@@ -42,38 +42,6 @@ struct std::hash<tenzor::BFloat16> {
 
 namespace tenzor {
 
-namespace {
-// NaN-aware ordering for the CPU sort/topk/median/mode paths (finding F065).
-// PyTorch treats NaN as the LARGEST value (sorts last ascending / first
-// descending). A bare `<`/`>` on floats is not a strict weak ordering when NaN
-// is present (all NaN compares are false → UB in std::sort), and the value would
-// otherwise diverge from the CUDA backend (which orders NaN as the maximum via a
-// radix key remap). NaN is detected from the IEEE-754 bit pattern so the result
-// is correct even if the TU is built with -ffast-math/-ffinite-math-only.
-inline bool ord_isnan(float x) {
-    uint32_t u; std::memcpy(&u, &x, sizeof(u));
-    return (u & 0x7fffffffu) > 0x7f800000u;
-}
-inline bool ord_isnan(double x) {
-    uint64_t u; std::memcpy(&u, &x, sizeof(u));
-    return (u & 0x7fffffffffffffffull) > 0x7ff0000000000000ull;
-}
-template <typename T> inline bool ord_less(T a, T b) {
-    if constexpr (std::is_floating_point_v<T>) {
-        bool na = ord_isnan(a), nb = ord_isnan(b);
-        if (na || nb) return !na && nb;
-        return a < b;
-    } else { return a < b; }
-}
-template <typename T> inline bool ord_greater(T a, T b) {
-    if constexpr (std::is_floating_point_v<T>) {
-        bool na = ord_isnan(a), nb = ord_isnan(b);
-        if (na || nb) return na && !nb;
-        return a > b;
-    } else { return a > b; }
-}
-}  // namespace
-
 auto topk(const Tensor& input,
           int64_t k,
           int64_t dim,
@@ -130,105 +98,25 @@ auto topk(const Tensor& input,
         return {values_i64.to(DType::UInt32), indices};
     }
 
-    // For non-CPU tensors, dispatch to backend kernel
-    if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::K, k);
-        attrs.set(AttrKey::Dim, dim);
-        attrs.set(AttrKey::Largest, largest);
-        attrs.set(AttrKey::Sorted, sorted);
-        std::vector<Tensor> inputs = {input};
-        auto results = dispatch<OpId::TopK>(inputs, attrs);
-        return {results[0], results[1]};
-    }
-
-    // Get contiguous input
-    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
-
-    // Create output tensors
-    std::vector<int64_t> output_shape(input.shape().begin(), input.shape().end());
-    output_shape[dim] = k;
-
-    Tensor values(output_shape, input.dtype(), input.device());
-    Tensor indices(output_shape, DType::Int64, input.device());
-
-    // Number of slices to process
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= input.shape()[i];
-    }
-
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) {
-        inner_size *= input.shape()[i];
-    }
-
-    // Helper lambda to process topk for any numeric type
-    auto process_topk = [&]<typename T>(T*) {
-        const T* input_data = input_cont.data<T>();
-        T* values_data = values.data<T>();
-        int64_t* indices_data = indices.data<int64_t>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                // Create index-value pairs for this slice
-                std::vector<std::pair<T, int64_t>> pairs;
-                pairs.reserve(dim_size);
-
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                    pairs.emplace_back(input_data[offset], i);
-                }
-
-                // Partial sort to get top-k
-                if (largest) {
-                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                        [](const auto& a, const auto& b) { return ord_greater(a.first, b.first); });
-                } else {
-                    std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
-                        [](const auto& a, const auto& b) { return ord_less(a.first, b.first); });
-                }
-
-                // Optionally sort the top-k
-                if (sorted) {
-                    if (largest) {
-                        std::sort(pairs.begin(), pairs.begin() + k,
-                            [](const auto& a, const auto& b) { return ord_greater(a.first, b.first); });
-                    } else {
-                        std::sort(pairs.begin(), pairs.begin() + k,
-                            [](const auto& a, const auto& b) { return ord_less(a.first, b.first); });
-                    }
-                }
-
-                // Write results
-                for (int64_t i = 0; i < k; ++i) {
-                    int64_t out_offset = outer * k * inner_size + i * inner_size + inner;
-                    values_data[out_offset] = pairs[i].first;
-                    indices_data[out_offset] = pairs[i].second;
-                }
-            }
-        }
-    };
-
-    // Process each slice along the specified dimension
-    switch (input.dtype()) {
-        case DType::Float32:
-            process_topk(static_cast<float*>(nullptr));
-            break;
-        case DType::Float64:
-            process_topk(static_cast<double*>(nullptr));
-            break;
-        case DType::Int32:
-            process_topk(static_cast<int32_t*>(nullptr));
-            break;
-        case DType::Int64:
-            process_topk(static_cast<int64_t*>(nullptr));
-            break;
-        default:
-            throw std::runtime_error("topk only supports Float32, Float64, Int32, and Int64 dtypes");
-    }
-
-    return {values, indices};
+    // JIT-R050: dispatch on EVERY device, including CPU. This used to
+    // special-case CPU with a hand-duplicated reference implementation
+    // below that bypassed dispatch() entirely -- invisible to
+    // DispatchInterceptorStack (the JIT tracer's only hook into the graph)
+    // by construction, unlike every other device. The CPU-registered
+    // OpId::TopK kernel (cpu_kernel_registry.cpp -> cpu::topk_kernel,
+    // backends/cpu/kernels/advanced.cpp) implements the identical
+    // partial_sort + optional full-sort algorithm the deleted reference
+    // path duplicated, with equal-or-broader dtype coverage (also handles
+    // Float16/BFloat16 natively; this function still pre-widens those two
+    // above for parity with the pre-existing narrow-int widening).
+    OpAttributes attrs;
+    attrs.set(AttrKey::K, k);
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Largest, largest);
+    attrs.set(AttrKey::Sorted, sorted);
+    std::vector<Tensor> inputs = {input};
+    auto results = dispatch<OpId::TopK>(inputs, attrs);
+    return {results[0], results[1]};
 }
 
 auto sort(const Tensor& input,
@@ -275,93 +163,17 @@ auto sort(const Tensor& input,
         return {values_i64.to(DType::UInt32), indices};
     }
 
-    // For non-CPU tensors, dispatch to backend kernel
-    if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        attrs.set(AttrKey::Descending, descending);
-        std::vector<Tensor> inputs = {input};
-        auto results = dispatch<OpId::Sort>(inputs, attrs);
-        return {results[0], results[1]};
-    }
-
-    // Get contiguous input
-    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
-
-    // Create output tensors with same shape as input
-    Tensor values(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
-    Tensor indices(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                   DType::Int64, input.device());
-
-    const int64_t dim_size = input.shape()[dim];
-
-    // Number of slices to process
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= input.shape()[i];
-    }
-
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) {
-        inner_size *= input.shape()[i];
-    }
-
-    // Helper lambda to process sort for any numeric type
-    auto process_sort = [&]<typename T>(T*) {
-        const T* input_data = input_cont.data<T>();
-        T* values_data = values.data<T>();
-        int64_t* indices_data = indices.data<int64_t>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                // Create index-value pairs
-                std::vector<std::pair<T, int64_t>> pairs;
-                pairs.reserve(dim_size);
-
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                    pairs.emplace_back(input_data[offset], i);
-                }
-
-                // Sort
-                if (descending) {
-                    std::sort(pairs.begin(), pairs.end(),
-                        [](const auto& a, const auto& b) { return ord_greater(a.first, b.first); });
-                } else {
-                    std::sort(pairs.begin(), pairs.end(),
-                        [](const auto& a, const auto& b) { return ord_less(a.first, b.first); });
-                }
-
-                // Write results
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                    values_data[offset] = pairs[i].first;
-                    indices_data[offset] = pairs[i].second;
-                }
-            }
-        }
-    };
-
-    // Process each slice based on dtype
-    switch (input.dtype()) {
-        case DType::Float32:
-            process_sort(static_cast<float*>(nullptr));
-            break;
-        case DType::Float64:
-            process_sort(static_cast<double*>(nullptr));
-            break;
-        case DType::Int32:
-            process_sort(static_cast<int32_t*>(nullptr));
-            break;
-        case DType::Int64:
-            process_sort(static_cast<int64_t*>(nullptr));
-            break;
-        default:
-            throw std::runtime_error("sort only supports Float32, Float64, Int32, and Int64 dtypes");
-    }
-
-    return {values, indices};
+    // JIT-R050: dispatch on EVERY device, including CPU — see topk()'s
+    // identical fix above for the full rationale. cpu::sort_kernel
+    // (backends/cpu/kernels/advanced.cpp) implements the same algorithm
+    // this deleted reference path duplicated, with equal-or-broader dtype
+    // coverage.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Descending, descending);
+    std::vector<Tensor> inputs = {input};
+    auto results = dispatch<OpId::Sort>(inputs, attrs);
+    return {results[0], results[1]};
 }
 
 auto unique(const Tensor& input,
@@ -369,217 +181,58 @@ auto unique(const Tensor& input,
             bool return_inverse,
             bool return_counts) -> std::tuple<Tensor, Tensor, Tensor> {
 
-    // For non-CPU tensors, dispatch to backend kernel
-    if (input.device().type != Device::Type::CPU) {
-        // F136: the GPU Unique kernels (ROCm/OneAPI/Vulkan) always emit values in
-        // SORTED order, but the CPU reference returns them in FIRST-APPEARANCE
-        // order for sorted_output==false — a silent cross-backend divergence in
-        // the values tensor and the inverse mapping (PyTorch leaves sorted=false
-        // order unspecified, but Tenzor's backends must still agree). When the
-        // caller asked for unsorted output, get a deterministic sorted result +
-        // inverse from the backend, then permute it into first-occurrence order
-        // to match CPU.
-        const bool need_reorder = !sorted_output;
-        OpAttributes attrs;
-        attrs.set(AttrKey::Sorted, true);
-        attrs.set(AttrKey::ReturnInverse, need_reorder ? true : return_inverse);
-        attrs.set(AttrKey::ReturnCounts, need_reorder ? true : return_counts);
-        std::vector<Tensor> inputs = {input};
-        auto results = dispatch<OpId::Unique>(inputs, attrs);
-        if (!need_reorder) {
-            return {results[0], results[1], results[2]};
-        }
-        Tensor values = results[0];
-        Tensor inverse = results[1];
-        Tensor counts = results[2];
-        const int64_t U = values.shape().empty() ? 0 : values.shape()[0];
-        const int64_t N = inverse.numel();
-        if (U <= 1 || N == 0) {
-            // 0/1 unique value: order is already identical to first-appearance.
-            return {values,
-                    return_inverse ? inverse : Tensor{},
-                    return_counts ? counts : Tensor{}};
-        }
-        Tensor inverse_flat = inverse.reshape({N});
-        // first_occ[g] = min input position whose group is g (identity = N).
-        Tensor pos = arange(0.0, static_cast<double>(N), 1.0, DType::Int64, inverse.device());
-        Tensor init = full({U}, static_cast<double>(N), DType::Int64, values.device());
-        Tensor first_occ = scatter_reduce(init, 0, inverse_flat, pos, "amin", /*include_self=*/true);
-        Tensor perm = argsort(first_occ, 0, /*descending=*/false);   // groups by first occurrence
-        Tensor inv_perm = argsort(perm, 0, /*descending=*/false);    // inverse permutation
-        values = index_select(values, 0, perm);
-        if (return_counts) {
-            counts = index_select(counts, 0, perm);
-        }
-        Tensor new_inverse;
-        if (return_inverse) {
-            std::vector<int64_t> inv_shape(inverse.shape().begin(), inverse.shape().end());
-            new_inverse = index_select(inv_perm, 0, inverse_flat).reshape(inv_shape);
-        }
+    // JIT-R050: dispatch on EVERY device, including CPU — see topk()'s fix
+    // above for the general rationale. Unlike topk/sort, this is NOT a
+    // simple duplicate: the GPU Unique kernels (ROCm/OneAPI/Vulkan) always
+    // emit values in SORTED order, while the deleted CPU-only reference
+    // implementation returned FIRST-APPEARANCE order for
+    // sorted_output==false — so this reorder step (originally "for non-CPU
+    // tensors only") is still needed, now unconditionally, to give EVERY
+    // backend (CPU included) matching first-appearance-order semantics.
+    // cpu::unique_kernel (registered for OpId::Unique) sorts when asked
+    // (attrs Sorted=true below), matching the GPU kernels' behavior, so
+    // this reorder produces the identical first-appearance result CPU used
+    // to compute directly, regardless of which backend ran the dispatch.
+    const bool need_reorder = !sorted_output;
+    OpAttributes attrs;
+    attrs.set(AttrKey::Sorted, true);
+    attrs.set(AttrKey::ReturnInverse, need_reorder ? true : return_inverse);
+    attrs.set(AttrKey::ReturnCounts, need_reorder ? true : return_counts);
+    std::vector<Tensor> inputs = {input};
+    auto results = dispatch<OpId::Unique>(inputs, attrs);
+    if (!need_reorder) {
+        return {results[0], results[1], results[2]};
+    }
+    Tensor values = results[0];
+    Tensor inverse = results[1];
+    Tensor counts = results[2];
+    const int64_t U = values.shape().empty() ? 0 : values.shape()[0];
+    const int64_t N = inverse.numel();
+    if (U <= 1 || N == 0) {
+        // 0/1 unique value: order is already identical to first-appearance.
         return {values,
-                return_inverse ? new_inverse : Tensor{},
+                return_inverse ? inverse : Tensor{},
                 return_counts ? counts : Tensor{}};
     }
-
-    // Get contiguous flattened input
-    Tensor input_flat = input.flatten().contiguous();
-    const int64_t numel = input_flat.numel();
-    const DType dtype = input.dtype();
-
-    // Helper lambda to process unique for any numeric type
-    auto process_unique = [&]<typename T>(T*) -> std::tuple<Tensor, Tensor, Tensor> {
-        const T* data = input_flat.data<T>();
-
-        // Floating-point types must treat all NaNs as a single unique value
-        // (matching PyTorch / NumPy semantics). std::unordered_map keying on T
-        // would record every NaN as distinct because NaN != NaN, so we route
-        // every NaN occurrence to one dedicated slot.
-        constexpr bool is_float =
-            std::is_same_v<T, float> || std::is_same_v<T, double> ||
-            std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>;
-
-        auto value_is_nan = [](T v) -> bool {
-            if constexpr (is_float) {
-                if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>) {
-                    return std::isnan(static_cast<float>(v));
-                } else {
-                    return std::isnan(v);
-                }
-            } else {
-                (void)v;
-                return false;
-            }
-        };
-
-        // Map from value to (first_index, count)
-        std::vector<std::pair<T, std::pair<int64_t, int64_t>>> value_info;
-        std::unordered_map<T, size_t> value_to_idx;
-        // Per-original-element slot index into value_info (pre-sort). Lets us
-        // build the inverse mapping without re-hashing values (which would fail
-        // for NaN keys).
-        std::vector<size_t> elem_slot(static_cast<size_t>(numel));
-        // Dedicated slot for NaN values; -1 until the first NaN is seen.
-        int64_t nan_slot = -1;
-
-        for (int64_t i = 0; i < numel; ++i) {
-            T val = data[i];
-            if (value_is_nan(val)) {
-                if (nan_slot < 0) {
-                    nan_slot = static_cast<int64_t>(value_info.size());
-                    value_info.emplace_back(val, std::make_pair(i, 1));
-                } else {
-                    value_info[static_cast<size_t>(nan_slot)].second.second++;
-                }
-                elem_slot[static_cast<size_t>(i)] = static_cast<size_t>(nan_slot);
-                continue;
-            }
-            auto it = value_to_idx.find(val);
-            if (it == value_to_idx.end()) {
-                size_t slot = value_info.size();
-                value_to_idx[val] = slot;
-                value_info.emplace_back(val, std::make_pair(i, 1));
-                elem_slot[static_cast<size_t>(i)] = slot;
-            } else {
-                value_info[it->second].second.second++;
-                elem_slot[static_cast<size_t>(i)] = it->second;
-            }
-        }
-
-        const int64_t num_unique = static_cast<int64_t>(value_info.size());
-
-        // remap[old_slot] = new position after sorting (identity if unsorted).
-        std::vector<int64_t> remap(static_cast<size_t>(num_unique));
-
-        // Sort if requested. We sort an index permutation so we can build the
-        // old-slot -> new-position remap used by the inverse mapping. NaN sorts
-        // to the end (consistent ordering across positions).
-        std::vector<int64_t> order(static_cast<size_t>(num_unique));
-        for (int64_t i = 0; i < num_unique; ++i) {
-            order[static_cast<size_t>(i)] = i;
-        }
-        if (sorted_output) {
-            std::sort(order.begin(), order.end(),
-                [&](int64_t a, int64_t b) {
-                    const T& va = value_info[static_cast<size_t>(a)].first;
-                    const T& vb = value_info[static_cast<size_t>(b)].first;
-                    const bool na = value_is_nan(va);
-                    const bool nb = value_is_nan(vb);
-                    if (na || nb) {
-                        // NaN sorts after everything; ties keep stable order.
-                        if (na && nb) return a < b;
-                        return nb;  // a goes first iff b is NaN and a is not
-                    }
-                    if constexpr (std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>) {
-                        return static_cast<float>(va) < static_cast<float>(vb);
-                    } else {
-                        return va < vb;
-                    }
-                });
-        }
-        for (int64_t pos = 0; pos < num_unique; ++pos) {
-            remap[static_cast<size_t>(order[static_cast<size_t>(pos)])] = pos;
-        }
-
-        // Create unique values tensor (in sorted/permuted order)
-        Tensor unique_vals({num_unique}, dtype, Device::cpu());
-        T* unique_data = unique_vals.data<T>();
-
-        for (int64_t pos = 0; pos < num_unique; ++pos) {
-            unique_data[pos] = value_info[static_cast<size_t>(order[static_cast<size_t>(pos)])].first;
-        }
-
-        // Create inverse indices if requested
-        Tensor inverse_indices;
-        if (return_inverse) {
-            inverse_indices = Tensor({numel}, DType::Int64, Device::cpu());
-            int64_t* inverse_data = inverse_indices.data<int64_t>();
-
-            for (int64_t i = 0; i < numel; ++i) {
-                inverse_data[i] = remap[elem_slot[static_cast<size_t>(i)]];
-            }
-        }
-
-        // Create counts if requested
-        Tensor counts;
-        if (return_counts) {
-            counts = Tensor({num_unique}, DType::Int64, Device::cpu());
-            int64_t* counts_data = counts.data<int64_t>();
-
-            for (int64_t pos = 0; pos < num_unique; ++pos) {
-                counts_data[pos] =
-                    value_info[static_cast<size_t>(order[static_cast<size_t>(pos)])].second.second;
-            }
-        }
-
-        return {unique_vals, inverse_indices, counts};
-    };
-
-    switch (dtype) {
-        case DType::Float32:
-            return process_unique(static_cast<float*>(nullptr));
-        case DType::Float64:
-            return process_unique(static_cast<double*>(nullptr));
-        case DType::Int8:
-            return process_unique(static_cast<int8_t*>(nullptr));
-        case DType::UInt8:
-            return process_unique(static_cast<uint8_t*>(nullptr));
-        case DType::Int16:
-            return process_unique(static_cast<int16_t*>(nullptr));
-        case DType::UInt16:
-            return process_unique(static_cast<uint16_t*>(nullptr));
-        case DType::Int32:
-            return process_unique(static_cast<int32_t*>(nullptr));
-        case DType::Int64:
-            return process_unique(static_cast<int64_t*>(nullptr));
-        case DType::Bool:
-            return process_unique(static_cast<bool*>(nullptr));
-        case DType::Float16:
-            return process_unique(static_cast<Float16*>(nullptr));
-        case DType::BFloat16:
-            return process_unique(static_cast<BFloat16*>(nullptr));
-        default:
-            throw std::runtime_error("unique: unsupported dtype");
+    Tensor inverse_flat = inverse.reshape({N});
+    // first_occ[g] = min input position whose group is g (identity = N).
+    Tensor pos = arange(0.0, static_cast<double>(N), 1.0, DType::Int64, inverse.device());
+    Tensor init = full({U}, static_cast<double>(N), DType::Int64, values.device());
+    Tensor first_occ = scatter_reduce(init, 0, inverse_flat, pos, "amin", /*include_self=*/true);
+    Tensor perm = argsort(first_occ, 0, /*descending=*/false);   // groups by first occurrence
+    Tensor inv_perm = argsort(perm, 0, /*descending=*/false);    // inverse permutation
+    values = index_select(values, 0, perm);
+    if (return_counts) {
+        counts = index_select(counts, 0, perm);
     }
+    Tensor new_inverse;
+    if (return_inverse) {
+        std::vector<int64_t> inv_shape(inverse.shape().begin(), inverse.shape().end());
+        new_inverse = index_select(inv_perm, 0, inverse_flat).reshape(inv_shape);
+    }
+    return {values,
+            return_inverse ? new_inverse : Tensor{},
+            return_counts ? counts : Tensor{}};
 }
 
 auto cumsum(const Tensor& input, int64_t dim) -> Tensor {
@@ -604,70 +257,14 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor {
         return cumsum(input.to(DType::Float32), dim).to(orig);
     }
 
-    // For non-CPU tensors, dispatch to backend kernel
-    if (input.device().type != Device::Type::CPU) {
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        std::vector<Tensor> inputs = {input};
-        return dispatch<OpId::CumSum>(inputs, attrs)[0];
-    }
-
-    // Get contiguous input
-    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
-
-    // Create output tensor
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
-
-    const int64_t dim_size = input.shape()[dim];
-
-    // Number of slices to process
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= input.shape()[i];
-    }
-
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) {
-        inner_size *= input.shape()[i];
-    }
-
-    // Helper lambda for cumsum
-    auto process_cumsum = [&]<typename T>(T*) {
-        const T* input_data = input_cont.data<T>();
-        T* output_data = output.data<T>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                T cumsum_val = static_cast<T>(0);
-
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                    cumsum_val += input_data[offset];
-                    output_data[offset] = cumsum_val;
-                }
-            }
-        }
-    };
-
-    switch (input.dtype()) {
-        case DType::Float32:
-            process_cumsum(static_cast<float*>(nullptr));
-            break;
-        case DType::Float64:
-            process_cumsum(static_cast<double*>(nullptr));
-            break;
-        case DType::Int32:
-            process_cumsum(static_cast<int32_t*>(nullptr));
-            break;
-        case DType::Int64:
-            process_cumsum(static_cast<int64_t*>(nullptr));
-            break;
-        default:
-            throw std::runtime_error("cumsum only supports Float32, Float64, Int32, and Int64 dtypes");
-    }
-
-    return output;
+    // JIT-R050: dispatch on EVERY device, including CPU — see topk()'s
+    // identical fix above for the full rationale. cpu::cumsum_kernel
+    // (backends/cpu/kernels/advanced.cpp) implements the identical
+    // algorithm this deleted reference path duplicated.
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::CumSum>(inputs, attrs)[0];
 }
 
 auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
@@ -692,70 +289,14 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
         return cumprod(input.to(DType::Float32), dim).to(orig);
     }
 
-    // For non-CPU tensors, dispatch to backend kernel
-    if (input.device().type != Device::Type::CPU) {
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        std::vector<Tensor> inputs = {input};
-        return dispatch<OpId::CumProd>(inputs, attrs)[0];
-    }
-
-    // Get contiguous input
-    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
-
-    // Create output tensor
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
-
-    const int64_t dim_size = input.shape()[dim];
-
-    // Number of slices to process
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= input.shape()[i];
-    }
-
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) {
-        inner_size *= input.shape()[i];
-    }
-
-    // Helper lambda for cumprod
-    auto process_cumprod = [&]<typename T>(T*) {
-        const T* input_data = input_cont.data<T>();
-        T* output_data = output.data<T>();
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                T cumprod_val = static_cast<T>(1);
-
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                    cumprod_val *= input_data[offset];
-                    output_data[offset] = cumprod_val;
-                }
-            }
-        }
-    };
-
-    switch (input.dtype()) {
-        case DType::Float32:
-            process_cumprod(static_cast<float*>(nullptr));
-            break;
-        case DType::Float64:
-            process_cumprod(static_cast<double*>(nullptr));
-            break;
-        case DType::Int32:
-            process_cumprod(static_cast<int32_t*>(nullptr));
-            break;
-        case DType::Int64:
-            process_cumprod(static_cast<int64_t*>(nullptr));
-            break;
-        default:
-            throw std::runtime_error("cumprod only supports Float32, Float64, Int32, and Int64 dtypes");
-    }
-
-    return output;
+    // JIT-R050: dispatch on EVERY device, including CPU — see topk()'s
+    // identical fix above for the full rationale. cpu::cumprod_kernel
+    // (backends/cpu/kernels/advanced.cpp) implements the identical
+    // algorithm this deleted reference path duplicated.
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::CumProd>(inputs, attrs)[0];
 }
 
 auto logcumsumexp(const Tensor& input, int64_t dim) -> Tensor {
@@ -773,88 +314,15 @@ auto logcumsumexp(const Tensor& input, int64_t dim) -> Tensor {
         throw std::runtime_error("Dimension out of range for logcumsumexp");
     }
 
-    // For non-CPU tensors, dispatch to backend kernel
-    if (input.device().type != Device::Type::CPU) {
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        std::vector<Tensor> inputs = {input};
-        return dispatch<OpId::Logcumsumexp>(inputs, attrs)[0];
-    }
-
-    // Upcast half types to Float32 for computation
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32_result = logcumsumexp(input.to(DType::Float32), dim);
-        return f32_result.to(input.dtype());
-    }
-
-    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
-        throw std::runtime_error("logcumsumexp only supports floating-point dtypes");
-    }
-
-    // Get contiguous input
-    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
-
-    // Create output tensor (same shape as input)
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
-
-    const int64_t dim_size = input.shape()[dim];
-
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= input.shape()[i];
-    }
-
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) {
-        inner_size *= input.shape()[i];
-    }
-
-    // Numerically stable log-cumsum-exp using running max
-    auto process_lcse = [&]<typename T>(T*) {
-        const T* input_data = input_cont.data<T>();
-        T* output_data = output.data<T>();
-
-        #ifdef _OPENMP
-        #pragma omp parallel for if (outer_size * inner_size > 64)
-        #endif
-        for (int64_t oi = 0; oi < outer_size * inner_size; ++oi) {
-            int64_t outer = oi / inner_size;
-            int64_t inner = oi % inner_size;
-
-            T running_max = -std::numeric_limits<T>::infinity();
-            T running_lse = -std::numeric_limits<T>::infinity();
-
-            for (int64_t i = 0; i < dim_size; ++i) {
-                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
-                T x = input_data[offset];
-                T new_max = std::max(running_max, x);
-
-                if (std::isinf(new_max) && new_max < T(0)) {
-                    // Both -inf, result stays -inf
-                    running_lse = -std::numeric_limits<T>::infinity();
-                } else {
-                    running_lse = new_max + std::log(
-                        std::exp(running_lse - new_max) + std::exp(x - new_max));
-                }
-                running_max = new_max;
-                output_data[offset] = running_lse;
-            }
-        }
-    };
-
-    switch (input.dtype()) {
-        case DType::Float32:
-            process_lcse(static_cast<float*>(nullptr));
-            break;
-        case DType::Float64:
-            process_lcse(static_cast<double*>(nullptr));
-            break;
-        default:
-            throw std::runtime_error("logcumsumexp: unsupported dtype");
-    }
-
-    return output;
+    // JIT-R050: dispatch on EVERY device, including CPU — see topk()'s
+    // identical fix above for the full rationale. cpu::logcumsumexp_kernel
+    // (backends/cpu/kernels/reduction.cpp) implements the identical
+    // numerically-stable running-max algorithm this deleted reference path
+    // duplicated, and natively widens Float16/BFloat16 itself.
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Logcumsumexp>(inputs, attrs)[0];
 }
 
 // ============================================================================

@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/jit/tracing_interceptor.hpp"
+#include <algorithm>
 #include <sstream>
 
 namespace tenzor {
@@ -61,6 +62,14 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         // executor already knows how to run/differentiate.
         case OpId::FusedLayerNorm: return OpType::LayerNorm;
 
+        // JIT-R054: scaled_dot_product_attention()'s fast path dispatches
+        // OpId::FlashAttention directly (not just via FuseAttentionPass
+        // synthesizing the node from a decomposed MatMul/Softmax pattern).
+        // Without this mapping, any traced call taking the fast path (4D
+        // Q/K/V, no explicit mask, supported dtype — the common case)
+        // unconditionally graph-broke the entire surrounding trace.
+        case OpId::FlashAttention: return OpType::FlashAttention;
+
         // Reductions
         case OpId::Sum:        return OpType::Sum;
         case OpId::Mean:       return OpType::Mean;
@@ -75,9 +84,20 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Abs:        return OpType::Abs;
         case OpId::Neg:        return OpType::Neg;
         case OpId::Clamp:      return OpType::Clamp;
+        // JIT-R091 (found via CrossEntropyLoss's segmentation-target ignore-
+        // mask denominator, tenzor::clamp_min(sum(mask), 1.0)): both were
+        // entirely unmapped, causing an unconditional hard graph break on
+        // ANY traced clamp_min/clamp_max call. Both reuse OpType::Clamp
+        // as-is — clamp_min sets only AttrKey::Min, clamp_max sets only
+        // AttrKey::Max, and execute_node's Clamp case already treats a
+        // missing bound as unbounded on that side (see graph.cpp), so no
+        // new OpType/execute_node case is needed.
+        case OpId::ClampMin:   return OpType::Clamp;
+        case OpId::ClampMax:   return OpType::Clamp;
         case OpId::Sin:        return OpType::Sin;
         case OpId::Cos:        return OpType::Cos;
         case OpId::Rsqrt:      return OpType::Rsqrt;
+        case OpId::Reciprocal: return OpType::Reciprocal;
         // Both previously unmapped -> any traced use of round()/fmod(), including
         // internally within tenzor::float_power's negative-base decomposition,
         // graph-broke the ENTIRE compiled graph regardless of how small the use.
@@ -122,12 +142,23 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Slice:      return OpType::Slice;
         case OpId::Cat:        return OpType::Cat;
         case OpId::Where:      return OpType::Where;
+        // JIT-R090: slice_scatter() is the primary correctly-traceable
+        // mechanism for KV-cache-style incremental updates (see
+        // src/nn/utils/kv_cache.cpp). Without this mapping every traced
+        // cache update graph-broke, permanently blocking JIT compilation of
+        // any autoregressive decode loop using it.
+        case OpId::SliceScatter: return OpType::SliceScatter;
 
         // Linear
         case OpId::Linear:     return OpType::Linear;
 
         // Embedding
         case OpId::Embedding:  return OpType::Embedding;
+        // JIT-R056 EXTENDED: EmbeddingBagForward's GPU dispatch sites had no
+        // opid_to_optype case, so a traced call graph-broke (safely, but
+        // permanently blocking JIT compilation of any model using
+        // EmbeddingBag on GPU).
+        case OpId::EmbeddingBagForward: return OpType::EmbeddingBag;
 
         // Dropout
         case OpId::Dropout:    return OpType::Dropout;
@@ -149,15 +180,112 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::Elu:          return OpType::ELU;
         case OpId::Mish:         return OpType::Mish;
         case OpId::Softplus:     return OpType::Softplus;
+        // JIT-R084: Swish/RReLU/LogSigmoid's no-grad-fast-path dispatch<>()
+        // call was previously unmapped here, graph-breaking the whole trace
+        // (a "masked landmine," not silent-wrong-answer) — reachable in real
+        // deployed inference via nn::Swish (MobileNetV3/EfficientNet-style
+        // blocks). Mirrors Mish/Softplus's identical treatment.
+        case OpId::Swish:        return OpType::Swish;
+        case OpId::RReLU:        return OpType::RReLU;
+        case OpId::LogSigmoid:   return OpType::LogSigmoid;
         case OpId::GroupNorm:    return OpType::GroupNorm;
         case OpId::InstanceNorm: return OpType::InstanceNorm;
         case OpId::Gather:       return OpType::Gather;
         case OpId::Scatter:      return OpType::Scatter;
+        // JIT-R064: Minimum/IndexCopy's dispatch<>() call was previously
+        // unmapped here, graph-breaking the whole trace — reachable in real
+        // deployed inference via Embedding::renorm_embeddings' max_norm
+        // clamp (scale = min(1, max_norm/norm); weight = index_copy(weight,
+        // 0, idx, rows * scale)), which runs on every forward call for any
+        // Embedding(max_norm>0) module.
+        case OpId::Minimum:      return OpType::Minimum;
+        case OpId::IndexCopy:    return OpType::IndexCopy;
         case OpId::Flip:         return OpType::Flip;
         case OpId::Roll:         return OpType::Roll;
 
+        // Triu/Tril/Diag/Trace: now dispatch unconditionally on every device
+        // (see ops/transform.cpp) instead of a CPU-only manual path that
+        // bypassed dispatch — mapping them here is what actually lets the
+        // JIT tracer capture them, matching Flip (JIT-R038).
+        case OpId::Triu:         return OpType::Triu;
+        case OpId::Tril:         return OpType::Tril;
+        case OpId::Diag:         return OpType::Diag;
+        case OpId::Trace:        return OpType::Trace;
+
         // Vision
         case OpId::Interpolate: return OpType::Interpolate;
+
+        // JIT-R091: was entirely unmapped, making every OneHot call an
+        // unconditional hard graph-break (abort_trace_unmappable) — masking
+        // CrossEntropyLoss/NLLLoss's segmentation-target path as a landmine
+        // rather than the "live" freeze the raw-permute half of the bug
+        // implied (the permute code was unreachable during tracing since
+        // OneHot always aborted first). Output shape: input_shape appended
+        // with num_classes (see infer_types' OneHot case).
+        case OpId::OneHot: return OpType::OneHot;
+
+        // JIT-R055: the direct dispatch<OpId::SparseSpMM>(crow,col,values,dense)
+        // convention (used by SparseLinear and the JVP sparse rules), distinct
+        // from OpType::SparseMatMul (a dense-weight-retagged-sparse node
+        // synthesized only by SparsePass, with a [x, weight] input layout).
+        case OpId::SparseSpMM: return OpType::SparseSpMM;
+        // JIT-R098: same direct-dispatch CSR convention, extended from
+        // spmm-only (JIT-R055) to the other autograd/ops.cpp sparse entry
+        // points (spmv/sparse_add/sparse_triangular_solve) so they are no
+        // longer zero-dispatch/tracer-invisible.
+        case OpId::SparseSpMV: return OpType::SparseSpMV;
+        case OpId::SparseAdd: return OpType::SparseAdd;
+        case OpId::SparseTrsv: return OpType::SparseTrsv;
+        case OpId::SparseTrsm: return OpType::SparseTrsm;
+        // JIT-R098 (continued): unblocks sparse_add's manually-recorded node
+        // — see the OpType::ScatterAdd/RepeatInterleave doc comments in
+        // tracer.hpp for why these needed mapping too.
+        case OpId::ScatterAdd: return OpType::ScatterAdd;
+        case OpId::RepeatInterleave: return OpType::RepeatInterleave;
+
+        // JIT-R100: same rationale as ScatterAdd/RepeatInterleave above —
+        // needed so CumSum/Sort/Nonzero/Bincount calls nested inside the
+        // SparseTensor structural-conversion methods (from_dense/coalesce/
+        // to_csr/to_csc) don't graph-break the whole trace. Also a general
+        // win for any other traced code calling these directly.
+        case OpId::CumSum: return OpType::CumSum;
+        case OpId::Sort: return OpType::Sort;
+        case OpId::Nonzero: return OpType::Nonzero;
+        case OpId::Bincount: return OpType::Bincount;
+
+        // JIT-R082/R086/R087: box_iou/nms/ROIAlignOp::apply already dispatch
+        // through these OpIds unconditionally (see src/ops/detection.cpp,
+        // src/nn/detection/roi_ops.cpp) — mapping them lets the generic
+        // interceptor auto-record, same treatment as CumSum/Sort/Nonzero/
+        // Bincount above. Must land together with JIT-R085's tracer-
+        // visibility fixes for encode_boxes/decode_boxes/clip_boxes_to_image/
+        // remove_small_boxes/select/nonzero/AnchorGenerator::generate — see
+        // findings.txt's documented ordering hazard.
+        case OpId::BoxIoU: return OpType::BoxIoU;
+        case OpId::NMS: return OpType::NMS;
+        case OpId::ROIAlignForward: return OpType::ROIAlignForward;
+
+        // JIT-R058b: OpId::QuantizedLinear is deliberately left UNMAPPED here.
+        // QuantizedLinear::forward_quantized's GPU fast path calls
+        // dispatch<OpId::QuantizedLinear>(input_int8, weight_int8, ...)
+        // directly, but that int8 activation is produced by quantize_tensor()
+        // — a raw host pointer loop with zero dispatch() calls — so it has no
+        // traced lineage back to the original float Variable regardless of
+        // whether this raw dispatch call itself is mapped. Auto-mapping it
+        // here would record a node with a frozen/wrong-lineage input AND
+        // double-record alongside the correctly-lineaged node that
+        // QuantizedLinear::forward_impl now records manually (via
+        // jit_record_quantized_linear_static, from the RAW FLOAT input,
+        // re-quantized inside execute_node — see graph.cpp's
+        // OpType::QuantizedLinearStatic case). Leaving this unmapped means a
+        // trace that reaches this raw dispatch call through any OTHER path
+        // (bypassing forward_impl) safely aborts to eager instead of
+        // recording a wrong node — matches OpType::QuantizedLinear above
+        // (dynamic quantization of a dense weight, synthesized only by
+        // QuantizationPass with a [x, weight] input layout) also NOT being
+        // reused here: that would silently reinterpret pre-quantized int8
+        // data as a dense float weight to re-quantize.
+        // case OpId::QuantizedLinear: intentionally not mapped.
 
         default:
             return std::nullopt;
@@ -196,11 +324,17 @@ static auto is_constant_creation_op(OpId op) -> bool {
 // materialization with no IR OpType. contiguous() is the canonical case: bias-
 // less Linear lowers to permute+matmul and matmul materializes a contiguous
 // copy of the permuted weight, so without this every bias-less Linear would
-// graph-break and fall back to eager. The tracer aliases the output to its
-// input and records no node (values are unchanged, so replay stays exact).
+// graph-break and fall back to eager. clone() is the other case: it exists at
+// the eager Tensor API purely to give the caller a storage-independent copy
+// for later in-place mutation safety, a hazard that doesn't exist in the
+// traced graph's pure-dataflow model (node outputs are immutable values), so
+// its traced VALUE is identical to its input's. The tracer aliases the
+// output to its input and records no node (values are unchanged, so replay
+// stays exact).
 static auto is_value_identity_op(OpId op) -> bool {
     switch (op) {
         case OpId::Contiguous:
+        case OpId::Clone:
             return true;
         default:
             return false;
@@ -271,9 +405,18 @@ auto make_tracing_interceptor(
             // Register the output tensors so a downstream consumer resolves them
             // through end_trace's constant-baking path, and record NO node. This
             // makes scalar/creation ops JIT-able uniformly on CPU and GPU.
+            // Must use register_new_tensor, NOT the fingerprint-deduping
+            // register_tensor: a freshly-allocated creation-op result (e.g.
+            // ones_like(z_gate) inside a per-timestep RNN loop) can and does
+            // land at an address a PRIOR, now-freed intermediate used —
+            // register_tensor would then silently alias the new constant to
+            // that unrelated dead tensor's id (confirmed: ones_like's output
+            // inside QuantizedGRU's gate loop collided with an earlier
+            // gate-split tensor's id, corrupting the graph — JIT-R058a
+            // regression testing).
             if (inputs.empty() && is_constant_creation_op(op)) {
                 for (auto& t : results) {
-                    tracer.register_tensor(t);
+                    tracer.register_new_tensor(t);
                 }
                 return results;
             }
@@ -301,6 +444,59 @@ auto make_tracing_interceptor(
         for (auto& t : inputs) {
             input_ids.push_back(tracer.register_tensor(t));
         }
+
+        // Snapshot the input/id correspondence BEFORE any op-specific
+        // reordering below (e.g. BatchNorm2dForwardAffine) mutates
+        // input_ids, so register_output's index-based inputs[k]<->id
+        // lookup stays correct regardless.
+        const std::vector<std::string> orig_input_ids = input_ids;
+
+        // Register one output tensor's id. A freshly-computed output must
+        // ALWAYS get a fresh id (register_new_tensor) UNLESS it is a
+        // genuine identity alias of one of this op's own inputs — the FULL
+        // logical view matches (data_ptr + dtype + device + shape +
+        // strides), checked locally against THIS op's inputs, not via
+        // tensor_fingerprint's global dedup lookup. Shape/strides must be
+        // part of the check, not just data_ptr+device: a view op like
+        // Squeeze/Unsqueeze/Permute shares its input's storage (same
+        // data_ptr) while presenting a genuinely DIFFERENT shape — matching
+        // on data_ptr alone would misclassify every such op as a same-value
+        // no-op and drop it (is_view_optype below), silently truncating the
+        // graph. Global fingerprint-based dedup (register_tensor) is
+        // separately unsafe here regardless: once a temporary tensor from
+        // an earlier op is freed, the allocator can and does hand the SAME
+        // address to a later, semantically unrelated output of matching
+        // shape/dtype/device (e.g. every iteration of a per-timestep RNN
+        // loop allocates same-shaped gate tensors) — register_tensor would
+        // then silently alias the new value to the dead tensor's old id,
+        // corrupting the graph. Both failure modes were confirmed via
+        // QuantizedGRU's per-timestep gate computation (JIT-R058a
+        // regression testing): the global-dedup version wrongly aliased
+        // across loop iterations; a data_ptr-only local version wrongly
+        // dropped every Squeeze/Unsqueeze as a no-op.
+        auto same_view = [](const Tensor& a, const Tensor& b) -> bool {
+            if (a.data_ptr() != b.data_ptr() || a.dtype() != b.dtype() ||
+                !(a.device() == b.device())) {
+                return false;
+            }
+            if (a.shape().size() != b.shape().size() ||
+                !std::equal(a.shape().begin(), a.shape().end(), b.shape().begin())) {
+                return false;
+            }
+            if (a.strides().size() != b.strides().size() ||
+                !std::equal(a.strides().begin(), a.strides().end(), b.strides().begin())) {
+                return false;
+            }
+            return true;
+        };
+        auto register_output = [&](const Tensor& t) -> std::string {
+            for (std::size_t k = 0; k < inputs.size(); ++k) {
+                if (same_view(t, inputs[k])) {
+                    return orig_input_ids[k];
+                }
+            }
+            return tracer.register_new_tensor(t);
+        };
 
         // Reorder BN2d's affine forward inputs from the eager kernel's
         // canonical (x, mean, var, weight, bias) into the IR's expected
@@ -334,12 +530,12 @@ auto make_tracing_interceptor(
             op == OpId::GroupNorm ||
             op == OpId::InstanceNorm) {
             if (!results.empty()) {
-                output_ids.push_back(tracer.register_tensor(results[0]));
+                output_ids.push_back(register_output(results[0]));
             }
         } else {
             output_ids.reserve(results.size());
             for (auto& t : results) {
-                output_ids.push_back(tracer.register_tensor(t));
+                output_ids.push_back(register_output(t));
             }
         }
 
@@ -437,6 +633,8 @@ auto make_tracing_interceptor(
         copy_float(AttrKey::Max,      "max");
         copy_float(AttrKey::Eps,      "eps");
         copy_float(AttrKey::Negative_slope, "negative_slope");
+        copy_float(AttrKey::Lower, "lower");  // JIT-R084: RReLU
+        copy_float(AttrKey::High,  "high");   // JIT-R084: RReLU
         copy_int(AttrKey::Dim,         "dim");
         // Transpose axes: eager transpose dispatches with Dim0/Dim1 and the
         // graph executor + shape inference read "dim0"/"dim1". Without these
@@ -459,7 +657,49 @@ auto make_tracing_interceptor(
         copy_bool(AttrKey::Unbiased, "unbiased");   // Var/Std
         copy_int(AttrKey::NumGroups, "num_groups");  // GroupNorm
         copy_int(AttrKey::Shift, "shift");           // Roll
+        copy_int(AttrKey::Diagonal, "diagonal");     // Triu/Tril/Diag
+        copy_int(AttrKey::M, "m");                   // SparseSpMM/SparseSpMV/SparseAdd
+        copy_int(AttrKey::K, "k");                   // SparseSpMM/SparseSpMV/SparseAdd
+        copy_int(AttrKey::N, "n");                   // SparseTrsv/SparseTrsm (JIT-R098)
+        copy_bool(AttrKey::Upper, "upper");           // SparseTrsv/SparseTrsm (JIT-R098)
+        copy_int(AttrKey::NumRepeats, "num_repeats"); // RepeatInterleave (JIT-R098)
+        copy_bool(AttrKey::Descending, "descending"); // Sort (JIT-R100)
+        copy_int(AttrKey::Minlength, "minlength");    // Bincount (JIT-R100)
+        copy_int(AttrKey::IouType, "iou_type");             // BoxIoU (JIT-R086)
+        copy_float(AttrKey::IouThreshold, "iou_threshold"); // NMS (JIT-R087)
+        copy_float(AttrKey::SpatialScale, "spatial_scale"); // ROIAlignForward (JIT-R082)
+        copy_int(AttrKey::SamplingRatio, "sampling_ratio"); // ROIAlignForward (JIT-R082)
+        copy_bool(AttrKey::Aligned, "aligned");              // ROIAlignForward (JIT-R082)
+        copy_int(AttrKey::NumClasses, "num_classes"); // OneHot (JIT-R091)
+        // Quantization scale/zero-point attrs: scale is Float64-tagged,
+        // zero-point is Int64-tagged. Currently unused by any OpId this
+        // interceptor auto-maps (QuantizedLinearStatic (JIT-R058b) is
+        // recorded manually via jit_record_quantized_linear_static, which
+        // sets these directly on the TracedOp and bypasses this generic
+        // dispatch-interceptor path entirely — see quantized_layers.cpp).
+        // Left in place as a harmless no-op for any future OpId that both
+        // (a) is safe to auto-map here and (b) carries these same attrs.
+        copy_float(AttrKey::InputScale, "input_scale");
+        copy_float(AttrKey::WeightScaleQ, "weight_scale");
+        copy_float(AttrKey::OutputScale, "output_scale");
+        copy_int(AttrKey::InputZeroPoint, "input_zero_point");
+        copy_int(AttrKey::WeightZeroPoint, "weight_zero_point");
         copy_bool(AttrKey::AlignCorners, "align_corners");
+        // FlashAttention: scale/causal/dropout_p, read by execute_node's
+        // OpType::FlashAttention case (graph.cpp) to reproduce the eager
+        // scale, apply the causal mask, and refuse to replay dropout_p>0
+        // (JIT-R054).
+        copy_float(AttrKey::Scale, "scale");
+        copy_bool(AttrKey::Causal, "causal");
+        copy_float(AttrKey::DropoutP, "dropout_p");
+        // JIT-R013: Dropout's own attrs use DIFFERENT AttrKeys (P/Training,
+        // not DropoutP) — nested_dropout (nested_ops.cpp, the only real
+        // producer of an OpType::Dropout node) sets these, but nothing
+        // copied them into the traced node, so handle_dropout/graph.cpp's
+        // interpreter had no way to see training=true even after being
+        // taught to check for it.
+        copy_float(AttrKey::P, "p");
+        copy_bool(AttrKey::Training, "training");
         // AvgPool2d's count_include_pad option (default true). Stored by the
         // pooling layer as an INT (set(AttrKey::CountIncludePad, int64_t{0|1})),
         // so it must be copied via copy_int — copy_bool/get_bool misreads an
@@ -468,6 +708,13 @@ auto make_tracing_interceptor(
         // silently used count_include_pad=true, diverging from an eager
         // avg_pool2d(count_include_pad=false) with non-zero padding.
         copy_int(AttrKey::CountIncludePad, "count_include_pad");
+        // MaxPool2d's ceil_mode (JIT-R060). Same INT64-tagged storage as
+        // CountIncludePad above (set(AttrKey::CeilMode, int64_t{0|1})) — must
+        // use copy_int, not copy_bool. Without this the traced node silently
+        // used the floor output-size formula regardless of the real
+        // ceil_mode, producing a wrong-shaped output on replay (Vulkan/MPS,
+        // the only backends where ceil_mode=true is reachable).
+        copy_int(AttrKey::CeilMode, "ceil_mode");
         // Slice indices: Start/End/Step are scalar ints used by Slice and
         // a handful of indexing ops. The MLIR lowerer needs them to
         // emit stablehlo.slice.
@@ -524,7 +771,13 @@ auto make_tracing_interceptor(
         if (attrs.has(AttrKey::Starts)) {
             copy_int_list_to_vec(AttrKey::Steps, "steps");
         }
-        if (attrs.has(AttrKey::Mode)) {
+        // Interpolate's "mode" string enum. AttrKey::Mode is reused with a
+        // DIFFERENT string enum by EmbeddingBagForward ("sum"/"mean"/"max") —
+        // exclude it here so it doesn't get misencoded via this block's
+        // unrelated nearest/bilinear/bicubic/trilinear mapping (falling into
+        // the `else -> -1` branch below); it gets its own dedicated encoding
+        // right after (JIT-R056).
+        if (op != OpId::EmbeddingBagForward && attrs.has(AttrKey::Mode)) {
             const auto mode = attrs.get_string(AttrKey::Mode, "bilinear");
             if (mode == "nearest") {
                 traced.int_attrs["mode"] = 0;
@@ -538,6 +791,17 @@ auto make_tracing_interceptor(
                 traced.int_attrs["mode"] = -1;
             }
         }
+        // EmbeddingBag's own AttrKey::Mode encoding ("sum"/"mean"/"max"),
+        // under a distinct key so it never collides with Interpolate's
+        // "mode" above. embedding_dim/include_last_offset complete the
+        // shape-inference/execute_node contract (JIT-R056).
+        if (op == OpId::EmbeddingBagForward && attrs.has(AttrKey::Mode)) {
+            const auto eb_mode = attrs.get_string(AttrKey::Mode, "sum");
+            traced.int_attrs["embedding_bag_mode"] =
+                (eb_mode == "mean") ? 1 : (eb_mode == "max") ? 2 : 0;
+        }
+        copy_int(AttrKey::EmbeddingDim, "embedding_dim");
+        copy_bool(AttrKey::IncludeLastOffset, "include_last_offset");
         copy_int(AttrKey::KernelSize,  "kernel_size");
         copy_int(AttrKey::Stride,      "stride");
         copy_int(AttrKey::Padding,     "padding");

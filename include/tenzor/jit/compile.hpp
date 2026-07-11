@@ -199,6 +199,32 @@ public:
     auto set_parameters(std::vector<std::shared_ptr<Variable>> params) -> void;
 
     /**
+     * @brief Declare the non-trainable buffers this function closes over
+     *        (JIT-R005 fix — mirrors with_parameters() exactly).
+     *
+     * Without this, a captured module's non-trainable state (BatchNorm/
+     * InstanceNorm running_mean_/running_var_, etc.) is frozen into the
+     * compiled graph as an opaque constant at trace time: later eager EMA
+     * updates (which always happen via the eager-fallback path, since
+     * grad-mode replay of a training-mode norm layer already throws) are
+     * silently invisible to every subsequent replay of the SAME compiled
+     * graph — wrong output, no error, no retrace trigger. Declaring the
+     * buffers here makes them live leaves instead, rebound to their current
+     * value on every call:
+     * @code
+     * auto fn = jit::compile(fwd).with_parameters(model->parameters())
+     *                             .with_buffers(model->buffers());
+     * @endcode
+     * Overwrites any previously declared buffers and clears the compilation
+     * cache (the cached graphs' buffer-leaf tables no longer apply).
+     */
+    auto with_buffers(std::vector<std::shared_ptr<Variable>> buffers)
+        -> CompiledFunction&;
+
+    /// Set the non-trainable buffers (see with_buffers); does not chain.
+    auto set_buffers(std::vector<std::shared_ptr<Variable>> buffers) -> void;
+
+    /**
      * @brief Get the number of cached shape specializations.
      */
     auto num_cached() const -> size_t;
@@ -282,6 +308,10 @@ private:
     /// caller/optimizer; threaded into the tracer at trace time and onto the
     /// built Graph so replay rebinds the live Variables. Guarded by mutex_.
     std::vector<std::shared_ptr<Variable>> parameters_;
+
+    /// Non-trainable buffers this function closes over (JIT-R005 fix).
+    /// Mirrors parameters_ exactly. Guarded by mutex_.
+    std::vector<std::shared_ptr<Variable>> buffers_;
 
     /// Track warmup calls for reduce-overhead mode (CUDA graph capture),
     /// keyed per shape signature so a call for one shape does not advance the

@@ -47,6 +47,7 @@
 
 #include <tenzor/jit/tracer.hpp>
 #include <tenzor/nn/module.hpp>
+#include <tenzor/nn/utils/variable_cast.hpp>
 #include <tenzor/tenzor.hpp>
 
 namespace tenzor::jit {
@@ -579,22 +580,26 @@ private:
 
 using MethodFn = Variable (*)(const Variable&);
 
-Variable call_relu(const Variable& v) {
-    return Variable(tenzor::clamp(v.tensor(), 0.0f,
-                                  std::numeric_limits<float>::infinity()),
-                    v.requires_grad());
-}
-Variable call_sigmoid(const Variable& v) { return Variable(tenzor::sigmoid(v.tensor()), v.requires_grad()); }
-Variable call_tanh(const Variable& v)    { return Variable(tenzor::tanh(v.tensor()),    v.requires_grad()); }
-Variable call_exp(const Variable& v)     { return Variable(tenzor::exp(v.tensor()),     v.requires_grad()); }
-Variable call_log(const Variable& v)     { return Variable(tenzor::log(v.tensor()),     v.requires_grad()); }
-Variable call_sqrt(const Variable& v)    { return Variable(tenzor::sqrt(v.tensor()),    v.requires_grad()); }
-Variable call_abs(const Variable& v)     { return Variable(tenzor::abs(v.tensor()),     v.requires_grad()); }
-Variable call_neg(const Variable& v)     { return Variable(tenzor::neg(v.tensor()),     v.requires_grad()); }
-Variable call_sum(const Variable& v)     { return Variable(tenzor::sum(v.tensor()),     v.requires_grad()); }
-Variable call_mean(const Variable& v)    { return Variable(tenzor::mean(v.tensor()),    v.requires_grad()); }
-Variable call_sin(const Variable& v)     { return Variable(tenzor::sin(v.tensor()),     v.requires_grad()); }
-Variable call_cos(const Variable& v)     { return Variable(tenzor::cos(v.tensor()),     v.requires_grad()); }
+// JIT-R027: these previously reconstructed the result as
+// `Variable(tenzor::X(v.tensor()), v.requires_grad())` — calling the raw
+// Tensor-level free function and copying only the requires_grad flag,
+// discarding grad_fn entirely (the "raw-tensor-op severs grad_fn" pattern).
+// Route through the Variable-level, autograd-aware overloads instead so
+// ScriptEvaluator::evaluate()'s own return value carries a real gradient
+// chain, not just whatever CompiledModule::forward()'s separate replay
+// path happens to reconstruct independently.
+Variable call_relu(const Variable& v)    { return tenzor::nn::relu(v); }
+Variable call_sigmoid(const Variable& v) { return tenzor::sigmoid(v); }
+Variable call_tanh(const Variable& v)    { return tenzor::tanh(v); }
+Variable call_exp(const Variable& v)     { return tenzor::exp(v); }
+Variable call_log(const Variable& v)     { return tenzor::log(v); }
+Variable call_sqrt(const Variable& v)    { return tenzor::sqrt(v); }
+Variable call_abs(const Variable& v)     { return tenzor::abs(v); }
+Variable call_neg(const Variable& v)     { return tenzor::neg(v); }
+Variable call_sum(const Variable& v)     { return tenzor::sum(v); }
+Variable call_mean(const Variable& v)    { return tenzor::mean(v); }
+Variable call_sin(const Variable& v)     { return tenzor::sin(v); }
+Variable call_cos(const Variable& v)     { return tenzor::cos(v); }
 
 const std::unordered_map<std::string, MethodFn>& method_table() {
     static const std::unordered_map<std::string, MethodFn> table = {
@@ -842,25 +847,26 @@ private:
             }
         };
 
+        // JIT-R027: route through the Variable-level, autograd-aware
+        // overloads (see call_relu et al. above) instead of reconstructing
+        // `Variable(tenzor::X(recv.tensor(), ...), recv.requires_grad())`,
+        // which discarded grad_fn entirely.
         if (name == "pow") {
             require_args(1, "exponent");
             float exp_val = eval_scalar(*args[0], env);
-            return Variable(tenzor::pow(recv.tensor(), exp_val),
-                            recv.requires_grad());
+            return tenzor::pow(recv, static_cast<double>(exp_val));
         }
         if (name == "clamp") {
             require_args(2, "min, max");
             float lo = eval_scalar(*args[0], env);
             float hi = eval_scalar(*args[1], env);
-            return Variable(tenzor::clamp(recv.tensor(), lo, hi),
-                            recv.requires_grad());
+            return tenzor::clamp(recv, static_cast<double>(lo), static_cast<double>(hi));
         }
         if (name == "sum" || name == "mean") {
             require_args(1, "dim");
             int64_t dim = eval_int(*args[0], env);
-            Tensor out = (name == "sum") ? tenzor::sum(recv.tensor(), dim)
-                                         : tenzor::mean(recv.tensor(), dim);
-            return Variable(std::move(out), recv.requires_grad());
+            return (name == "sum") ? tenzor::sum(recv, dim)
+                                   : tenzor::mean(recv, dim);
         }
         throw std::runtime_error(
             "compile_script: unknown method '." + name + "(...)' "
@@ -871,29 +877,39 @@ private:
     Variable visit(const BinOpExpr& b, const Env& env) const {
         Variable lhs = eval(*b.lhs, env);
         Variable rhs = eval(*b.rhs, env);
+        // JIT-R027: use the autograd-aware to_device/variable_cast helpers
+        // (which build proper DeviceTransferBackward/TypeCastBackward
+        // nodes) instead of `Variable(a.tensor().to(...).to(...),
+        // a.requires_grad())`, which discarded grad_fn.
         auto normalise = [&](Variable& a, Variable& other) {
             if (a.tensor().numel() == 1 &&
                 (a.tensor().dtype() != other.tensor().dtype() ||
                  a.tensor().device() != other.tensor().device())) {
-                a = Variable(
-                    a.tensor().to(other.tensor().device()).to(other.tensor().dtype()),
-                    a.requires_grad());
+                if (a.tensor().device() != other.tensor().device()) {
+                    a = tenzor::to_device(a, other.tensor().device());
+                }
+                if (a.tensor().dtype() != other.tensor().dtype()) {
+                    a = tenzor::nn::variable_cast(a, other.tensor().dtype());
+                }
             }
         };
         normalise(lhs, rhs);
         normalise(rhs, lhs);
 
-        Tensor out;
+        // JIT-R027: use the Variable-level operator overloads (autograd-
+        // aware) instead of operating on .tensor() and manually
+        // reconstructing a Variable with an OR'd requires_grad flag but no
+        // grad_fn — this correctly builds the AddBackward/SubBackward/
+        // MulBackward/DivBackward graph node wired to both lhs and rhs.
         switch (b.op) {
-            case '+': out = lhs.tensor() + rhs.tensor(); break;
-            case '-': out = lhs.tensor() - rhs.tensor(); break;
-            case '*': out = lhs.tensor() * rhs.tensor(); break;
-            case '/': out = lhs.tensor() / rhs.tensor(); break;
+            case '+': return lhs + rhs;
+            case '-': return lhs - rhs;
+            case '*': return lhs * rhs;
+            case '/': return lhs / rhs;
             default:
                 throw std::runtime_error(
                     std::string("compile_script: unknown operator '") + b.op + "'");
         }
-        return Variable(out, lhs.requires_grad() || rhs.requires_grad());
     }
 
     Variable visit(const CmpOpExpr& c, const Env& env) const {

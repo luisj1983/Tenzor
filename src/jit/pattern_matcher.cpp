@@ -661,11 +661,25 @@ auto PatternMatcher::match_gemm_epilogue(const Graph& graph, size_t start_idx,
             const auto& bshape = bias_val->shape();
             const int64_t cols = mm_shape->back();
             if (!bshape.empty() && cols > 0 && bshape.back() == cols) {
+                // JIT-R017: guard against signed-overflow UB, same class as
+                // estimate_elements' __builtin_mul_overflow guard above
+                // (JIT-020) applied to this structurally identical raw
+                // dimension-product loop. An overflowed (UB) bnumel could
+                // spuriously equal `cols`, misclassifying a full-tensor
+                // residual as a per-column bias and fusing it into
+                // GemmEpilogue, which indexes bias[idx % cols] — silently
+                // broadcasting the residual from its first row only.
                 int64_t bnumel = 1;
-                for (auto d : bshape) bnumel *= d;
+                bool overflowed = false;
+                for (auto d : bshape) {
+                    if (__builtin_mul_overflow(bnumel, d, &bnumel)) {
+                        overflowed = true;
+                        break;
+                    }
+                }
                 // A per-column bias has exactly `cols` elements (all leading
                 // dims == 1); a [rows, cols] residual has rows*cols != cols.
-                is_per_column_bias = (bnumel == cols);
+                is_per_column_bias = !overflowed && (bnumel == cols);
             }
         }
         if (is_per_column_bias) {

@@ -12,6 +12,9 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/autograd/variable.hpp"
+#include "tenzor/autograd/ops.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <algorithm>
 #include <numeric>
 #include <cmath>
@@ -35,6 +38,25 @@ namespace ops {
 // ============================================================================
 
 namespace {
+// JIT-R085: Tensor::slice()/squeeze() are pure TensorImpl metadata tricks
+// with ZERO dispatch() calls — invisible to both the tracer's generic
+// dispatch<OpId> interception and its own tensor lineage map. Since
+// encode_boxes/decode_boxes/clip_boxes_to_image/remove_small_boxes are
+// otherwise built entirely from already-mapped elementwise Tensor ops
+// (sub/add/mul/div/log/exp/clamp/cat, all of which DO dispatch and are
+// correctly auto-recorded), routing ONLY the initial column-slice through
+// the Variable-level tracer-aware wrapper is sufficient to make the whole
+// function's fine-grained op sequence tracer-visible — no new OpType or
+// manual whole-function recording needed. Mirrors lstm.cpp/quantized_layers.
+// cpp's traced_slice/traced_squeeze pattern exactly.
+inline auto traced_slice(const Tensor& t, int64_t dim, int64_t start,
+                          int64_t end, int64_t step = 1) -> Tensor {
+    return ::tenzor::slice(::tenzor::Variable(t, false), dim, start, end, step).tensor();
+}
+inline auto traced_squeeze(const Tensor& t, int64_t dim) -> Tensor {
+    return ::tenzor::squeeze(::tenzor::Variable(t, false), dim).tensor();
+}
+
 
 #if defined(__AVX2__) || defined(TENZOR_HAS_AVX512)
 
@@ -211,33 +233,15 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
     return results[0];
 }
 
-auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Tensor {
-    if (boxes.ndim() != 2 || boxes.shape()[1] != 4) {
-        throw std::invalid_argument("Boxes must be (N, 4) tensor");
-    }
-    if (scores.ndim() != 1) {
-        throw std::invalid_argument("Scores must be 1D tensor");
-    }
-    if (boxes.shape()[0] != scores.shape()[0]) {
-        throw std::invalid_argument("Number of boxes and scores must match");
-    }
-
+namespace {
+// JIT-R087: the CPU path below never calls dispatch() (a raw host loop) —
+// invisible to the tracer's generic dispatch<OpId> interception, unlike the
+// GPU path, which dispatches OpId::NMS and is auto-recorded now that it's
+// mapped in opid_to_optype (JIT-R086/R087). Extracted so nms() can manually
+// record around it, mirroring ops::nonzero's identical JIT-R085 fix
+// (src/ops/indexing.cpp).
+Tensor nms_cpu_impl(const Tensor& boxes, const Tensor& scores, double iou_threshold) {
     const int64_t N = boxes.shape()[0];
-    if (N == 0) {
-        return tenzor::empty({0}, DType::Int64, boxes.device());
-    }
-
-    // GPU fast path: dispatch NMS to registered backend kernel (CUDA, ROCm, OneAPI, Vulkan)
-    if (boxes.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::IouThreshold, static_cast<float>(iou_threshold));
-        auto boxes_f32 = boxes.to(DType::Float32).contiguous();
-        auto scores_f32 = scores.to(DType::Float32).contiguous();
-        std::vector<Tensor> nms_inputs = {boxes_f32, scores_f32};
-        auto result = dispatch<OpId::NMS>(nms_inputs, attrs);
-        return result[0];
-    }
-
     // Move to CPU and convert to Float32 for processing
     auto boxes_cpu = boxes.to(Device::cpu()).to(DType::Float32);
     auto scores_cpu = scores.to(Device::cpu()).to(DType::Float32);
@@ -332,6 +336,52 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
 
     return result.to(boxes.device());
 }
+}  // namespace
+
+auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Tensor {
+    if (boxes.ndim() != 2 || boxes.shape()[1] != 4) {
+        throw std::invalid_argument("Boxes must be (N, 4) tensor");
+    }
+    if (scores.ndim() != 1) {
+        throw std::invalid_argument("Scores must be 1D tensor");
+    }
+    if (boxes.shape()[0] != scores.shape()[0]) {
+        throw std::invalid_argument("Number of boxes and scores must match");
+    }
+
+    const int64_t N = boxes.shape()[0];
+    if (N == 0) {
+        return tenzor::empty({0}, DType::Int64, boxes.device());
+    }
+
+    // GPU fast path: dispatch NMS to registered backend kernel (CUDA, ROCm, OneAPI, Vulkan)
+    if (boxes.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::IouThreshold, static_cast<float>(iou_threshold));
+        auto boxes_f32 = boxes.to(DType::Float32).contiguous();
+        auto scores_f32 = scores.to(DType::Float32).contiguous();
+        std::vector<Tensor> nms_inputs = {boxes_f32, scores_f32};
+        auto result = dispatch<OpId::NMS>(nms_inputs, attrs);
+        return result[0];
+    }
+
+    // JIT-R087: nms_cpu_impl never dispatches — manually record here so this
+    // call site is tracer-visible, matching the GPU path's now-automatic
+    // recording (JIT-R086/R087's opid_to_optype mapping).
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        auto boxes_id = tracer.register_tensor(boxes);
+        auto scores_id = tracer.register_tensor(scores);
+        Tensor result = nms_cpu_impl(boxes, scores, iou_threshold);
+        auto output_id = tracer.register_new_tensor(result);
+        ::tenzor::jit::TracedOp op(
+            ::tenzor::jit::OpType::NMS, {boxes_id, scores_id}, {output_id});
+        op.attrs["iou_threshold"] = iou_threshold;
+        tracer.record_op(std::move(op));
+        return result;
+    }
+    return nms_cpu_impl(boxes, scores, iou_threshold);
+}
 
 auto batched_nms(const Tensor& boxes, const Tensor& scores,
                  double iou_threshold, double score_threshold,
@@ -356,7 +406,7 @@ auto batched_nms(const Tensor& boxes, const Tensor& scores,
 
     // Apply NMS per class
     for (int64_t cls = 0; cls < num_classes; ++cls) {
-        auto class_scores = scores.slice(1, cls, cls + 1).squeeze(1);
+        auto class_scores = traced_squeeze(traced_slice(scores, 1, cls, cls + 1), 1);
 
         // Filter by score threshold - create scalar tensor for comparison
         auto score_shape = class_scores.shape();
@@ -364,7 +414,7 @@ auto batched_nms(const Tensor& boxes, const Tensor& scores,
         auto threshold_tensor = tenzor::full(shape_vec, static_cast<float>(score_threshold),
                                               class_scores.dtype(), class_scores.device());
         auto mask = class_scores > threshold_tensor;
-        auto indices = mask.nonzero().squeeze(1);
+        auto indices = traced_squeeze(mask.nonzero(), 1);
 
         if (indices.shape()[0] == 0) continue;
 
@@ -435,15 +485,15 @@ auto encode_boxes(const Tensor& boxes, const Tensor& anchors,
     }
 
     // Convert to (cx, cy, w, h) format
-    auto boxes_x1 = boxes.slice(1, 0, 1);
-    auto boxes_y1 = boxes.slice(1, 1, 2);
-    auto boxes_x2 = boxes.slice(1, 2, 3);
-    auto boxes_y2 = boxes.slice(1, 3, 4);
+    auto boxes_x1 = traced_slice(boxes, 1, 0, 1);
+    auto boxes_y1 = traced_slice(boxes, 1, 1, 2);
+    auto boxes_x2 = traced_slice(boxes, 1, 2, 3);
+    auto boxes_y2 = traced_slice(boxes, 1, 3, 4);
 
-    auto anchors_x1 = anchors.slice(1, 0, 1);
-    auto anchors_y1 = anchors.slice(1, 1, 2);
-    auto anchors_x2 = anchors.slice(1, 2, 3);
-    auto anchors_y2 = anchors.slice(1, 3, 4);
+    auto anchors_x1 = traced_slice(anchors, 1, 0, 1);
+    auto anchors_y1 = traced_slice(anchors, 1, 1, 2);
+    auto anchors_x2 = traced_slice(anchors, 1, 2, 3);
+    auto anchors_y2 = traced_slice(anchors, 1, 3, 4);
 
     auto boxes_w = boxes_x2 - boxes_x1;
     auto boxes_h = boxes_y2 - boxes_y1;
@@ -492,16 +542,16 @@ auto decode_boxes(const Tensor& deltas, const Tensor& anchors,
     }
 
     // Extract deltas
-    auto dx = deltas.slice(1, 0, 1) * weights[0];
-    auto dy = deltas.slice(1, 1, 2) * weights[1];
-    auto dw = deltas.slice(1, 2, 3) * weights[2];
-    auto dh = deltas.slice(1, 3, 4) * weights[3];
+    auto dx = traced_slice(deltas, 1, 0, 1) * weights[0];
+    auto dy = traced_slice(deltas, 1, 1, 2) * weights[1];
+    auto dw = traced_slice(deltas, 1, 2, 3) * weights[2];
+    auto dh = traced_slice(deltas, 1, 3, 4) * weights[3];
 
     // Extract anchors
-    auto anchors_x1 = anchors.slice(1, 0, 1);
-    auto anchors_y1 = anchors.slice(1, 1, 2);
-    auto anchors_x2 = anchors.slice(1, 2, 3);
-    auto anchors_y2 = anchors.slice(1, 3, 4);
+    auto anchors_x1 = traced_slice(anchors, 1, 0, 1);
+    auto anchors_y1 = traced_slice(anchors, 1, 1, 2);
+    auto anchors_x2 = traced_slice(anchors, 1, 2, 3);
+    auto anchors_y2 = traced_slice(anchors, 1, 3, 4);
 
     auto anchors_w = anchors_x2 - anchors_x1;
     auto anchors_h = anchors_y2 - anchors_y1;
@@ -537,31 +587,31 @@ auto clip_boxes_to_image(const Tensor& boxes, int64_t height, int64_t width) -> 
         return r.to(boxes.dtype());
     }
     // Clamp each coordinate separately
-    auto x1 = tenzor::clamp(boxes.slice(1, 0, 1), 0.0f, static_cast<float>(width));
-    auto y1 = tenzor::clamp(boxes.slice(1, 1, 2), 0.0f, static_cast<float>(height));
-    auto x2 = tenzor::clamp(boxes.slice(1, 2, 3), 0.0f, static_cast<float>(width));
-    auto y2 = tenzor::clamp(boxes.slice(1, 3, 4), 0.0f, static_cast<float>(height));
+    auto x1 = tenzor::clamp(traced_slice(boxes, 1, 0, 1), 0.0f, static_cast<float>(width));
+    auto y1 = tenzor::clamp(traced_slice(boxes, 1, 1, 2), 0.0f, static_cast<float>(height));
+    auto x2 = tenzor::clamp(traced_slice(boxes, 1, 2, 3), 0.0f, static_cast<float>(width));
+    auto y2 = tenzor::clamp(traced_slice(boxes, 1, 3, 4), 0.0f, static_cast<float>(height));
 
     return tenzor::cat({x1, y1, x2, y2}, 1);
 }
 
 auto remove_small_boxes(const Tensor& boxes, [[maybe_unused]] const Tensor& scores,
                         double min_size) -> Tensor {
-    auto widths = boxes.slice(1, 2, 3) - boxes.slice(1, 0, 1);
-    auto heights = boxes.slice(1, 3, 4) - boxes.slice(1, 1, 2);
+    auto widths = traced_slice(boxes, 1, 2, 3) - traced_slice(boxes, 1, 0, 1);
+    auto heights = traced_slice(boxes, 1, 3, 4) - traced_slice(boxes, 1, 1, 2);
 
     // Create scalar tensor for comparison
-    auto width_squeezed = widths.squeeze(1);
+    auto width_squeezed = traced_squeeze(widths, 1);
     auto width_shape = width_squeezed.shape();
     std::vector<int64_t> shape_vec(width_shape.begin(), width_shape.end());
     auto min_size_tensor = tenzor::full(shape_vec, static_cast<float>(min_size),
                                          width_squeezed.dtype(), width_squeezed.device());
 
-    auto valid_w = widths.squeeze(1) >= min_size_tensor;
-    auto valid_h = heights.squeeze(1) >= min_size_tensor;
+    auto valid_w = width_squeezed >= min_size_tensor;
+    auto valid_h = traced_squeeze(heights, 1) >= min_size_tensor;
     auto valid = valid_w * valid_h;  // Element-wise multiplication for boolean tensors
 
-    return valid.nonzero().squeeze(1);
+    return traced_squeeze(valid.nonzero(), 1);
 }
 
 } // namespace ops

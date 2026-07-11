@@ -63,13 +63,16 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Sin: return "Sin";
         case OpType::Cos: return "Cos";
         case OpType::Rsqrt: return "Rsqrt";
+        case OpType::Reciprocal: return "Reciprocal";
         case OpType::Round: return "Round";
         case OpType::Fmod: return "Fmod";
         case OpType::Slice: return "Slice";
         case OpType::Cat: return "Cat";
+        case OpType::SliceScatter: return "SliceScatter";
         case OpType::Dropout: return "Dropout";
         case OpType::Linear: return "Linear";
         case OpType::Embedding: return "Embedding";
+        case OpType::EmbeddingBag: return "EmbeddingBag";
         case OpType::GELU: return "GELU";
         case OpType::Det: return "Det";
         case OpType::Inv: return "Inv";
@@ -89,10 +92,24 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::SwapIn: return "SwapIn";
         case OpType::GuardNode: return "GuardNode";
         case OpType::QuantizedLinear: return "QuantizedLinear";
+        case OpType::QuantizedLinearStatic: return "QuantizedLinearStatic";
         case OpType::QuantizedConv2d: return "QuantizedConv2d";
         case OpType::Dequantize: return "Dequantize";
         case OpType::Quantize: return "Quantize";
+        case OpType::OneHot: return "OneHot";
+        case OpType::SparseSpMV: return "SparseSpMV";
+        case OpType::SparseAdd: return "SparseAdd";
+        case OpType::SparseTrsv: return "SparseTrsv";
+        case OpType::SparseTrsm: return "SparseTrsm";
+        case OpType::ScatterAdd: return "ScatterAdd";
+        case OpType::RepeatInterleave: return "RepeatInterleave";
+        case OpType::Swish: return "Swish";
+        case OpType::RReLU: return "RReLU";
+        case OpType::LogSigmoid: return "LogSigmoid";
+        case OpType::Minimum: return "Minimum";
+        case OpType::IndexCopy: return "IndexCopy";
         case OpType::SparseMatMul: return "SparseMatMul";
+        case OpType::SparseSpMM: return "SparseSpMM";
         case OpType::DenseToSparse: return "DenseToSparse";
         case OpType::Constant: return "Constant";
         case OpType::Input: return "Input";
@@ -136,6 +153,30 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Scatter: return "Scatter";
         case OpType::Flip: return "Flip";
         case OpType::Roll: return "Roll";
+        case OpType::Triu: return "Triu";
+        case OpType::Tril: return "Tril";
+        case OpType::Diag: return "Diag";
+        case OpType::Trace: return "Trace";
+        case OpType::AsStrided: return "AsStrided";
+        case OpType::ViewAsReal: return "ViewAsReal";
+        case OpType::ViewAsComplex: return "ViewAsComplex";
+        case OpType::ToDevice: return "ToDevice";
+        // JIT-R100
+        case OpType::CumSum: return "CumSum";
+        case OpType::Sort: return "Sort";
+        case OpType::Nonzero: return "Nonzero";
+        case OpType::Bincount: return "Bincount";
+        case OpType::SparseFromDense: return "SparseFromDense";
+        case OpType::SparseToDense: return "SparseToDense";
+        case OpType::SparseCoalesce: return "SparseCoalesce";
+        case OpType::SparseTranspose: return "SparseTranspose";
+        case OpType::SparseToCsr: return "SparseToCsr";
+        case OpType::SparseToCsc: return "SparseToCsc";
+        case OpType::SparseToBsr: return "SparseToBsr";
+        case OpType::BoxIoU: return "BoxIoU";
+        case OpType::NMS: return "NMS";
+        case OpType::ROIAlignForward: return "ROIAlignForward";
+        case OpType::AnchorGenerate: return "AnchorGenerate";
         default: return "Unknown";
     }
 }
@@ -180,13 +221,16 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Sin", OpType::Sin},
         {"Cos", OpType::Cos},
         {"Rsqrt", OpType::Rsqrt},
+        {"Reciprocal", OpType::Reciprocal},
         {"Round", OpType::Round},
         {"Fmod", OpType::Fmod},
         {"Slice", OpType::Slice},
         {"Cat", OpType::Cat},
+        {"SliceScatter", OpType::SliceScatter},
         {"Dropout", OpType::Dropout},
         {"Linear", OpType::Linear},
         {"Embedding", OpType::Embedding},
+        {"EmbeddingBag", OpType::EmbeddingBag},
         {"GELU", OpType::GELU},
         {"Det", OpType::Det},
         {"Inv", OpType::Inv},
@@ -206,10 +250,24 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"SwapIn", OpType::SwapIn},
         {"GuardNode", OpType::GuardNode},
         {"QuantizedLinear", OpType::QuantizedLinear},
+        {"QuantizedLinearStatic", OpType::QuantizedLinearStatic},
         {"QuantizedConv2d", OpType::QuantizedConv2d},
         {"Dequantize", OpType::Dequantize},
         {"Quantize", OpType::Quantize},
+        {"OneHot", OpType::OneHot},
+        {"SparseSpMV", OpType::SparseSpMV},
+        {"SparseAdd", OpType::SparseAdd},
+        {"SparseTrsv", OpType::SparseTrsv},
+        {"SparseTrsm", OpType::SparseTrsm},
+        {"ScatterAdd", OpType::ScatterAdd},
+        {"RepeatInterleave", OpType::RepeatInterleave},
+        {"Swish", OpType::Swish},
+        {"RReLU", OpType::RReLU},
+        {"LogSigmoid", OpType::LogSigmoid},
+        {"Minimum", OpType::Minimum},
+        {"IndexCopy", OpType::IndexCopy},
         {"SparseMatMul", OpType::SparseMatMul},
+        {"SparseSpMM", OpType::SparseSpMM},
         {"DenseToSparse", OpType::DenseToSparse},
         {"Constant", OpType::Constant},
         {"Input", OpType::Input},
@@ -252,6 +310,30 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Scatter", OpType::Scatter},
         {"Flip", OpType::Flip},
         {"Roll", OpType::Roll},
+        {"Triu", OpType::Triu},
+        {"Tril", OpType::Tril},
+        {"Diag", OpType::Diag},
+        {"Trace", OpType::Trace},
+        {"AsStrided", OpType::AsStrided},
+        {"ViewAsReal", OpType::ViewAsReal},
+        {"ViewAsComplex", OpType::ViewAsComplex},
+        {"ToDevice", OpType::ToDevice},
+        // JIT-R100
+        {"CumSum", OpType::CumSum},
+        {"Sort", OpType::Sort},
+        {"Nonzero", OpType::Nonzero},
+        {"Bincount", OpType::Bincount},
+        {"SparseFromDense", OpType::SparseFromDense},
+        {"SparseToDense", OpType::SparseToDense},
+        {"SparseCoalesce", OpType::SparseCoalesce},
+        {"SparseTranspose", OpType::SparseTranspose},
+        {"SparseToCsr", OpType::SparseToCsr},
+        {"SparseToCsc", OpType::SparseToCsc},
+        {"SparseToBsr", OpType::SparseToBsr},
+        {"BoxIoU", OpType::BoxIoU},
+        {"NMS", OpType::NMS},
+        {"ROIAlignForward", OpType::ROIAlignForward},
+        {"AnchorGenerate", OpType::AnchorGenerate},
     };
 
     auto it = string_to_type.find(str);
@@ -341,12 +423,16 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
     // rebind the live Variables (see classify_captured below and
     // Graph::forward's parameter-leaf binding).
     graph->set_parameters(parameters_);
+    // JIT-R005 fix: same forwarding for non-trainable buffers.
+    graph->set_buffers(buffers_);
 
     // Classify a non-produced op input (one that has no producing node and is
     // not a graph input): a captured module PARAMETER (storage matches a
     // declared parameter) becomes a parameter leaf bound to the live Variable;
-    // anything else is frozen as an opaque constant. This is the single point
-    // where a closure-captured parameter stops being baked as a frozen value.
+    // a captured module BUFFER (JIT-R005 fix) becomes a buffer leaf, also
+    // rebound to its live value on every replay; anything else is frozen as
+    // an opaque constant. This is the single point where a closure-captured
+    // parameter/buffer stops being baked as a frozen value.
     auto classify_captured = [&](Graph& g, const std::string& input_id) {
         auto storage_it = tensor_storage_.find(input_id);
         if (storage_it == tensor_storage_.end()) return;
@@ -354,9 +440,14 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
         auto pit = param_storage_index_.find(ident);
         if (pit != param_storage_index_.end()) {
             g.add_param_leaf(input_id, pit->second);
-        } else {
-            g.set_constant(input_id, storage_it->second);
+            return;
         }
+        auto bit = buffer_storage_index_.find(ident);
+        if (bit != buffer_storage_index_.end()) {
+            g.add_buffer_leaf(input_id, bit->second);
+            return;
+        }
+        g.set_constant(input_id, storage_it->second);
     };
 
     // Map tensor IDs to graph values
@@ -433,6 +524,8 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
         // rebound to the live Variable at replay (grad flows to param->grad(),
         // and inference sees updated weights) rather than frozen as a constant.
         sub->set_parameters(parameters_);
+        // JIT-R005 fix: same forwarding for non-trainable buffers.
+        sub->set_buffers(buffers_);
         std::unordered_map<std::string, std::shared_ptr<Value>> sub_values;
 
         // Carried inputs become sub-graph inputs.
@@ -859,6 +952,21 @@ auto Tracer::set_parameters(std::vector<std::shared_ptr<Variable>> params) -> vo
     }
 }
 
+// JIT-R005 fix: mirrors set_parameters() exactly, for non-trainable buffers
+// (BatchNorm/InstanceNorm running_mean_/running_var_, etc.).
+auto Tracer::set_buffers(std::vector<std::shared_ptr<Variable>> buffers) -> void {
+    buffers_ = std::move(buffers);
+    buffer_storage_index_.clear();
+    for (size_t i = 0; i < buffers_.size(); ++i) {
+        const auto& b = buffers_[i];
+        if (!b) continue;
+        const void* id = b->tensor().data_ptr();
+        if (id != nullptr) {
+            buffer_storage_index_.emplace(id, i);
+        }
+    }
+}
+
 auto Tracer::get_tensor_info(const std::string& tensor_id) const -> const TensorInfo& {
     auto it = tensor_info_.find(tensor_id);
     if (it == tensor_info_.end()) {
@@ -874,6 +982,8 @@ auto Tracer::clear() -> void {
     tensor_storage_.clear();
     parameters_.clear();
     param_storage_index_.clear();
+    buffers_.clear();
+    buffer_storage_index_.clear();
     next_tensor_id_ = 0;
     graph_break_count_ = 0;
     // clear() is the tracer's full reset — it stops tracing too, so

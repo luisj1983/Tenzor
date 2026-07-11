@@ -73,6 +73,7 @@ inline Device::Type nameToDeviceType(const std::string& name) {
     if (name == "vulkan") return Device::Type::Vulkan;
     if (name == "oneapi") return Device::Type::OneAPI;
     if (name == "rocm") return Device::Type::ROCm;
+    if (name == "mps") return Device::Type::MPS;
     throw std::runtime_error("Unknown backend name: " + name);
 }
 
@@ -307,7 +308,7 @@ inline std::once_flag BackendTest::init_flag;
     INSTANTIATE_TEST_SUITE_P( \
         AllBackends, \
         TestSuiteName, \
-        ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm"), \
+        ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm", "mps"), \
         [](const ::testing::TestParamInfo<std::string>& info) { \
             return info.param; \
         } \
@@ -327,6 +328,7 @@ inline std::once_flag BackendTest::init_flag;
                 {"oneapi", Device::Type::OneAPI}, \
                 {"vulkan", Device::Type::Vulkan}, \
                 {"rocm", Device::Type::ROCm}, \
+                {"mps", Device::Type::MPS}, \
             }; \
             for (const auto& [n, t] : backends) { \
                 auto* b = backend_registry().get_backend(t); \

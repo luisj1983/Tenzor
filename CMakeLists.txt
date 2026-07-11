@@ -354,6 +354,55 @@ if(TENZOR_USE_MLIR_JIT)
     message(STATUS "  Default IREE rocm target chip: ${TENZOR_DEFAULT_ROCM_TARGET}")
 endif()
 
+# JIT-R043: extends the TENZOR_DEFAULT_ROCM_TARGET block above — IREE's
+# iree-compile cuda target requires an explicit `--iree-cuda-target=<smXX>`
+# flag, just like rocm requires `--iree-rocm-target=<gfxXXX>`. Only ROCm had
+# a build-time default macro wired up; CUDA fell all the way through to
+# iree_compile.cpp's hardcoded "sm_80" literal even though this repo already
+# auto-detects the build machine's real compute capability for the EAGER
+# CUDA backend (src/backends/cuda/CMakeLists.txt) — that detection just
+# never got threaded into a JIT-side default. Query nvidia-smi directly here
+# (independent of src/backends/cuda/CMakeLists.txt's CMAKE_CUDA_ARCHITECTURES,
+# which on CMake 3.24+ is the literal string "native" — not a usable IREE
+# target string) so this block works regardless of CMake version or
+# subdirectory processing order. Detection failure (no nvidia-smi, no GPU
+# present at build time, parse failure) leaves TENZOR_DEFAULT_CUDA_TARGET
+# undefined entirely — strictly additive, never worse than the pre-existing
+# "sm_80" runtime fallback in iree_compile.cpp.
+if(TENZOR_BUILD_CUDA)
+    set(_tenzor_default_cuda_target "")
+    find_program(_TENZOR_NVIDIA_SMI nvidia-smi)
+    if(_TENZOR_NVIDIA_SMI)
+        execute_process(
+            COMMAND ${_TENZOR_NVIDIA_SMI} --query-gpu=compute_cap --format=csv,noheader,nounits
+            OUTPUT_VARIABLE _TENZOR_CUDA_COMPUTE_CAPS
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE _TENZOR_NVIDIA_SMI_RESULT
+        )
+        if(_TENZOR_NVIDIA_SMI_RESULT EQUAL 0 AND _TENZOR_CUDA_COMPUTE_CAPS)
+            # Take the FIRST reported GPU's compute_cap (e.g. "8.6"); IREE
+            # wants "sm_86" (no dot, sm_ prefix) -- matches iree_compile.cpp's
+            # existing "sm_80"-style fallback literal format.
+            string(REPLACE "\n" ";" _TENZOR_CUDA_CAP_LIST "${_TENZOR_CUDA_COMPUTE_CAPS}")
+            list(GET _TENZOR_CUDA_CAP_LIST 0 _TENZOR_CUDA_FIRST_CAP)
+            string(STRIP "${_TENZOR_CUDA_FIRST_CAP}" _TENZOR_CUDA_FIRST_CAP)
+            string(REPLACE "." "" _TENZOR_CUDA_ARCH_NUM "${_TENZOR_CUDA_FIRST_CAP}")
+            if(_TENZOR_CUDA_ARCH_NUM MATCHES "^[0-9]+$")
+                set(_tenzor_default_cuda_target "sm_${_TENZOR_CUDA_ARCH_NUM}")
+            endif()
+        endif()
+    endif()
+    if(_tenzor_default_cuda_target)
+        set(TENZOR_DEFAULT_CUDA_TARGET "${_tenzor_default_cuda_target}"
+            CACHE STRING "Default --iree-cuda-target chip for iree-compile." FORCE)
+        message(STATUS "  Default IREE cuda target chip: ${TENZOR_DEFAULT_CUDA_TARGET}")
+    else()
+        message(STATUS "  Default IREE cuda target chip: none detected "
+                "(iree_compile.cpp falls back to its hardcoded sm_80 default)")
+    endif()
+endif()
+
 # Link-Time Optimization
 option(TENZOR_ENABLE_LTO "Enable Link-Time Optimization" OFF)
 if(TENZOR_ENABLE_LTO)

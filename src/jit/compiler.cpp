@@ -1340,6 +1340,25 @@ auto FuseAttentionPass::fuse_attention(
     std::shared_ptr<Node> mask_add_node,
     Graph& graph) -> bool {
 
+    // JIT-R041: every lowering handler for OpType::FlashAttention —
+    // iree_customcalls.cpp's dispatch_flash_attention, lowering.cpp's
+    // handle_flash_attention_custom_call, AND handle_flash_attention_expand
+    // (the LIVE default-compiled path, since the plugin path is always
+    // disabled) — hard-asserts exactly 3 inputs and has no parameter for an
+    // explicit additive mask tensor, only a boolean causal + scalar scale.
+    // Synthesizing the 4-input has_mask=true node below would build a node
+    // NO lowering path can consume, degrading to a silent eager fallback
+    // (non-strict mode) or a hard, confusingly-worded compile failure
+    // (strict mode) — for a case (GroupedQueryAttention's causal mask, e.g.)
+    // that's actually common. Until the lowering handlers gain real masked-
+    // FlashAttention support, refuse to fuse rather than emit an unlowerable
+    // node — the unfused MatMul->Mul->Add->Softmax->MatMul sequence this
+    // leaves behind is itself fully correct and lowerable, just unfused
+    // (a real perf loss, not a correctness one).
+    if (mask_add_node) {
+        return false;
+    }
+
     // Create FlashAttention node
     auto flash_node = graph.create_node(OpType::FlashAttention, "flash_attention");
 
@@ -1378,18 +1397,9 @@ auto FuseAttentionPass::fuse_attention(
         }
     }
 
-    // If there's a mask, add it as the 4th input
-    if (mask_add_node) {
-        // The mask is the input to Add that is NOT the scale output
-        auto scale_out_id = scale_node->outputs()[0]->id();
-        for (const auto& inp : mask_add_node->inputs()) {
-            if (inp->id() != scale_out_id) {
-                flash_node->add_input(inp);
-                flash_node->set_bool_attr("has_mask", true);
-                break;
-            }
-        }
-    }
+    // NOTE: mask_add_node is always null here — the early bailout above
+    // refuses fusion whenever a mask is present (JIT-R041), since no
+    // lowering handler can consume a 4-input masked FlashAttention node.
 
     // Create output value matching av_matmul's output
     if (!av_matmul->outputs().empty()) {
@@ -2139,15 +2149,42 @@ auto LoopUnrollingPass::run(Graph& graph) -> bool {
         auto loop_inputs = loop_node->inputs();
         auto loop_outputs = loop_node->outputs();
 
-        // Carried values start as the loop's non-bound inputs
+        // Carried values start as the loop's non-bound inputs: [entry_cond,
+        // carried_0, ...]. carried_ids[0] is ALWAYS the current cond value —
+        // initialized here to entry_cond, then updated (gated, see below) at
+        // the end of every iteration.
         std::vector<std::string> carried_ids;
         for (size_t i = 1; i < loop_inputs.size(); ++i) {
             carried_ids.push_back(loop_inputs[i]->id());
         }
 
+        // JIT-R003: a static unroll must still respect the loop's
+        // data-dependent early-exit semantics — the runtime cond can go
+        // false before trip_count iterations, and both eager
+        // (control_flow.cpp) and the graph interpreter (graph.cpp) honour
+        // that. The unrolled clones below therefore do NOT unconditionally
+        // overwrite each carried value with the new per-iteration result;
+        // instead every carried slot (including the cond slot itself) is
+        // gated with `Where(active, new_value, old_value)`, where `active`
+        // is the cond value as it stood ENTERING this iteration. Once cond
+        // goes false, `Where` keeps selecting the frozen old value for
+        // every carried slot in every subsequent iteration (cond included,
+        // so `active` itself latches false) — exactly reproducing
+        // while_loop's "stop advancing state past the first failing cond"
+        // behavior, just unrolled at compile time instead of interpreted.
+        // The body still runs unconditionally every iteration (wasted work
+        // once inactive, but pure/side-effect-free ops make that safe) —
+        // its result is simply discarded by the select once cond is false.
+
         // For each iteration, clone body nodes with remapped IDs
         for (int64_t iter = 0; iter < trip_count; ++iter) {
             std::unordered_map<std::string, std::string> id_remap;
+
+            // Snapshot the cond/carried state as it stood BEFORE this
+            // iteration's body runs — `active_before` gates whether this
+            // iteration's results actually get applied below.
+            const std::string active_before_id = carried_ids[0];
+            std::vector<std::string> pre_iter_carried_ids = carried_ids;
 
             // Loop convention: body_inputs = [iter, cond, carried_0, ...];
             // carried_ids tracks the loop's [cond, carried_0, ...]. Previously
@@ -2229,19 +2266,40 @@ auto LoopUnrollingPass::run(Graph& graph) -> bool {
                 graph.add_node(cloned);
             }
 
+            // loop_outputs are the final carried values [v_0_final, ...]; they map to
+            // carried_ids[1..] (carried_ids[0] is the loop cond, which is NOT a loop
+            // output). Skip the cond slot — previously loop_outputs[i] was wired to
+            // carried_ids[i], returning cond/shifted values.
+            auto active_val = graph.get_value(active_before_id);
             auto& body_outputs = body->outputs();
             for (size_t i = 0; i < std::min(body_outputs.size(), carried_ids.size()); ++i) {
                 auto remap_it = id_remap.find(body_outputs[i]->id());
-                if (remap_it != id_remap.end()) {
-                    carried_ids[i] = remap_it->second;
-                }
+                if (remap_it == id_remap.end()) continue;
+
+                // Gate: carried_ids[i] = active_before ? candidate : old.
+                // This applies to EVERY carried slot, including index 0
+                // (cond) — so `active` itself latches false forever once
+                // the loop's cond first goes false.
+                auto candidate_val = graph.get_value(remap_it->second);
+                auto old_val = graph.get_value(pre_iter_carried_ids[i]);
+                if (!candidate_val || !old_val || !active_val) continue;
+
+                auto where_node = graph.create_node(OpType::Where);
+                where_node->add_input(active_val);
+                where_node->add_input(candidate_val);
+                where_node->add_input(old_val);
+                std::string where_id = candidate_val->id() + "_gated";
+                auto where_val = graph.create_value(
+                    where_id, candidate_val->shape(), candidate_val->dtype(),
+                    candidate_val->device());
+                where_val->set_node(where_node);
+                where_node->add_output(where_val);
+                graph.add_node(where_node);
+
+                carried_ids[i] = where_id;
             }
         }
 
-        // loop_outputs are the final carried values [v_0_final, ...]; they map to
-        // carried_ids[1..] (carried_ids[0] is the loop cond, which is NOT a loop
-        // output). Skip the cond slot — previously loop_outputs[i] was wired to
-        // carried_ids[i], returning cond/shifted values.
         for (size_t i = 0; i < loop_outputs.size() && (i + 1) < carried_ids.size(); ++i) {
             graph.replace_value(loop_outputs[i]->id(), carried_ids[i + 1]);
         }
@@ -3070,6 +3128,47 @@ auto LayoutOptimizationPass::run(Graph& graph) -> bool {
         changed = true;
     }
 
+    // Phase 5 (JIT-R040): Phase 4 above only inspects node-to-node input
+    // edges (graph.nodes()'s own inputs()), so a channels-last node whose
+    // output is a graph OUTPUT directly — with no other node consuming it
+    // (e.g. a bare conv/batchnorm-terminated subgraph with no trailing
+    // flatten/linear/pool) — never gets a boundary conversion and leaves
+    // the graph's output physically in channels-last byte order while every
+    // downstream consumer (buffer protocol, raw data_ptr() reads assuming
+    // canonical NCHW) expects contiguous. Insert the same contiguous-
+    // restoring LayoutConvert for any 4D graph output produced by a
+    // channels-last node.
+    {
+        auto current_outputs = graph.outputs();
+        bool outputs_changed = false;
+        for (auto& out_val : current_outputs) {
+            auto producer = out_val->node();
+            if (!producer) continue;
+            if (out_val->shape().size() != 4) continue;
+            if (channels_last_nodes.count(producer.get()) == 0) continue;
+
+            auto convert_output = std::make_shared<Value>(
+                out_val->id() + "_fmt_out",
+                out_val->shape(),
+                out_val->dtype(),
+                out_val->device());
+
+            auto convert_node = std::make_shared<Node>(OpType::LayoutConvert);
+            convert_node->add_input(out_val);
+            convert_node->add_output(convert_output);
+            convert_node->set_int_attr("target_format", 0);  // 0 = Contiguous
+            convert_output->set_node(convert_node);
+
+            graph.add_node(convert_node);
+            out_val = convert_output;
+            outputs_changed = true;
+            changed = true;
+        }
+        if (outputs_changed) {
+            graph.set_outputs(std::move(current_outputs));
+        }
+    }
+
     if (changed) {
         graph.topological_sort();
     }
@@ -3464,6 +3563,30 @@ auto QuantizationPass::quantize_conv2d(std::shared_ptr<Node> node, Graph& graph)
     // for why in-place beats a replacement node.)
     (void)graph;
     if (node->inputs().size() < 2) return false;  // need at least [x, weight]
+
+    // JIT-R039: eager's QuantizedConv2d::from_float (quantized_layers.cpp)
+    // explicitly REJECTS non-square kernels and asymmetric stride/padding/
+    // dilation, because the quantized layer's ctor stores only ONE scalar
+    // per stride/padding/dilation and the JIT interpreter's
+    // quantized_conv2d_dynamic reads only the H-axis kernel dim
+    // (weight.shape()[2]) — silently retagging such a Conv2d here would
+    // drop the W-axis value entirely and produce a wrong spatial output
+    // with no error, exactly what eager's rejection comment warns against.
+    // Weight is inputs()[1], shape [out_channels, in_channels/groups, kH, kW].
+    auto weight_shape = node->inputs()[1]->shape();
+    if (weight_shape.size() >= 4 && weight_shape[2] != weight_shape[3]) {
+        return false;  // non-square kernel — leave as plain (unquantized) Conv2d
+    }
+    auto is_asymmetric_pair = [&](const char* name) -> bool {
+        if (!node->has_vec_attr(name)) return false;
+        const auto& v = node->get_vec_attr(name);
+        return v.size() >= 2 && v[0] != v[1];
+    };
+    if (is_asymmetric_pair("stride") || is_asymmetric_pair("padding") ||
+        is_asymmetric_pair("dilation")) {
+        return false;  // asymmetric geometry — leave as plain Conv2d
+    }
+
     node->set_op_type(OpType::QuantizedConv2d);
     node->set_bool_attr("quantized", true);
     return true;

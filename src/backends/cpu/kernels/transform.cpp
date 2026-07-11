@@ -1306,5 +1306,117 @@ auto flip_kernel(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
     return output;
 }
 
+namespace {
+// Helper: apply a per-element keep-predicate on the last two dims of a
+// tensor, zeroing everything else. Shared by triu_kernel/tril_kernel.
+// Relocated here from the old CPU-only branch in tenzor::triu/tril
+// (src/ops/transform.cpp) so those public functions can dispatch
+// unconditionally (like flip()) without this implementation recursing back
+// through OpId::Triu/Tril.
+template<typename Func>
+auto triangular_kernel_impl(const Tensor& input, int64_t diagonal, Func&& should_keep) -> Tensor {
+    if (input.ndim() < 2) {
+        throw std::runtime_error("triu/tril requires at least 2D tensor");
+    }
+
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
+    Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+
+    auto shape = cont.shape();
+    int64_t rows = shape[input.ndim() - 2];
+    int64_t cols = shape[input.ndim() - 1];
+    // A zero-size matrix dimension makes the per-batch element count zero, so
+    // batch_size = numel / (rows*cols) would divide by zero. The result is
+    // already the correctly-shaped zero tensor; return it directly.
+    if (rows == 0 || cols == 0) {
+        return result;
+    }
+    int64_t batch_size = cont.numel() / (rows * cols);
+    auto elem_size = dtype_size(input.dtype());
+
+    const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
+    auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t i = 0; i < rows; ++i) {
+            for (int64_t j = 0; j < cols; ++j) {
+                if (should_keep(i, j, diagonal)) {
+                    int64_t idx = (b * rows * cols + i * cols + j) * elem_size;
+                    std::memcpy(dst + idx, src + idx, elem_size);
+                }
+            }
+        }
+    }
+    return result;
+}
+}  // namespace
+
+auto triu_kernel(const Tensor& input, int64_t diagonal) -> Tensor {
+    return triangular_kernel_impl(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
+        return j >= i + d;  // Keep upper triangle
+    });
+}
+
+auto tril_kernel(const Tensor& input, int64_t diagonal) -> Tensor {
+    return triangular_kernel_impl(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
+        return j <= i + d;  // Keep lower triangle
+    });
+}
+
+auto diag_kernel(const Tensor& input, int64_t diagonal) -> Tensor {
+    // Relocated here from the old CPU-only branch in tenzor::diag
+    // (src/ops/transform.cpp) for the same reason as triu_kernel/tril_kernel
+    // above — see that comment.
+    if (input.ndim() == 1) {
+        // 1D -> 2D: construct diagonal matrix
+        int64_t n = input.shape()[0];
+        int64_t abs_diag = std::abs(diagonal);
+        int64_t size = n + abs_diag;
+
+        Tensor result({size, size}, input.dtype(), input.device());
+
+        auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
+        auto elem_size = dtype_size(input.dtype());
+        const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
+        auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t row = diagonal >= 0 ? i : i - diagonal;
+            int64_t col = diagonal >= 0 ? i + diagonal : i;
+            int64_t dst_idx = (row * size + col) * elem_size;
+            int64_t src_idx = i * elem_size;
+            std::memcpy(dst + dst_idx, src + src_idx, elem_size);
+        }
+        return result;
+    } else if (input.ndim() == 2) {
+        // 2D -> 1D: extract diagonal
+        auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
+        int64_t rows = input.shape()[0];
+        int64_t cols = input.shape()[1];
+        int64_t start_row = diagonal >= 0 ? 0 : -diagonal;
+        int64_t start_col = diagonal >= 0 ? diagonal : 0;
+        int64_t diag_len = std::min(rows - start_row, cols - start_col);
+        if (diag_len <= 0) {
+            return Tensor::empty_uninitialized({0}, input.dtype(), input.device());
+        }
+
+        auto result = Tensor::empty_uninitialized({diag_len}, input.dtype(), input.device());
+        auto elem_size = dtype_size(input.dtype());
+        const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
+        auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+        for (int64_t i = 0; i < diag_len; ++i) {
+            int64_t src_idx = ((start_row + i) * cols + (start_col + i)) * elem_size;
+            int64_t dst_idx = i * elem_size;
+            std::memcpy(dst + dst_idx, src + src_idx, elem_size);
+        }
+        return result;
+    } else {
+        throw std::runtime_error("diag: input must be 1D or 2D, got " +
+                                 std::to_string(input.ndim()) + "D");
+    }
+}
+
 } // namespace cpu
 } // namespace tenzor

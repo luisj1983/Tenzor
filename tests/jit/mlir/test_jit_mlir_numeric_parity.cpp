@@ -497,24 +497,19 @@ TEST(MlirNumericParity, PowNegativeBaseRuntimeTensorExponent) {
             << "PowNegativeBaseRuntimeTensorExponent did not attempt an IREE "
                "compile on target=" << target;
 
-        // cuda: this machine's GPU is sm_120 (Blackwell); confirmed via a
-        // direct `iree-compile --iree-hal-target-backends=cuda
-        // --iree-cuda-target=sm_120 <file.mlir>` run (fully outside Tenzor)
-        // that the installed IREE 3.11.0rc / LLVM 23.0.0git NVPTX backend
-        // compiles sm_80/sm_86 successfully but rejects sm_89 and above --
-        // including the exact sm_120 this device resolves to -- with "missing
-        // GPU target in #hal.executable.target". That is a toolchain/hardware-
-        // generation ceiling, not a Tenzor bug: cuda_arch resolution and
-        // --iree-cuda-target flag construction (iree_compile.cpp) are correct
-        // (verified by direct inspection and by sm_80/sm_86 succeeding). The
-        // compile therefore genuinely fails here and degrades to eager, which
-        // for this test's synthetic dispatch(OpId::Pow, {x, y_t}, {}) call is
-        // NOT a valid ground truth either (see the OUT OF CONTRACT note above
-        // the test) -- so the tight numeric comparison below does not apply
-        // to cuda on this machine. The throw/attempted-compile assertions
-        // above still ran, so a genuine crash or a silently-skipped compile
-        // attempt is still caught.
-        if (target == "cuda") continue;
+        // JIT-R029/R101: this machine's GPU is sm_120 (Blackwell); the
+        // installed IREE 3.11.0rc / LLVM 23.0.0git NVPTX backend compiles
+        // sm_80/sm_86 successfully but rejects sm_89+ (including sm_120)
+        // with "missing GPU target in #hal.executable.target" -- a
+        // toolchain/hardware-generation ceiling, not a Tenzor bug.
+        // iree_compile.cpp's compile_via_subprocess (JIT-R101) now retries
+        // once with the sm_80 Ampere baseline on exactly this failure
+        // signature, which PTX-JITs forward-compatibly onto Blackwell, so
+        // the compile now genuinely SUCCEEDS here instead of degrading to
+        // eager -- the tight numeric comparison below is a real IREE-
+        // compiled result and applies to cuda the same as every other
+        // target (previously skipped; see the now-superseded JIT-R029
+        // finding in findings.txt for the pre-R101 history).
 
         const Tensor got = out.tensor().to(DType::Float32).to(Device::cpu());
         const float* g = got.data<float>();

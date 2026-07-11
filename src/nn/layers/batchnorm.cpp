@@ -8,6 +8,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/utils/autograd_wrap.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 
 // SIMD headers for optimized BatchNorm
@@ -404,8 +405,16 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
     const bool needs_grad = is_grad_enabled() &&
         (input.requires_grad() || (affine_ && cached_weight_ && cached_weight_->requires_grad()));
 
+    // JIT-R059: this hand-rolled SIMD pointer loop never calls dispatch(),
+    // so it is completely invisible to the JIT tracer — the common
+    // model.eval()-under-no_grad inference case would freeze BatchNorm2d's
+    // entire output as a trace-time constant. Skip it while tracing; the
+    // STANDARD PATH below already dispatches OpId::BatchNorm2dForwardAffine
+    // unconditionally on every device (including CPU), so it is a correct,
+    // tracer-visible fallback with no functionality loss.
     if (!needs_grad && !training_ && track_running_stats_ &&
-        input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
+        input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32 &&
+        !::tenzor::jit::Tracer::get_instance().is_tracing()) {
 
         const Tensor& input_tensor = input.tensor();
         const auto* input_data = input_tensor.data<float>();
@@ -1204,15 +1213,21 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         // (N, L, C) first so that channels end up as the trailing
         // dimension — the subsequent contiguous+reshape then gives the
         // expected (N*L, C) layout where row j is one per-channel sample.
+        // tenzor::permute (Variable-level) — not the raw Tensor::permute(),
+        // which is pure metadata with zero dispatch() calls and was
+        // invisible to the JIT tracer (JIT-R048).
         Tensor reshaped_input = shape.size() == 3 ?
-            input_work.permute({0, 2, 1}).contiguous().reshape({N * L, C}) :
+            tenzor::permute(Variable(input_work, false), {0, 2, 1}).tensor()
+                .contiguous().reshape({N * L, C}) :
             input_work.contiguous();
 
         // Compute mean: average over batch dimension (N*L)
         batch_mean = mean(reshaped_input, 0, false);
 
-        // Compute variance
-        auto mean_broadcast = batch_mean.unsqueeze(0).contiguous();
+        // Compute variance. tenzor::unsqueeze (Variable-level) — not the raw
+        // Tensor::unsqueeze() — so this stays visible to the JIT tracer
+        // (JIT-R048; see the fuller explanation further down this function).
+        auto mean_broadcast = tenzor::unsqueeze(Variable(batch_mean, false), 0).tensor().contiguous();
         auto centered = (reshaped_input - mean_broadcast).contiguous();
         batch_var = mean(centered * centered, 0, false);
 
@@ -1229,6 +1244,23 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
 
             auto& rm_var_ptr = buffers_["running_mean"];
             auto& rv_var_ptr = buffers_["running_var"];
+
+            // JIT-R103: align running-stat buffers to the input's device
+            // before the EMA update below. Buffers stay on whatever device
+            // the module was constructed on (CPU by default) until moved,
+            // but the update mixes them directly with batch_mean/
+            // unbiased_var (computed from input_work, on the INPUT's
+            // device) — a lazily-placed module (constructed on CPU, called
+            // with a GPU input, the common workflow) hit a device-mismatch
+            // dispatch error. Mutates the stored buffer in place, mirroring
+            // LSTMCell::forward's established weight_ih_->to(input_device)
+            // pattern (src/nn/layers/lstm.cpp).
+            if (rm_var_ptr->tensor().device() != original_device) {
+                rm_var_ptr->tensor() = rm_var_ptr->tensor().to(original_device);
+            }
+            if (rv_var_ptr->tensor().device() != original_device) {
+                rv_var_ptr->tensor() = rv_var_ptr->tensor().to(original_device);
+            }
 
             // Exponential moving average update using tensor operations
             // This properly handles both CPU and CUDA/GPU tensors
@@ -1288,38 +1320,57 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
     // to be cast to Float32 before mixing with upcasted tensors.
     const DType compute_dtype = input_work.dtype();
     auto to_compute = [&](const Tensor& t) -> Tensor {
-        return t.dtype() == compute_dtype ? t : t.to(compute_dtype);
+        // JIT-R103: also reconcile device — this is used for cached_weight_/
+        // cached_bias_ (affine params) below, which stay wherever the
+        // module was constructed (CPU by default) until moved, but get
+        // mixed directly with `normalized` (on the input's device).
+        Tensor r = (t.device() != original_device) ? t.to(original_device) : t;
+        return r.dtype() == compute_dtype ? r : r.to(compute_dtype);
+    };
+    // Tensor::unsqueeze() is pure metadata with zero dispatch() calls, so a
+    // raw .unsqueeze() chain here was invisible to the JIT tracer — and the
+    // .contiguous() that always follows it (which DOES dispatch) then
+    // aliased its output to that untracked unsqueezed tensor, freezing the
+    // whole broadcast+normalize+affine chain at its trace-time value
+    // (JIT-R048). tenzor::unsqueeze (Variable-level) records a real
+    // OpType::Unsqueeze node when tracing is active.
+    auto traced_unsqueeze = [](const Tensor& t, std::initializer_list<int64_t> dims) -> Tensor {
+        Tensor result = t;
+        for (int64_t d : dims) {
+            result = tenzor::unsqueeze(Variable(result, false), d).tensor();
+        }
+        return result;
     };
 
     Tensor output;
     if (shape.size() == 3) {
-        auto mean_broadcast = batch_mean.unsqueeze(0).unsqueeze(2).contiguous();
-        auto var_broadcast = batch_var.unsqueeze(0).unsqueeze(2).contiguous();
+        auto mean_broadcast = traced_unsqueeze(batch_mean, {0, 2}).contiguous();
+        auto var_broadcast = traced_unsqueeze(batch_var, {0, 2}).contiguous();
         auto eps_tensor = full({}, eps_, var_broadcast.dtype(), var_broadcast.device());
         auto invstd = pow(var_broadcast + eps_tensor, -0.5f).contiguous();
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_ && cached_weight_ && cached_bias_) {
             auto weight_broadcast =
-                to_compute(cached_weight_->tensor()).unsqueeze(0).unsqueeze(2).contiguous();
+                traced_unsqueeze(to_compute(cached_weight_->tensor()), {0, 2}).contiguous();
             auto bias_broadcast =
-                to_compute(cached_bias_->tensor()).unsqueeze(0).unsqueeze(2).contiguous();
+                traced_unsqueeze(to_compute(cached_bias_->tensor()), {0, 2}).contiguous();
             output = (normalized * weight_broadcast + bias_broadcast).contiguous();
         } else {
             output = normalized;
         }
     } else {
-        auto mean_broadcast = batch_mean.unsqueeze(0).contiguous();
-        auto var_broadcast = batch_var.unsqueeze(0).contiguous();
+        auto mean_broadcast = traced_unsqueeze(batch_mean, {0}).contiguous();
+        auto var_broadcast = traced_unsqueeze(batch_var, {0}).contiguous();
         auto eps_tensor = full({}, eps_, var_broadcast.dtype(), var_broadcast.device());
         auto invstd = pow(var_broadcast + eps_tensor, -0.5f).contiguous();
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_ && cached_weight_ && cached_bias_) {
             auto weight_broadcast =
-                to_compute(cached_weight_->tensor()).unsqueeze(0).contiguous();
+                traced_unsqueeze(to_compute(cached_weight_->tensor()), {0}).contiguous();
             auto bias_broadcast =
-                to_compute(cached_bias_->tensor()).unsqueeze(0).contiguous();
+                traced_unsqueeze(to_compute(cached_bias_->tensor()), {0}).contiguous();
             output = (normalized * weight_broadcast + bias_broadcast).contiguous();
         } else {
             output = normalized;

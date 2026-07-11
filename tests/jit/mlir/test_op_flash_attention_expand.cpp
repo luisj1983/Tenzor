@@ -112,6 +112,29 @@ TEST(OpFlashAttentionExpand, EmitsDistinctTextFromCustomCall) {
               std::string::npos) << expand_mlir;
 }
 
+// JIT-R068: sibling of the interpreter path's OpType::FlashAttention
+// dropout_p guard (JIT-R054, graph.cpp execute_node). The expand lowering
+// emits no dropout step at all, so a traced node with dropout_p > 0 must
+// fail the LOWERING itself rather than silently compile to a dropout-free
+// (wrong) forward pass.
+TEST(OpFlashAttentionExpand, RefusesToLowerDropoutGreaterThanZero) {
+    ensure_core_init();
+    auto g = make_fa_graph({2, 4, 16, 64}, /*causal=*/false);
+    // make_fa_graph only sets "causal"; find the FlashAttention node and add
+    // dropout_p directly rather than growing the helper's signature.
+    for (auto& node : g.nodes()) {
+        if (node->op_type() == tzj::OpType::FlashAttention) {
+            node->set_attr("dropout_p", 0.1);
+        }
+    }
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(false);
+    EXPECT_THROW({ (void)lowerer.lower(g); }, std::exception)
+        << "GraphToMLIR::lower did not throw for FlashAttention(expand) "
+           "with dropout_p > 0 — the compiled graph would silently skip "
+           "dropout instead of failing loudly";
+}
+
 TEST(OpFlashAttentionExpand, ExpandPathIsIreeCompileClean_NonCausal) {
     ensure_core_init();
     auto g = make_fa_graph({2, 4, 16, 64}, /*causal=*/false);

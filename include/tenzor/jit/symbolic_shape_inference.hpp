@@ -87,6 +87,16 @@ private:
     /// Infer output shape for Linear: (*, in_features) -> (*, out_features).
     auto infer_linear(const Node* node) -> std::vector<SymbolicShape>;
 
+    /// JIT-R010: Infer output shape for ConvTranspose (transposed/deconv N-D).
+    auto infer_conv_transpose(const Node* node) -> std::vector<SymbolicShape>;
+
+    /// JIT-R010: Infer output shape for MaxPool2d/AvgPool2d (rectangular
+    /// kernel/stride/padding/dilation, ceil_mode).
+    auto infer_pool2d(const Node* node) -> std::vector<SymbolicShape>;
+
+    /// JIT-R010: Infer output shape for AdaptiveAvgPool2d ("output_size" attr).
+    auto infer_adaptive_avg_pool2d(const Node* node) -> std::vector<SymbolicShape>;
+
     /// Gather symbolic shapes from a node's inputs, falling back to concrete shapes.
     auto gather_input_shapes(const Node* node) -> std::vector<SymbolicShape>;
 };

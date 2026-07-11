@@ -14,14 +14,30 @@
 #include <tenzor/jit/symbolic_shape_inference.hpp>
 #include <tenzor/core/dtype.hpp>
 #include <tenzor/core/device.hpp>
+#include <tenzor/nn/layers/linear.hpp>
+#include <tenzor/ops/creation.hpp>
+#include "../backend_parity/parity_test_utils.hpp"
 
 using namespace tenzor::jit;
+using namespace tenzor::testing;
 
 namespace {
 std::shared_ptr<Value> mk_val(std::string id, std::vector<int64_t> shape) {
     return std::make_shared<Value>(std::move(id), std::move(shape),
                                    tenzor::DType::Float32, tenzor::Device::cpu());
 }
+
+// JIT-R015's regression test is the first test in this file to actually
+// dispatch real tensor ops (randn/Linear::forward via CompiledModule::trace)
+// rather than pure Graph/SymbolicShape unit-level construction, so it needs
+// the backend dispatch tables initialized (mirrors test_jit_trace_ops.cpp's
+// identical pattern).
+class DynamicShapesEnv : public ::testing::Environment {
+public:
+    void SetUp() override { tenzor::initialize(); }
+};
+[[maybe_unused]] auto* g_dynamic_shapes_env =
+    ::testing::AddGlobalTestEnvironment(new DynamicShapesEnv);
 }  // namespace
 
 // JIT-F021: a permutation whose length differs from the input rank must yield
@@ -141,6 +157,166 @@ TEST(SymbolicShapeInferenceFixes, CastPreservesDynamicDim) {
     EXPECT_EQ(out[0][1].value(), 10);
 }
 
+// JIT-R010 — SymbolicShapeInference::infer() was missing rules for ~20
+// OpTypes that Graph::infer_symbolic_types() already handled, silently
+// freezing dynamic dims for graphs containing them (same JIT-F040 pattern
+// as CastPreservesDynamicDim above). Cover a representative cross-section.
+
+TEST(SymbolicShapeInferenceFixes, FmodPreservesDynamicDim) {
+    auto x = mk_val("x", {0, 10});
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+    auto y = mk_val("y", {0, 10});
+    y->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+    auto node = std::make_shared<Node>(OpType::Fmod);
+    node->add_input(x);
+    node->add_input(y);
+    node->add_output(mk_val("z", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+}
+
+TEST(SymbolicShapeInferenceFixes, RoundSiLURoPERollScatterPreserveDynamicDim) {
+    for (auto op : {OpType::Round, OpType::SiLU, OpType::RoPE, OpType::Roll,
+                    OpType::Scatter}) {
+        auto x = mk_val("x", {0, 10});
+        x->set_symbolic_shape(SymbolicShape(
+            {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+        auto node = std::make_shared<Node>(op);
+        node->add_input(x);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u) << "op=" << static_cast<int>(op);
+        ASSERT_EQ(out[0].rank(), 2u) << "op=" << static_cast<int>(op);
+        EXPECT_TRUE(out[0][0].is_symbolic()) << "op=" << static_cast<int>(op);
+    }
+}
+
+TEST(SymbolicShapeInferenceFixes, MaxPool2dComputesPooledSpatialDims) {
+    // Concrete 4D input [1,3,8,8], kernel=2 stride=2 -> [1,3,4,4].
+    auto x = mk_val("x", {1, 3, 8, 8});
+    auto node = std::make_shared<Node>(OpType::MaxPool2d);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("kernel_size", {2, 2});
+    node->set_vec_attr("stride", {2, 2});
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 4u);
+    EXPECT_EQ(out[0][0].value(), 1);
+    EXPECT_EQ(out[0][1].value(), 3);
+    EXPECT_EQ(out[0][2].value(), 4);
+    EXPECT_EQ(out[0][3].value(), 4);
+}
+
+TEST(SymbolicShapeInferenceFixes, AdaptiveAvgPool2dUsesOutputSizeAttr) {
+    auto x = mk_val("x", {1, 3, 17, 23});
+    auto node = std::make_shared<Node>(OpType::AdaptiveAvgPool2d);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("output_size", {7, 7});
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 4u);
+    EXPECT_EQ(out[0][2].value(), 7);
+    EXPECT_EQ(out[0][3].value(), 7);
+}
+
+TEST(SymbolicShapeInferenceFixes, ConvTransposeComputesUpsampledSpatialDims) {
+    // Input [1,4,4,4], weight [4,8,3,3] (in=4,out=8,k=3), stride=2, padding=1,
+    // output_padding=1 -> H_out = (4-1)*2 - 2*1 + 1*(3-1) + 1 + 1 = 8.
+    auto x = mk_val("x", {1, 4, 4, 4});
+    auto w = mk_val("w", {4, 8, 3, 3});
+    auto node = std::make_shared<Node>(OpType::ConvTranspose);
+    node->add_input(x);
+    node->add_input(w);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("stride", {2, 2});
+    node->set_vec_attr("padding", {1, 1});
+    node->set_vec_attr("output_padding", {1, 1});
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 4u);
+    EXPECT_EQ(out[0][0].value(), 1);   // batch
+    EXPECT_EQ(out[0][1].value(), 8);   // out_channels = w.shape[1]
+    EXPECT_EQ(out[0][2].value(), 8);   // H_out
+    EXPECT_EQ(out[0][3].value(), 8);   // W_out
+}
+
+TEST(SymbolicShapeInferenceFixes, QuantizedLinearSharesLinearShapeRule) {
+    auto x = mk_val("x", {0, 16});
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(16)}));
+    auto w = mk_val("w", {32, 16});  // [out_features, in_features]
+    auto node = std::make_shared<Node>(OpType::QuantizedLinear);
+    node->add_input(x);
+    node->add_input(w);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    EXPECT_EQ(out[0][1].value(), 32);
+}
+
+TEST(SymbolicShapeInferenceFixes, EmbeddingAppendsEmbeddingDim) {
+    auto weight = mk_val("w", {1000, 64});  // [num_embeddings, embedding_dim]
+    auto idx = mk_val("idx", {0, 5});
+    idx->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(5)}));
+    auto node = std::make_shared<Node>(OpType::Embedding);
+    node->add_input(weight);
+    node->add_input(idx);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 3u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    EXPECT_EQ(out[0][1].value(), 5);
+    EXPECT_EQ(out[0][2].value(), 64);
+}
+
+TEST(SymbolicShapeInferenceFixes, EigvalshDropsLastDim) {
+    auto x = mk_val("x", {4, 4});
+    auto node = std::make_shared<Node>(OpType::Eigvalsh);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 1u);
+    EXPECT_EQ(out[0][0].value(), 4);
+}
+
+TEST(SymbolicShapeInferenceFixes, FusedFFNUsesSecondLinearWeight) {
+    auto x = mk_val("x", {0, 16});
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(16)}));
+    auto w1 = mk_val("w1", {64, 16});
+    auto w2 = mk_val("w2", {16, 64});  // second linear: out_features=16
+    auto node = std::make_shared<Node>(OpType::FusedFFN);
+    node->add_input(x);
+    node->add_input(w1);
+    node->add_input(w2);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    EXPECT_EQ(out[0][1].value(), 16);
+}
+
 TEST(SymbolicShapeInferenceFixes, FlattenPreservesDynamicBatch) {
     // conv->Flatten->Linear: Flatten(start_dim=1) over [B,3,4] -> [B, 12] with B
     // still symbolic (12 = 3*4 concrete product).
@@ -195,7 +371,209 @@ TEST(SymbolicShapeInferenceFixes, DynamicModuleRoundTripsAsDynamic) {
         << "dynamic module reloaded as STATIC — dynamic_dims not serialized (F031)";
 }
 
+// JIT-R015 regression: a device/dtype-mismatch retrace (CompiledModule::
+// forward's shape/device/dtype cache miss path) must propagate the
+// mark_dynamic_dims() configuration and add_metadata() key/values onto the
+// retraced replacement graph. Before this fix, dynamic_dims_/metadata_ are
+// members of the ORIGINAL CompiledModule (not the Graph), so a retrace
+// silently dropped them: has_dynamic_shapes() would go from true to
+// (functionally) false, degrading a caller's "reuse one dynamic-shape
+// graph" configuration into "retrace on every subsequent shape change" —
+// confirmed perf-only (compute_shape_key() already retraces
+// unconditionally on any shape change regardless of dynamic_dims_
+// survival), never a wrong-output bug, but a real regression nonetheless.
+TEST(SymbolicShapeInferenceFixes, RetraceOnDeviceMismatchPreservesDynamicDimsAndMetadata) {
+    auto lin = std::make_shared<tenzor::nn::Linear>(4, 4);
+    auto cpu_input = tenzor::Variable(
+        tenzor::randn({2, 4}, tenzor::DType::Float32, tenzor::Device::cpu()), false);
+
+    auto module = CompiledModule::trace(lin, cpu_input);
+    module->mark_dynamic_dims({{0, 0, "batch"}});
+    module->add_metadata("model_name", "r015_regression");
+    ASSERT_TRUE(module->has_dynamic_shapes());
+
+    // Baseline call on the trace device — no retrace yet.
+    ASSERT_NO_THROW({ (void)module->forward(cpu_input); });
+    ASSERT_TRUE(module->has_dynamic_shapes());
+
+    for (const auto& dev : get_available_backends()) {
+        if (dev.type == tenzor::Device::Type::CPU) continue;  // already the trace device
+
+        auto other_device_input = tenzor::Variable(
+            tenzor::randn({3, 4}, tenzor::DType::Float32, dev), false);
+
+        // This call's device differs from the trace device -> forces the
+        // device-mismatch retrace path in CompiledModule::forward.
+        ASSERT_NO_THROW({ (void)module->forward(other_device_input); })
+            << "retrace threw on " << backend_name(dev);
+
+        EXPECT_TRUE(module->has_dynamic_shapes())
+            << "mark_dynamic_dims() config was dropped by a device-mismatch "
+               "retrace on " << backend_name(dev);
+        EXPECT_EQ(module->get_metadata("model_name"), "r015_regression")
+            << "add_metadata() was dropped by a device-mismatch retrace on "
+            << backend_name(dev);
+
+        // Prove has_dynamic_shapes() isn't just a stale flag: a THIRD call
+        // with yet another batch size, on the NEW device, must still work
+        // without throwing (the dynamic batch dim genuinely still functions
+        // on the retraced graph).
+        auto third_input = tenzor::Variable(
+            tenzor::randn({5, 4}, tenzor::DType::Float32, dev), false);
+        tenzor::Variable out;
+        ASSERT_NO_THROW({ out = module->forward(third_input); })
+            << "a further batch-size change on " << backend_name(dev)
+            << " threw after the dynamic-dims config should have survived "
+               "the earlier retrace";
+        EXPECT_EQ(out.tensor().shape()[0], 5);
+        break;  // one non-CPU backend is enough to exercise the retrace path
+    }
+}
+
+// JIT-R020 regression: Graph::partition_at() must re-classify a boundary
+// input backed by the PARENT graph's constants_/param_leaves_/
+// buffer_leaves_ onto the sub-graph the same way, instead of leaving it as
+// a generic boundary "sub_input" — a caller reconstructing that wiring
+// manually (e.g. snapshotting a parameter's current value once) would
+// otherwise reintroduce the exact frozen-value bug JIT-R005 fixed, at every
+// partition boundary. partition_at() currently has no callers in this
+// codebase (the obvious future use is pipeline-parallel/multi-device
+// partitioning), so this exercises the Graph-level API directly rather
+// than through any higher-level entry point.
+TEST(SymbolicShapeInferenceFixes, PartitionAtForwardsConstantsParametersAndBuffers) {
+    auto g = std::make_shared<Graph>();
+
+    auto x = g->create_value("x", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto w = g->create_value("w", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto buf = g->create_value("buf", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto b = g->create_value("b", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+
+    // Node A (partition 0): mid = x + w  (w is a param leaf)
+    auto mid = g->create_value("mid", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto add_a = g->create_node(OpType::Add, "add_a");
+    add_a->add_input(x);
+    add_a->add_input(w);
+    add_a->add_output(mid);
+    mid->set_node(add_a);
+    g->add_node(add_a);
+
+    // Marker node at index 1 — excluded by the break, splitting the graph
+    // into partition0={add_a} and partition1={add_b1, add_b2}.
+    auto mid2 = g->create_value("mid2", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto marker = g->create_node(OpType::ReLU, "marker");
+    marker->add_input(mid);
+    marker->add_output(mid2);
+    mid2->set_node(marker);
+    g->add_node(marker);
+
+    // Node B (partition 1): y = (mid + b) + buf. "mid" is a genuine cross-
+    // partition boundary (produced by partition 0); "b" is a plain
+    // constant; "buf" is a buffer leaf.
+    auto tmp = g->create_value("tmp", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto add_b1 = g->create_node(OpType::Add, "add_b1");
+    add_b1->add_input(mid);
+    add_b1->add_input(b);
+    add_b1->add_output(tmp);
+    tmp->set_node(add_b1);
+    g->add_node(add_b1);
+
+    auto y = g->create_value("y", {2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto add_b2 = g->create_node(OpType::Add, "add_b2");
+    add_b2->add_input(tmp);
+    add_b2->add_input(buf);
+    add_b2->add_output(y);
+    y->set_node(add_b2);
+    g->add_node(add_b2);
+
+    g->set_inputs({x});
+    g->set_outputs({y});
+
+    // Wire "w" as a param leaf, "buf" as a buffer leaf, "b" as a plain
+    // constant — exactly what end_trace() does for a captured module
+    // parameter / buffer / other constant.
+    auto w_var = std::make_shared<tenzor::Variable>(
+        tenzor::randn({2, 4}, tenzor::DType::Float32, tenzor::Device::cpu()), true);
+    g->set_parameters({w_var});
+    g->add_param_leaf("w", 0);
+
+    auto buf_var = std::make_shared<tenzor::Variable>(
+        tenzor::randn({2, 4}, tenzor::DType::Float32, tenzor::Device::cpu()), false);
+    g->set_buffers({buf_var});
+    g->add_buffer_leaf("buf", 0);
+
+    g->set_constant("b", tenzor::randn({2, 4}, tenzor::DType::Float32, tenzor::Device::cpu()));
+
+    auto partitions = g->partition_at({1});
+    ASSERT_EQ(partitions.size(), 2u);
+
+    EXPECT_TRUE(partitions[0]->param_leaves().count("w") > 0)
+        << "partition 0's boundary input 'w' was not re-classified as a "
+           "param leaf";
+    EXPECT_EQ(partitions[0]->parameters().size(), 1u);
+
+    EXPECT_TRUE(partitions[1]->constants().count("b") > 0)
+        << "partition 1's boundary input 'b' was not re-classified as a "
+           "constant";
+    EXPECT_TRUE(partitions[1]->buffer_leaves().count("buf") > 0)
+        << "partition 1's boundary input 'buf' was not re-classified as a "
+           "buffer leaf";
+    EXPECT_EQ(partitions[1]->buffers().size(), 1u);
+
+    // "mid" is a genuine cross-partition boundary — must remain a plain
+    // sub-graph INPUT, not a constant/param/buffer leaf.
+    bool mid_is_input = false;
+    for (const auto& inp : partitions[1]->inputs()) {
+        if (inp->id() == "mid") { mid_is_input = true; break; }
+    }
+    EXPECT_TRUE(mid_is_input);
+    EXPECT_FALSE(partitions[1]->constants().count("mid") > 0);
+    EXPECT_FALSE(partitions[1]->param_leaves().count("mid") > 0);
+    EXPECT_FALSE(partitions[1]->buffer_leaves().count("mid") > 0);
+}
+
 class DynamicShapesTest : public ::testing::Test {};
+
+// JIT-R018 regression: Graph::infer_symbolic_types()'s Interpolate case must
+// leave the output's trace-time symbolic shape intact for the scale_factor
+// form (no "output_size" attr) — NOT overwrite it with the unscaled input
+// shape. Pre-fix, the push_back sat outside the `!size.empty()` guard, so an
+// Interpolate node with no output_size attr always corrupted its output
+// shape to match the input's.
+TEST(GraphInferSymbolicTypes, InterpolateScaleFactorFormPreservesOutputShape) {
+    Graph g;
+    auto x = g.create_value("x", {1, 3, 4, 4}, tenzor::DType::Float32,
+                            tenzor::Device::cpu());
+    x->set_symbolic_shape(SymbolicShape({
+        SymbolicDim::concrete(1), SymbolicDim::concrete(3),
+        SymbolicDim::concrete(4), SymbolicDim::concrete(4)}));
+    g.set_inputs({x});
+
+    auto node = g.create_node(OpType::Interpolate, "interp");
+    node->add_input(x);
+    // scale_factor form: deliberately no "output_size" attr set.
+
+    auto out = g.create_value("y", {1, 3, 8, 8}, tenzor::DType::Float32,
+                              tenzor::Device::cpu());
+    // Trace-time-correct output symbolic shape (2x upsample), the value
+    // infer_symbolic_types() must NOT clobber.
+    out->set_symbolic_shape(SymbolicShape({
+        SymbolicDim::concrete(1), SymbolicDim::concrete(3),
+        SymbolicDim::concrete(8), SymbolicDim::concrete(8)}));
+    out->set_node(node);
+    node->add_output(out);
+    g.add_node(node);
+    g.set_outputs({out});
+
+    g.infer_symbolic_types();
+
+    ASSERT_TRUE(out->has_symbolic_shape());
+    ASSERT_EQ(out->symbolic_shape().rank(), 4u);
+    EXPECT_EQ(out->symbolic_shape()[2].value(), 8)
+        << "Interpolate (scale_factor form) corrupted its output shape to "
+           "the unscaled input shape instead of leaving the trace-time "
+           "shape intact";
+    EXPECT_EQ(out->symbolic_shape()[3].value(), 8);
+}
 
 TEST_F(DynamicShapesTest, SymbolicDimConcrete) {
     auto dim = SymbolicDim::concrete(64);

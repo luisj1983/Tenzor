@@ -378,6 +378,20 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Ten
 // ==============================================================================
 
 auto unsqueeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {
+    // JIT-R107: negative dim was never normalized here, so unsqueeze(-1) (as
+    // used by SyncBatchNormBackward::backward_with_variables) indexed
+    // strides()[-1] via std::span::operator[], hitting an out-of-bounds
+    // assertion (SIGABRT) instead of a catchable exception. Mirrors the
+    // canonical Tensor::unsqueeze (src/core/tensor.cpp) and this file's own
+    // squeeze_kernel convention: valid range is [-(ndim+1), ndim] since the
+    // result has one more dimension than the input.
+    const int64_t ndims = input.ndim();
+    const int64_t new_ndims = ndims + 1;
+    if (dim < 0) dim += new_ndims;
+    if (dim < 0 || dim >= new_ndims) {
+        throw std::out_of_range("unsqueeze ROCm: dimension out of range");
+    }
+
     Tensor result;
     HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
 
@@ -385,8 +399,16 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> T
     auto& r_strides = result.mutable_strides();
     r_shape.insert(r_shape.begin() + dim, 1);
 
-    // Compute stride for new dimension
-    int64_t new_stride = (dim < input.ndim()) ? input.strides()[dim] : 1;
+    // Stride for the inserted size-1 dim (matches Tensor::unsqueeze): for a
+    // contiguous parent, strides[dim]*shape[dim] keeps the result reporting
+    // contiguous; strides[dim] alone (the old formula, unconditionally) is
+    // only correct for a non-contiguous parent or the trailing insertion.
+    int64_t new_stride;
+    if (input.is_contiguous()) {
+        new_stride = (dim < ndims) ? (input.strides()[dim] * input.shape()[dim]) : 1;
+    } else {
+        new_stride = (dim < ndims) ? input.strides()[dim] : 1;
+    }
     r_strides.insert(r_strides.begin() + dim, new_stride);
 
     return result;

@@ -17,6 +17,13 @@ class BatchNorm1dMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     float variance_tolerance() const {
         if (dtype() == DType::Float16) return 0.2f;
+        // BFloat16 has only 8 mantissa bits (~2-3 decimal digits); the CPU
+        // kernel already accumulates mean/variance in Float32 with Kahan
+        // summation (src/backends/cpu/kernels/batchnorm.cpp) and narrows
+        // only the final stored result, so the residual ~1e-3 error here is
+        // expected BFloat16 rounding noise on the narrowed output, not
+        // accumulated computational error. Empirically observed ~1.3e-3.
+        if (dtype() == DType::BFloat16) return 5e-3f;
         return 1e-3f;
     }
 };

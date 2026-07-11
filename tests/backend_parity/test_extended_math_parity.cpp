@@ -228,6 +228,53 @@ TEST_P(ExtendedMathParity, Hypot) {
     }, {a, b}, device, 1e-5f, 1e-7f, "Hypot");
 }
 
+TEST_P(ExtendedMathParity, Minimum) {
+
+    auto a = randn({32, 32}, DType::Float32, Device::cpu());
+    auto b = randn({32, 32}, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return minimum(inputs[0], inputs[1]);
+    }, {a, b}, device, 1e-5f, 1e-7f, "Minimum");
+}
+
+// JIT-R064 follow-up: minimum()/maximum() with broadcast-shaped (not merely
+// same-shape) operands — e.g. Embedding::renorm_embeddings' scale = minimum
+// (ratio, one) where `one` is a 0-d scalar broadcast against a (N, 1)
+// tensor. Caught ROCm's minimum_kernel/maximum_kernel hard-requiring equal
+// numel with no broadcast path at all (every other backend already
+// broadcasts correctly), so this is real cross-backend parity coverage, not
+// just characterization.
+TEST_P(ExtendedMathParity, Minimum_Broadcast) {
+
+    auto a = randn({8, 4}, DType::Float32, Device::cpu());
+    auto b = randn({}, DType::Float32, Device::cpu());  // 0-d scalar
+
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return minimum(inputs[0], inputs[1]);
+    }, {a, b}, device, 1e-5f, 1e-7f, "Minimum_Broadcast");
+}
+
+TEST_P(ExtendedMathParity, Maximum) {
+
+    auto a = randn({32, 32}, DType::Float32, Device::cpu());
+    auto b = randn({32, 32}, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return maximum(inputs[0], inputs[1]);
+    }, {a, b}, device, 1e-5f, 1e-7f, "Maximum");
+}
+
+TEST_P(ExtendedMathParity, Maximum_Broadcast) {
+
+    auto a = randn({8, 4}, DType::Float32, Device::cpu());
+    auto b = randn({}, DType::Float32, Device::cpu());  // 0-d scalar
+
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return maximum(inputs[0], inputs[1]);
+    }, {a, b}, device, 1e-5f, 1e-7f, "Maximum_Broadcast");
+}
+
 // Phase 6-followup #27: gradient parity for extended math.
 TEST_P(ExtendedMathParity, Log2_GradientParity) {
     auto a = generate_uniform_tensor({16, 16}, 0.5f, 5.0f, DType::Float32, Device::cpu());

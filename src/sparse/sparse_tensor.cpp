@@ -5,6 +5,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <algorithm>
 #include <type_traits>
 #include <complex>
@@ -52,6 +53,66 @@ inline void sparse_accumulate(T& dst, const T& src) {
     } else {
         dst += src;
     }
+}
+
+inline auto jit_tracing_active() -> bool {
+    return ::tenzor::jit::Tracer::get_instance().is_tracing();
+}
+
+inline auto sparse_layout_tag(SparseLayout layout) -> int64_t {
+    return static_cast<int64_t>(layout);
+}
+
+// JIT-R100: fixed per-layout component-tensor ordering shared by every
+// manually-recorded SparseTensor structural-conversion node — see the
+// OpType::SparseFromDense..SparseToBsr doc comments in tracer.hpp. Also
+// used by execute_node (graph.cpp) to reconstruct on replay.
+inline auto sparse_component_tensors(const SparseTensor& sp) -> std::vector<Tensor> {
+    switch (sp.layout()) {
+        case SparseLayout::COO: return {sp.indices(), sp.values()};
+        case SparseLayout::CSR: return {sp.crow_indices(), sp.col_indices(), sp.values()};
+        case SparseLayout::CSC: return {sp.ccol_indices(), sp.row_indices(), sp.values()};
+        case SparseLayout::BSR: return {sp.bsr_row_ptr(), sp.bsr_col_ind(), sp.values()};
+    }
+    throw std::runtime_error("sparse_component_tensors: unknown layout");
+}
+
+// Records a manually-traced node whose input is `self` (a SparseTensor,
+// e.g. coalesce/transpose/to_csr/to_csc/to_bsr) and whose output is `out`
+// (also a SparseTensor). `self`'s layout/shape/block_size travel as
+// in_layout/in_shape/in_block_h/in_block_w so execute_node can reconstruct
+// it before re-invoking the real method; `out`'s own layout/shape/block-
+// size are deliberately NOT stored — execute_node re-derives them by
+// inspecting the result it freshly recomputes, the same way this function
+// inspects `out` here. `extra_int_attrs` carries call parameters that
+// aren't recoverable from `self`/`out` at all (e.g. to_bsr's target block
+// size, which must be known BEFORE the real method can even be called).
+// Mirrors sparse_add's manual-recording pattern (JIT-R098).
+inline void jit_record_sparse_conversion(
+    ::tenzor::jit::OpType op_type,
+    const SparseTensor& self,
+    const SparseTensor& out,
+    const std::vector<std::pair<const char*, int64_t>>& extra_int_attrs = {}) {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    auto in_tensors = sparse_component_tensors(self);
+    auto out_tensors = sparse_component_tensors(out);
+
+    std::vector<std::string> input_ids;
+    input_ids.reserve(in_tensors.size());
+    for (auto& t : in_tensors) input_ids.push_back(tracer.register_tensor(t));
+    std::vector<std::string> output_ids;
+    output_ids.reserve(out_tensors.size());
+    for (auto& t : out_tensors) output_ids.push_back(tracer.register_new_tensor(t));
+
+    ::tenzor::jit::TracedOp op(op_type, std::move(input_ids), std::move(output_ids));
+    op.int_attrs["in_layout"] = sparse_layout_tag(self.layout());
+    if (self.layout() == SparseLayout::BSR) {
+        op.int_attrs["in_block_h"] = self.block_size().first;
+        op.int_attrs["in_block_w"] = self.block_size().second;
+    }
+    op.vec_attrs["in_shape"] = self.shape();
+    for (auto& [name, val] : extra_int_attrs) op.int_attrs[name] = val;
+    tracer.record_op(std::move(op));
 }
 }  // namespace
 
@@ -206,6 +267,7 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
 }
 
 auto SparseTensor::from_dense(const Tensor& dense, SparseLayout layout) -> SparseTensor {
+  auto compute = [&]() -> SparseTensor {
     // Device-aware implementation: nonzero + index_select on the original
     // device. The previous implementation pulled the full dense tensor to
     // host and host-scanned for nonzeros — a real CPU compute fallback for
@@ -276,9 +338,35 @@ auto SparseTensor::from_dense(const Tensor& dense, SparseLayout layout) -> Spars
     if (layout == SparseLayout::CSR) return result.to_csr();
     if (layout == SparseLayout::CSC) return result.to_csc();
     return result;
+  };
+
+  SparseTensor result = compute();
+
+  // JIT-R100: manually record this structural conversion (mirrors
+  // sparse_add's pattern, JIT-R098) so a downstream consumer inside the
+  // same trace (e.g. another sparse op reading result.crow_indices())
+  // resolves to a real producer instead of being silently frozen as a
+  // trace-time constant. `layout` (the target layout) is a genuine call
+  // parameter, not derivable from the dense input, so it travels as an
+  // attr; execute_node re-derives everything else about the output by
+  // inspecting its own freshly-recomputed result.
+  if (jit_tracing_active()) {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    auto out_tensors = sparse_component_tensors(result);
+    std::vector<std::string> input_ids = {tracer.register_tensor(dense)};
+    std::vector<std::string> output_ids;
+    output_ids.reserve(out_tensors.size());
+    for (auto& t : out_tensors) output_ids.push_back(tracer.register_new_tensor(t));
+    ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::SparseFromDense,
+                                std::move(input_ids), std::move(output_ids));
+    op.int_attrs["target_layout"] = sparse_layout_tag(layout);
+    tracer.record_op(std::move(op));
+  }
+  return result;
 }
 
 auto SparseTensor::to_dense() const -> Tensor {
+  auto compute = [&]() -> Tensor {
     // Device-aware implementation: build a flat scatter index on the
     // values_ device, then `scatter_add` into a flat zeros buffer and
     // reshape. Replaces the previous CPU round-trip path.
@@ -628,6 +716,32 @@ auto SparseTensor::to_dense() const -> Tensor {
     }
 
     return result;
+  };
+
+  Tensor result = compute();
+
+  // JIT-R100: manually record this structural conversion (mirrors
+  // sparse_add's pattern, JIT-R098). `*this`'s layout/shape/block_size
+  // travel as attrs so execute_node can reconstruct it before re-invoking
+  // the real method.
+  if (jit_tracing_active()) {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    auto in_tensors = sparse_component_tensors(*this);
+    std::vector<std::string> input_ids;
+    input_ids.reserve(in_tensors.size());
+    for (auto& t : in_tensors) input_ids.push_back(tracer.register_tensor(t));
+    std::vector<std::string> output_ids = {tracer.register_new_tensor(result)};
+    ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::SparseToDense,
+                                std::move(input_ids), std::move(output_ids));
+    op.int_attrs["in_layout"] = sparse_layout_tag(layout_);
+    if (layout_ == SparseLayout::BSR) {
+        op.int_attrs["in_block_h"] = block_size_.first;
+        op.int_attrs["in_block_w"] = block_size_.second;
+    }
+    op.vec_attrs["in_shape"] = shape_;
+    tracer.record_op(std::move(op));
+  }
+  return result;
 }
 
 auto SparseTensor::to_coo() const -> SparseTensor {
@@ -696,6 +810,7 @@ auto SparseTensor::to_coo() const -> SparseTensor {
 }
 
 auto SparseTensor::to_csr() const -> SparseTensor {
+  auto compute = [&]() -> SparseTensor {
     if (layout_ == SparseLayout::CSR) return *this;
     if (shape_.size() != 2) {
         throw std::runtime_error("to_csr: only 2D sparse tensors supported");
@@ -742,7 +857,14 @@ auto SparseTensor::to_csr() const -> SparseTensor {
     // by prepending a leading zero.
     Tensor row_idx = reshape(slice(coo.indices_, 0, 0, 1), {coalesced_nnz}).contiguous();
     Tensor col_idx = reshape(slice(coo.indices_, 0, 1, 2), {coalesced_nnz}).contiguous();
-    Tensor row_counts = bincount(row_idx, std::nullopt, /*minlength=*/nrows);
+    // validate=false: row_idx is a row-coordinate column straight off an
+    // already-validated coalesced COO tensor (sparse_coo's own construction
+    // already bounds-checks it into [0, nrows)) — bincount's redundant
+    // non-negativity re-check is a genuine, unconditional tracer graph-break
+    // (JIT-R100, see bincount's doc comment) that would otherwise prevent
+    // to_csr() from ever being traceable.
+    Tensor row_counts = bincount(row_idx, std::nullopt, /*minlength=*/nrows,
+                                  /*validate=*/false);
     if (row_counts.dtype() != DType::Int64) {
         row_counts = row_counts.to(DType::Int64);
     }
@@ -755,9 +877,17 @@ auto SparseTensor::to_csr() const -> SparseTensor {
     Tensor crow = cat({zero_prefix, cumsum_out}, /*dim=*/0);
 
     return sparse_csr(crow, col_idx, coo.values_, shape_);
+  };
+
+  SparseTensor result = compute();
+  if (jit_tracing_active()) {
+    jit_record_sparse_conversion(::tenzor::jit::OpType::SparseToCsr, *this, result);
+  }
+  return result;
 }
 
 auto SparseTensor::transpose() const -> SparseTensor {
+  auto compute = [&]() -> SparseTensor {
     if (shape_.size() != 2) {
         throw std::runtime_error("SparseTensor::transpose: only 2D sparse tensors supported");
     }
@@ -812,9 +942,17 @@ auto SparseTensor::transpose() const -> SparseTensor {
     // BSR: convert to COO, transpose, convert back
     auto coo = to_coo();
     return coo.transpose();
+  };
+
+  SparseTensor result = compute();
+  if (jit_tracing_active()) {
+    jit_record_sparse_conversion(::tenzor::jit::OpType::SparseTranspose, *this, result);
+  }
+  return result;
 }
 
 auto SparseTensor::coalesce() const -> SparseTensor {
+  auto compute = [&]() -> SparseTensor {
     if (coalesced_ || layout_ != SparseLayout::COO) return *this;
     if (nnz_ == 0) {
         SparseTensor result = *this;
@@ -987,6 +1125,13 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         result.coalesced_ = true;
         return result;
     }
+  };
+
+  SparseTensor result = compute();
+  if (jit_tracing_active()) {
+    jit_record_sparse_conversion(::tenzor::jit::OpType::SparseCoalesce, *this, result);
+  }
+  return result;
 }
 
 auto SparseTensor::to(Device device) const -> SparseTensor {
@@ -1170,6 +1315,7 @@ auto SparseTensor::sparse_bsr(const Tensor& bsr_row_ptr, const Tensor& bsr_col_i
 }
 
 auto SparseTensor::to_csc() const -> SparseTensor {
+  auto compute = [&]() -> SparseTensor {
     if (layout_ == SparseLayout::CSC) return *this;
     if (shape_.size() != 2) {
         throw std::runtime_error("to_csc: only 2D sparse tensors supported");
@@ -1283,9 +1429,17 @@ auto SparseTensor::to_csc() const -> SparseTensor {
     }
 
     return sparse_csc(ccol, row, new_vals, shape_);
+  };
+
+  SparseTensor result = compute();
+  if (jit_tracing_active()) {
+    jit_record_sparse_conversion(::tenzor::jit::OpType::SparseToCsc, *this, result);
+  }
+  return result;
 }
 
 auto SparseTensor::to_bsr(std::pair<int64_t, int64_t> block_size) const -> SparseTensor {
+  auto compute = [&]() -> SparseTensor {
     if (layout_ == SparseLayout::BSR && block_size_ == block_size) return *this;
     if (shape_.size() != 2) {
         throw std::runtime_error("to_bsr: only 2D sparse tensors supported");
@@ -1507,6 +1661,18 @@ auto SparseTensor::to_bsr(std::pair<int64_t, int64_t> block_size) const -> Spars
                 "SparseTensor::to_bsr backstop: unsupported dtype " +
                 std::string(dtype_name(cont.dtype())));
     }
+  };
+
+  SparseTensor result = compute();
+  if (jit_tracing_active()) {
+    // target block size is a genuine call parameter, not derivable from
+    // `self`/`result` alone before the real method has even run — must
+    // travel as an attr (see jit_record_sparse_conversion's doc comment).
+    jit_record_sparse_conversion(::tenzor::jit::OpType::SparseToBsr, *this, result,
+                                  {{"target_block_h", block_size.first},
+                                   {"target_block_w", block_size.second}});
+  }
+  return result;
 }
 
 // Free functions

@@ -1,0 +1,264 @@
+JIT SUBSYSTEM — CROSS-BACKEND REVIEW FINDINGS (OPEN ITEMS ONLY)
+Maintained across /loop review passes. Each finding has a stable ID (JIT-R###).
+Before adding a new finding, check its file:line + one-line summary against the
+list below — do not re-add anything already recorded here, even if reworded.
+Backends in scope: CPU, CUDA, ROCm, OneAPI, Vulkan, MPS.
+
+Severity legend: CRITICAL > HIGH > MEDIUM > LOW > INFO (landmine/dead-code note).
+Convention: once a finding is fixed and verified, it is REMOVED from this file
+entirely (not left annotated FIXED) — this file tracks only outstanding work.
+IDs are never reused; gaps in the R### sequence below are fixed findings that
+have been removed, not missing entries.
+
+[JIT-R023] MEDIUM (latent, no live trigger) — memory_planner.cpp's
+compute_live_ranges/greedy_assign treat topological node-index as an
+execution-time proxy; the invariant is unenforced and undocumented
+File: src/jit/memory_planner.cpp:128-363 (esp. 298-305). Two live ranges are
+considered safely non-overlapping purely by [begin,end] INDEX-interval
+comparison — assumes node i's writes complete before node i+1 starts. Holds
+for the current strictly-sequential interpreter but is nowhere enforced or
+documented as a requirement.
+NOTE: per the same review pass, this planner's output is not currently wired
+to any real tensor-placement code anywhere in the codebase (see JIT-R024) —
+so there is no live corruption risk today. This finding is about what
+happens the moment that changes: if this plan is ever wired to a backend
+that executes independent nodes concurrently (multi-stream CUDA/ROCm, or a
+future IREE async lowering), two nodes with non-overlapping INDEX ranges but
+overlapping REAL execution time could be aliased to the same buffer slot —
+read of not-yet-written or already-overwritten data, only on whichever
+backend's runtime schedules out-of-order/concurrently.
+PARTIALLY ADDRESSED 2026-07-11: the underlying architectural gap (INDEX-
+interval overlap isn't a valid proxy for execution-time overlap under
+concurrent scheduling) genuinely can't be "fixed" without knowing the
+requirements of a not-yet-built concurrent consumer — implementing that
+now would be speculative, disproportionate new-feature work for code
+nothing currently uses (JIT-R024). What WAS proportionate and done: added
+an explicit doc comment directly on compute_live_ranges() stating the
+invariant, why it currently holds (strictly-sequential interpreter), and
+exactly when to re-verify it (before wiring this planner's output to any
+backend that executes nodes concurrently) — closing the "unenforced AND
+undocumented" half of the original finding; the enforcement-when-needed
+half remains correctly deferred to whoever builds that consumer, same as
+the still-open JIT-R024 dependency this finding already correctly noted.
+Verified via test_memory_planner (7) and test_memory_planner_swap (3) —
+zero regressions (doc-comment-only change).
+Confidence: Medium (real gap, no live trigger — unchanged). Status: OPEN
+(now documented; re-check/enforce when memory_planner output is wired to
+actual concurrent execution).
+
+--- LOW / INFO (landmines & open follow-ups, deprioritized) ---
+
+[JIT-R024] LOW/INFO — memory_planner.cpp's computed plan (buffer_id/offset,
+live-range aliasing) is not consumed by any real tensor-placement code
+anywhere in the current codebase
+File: src/jit/memory_planner.cpp (whole file). Traced every consumer:
+MemoryPlanningPass::run (compiler.cpp:2435-2441) stores the plan purely for
+verbose-logging stats (compiler.cpp:3386-3392, never reads
+buffer_id()/buffer_offset()); CompiledModule::memory_plan_
+(compiled_module.cpp:426) assigned once, never read again;
+Value::has_memory_plan() (graph.hpp:174) has zero callers anywhere;
+RematerializationPlanner/MemorySwapPlanner are never invoked from
+compiler.cpp's pass pipeline at all (self-referenced only within
+memory_planner.hpp/cpp), and their SwapOut/SwapIn nodes are literal
+pass-through no-ops during execution (graph.cpp:4234-4241). The only real
+buffer_id/offset consumer in the repo, LiteAllocator::get_buffer
+(src/lite/runtime.cpp:127), belongs to the separate tenzor::lite
+runtime/format, and even there the loader's own comment
+(runtime.cpp:292-300) states LiteGraph::execute does NOT yet place node
+outputs into this arena. No corruption risk today; keeping as a landmine
+note so this isn't re-"discovered" as urgent, and so it gets re-evaluated
+once the arena-backed execution path (see JIT-R023) is implemented.
+Status: OPEN (informational).
+
+======================================================================
+PASS 3 (2026-07-10) — completeness/gap-check: quantized MLIR lowering +
+independent fresh sweep for the two established bug signatures in files
+outside the module-by-module split used in passes 1-2. Found genuinely new
+territory: src/nn/detection/ (Faster/Mask-R-CNN pipeline) had ZERO prior
+coverage and contains an unconditional (not no-grad-gated) landmine.
+======================================================================
+
+======================================================================
+CHECKED CLEAN — pass 2/3 addendum (breadth coverage; do not re-review these
+from scratch, re-verify only if related code changes). This section was
+missing from the original transcription of the NN-layer sweep and the
+completeness-check pass — added to prevent future passes from re-flagging
+these as "uncovered."
+======================================================================
+- src/nn/layers/: rnn.cpp, linear.cpp, lazy_linear.cpp, lazy_conv.cpp,
+  sparse_embedding.cpp, gqa_attention.cpp, flex_attention.cpp,
+  transformer.cpp (except PositionalEncoding, see JIT-R057), hrm.cpp
+  (except the ACT loop JIT-R051 and a dead unused RoPE variant), moe.cpp's
+  router/gate proper (except topk/branching, see JIT-R050), conv.cpp's
+  Conv2d/Conv3d/ConvTranspose2d/3d/DeformableConv2d (except ConvTranspose1d
+  JIT-R052 and Conv1d depthwise JIT-R073), most of pooling.cpp (each 1D/3D
+  pool dispatches its own OpId directly — except MaxPool ceil_mode
+  JIT-R060), mobilenet.cpp, segmentation.cpp, padding.cpp, upsample.cpp,
+  vision.cpp's window_partition/reverse (except the mask unsqueeze
+  JIT-R070), functional.cpp (all but multi_head_attention_forward,
+  JIT-R054), activations.cpp (except Swish/RReLU/LogSigmoid, JIT-R084),
+  batchnorm.cpp's BatchNorm2d standard/fused-cuDNN/training paths and
+  BatchNorm3d (except the CPU eval fast path, JIT-R059), normalization.cpp's
+  InstanceNorm2d/3d and LocalResponseNorm (except LayerNorm/GroupNorm CPU,
+  JIT-R046/R047, and InstanceNorm1d, JIT-R053), drop_path.cpp.
+- src/nn/detection/{anchors,roi_ops,rpn,roi_head,mask_head}.cpp and the
+  shared src/ops/detection.cpp / src/ops/indexing.cpp primitives they call
+  into: full dedicated deep-dive completed and fixed 2026-07-11 (was
+  JIT-R082/R085-R089) — box_iou/nms/ROIAlignForward now dispatch through
+  mapped OpIds with real execute_node replay (ROIAlign differentiably);
+  encode_boxes/decode_boxes/clip_boxes_to_image/remove_small_boxes/select
+  route through Variable-level traced_slice/traced_squeeze; nonzero's CPU
+  path and AnchorGenerator::generate are manually recorded (new OpTypes
+  NMS/BoxIoU/ROIAlignForward/AnchorGenerate); genuinely data-dependent
+  control flow (assign_anchors_to_gt/match_proposals_to_gt/
+  generate_proposals/postprocess_detections/process_masks) now refuses to
+  trace loudly instead of silently freezing GT-dependent or count-dependent
+  structure (matches the established JIT-R050/R051 precedent). See
+  tests/jit/test_jit_trace_ops.cpp's JitDetectionOps suite (12 tests).
+- src/nn/compression/distillation.cpp, src/nn/parallel/data_parallel.cpp:
+  checked clean (breadth-level).
+- src/nn/quantization/{awq,gptq,observer,qconfig}.cpp: checked clean for
+  the raw-tensor-bypass (signature-1) pattern specifically; not reviewed
+  for other bug categories (training-mode state, F16/BF16, unmapped OpId).
+- src/autograd/*.cpp (29 files excluding ops.cpp): swept for signature-1
+  (raw-tensor-bypass), zero hits.
+- src/onnx/*.cpp: swept for signature-1, zero hits (the one real ONNX bug
+  found, JIT-R031, is a missing-attribute-mapping bug, a different
+  category, found via the targeted follow-up not this sweep).
+
+======================================================================
+PASS 3 continued — final targeted sweep (kv_cache, loss, amp, nested,
+reparametrization utils, sparse). NOT clean — surfaced one severe new bug
+(SpectralNorm) plus several solid extensions of the established tracer-
+bypass mechanism into previously-unreviewed subsystems.
+======================================================================
+
+[JIT-R106] CONFIRMED IREE/Vulkan-SPIR-V BUG (standalone repro landed
+2026-07-11), NOT a Tenzor-side bug — Float16 SDPA NaN traced to a
+convert(f16→f32)-into-dot_general fusion bug in IREE's Vulkan backend
+File: test_jit_mlir_numeric_parity.cpp's
+Float16ScaledDotProductAttentionParity (target=vulkan-spirv). Built a
+standalone repro entirely outside Tenzor: dumped the real StableHLO Tenzor
+generates for this exact case via CompiledFunction::dump_stablehlo(),
+compiled it directly with `iree-compile --iree-hal-target-backends=
+vulkan-spirv --iree-vulkan-target=ada` (this machine's real NVIDIA RTX 5070
+Laptop GPU, a Blackwell-generation card — "ada" rather than "ampere" because
+Tenzor's Vulkan IREE-target architecture detection was found and fixed this
+session to route Blackwell/Ada NVIDIA GPUs to IREE's "ada" profile instead
+of a stale hardcoded "ampere" that failed to even initialize on this
+hardware; was tracked as JIT-R108, now fixed and removed from this file),
+and ran it via
+`iree-run-module` against the real Vulkan device, bisecting the dumped
+module stage by stage:
+  - Full SDPA pipeline standalone: reproduces the NaN exactly (matches
+    Tenzor's failing test) — confirms this is not a Tenzor invocation
+    artifact.
+  - Softmax alone (reduce-max(-inf init)/subtract/exp/reduce-sum/divide, all
+    F32): BIT-EXACT match vs llvm-cpu. Rules out the softmax pipeline
+    entirely — the R106-original hypothesis (a stablehlo.reduce or divide/
+    exponential SPIR-V bug) is WRONG.
+  - QK dot_general + scale alone (transpose/reshape/convert-to-f32/
+    dot_general/convert-back/reshape/multiply): reproduces massive
+    divergence (values ~1e5-1e6 / inf vs correct O(1-10) values on CPU) —
+    isolates the bug to before softmax, in the QK score computation.
+  - Same dot_general with `precision = [HIGHEST, HIGHEST]` removed
+    (DEFAULT precision): identical corruption — rules out the precision
+    attribute as the trigger.
+  - Same 32x32 matmul with NO batching dims (plain 2D dot_general,
+    contracting_dims=[1]x[0] only): identical corruption — rules out
+    batching as the trigger; this is a bug in basic F32 matmul codegen
+    for this backend, unrelated to attention structure.
+  - Same 32x32 matmul fed PURE F32 input (no f16 anywhere in the module):
+    CORRECT (max abs diff ~1.9e-6, ordinary float noise) — the matmul
+    codegen itself is fine.
+  - `stablehlo.convert(f16→f32)` alone (reshape + convert, no matmul):
+    BIT-EXACT (diff = 0.0) — the conversion codegen itself is fine.
+  CONCLUSION: neither `stablehlo.convert(f16→f32)` nor `stablehlo.dot_general`
+  is individually buggy on this IREE/Vulkan-SPIR-V backend + GPU/driver
+  combination — the bug is specifically in the FUSION/INTERACTION when a
+  convert's output feeds directly into a dot_general's operand (consistent
+  with the "failed to legalize operation 'vector.bitcast'" warning seen when
+  compiling this exact pattern against IREE's generic/no-target-resolved
+  SPIR-V profile (encountered while isolating the now-fixed JIT-R108
+  target-detection staleness) — suggesting the f16→f32 widening's
+  vector-lane-packing lowering and the matmul's operand-loading codegen
+  interact incorrectly, most likely a missing synchronization between the
+  convert's compute dispatch and the matmul's, or an incorrect fused
+  bitcast/lane-repacking assumption in the matmul's input-loading code).
+Not a Tenzor-side bug: Tenzor's generated StableHLO is correct standard
+MLIR; the same text lowers correctly on llvm-cpu/cuda/rocm. No Tenzor-side
+workaround was attempted — the only credible mitigation (restructuring
+Tenzor's lowering to prevent IREE from fusing the convert into the
+dot_general, e.g. via an artificial op between them) would be a fragile,
+unverifiable bet against IREE's current fusion heuristics rather than a
+real fix, and risks silently breaking on a future IREE version; this is a
+genuine upstream IREE bug that needs to be reported/fixed there.
+Backends: Vulkan only (CPU/CUDA/ROCm all pass with the same MLIR
+structure). Confidence: High (root cause isolated to a specific, minimal,
+reproducible standalone construct — convert(f16→f32) feeding dot_general
+— independent of Tenzor entirely). Status: OPEN — not fixable within
+Tenzor; recommend filing an IREE upstream bug report with the minimal
+repro modules saved this session as the reproduction case (the bisection
+sequence above from full-pipeline down to the 2-op minimal repro), and/or
+avoiding F16 SDPA on the Vulkan/IREE target until IREE fixes this (CPU/
+CUDA/ROCm are unaffected and remain safe to use for this op+dtype+target
+combination).
+
+======================================================================
+CHECKED CLEAN (informational — do not re-review these areas from scratch;
+re-verify only if related code changes)
+======================================================================
+- src/jit/codegen.{hpp,cpp}, src/jit/extended_codegen.{hpp,cpp}: unusually
+  well-hardened (explicit prior-bug-ID comments: JIT-002, JIT-R023, JIT-F004,
+  JIT-F013/14/52, JIT-064/65, BUG H4/M5, S25/audit-12). This path targets
+  ONLY CUDA/ROCm (NVRTC/HIPRTC); Vulkan/OneAPI/MPS/CPU tensors are rejected
+  loudly rather than misrouted. No dtype, stride, attr-key, or CUDA-vs-ROCm
+  semantic divergence found. No eager-fallback double-execution path exists
+  in these files (no retry/catch logic at all).
+- src/jit/serialization.{hpp,cpp}: parameter-capture completeness verified
+  op-type-agnostic (matches by storage identity, not per-op special-cased);
+  device is deliberately always serialized as CPU regardless of trace-time
+  device (correct, documented); dtype preserved exactly + range-validated;
+  dynamic-shape metadata correctly handled one layer up by
+  CompiledModule::save/load ("F031"). Minor non-bug: read_header() requires
+  an exact version match with no backward-compat reader — fails loudly, not
+  the silent-corruption class this review hunts for.
+- include/tenzor/jit/symbolic_shape.hpp: broadcast_symbolic_shapes correctly
+  handles the ExprOp::Max fallback for two structurally-different
+  non-concrete dims; no backend-specific issue.
+- Control-flow condition casting (the historical "device-side Float32 cond
+  cast" bug class): confirmed fully centralized and fixed — both eager
+  (control_flow.cpp:37-38,104) and interpreter (graph.cpp:4071,4098,4258,
+  4293) consistently widen to Float64 on CPU before comparing. Neither the
+  native codegen path nor lowering.cpp evaluate If/Loop conditions at all
+  (control flow is exclusively owned by interpreter/tracer) — no MLIR-vs-
+  native divergence possible for this specific historical bug class.
+- LayerNorm/RMSNorm Pow-exponent guard (e<1.999f || e>2.001f) confirmed
+  byte-for-byte identical between match_layer_norm and match_rms_norm in
+  pattern_matcher.cpp; no bypass path across pattern variants.
+- jit_hooks.{hpp,cpp}, bindings_jit.cpp: no dtype/device coercion bugs; no
+  backend-conditional branching in bindings_jit.cpp at all (backend logic
+  lives in compile.cpp, which this file only forwards a config string into).
+- No tolerance-masking anti-pattern found across the 7 parity/hardening test
+  files reviewed — all loosened rtol/atol bounds are dtype-driven and applied
+  uniformly across backends, not selectively loosened per-backend.
+
+======================================================================
+DEAD CODE NOTES (zero risk today, recorded only to avoid re-flagging)
+======================================================================
+- AutotuneCache (autotune.{hpp,cpp}): well-hardened (arch-qualified key
+  contract, rejects out-of-range/NaN), but has ZERO production callers
+  anywhere outside its own tests — "max-autotune" compile mode never touches
+  it. Its arch-key safety is a documented contract, not an enforced one; a
+  careless future caller passing a bare Device::to_string() instead of a
+  true arch-qualified string could reintroduce cross-GPU-generation aliasing
+  once this is wired up.
+- FuseResidualAddPass's "residual" bool attribute (compiler.cpp:1474,1503)
+  is set but never consumed anywhere — inert bookkeeping, no execution effect.
+- emit_custom_call() (mlir_text_emit.{hpp,cpp}, the stablehlo.custom_call
+  form) is defined but never called — only emit_plugin_call() is used. The
+  entire tenzor_plugin mechanism is gated behind plugin_enabled, which every
+  real (non-debug-dump) call site in compile.cpp sets to false ("H2: always
+  the device-correct expand form"); iree_customcalls.cpp's require_local_hal()
+  guard defends against silent CPU-fallback-under-GPU-target if this is ever
+  enabled. Currently dead-but-safely-defended.

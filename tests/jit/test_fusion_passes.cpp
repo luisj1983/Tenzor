@@ -214,6 +214,128 @@ TEST_F(FusionPassesTest, FuseAttention_NoPattern) {
 // + NoPattern are the regression-prevention surface here; broader
 // coverage lives in test_jit_compile.cpp's end-to-end compile path.)
 
+namespace {
+// Builds MatMul(Q,K) -> Mul(scale) -> [optional Add(mask)] -> Softmax ->
+// MatMul(_,V), matching FuseAttentionPass::run's exact pattern, and returns
+// the final output Value. Used by the JIT-R041 regression tests below.
+auto build_attention_pattern(Graph& graph, Device device, bool with_mask)
+    -> std::shared_ptr<Value> {
+    auto q = graph.create_value("q", {1, 4, 8}, DType::Float32, device);
+    auto k = graph.create_value("k", {1, 4, 8}, DType::Float32, device);
+    auto v = graph.create_value("v", {1, 4, 8}, DType::Float32, device);
+
+    auto qk_node = graph.create_node(OpType::MatMul, "qk_matmul");
+    qk_node->add_input(q);
+    qk_node->add_input(k);
+    auto qk_out = graph.create_value("qk_out", {1, 4, 4}, DType::Float32, device);
+    qk_out->set_node(qk_node);
+    qk_node->add_output(qk_out);
+    graph.add_node(qk_node);
+
+    auto scale_const_node = graph.create_node(OpType::Constant, "scale_const");
+    scale_const_node->set_tensor_attr(
+        "value", tenzor::full({1}, 0.125, DType::Float32, device));
+    auto scale_const_val = graph.create_value("scale_const_val", {1}, DType::Float32, device);
+    scale_const_val->set_node(scale_const_node);
+    scale_const_node->add_output(scale_const_val);
+    graph.add_node(scale_const_node);
+
+    auto scale_node = graph.create_node(OpType::Mul, "scale");
+    scale_node->add_input(qk_out);
+    scale_node->add_input(scale_const_val);
+    auto scale_out = graph.create_value("scale_out", {1, 4, 4}, DType::Float32, device);
+    scale_out->set_node(scale_node);
+    scale_node->add_output(scale_out);
+    graph.add_node(scale_node);
+
+    std::shared_ptr<Value> softmax_input = scale_out;
+    if (with_mask) {
+        auto mask = graph.create_value("mask", {1, 4, 4}, DType::Float32, device);
+        auto mask_add_node = graph.create_node(OpType::Add, "mask_add");
+        mask_add_node->add_input(scale_out);
+        mask_add_node->add_input(mask);
+        auto mask_out = graph.create_value("mask_out", {1, 4, 4}, DType::Float32, device);
+        mask_out->set_node(mask_add_node);
+        mask_add_node->add_output(mask_out);
+        graph.add_node(mask_add_node);
+        softmax_input = mask_out;
+    }
+
+    auto softmax_node = graph.create_node(OpType::Softmax, "softmax");
+    softmax_node->add_input(softmax_input);
+    auto softmax_out = graph.create_value("softmax_out", {1, 4, 4}, DType::Float32, device);
+    softmax_out->set_node(softmax_node);
+    softmax_node->add_output(softmax_out);
+    graph.add_node(softmax_node);
+
+    auto av_node = graph.create_node(OpType::MatMul, "av_matmul");
+    av_node->add_input(softmax_out);
+    av_node->add_input(v);
+    auto av_out = graph.create_value("av_out", {1, 4, 8}, DType::Float32, device);
+    av_out->set_node(av_node);
+    av_node->add_output(av_out);
+    graph.add_node(av_node);
+
+    graph.set_inputs({q, k, v});
+    graph.set_outputs({av_out});
+    return av_out;
+}
+}  // namespace
+
+TEST_F(FusionPassesTest, FuseAttention_WithoutMask_Fuses) {
+    // Baseline: an unmasked attention pattern still fuses into a single
+    // 3-input FlashAttention node (sanity check that JIT-R041's added
+    // early-return for the masked case didn't also break the plain path).
+    Graph graph;
+    build_attention_pattern(graph, device_, /*with_mask=*/false);
+
+    int orig_nodes = graph.num_nodes();
+    FuseAttentionPass pass;
+    bool changed = pass.run(graph);
+    EXPECT_TRUE(changed) << "FuseAttention did not fire on an unmasked "
+                             "MatMul->Mul->Softmax->MatMul pattern";
+    EXPECT_LT(graph.num_nodes(), orig_nodes);
+
+    ASSERT_EQ(graph.outputs().size(), 1u);
+    auto fused_node = graph.outputs()[0]->node();
+    ASSERT_NE(fused_node, nullptr);
+    EXPECT_EQ(fused_node->op_type(), OpType::FlashAttention);
+    EXPECT_EQ(fused_node->inputs().size(), 3u)
+        << "unmasked fusion should produce exactly [Q, K, V]";
+    EXPECT_FALSE(fused_node->get_bool_attr("has_mask"));
+}
+
+TEST_F(FusionPassesTest, FuseAttention_WithMask_DoesNotFuse) {
+    // JIT-R041 regression: every lowering handler for OpType::FlashAttention
+    // (iree_customcalls.cpp, lowering.cpp's custom-call AND expand paths —
+    // the expand path is the LIVE default) hard-rejects anything but exactly
+    // 3 inputs. Before the fix, this masked pattern got fused into a 4-input
+    // has_mask=true FlashAttention node that no lowering path could consume.
+    // The pass must now refuse to fuse a masked pattern at all, leaving the
+    // fully-correct (if unfused/unaccelerated) MatMul->Mul->Add->Softmax->
+    // MatMul sequence intact.
+    Graph graph;
+    build_attention_pattern(graph, device_, /*with_mask=*/true);
+
+    int orig_nodes = graph.num_nodes();
+    FuseAttentionPass pass;
+    bool changed = pass.run(graph);
+    EXPECT_FALSE(changed)
+        << "FuseAttentionPass fused a MASKED attention pattern into an "
+           "unlowerable 4-input FlashAttention node";
+    EXPECT_EQ(graph.num_nodes(), orig_nodes)
+        << "graph should be untouched when fusion is refused";
+
+    // No node anywhere in the graph should be the unlowerable 4-input form.
+    for (const auto& node : graph.nodes()) {
+        if (node->op_type() == OpType::FlashAttention) {
+            EXPECT_LE(node->inputs().size(), 3u)
+                << "found a FlashAttention node with >3 inputs — exactly "
+                   "the unlowerable shape JIT-R041 must prevent";
+        }
+    }
+}
+
 // ============================================================================
 // FuseFFNPass
 // ============================================================================
@@ -538,4 +660,121 @@ TEST_F(FusionPassesTest, LayerNorm_FullStillFused) {
     EXPECT_TRUE(has_kind(matches, FusionKind::LayerNorm))
         << "a full LayerNorm (with normalizing Div) must still fuse (guard "
            "over-rejected)";
+}
+
+// ============================================================================
+// QuantizationPass (JIT-R039)
+// ============================================================================
+
+namespace {
+// Builds a standalone Conv2d node [x, weight] with the given weight kernel
+// shape and (equal H/W) stride/padding/dilation attrs, wired as the graph's
+// sole node/output. device_ must support OpId::QuantizedConv2d (true for CPU
+// in this codebase) for QuantizationPass::run to even attempt quantizing it.
+auto build_conv2d_node(Graph& graph, Device device,
+                       int64_t kernel_h, int64_t kernel_w,
+                       int64_t stride_h, int64_t stride_w)
+    -> std::shared_ptr<Node> {
+    auto x = graph.create_value("x", {1, 3, 16, 16}, DType::Float32, device);
+    auto w = graph.create_value("w", {8, 3, kernel_h, kernel_w}, DType::Float32, device);
+    auto conv_node = graph.create_node(OpType::Conv2d, "conv");
+    conv_node->add_input(x);
+    conv_node->add_input(w);
+    conv_node->set_vec_attr("stride", {stride_h, stride_w});
+    conv_node->set_vec_attr("padding", {0, 0});
+    conv_node->set_vec_attr("dilation", {1, 1});
+    auto out = graph.create_value("conv_out", {1, 8, 8, 8}, DType::Float32, device);
+    out->set_node(conv_node);
+    conv_node->add_output(out);
+    graph.add_node(conv_node);
+    graph.set_inputs({x});
+    graph.set_outputs({out});
+    return conv_node;
+}
+}  // namespace
+
+TEST_F(FusionPassesTest, Quantization_SquareSymmetricConv2d_Quantizes) {
+    // Baseline: a square-kernel, symmetric-stride Conv2d IS eligible for
+    // quantization (sanity check that JIT-R039's added rejection didn't
+    // also break the plain, safe-to-quantize case).
+    Graph graph;
+    auto conv = build_conv2d_node(graph, device_, /*kh=*/3, /*kw=*/3,
+                                  /*sh=*/2, /*sw=*/2);
+    QuantizationPass pass;
+    bool changed = pass.run(graph);
+    EXPECT_TRUE(changed) << "a square-kernel, symmetric-stride Conv2d should "
+                             "have been retagged QuantizedConv2d";
+    EXPECT_EQ(conv->op_type(), OpType::QuantizedConv2d);
+}
+
+TEST_F(FusionPassesTest, Quantization_NonSquareKernelConv2d_NotQuantized) {
+    // JIT-R039 regression: eager's QuantizedConv2d::from_float explicitly
+    // REJECTS non-square kernels (the quantized ctor stores a single scalar
+    // kernel_size and the interpreter's quantized_conv2d_dynamic reads only
+    // weight.shape()[2], silently dropping the W-axis value). The JIT
+    // retag must not do what that eager rejection exists to prevent.
+    Graph graph;
+    auto conv = build_conv2d_node(graph, device_, /*kh=*/3, /*kw=*/5,
+                                  /*sh=*/1, /*sw=*/1);
+    QuantizationPass pass;
+    bool changed = pass.run(graph);
+    EXPECT_FALSE(changed) << "a non-square-kernel (3x5) Conv2d must NOT be "
+                              "retagged QuantizedConv2d";
+    EXPECT_EQ(conv->op_type(), OpType::Conv2d);
+}
+
+TEST_F(FusionPassesTest, Quantization_AsymmetricStrideConv2d_NotQuantized) {
+    // Same rationale as above, for asymmetric stride (square kernel here so
+    // ONLY the stride asymmetry is under test).
+    Graph graph;
+    auto conv = build_conv2d_node(graph, device_, /*kh=*/3, /*kw=*/3,
+                                  /*sh=*/2, /*sw=*/1);
+    QuantizationPass pass;
+    bool changed = pass.run(graph);
+    EXPECT_FALSE(changed) << "an asymmetric-stride (2,1) Conv2d must NOT be "
+                              "retagged QuantizedConv2d";
+    EXPECT_EQ(conv->op_type(), OpType::Conv2d);
+}
+
+// ============================================================================
+// LayoutOptimizationPass (JIT-R040)
+// ============================================================================
+
+TEST_F(FusionPassesTest, LayoutOptimization_ChannelsLastGraphOutput_GetsContiguousRestore) {
+    // JIT-R040 regression: Phase 4 of LayoutOptimizationPass only inserted a
+    // contiguous-restoring LayoutConvert at NODE-to-NODE format boundaries —
+    // a channels-last node whose output is a graph OUTPUT directly (no other
+    // node consumer, e.g. a bare conv-terminated subgraph) never got one,
+    // leaving the graph's output physically channels-last while every
+    // consumer (buffer protocol, raw data_ptr() reads) expects contiguous.
+    // The pass is gated to CUDA/ROCm only (memory_format is real hardware
+    // layout there); tag the graph's input with that device — this is pure
+    // graph metadata, no physical GPU tensor is touched by this pass.
+    Graph graph;
+    Device cuda_dev = Device::cuda(0);
+    auto x = graph.create_value("x", {1, 3, 8, 8}, DType::Float32, cuda_dev);
+    auto w = graph.create_value("w", {4, 3, 3, 3}, DType::Float32, cuda_dev);
+    auto conv_node = graph.create_node(OpType::Conv2d, "conv");
+    conv_node->add_input(x);
+    conv_node->add_input(w);
+    auto conv_out = graph.create_value("conv_out", {1, 4, 8, 8}, DType::Float32, cuda_dev);
+    conv_out->set_node(conv_node);
+    conv_node->add_output(conv_out);
+    graph.add_node(conv_node);
+    graph.set_inputs({x});
+    graph.set_outputs({conv_out});  // conv output IS a graph output directly
+
+    LayoutOptimizationPass pass;
+    bool changed = pass.run(graph);
+    EXPECT_TRUE(changed);
+
+    ASSERT_EQ(graph.outputs().size(), 1u);
+    auto final_producer = graph.outputs()[0]->node();
+    ASSERT_NE(final_producer, nullptr);
+    EXPECT_EQ(final_producer->op_type(), OpType::LayoutConvert)
+        << "a channels-last Conv2d feeding a graph output directly must get "
+           "a trailing contiguous-restoring LayoutConvert node";
+    EXPECT_EQ(final_producer->get_int_attr("target_format"), 0)
+        << "the trailing LayoutConvert must restore Contiguous (0), not "
+           "leave the output in ChannelsLast (1)";
 }

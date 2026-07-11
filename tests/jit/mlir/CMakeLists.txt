@@ -131,6 +131,14 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_op_vision
         DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
 
+    # JIT-R081 — Quantize/Dequantize/QuantizedLinear/QuantizedLinearStatic/
+    # QuantizedConv2d lowering.
+    add_executable(test_op_quantization test_op_quantization.cpp)
+    target_link_libraries(test_op_quantization
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_op_quantization
+        DISCOVERY_TIMEOUT 180 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task D.1.1 — FlashAttention dialect op lowers to stablehlo.custom_call
     # @tenzor_flash_attention.
     add_executable(test_op_flash_attention test_op_flash_attention.cpp)

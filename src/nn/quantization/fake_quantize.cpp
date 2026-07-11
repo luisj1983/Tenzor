@@ -14,6 +14,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -67,6 +68,32 @@ FakeQuantize::FakeQuantize(
 auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
     if (!fake_quant_enabled_) {
         return input;  // Pass through
+    }
+
+    // JIT-R065: whenever this call could recompute qparams_ (observer
+    // enabled, non-learnable, training mode — the exact condition guarding
+    // calculate_qparams() below), qparams_->scale/zero_point are read as
+    // plain host floats a few lines down and baked into the STE/observer
+    // paths as trace-time constants (fake_quantize_with_grad's `scale`
+    // parameter, apply_fake_quantization's qparams_ read). A trace can only
+    // ever capture whichever value happened to be resident at trace time,
+    // so every replay would silently freeze QAT calibration at that one
+    // snapshot forever — even though eager execution keeps refining scale/
+    // zero_point every mini-batch. Not gated on observer_->has_data() at
+    // trace time: even a not-yet-calibrated FIRST call would freeze the
+    // dummy initial scale=1.0/zero_point=0 for all future replays. Mirrors
+    // JIT-R063 (VariationalDropout)'s identical cached-member-state class.
+    if (observer_enabled_ && !learnable_ && training_ &&
+        ::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "FakeQuantize::forward: cannot be JIT-traced while actively "
+            "calibrating (observer enabled, non-learnable, training mode) "
+            "— scale/zero_point are recomputed from observed statistics "
+            "and baked into the compiled graph as constants, so QAT "
+            "calibration would silently freeze at the trace-time snapshot "
+            "instead of progressively refining. Call outside "
+            "jit.compile()/jit.trace() during calibration, or switch to "
+            "the learnable (LSQ) path once calibration is complete.");
     }
 
     // Update observer if enabled (even in eval mode for calibration)
@@ -162,6 +189,23 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
         return fake_quantize_per_channel_with_grad(
             input, qparams_->scale, qparams_->zero_point,
             quant_min, quant_max, channel_axis);
+    }
+
+    // JIT-R066: apply_fake_quantization() -> quantize_tensor()/
+    // dequantize_tensor() is a raw host-pointer computation with zero
+    // dispatch() calls (D2H, hand-rolled loop, H2D). Regardless of whether
+    // qparams_ is actively changing (the narrower JIT-R065 guard above),
+    // ANY use of this path is invisible to the tracer's tensor-lineage map
+    // — the result would be frozen as a trace-time constant, silently
+    // discarding the real (replayed) input activation on every later call.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "FakeQuantize::forward: cannot be JIT-traced on the no-grad "
+            "fallback path (see JIT-R066 — apply_fake_quantization's core "
+            "(de)quantize math bypasses dispatch/tracing entirely, so the "
+            "output would be frozen as a trace-time constant). Call "
+            "outside jit.compile()/jit.trace(), or ensure the input "
+            "requires_grad so the differentiable STE path is used instead.");
     }
 
     // Fall-through: non-autograd path (eval calibration or

@@ -2394,6 +2394,140 @@ TEST_F(JITCompilerTest, ShapeGuardMismatchStopsExecutionImmediately) {
     ASSERT_EQ(results2.size(), 1u);
 }
 
+// JIT-R004 regression: CompiledModule::forward() must route a
+// requires_grad()==true input to forward_grad() instead of silently
+// returning a detached (requires_grad=false) result — the exact
+// "raw-tensor-op severs autograd" pattern, reachable via
+// model.optimize_for_inference() followed by a call with a
+// requires_grad-True input (execute_fused_gpu_node unconditionally detaches
+// on the fused-GPU-kernel path; a plain ReLU graph shows the SAME missing
+// gate at the CompiledModule::forward layer without needing a GPU fusion).
+TEST_F(JITCompilerTest, CompiledModuleForwardRoutesRequiresGradToForwardGrad) {
+    auto graph = std::make_shared<Graph>();
+    auto input = graph->create_value("input", {2, 3}, DType::Float32, device_);
+    auto relu_node = graph->create_node(OpType::ReLU, "relu");
+    relu_node->add_input(input);
+    auto relu_out = graph->create_value("relu_out", {2, 3}, DType::Float32, device_);
+    relu_out->set_node(relu_node);
+    relu_node->add_output(relu_out);
+    graph->add_node(relu_node);
+    graph->set_inputs({input});
+    graph->set_outputs({relu_out});
+
+    CompiledModule mod(graph);
+    Variable grad_input(tenzor::full({2, 3}, 1.0, DType::Float32, device_),
+                        /*requires_grad=*/true);
+
+    auto result = mod.forward(grad_input);
+    EXPECT_TRUE(result.requires_grad())
+        << "CompiledModule::forward() silently detached a requires_grad "
+           "input instead of routing to forward_grad()";
+    EXPECT_NE(result.grad_fn(), nullptr)
+        << "result must carry a real grad_fn so .backward() reaches the input";
+
+    // Sanity: a non-grad input must still take the plain inference path
+    // (this gate must not force EVERY call through forward_grad).
+    Variable no_grad_input(tenzor::full({2, 3}, 1.0, DType::Float32, device_),
+                           /*requires_grad=*/false);
+    auto result2 = mod.forward(no_grad_input);
+    EXPECT_FALSE(result2.requires_grad());
+}
+
+// JIT-R030 regression: CompiledModule::forward_grad() never checked
+// needs_retrace() after a ShapeGuard mismatch, so Graph::forward's
+// stop-immediately behavior (see ShapeGuardMismatchStopsExecutionImmediately
+// above) silently returned an empty/partial result instead of throwing.
+// That empty result propagated past CompiledFunction::grad_invoke's
+// try/catch (which only wraps the forward_grad() call itself) into an
+// UNCAUGHT "produced no outputs" error deep in the caller. forward_grad()
+// must now throw immediately when a guard trips, so a would-be caller like
+// grad_invoke's try/catch actually gets a chance to catch it and fall back.
+TEST_F(JITCompilerTest, CompiledModuleForwardGradThrowsOnShapeGuardMismatch) {
+    auto graph = std::make_shared<Graph>();
+    auto input = graph->create_value("input", {2, 3}, DType::Float32, device_);
+
+    auto guard_node = graph->create_node(OpType::ShapeGuard, "shape_guard_0");
+    guard_node->set_vec_attr("expected_shape", std::vector<int64_t>{2, 3});
+    guard_node->add_input(input);
+    auto guard_out = graph->create_value("guard_out", {2, 3}, DType::Float32, device_);
+    guard_out->set_node(guard_node);
+    guard_node->add_output(guard_out);
+    graph->add_node(guard_node);
+
+    auto relu_node = graph->create_node(OpType::ReLU, "relu");
+    relu_node->add_input(guard_out);
+    auto relu_out = graph->create_value("relu_out", {2, 3}, DType::Float32, device_);
+    relu_out->set_node(relu_node);
+    relu_node->add_output(relu_out);
+    graph->add_node(relu_node);
+
+    graph->set_inputs({input});
+    graph->set_outputs({relu_out});
+
+    CompiledModule mod(graph);
+
+    // A DIFFERENT shape than the guard's expected_shape ({2,3}) trips the
+    // guard mid-replay.
+    Variable mismatched(tenzor::full({4, 5}, 1.0, DType::Float32, device_),
+                        /*requires_grad=*/true);
+    EXPECT_THROW(mod.forward_grad({mismatched}), std::runtime_error)
+        << "forward_grad() must throw (not silently return an empty/partial "
+           "result) when a ShapeGuard mismatch fires and there is no "
+           "grad-mode retrace path available";
+}
+
+// JIT-R012 regression: infer_types()/infer_symbolic_types() never called
+// Value::set_dtype(), despite the header documenting dtype propagation --
+// most acutely wrong for OpType::Cast, whose entire purpose is changing
+// dtype. Build a Cast node whose output Value's dtype deliberately does NOT
+// match its "target_dtype" attr (simulating a graph-mutation pass that
+// retyped the node without updating the Value, or a hand-built graph via
+// the public API) and assert infer_types()/infer_symbolic_types() reconcile
+// it.
+TEST_F(JITCompilerTest, InferTypesReconcilesCastOutputDtype) {
+    Graph g;
+    auto x = g.create_value("x", {2, 3}, DType::Float32, device_);
+    g.set_inputs({x});
+
+    auto cast_node = g.create_node(OpType::Cast, "cast");
+    cast_node->add_input(x);
+    cast_node->set_int_attr("target_dtype", static_cast<int64_t>(DType::Float16));
+    auto y = g.create_value("y", {2, 3}, DType::Float32, device_);  // stale dtype
+    y->set_node(cast_node);
+    cast_node->add_output(y);
+    g.add_node(cast_node);
+    g.set_outputs({y});
+
+    g.infer_types();
+    EXPECT_EQ(y->dtype(), DType::Float16)
+        << "infer_types() did not reconcile Cast's output Value dtype to "
+           "the node's target_dtype attr";
+}
+
+TEST_F(JITCompilerTest, InferSymbolicTypesReconcilesCastOutputDtype) {
+    Graph g;
+    auto x = g.create_value("x", {2, 3}, DType::Float32, device_);
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::concrete(2), SymbolicDim::concrete(3)}));
+    g.set_inputs({x});
+
+    auto cast_node = g.create_node(OpType::Cast, "cast");
+    cast_node->add_input(x);
+    cast_node->set_int_attr("target_dtype", static_cast<int64_t>(DType::Int32));
+    auto y = g.create_value("y", {2, 3}, DType::Float32, device_);  // stale dtype
+    y->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::concrete(2), SymbolicDim::concrete(3)}));
+    y->set_node(cast_node);
+    cast_node->add_output(y);
+    g.add_node(cast_node);
+    g.set_outputs({y});
+
+    g.infer_symbolic_types();
+    EXPECT_EQ(y->dtype(), DType::Int32)
+        << "infer_symbolic_types() did not reconcile Cast's output Value "
+           "dtype to the node's target_dtype attr";
+}
+
 TEST_F(JITCompilerTest, Integration_ResidualConnection) {
     Graph graph;
 

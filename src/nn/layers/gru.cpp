@@ -19,6 +19,28 @@
 
 namespace tenzor::nn {
 
+namespace {
+// JIT-R072: Tensor::slice()/reshape()/transpose() are pure TensorImpl
+// metadata tricks with ZERO dispatch() calls — invisible to both the
+// tracer's generic dispatch<OpId> interception and its own tensor lineage
+// map (same bug class as JIT-R052/R058a). Currently masked
+// (OpId::GRUForward/GRUCudnnTrainForward are both unmapped, so the
+// dispatch() call these wrap graph-breaks first regardless of whether the
+// operands were traced), but this is the correct fix ready for when GRU JIT
+// tracing support is added. Mirrors lstm.cpp/quantized_layers.cpp's
+// traced_slice/traced_reshape/traced_transpose exactly.
+inline auto traced_slice(const Tensor& t, int64_t dim, int64_t start,
+                          int64_t end, int64_t step = 1) -> Tensor {
+    return ::tenzor::slice(::tenzor::Variable(t, false), dim, start, end, step).tensor();
+}
+inline auto traced_reshape(const Tensor& t, std::vector<int64_t> shape) -> Tensor {
+    return ::tenzor::reshape(::tenzor::Variable(t, false), std::move(shape)).tensor();
+}
+inline auto traced_transpose(const Tensor& t, int64_t dim0, int64_t dim1) -> Tensor {
+    return ::tenzor::transpose(::tenzor::Variable(t, false), dim0, dim1).tensor();
+}
+}  // namespace
+
 // ============================================================================
 // GRUCell Implementation
 // ============================================================================
@@ -425,6 +447,22 @@ auto GRU::forward(const Variable& input, const Variable& hx,
         !x.requires_grad() && !tenzor::is_grad_enabled();
 
     if (can_use_fused) {
+        // JIT-R102 (non-JIT, same review pass): this fused-kernel path reads
+        // Parameter tensors directly (bypassing GRUCell::forward, whose own
+        // device-alignment above -- `weight_ih_->to(input_device)` -- is what
+        // normally handles a lazily-placed module: constructed on CPU, then
+        // called with a GPU input, the common workflow). Mirror that same
+        // established mutating in-place move here so every raw ->tensor()
+        // extraction below already reads an input-device tensor.
+        for (auto& cell : forward_cells_) {
+            if (cell->weight_ih()->weight()->device() != input.device()) {
+                cell->weight_ih()->to(input.device());
+            }
+            if (cell->weight_hh()->weight()->device() != input.device()) {
+                cell->weight_hh()->to(input.device());
+            }
+        }
+
         // Prepare input tensor for kernel. The fused GRU kernels (CPU
         // gru_forward_kernel, CUDA gru_forward_cuda, ...) all expect
         // time-major (seq_len, batch, input_size). When batch_first=true
@@ -478,8 +516,9 @@ auto GRU::forward(const Variable& input, const Variable& hx,
             }
 
             // Get initial state for this layer
-            Tensor h0_layer = h.tensor().slice(0, layer, layer + 1)
-                                .reshape({batch_size, hidden_size_}).contiguous();
+            Tensor h0_layer = traced_reshape(
+                traced_slice(h.tensor(), 0, layer, layer + 1),
+                {batch_size, hidden_size_}).contiguous();
 
             // Call fused kernel — 6th input (bias_hh) is consumed by
             // backends that distinguish between bias_ih and bias_hh
@@ -505,7 +544,7 @@ auto GRU::forward(const Variable& input, const Variable& hx,
         // Reshape output
         Variable output(layer_input, false);
         if (batch_first_) {
-            output = Variable(output.tensor().transpose(0, 1), false);
+            output = Variable(traced_transpose(output.tensor(), 0, 1), false);
         }
 
         // Stack final states: (num_layers, batch, hidden)
@@ -536,31 +575,50 @@ auto GRU::forward(const Variable& input, const Variable& hx,
         Variable layer_in = x;  // (seq, batch, feat) seq-major; later (seq, batch, hidden)
         for (int64_t layer = 0; layer < num_layers_; ++layer) {
             auto& cell = forward_cells_[layer];
-            auto W_ih_var = cell->weight_ih()->weight();
-            auto W_hh_var = cell->weight_hh()->weight();
+            // JIT-R102 (non-JIT, same review pass): mirrors the LSTM fused
+            // cuDNN training path fix -- see lstm.cpp's identical block for
+            // the full rationale. to_device() is autograd-aware, so
+            // gradients still flow back to the real, original-device
+            // Parameter through the extra device-transfer node when a
+            // transfer actually happens.
+            Variable W_ih_v = *cell->weight_ih()->weight();
+            Variable W_hh_v = *cell->weight_hh()->weight();
+            if (W_ih_v.tensor().device() != input.tensor().device()) {
+                W_ih_v = tenzor::to_device(W_ih_v, input.tensor().device());
+            }
+            if (W_hh_v.tensor().device() != input.tensor().device()) {
+                W_hh_v = tenzor::to_device(W_hh_v, input.tensor().device());
+            }
             const bool has_bias_ih = cell->weight_ih()->has_bias();
             const bool has_bias_hh = cell->weight_hh()->has_bias();
-            std::shared_ptr<Variable> b_ih_var, b_hh_var;
+            Variable b_ih_v, b_hh_v;
             Tensor b_ih_t, b_hh_t;
             if (has_bias_ih) {
-                b_ih_var = cell->weight_ih()->bias();
-                b_ih_t = b_ih_var->tensor();
+                b_ih_v = *cell->weight_ih()->bias();
+                if (b_ih_v.tensor().device() != input.tensor().device()) {
+                    b_ih_v = tenzor::to_device(b_ih_v, input.tensor().device());
+                }
+                b_ih_t = b_ih_v.tensor();
             } else {
                 b_ih_t = empty({0}, DType::Float32, input.device());
             }
             if (has_bias_hh) {
-                b_hh_var = cell->weight_hh()->bias();
-                b_hh_t = b_hh_var->tensor();
+                b_hh_v = *cell->weight_hh()->bias();
+                if (b_hh_v.tensor().device() != input.tensor().device()) {
+                    b_hh_v = tenzor::to_device(b_hh_v, input.tensor().device());
+                }
+                b_hh_t = b_hh_v.tensor();
             } else {
                 b_hh_t = empty({0}, DType::Float32, input.device());
             }
 
             Tensor x_t = layer_in.tensor().contiguous();  // (seq, batch, in)
-            Tensor h0_t = h.tensor().slice(0, layer, layer + 1)
-                              .reshape({kb, hidden_size_}).contiguous();
+            Tensor h0_t = traced_reshape(
+                traced_slice(h.tensor(), 0, layer, layer + 1),
+                {kb, hidden_size_}).contiguous();
 
             std::vector<Tensor> fwd_in = {x_t, h0_t,
-                                          W_ih_var->tensor(), W_hh_var->tensor(),
+                                          W_ih_v.tensor(), W_hh_v.tensor(),
                                           b_ih_t, b_hh_t};
             auto outs = dispatch<OpId::GRUCudnnTrainForward>(fwd_in);
             Tensor output_t = outs[0];      // (seq, batch, hidden)
@@ -568,19 +626,19 @@ auto GRU::forward(const Variable& input, const Variable& hx,
             Tensor wspace   = outs[3];
 
             std::vector<Tensor> saved = {x_t, h0_t,
-                                         W_ih_var->tensor(), W_hh_var->tensor(),
+                                         W_ih_v.tensor(), W_hh_v.tensor(),
                                          b_ih_t, b_hh_t, output_t, wspace, reserve};
 
             std::vector<std::shared_ptr<Function>> next_funcs = {
-                layer_in.grad_fn(), W_ih_var->grad_fn(), W_hh_var->grad_fn()};
-            std::vector<Variable> in_vars = {layer_in, *W_ih_var, *W_hh_var};
+                layer_in.grad_fn(), W_ih_v.grad_fn(), W_hh_v.grad_fn()};
+            std::vector<Variable> in_vars = {layer_in, W_ih_v, W_hh_v};
             if (has_bias_ih) {
-                next_funcs.push_back(b_ih_var->grad_fn());
-                in_vars.push_back(*b_ih_var);
+                next_funcs.push_back(b_ih_v.grad_fn());
+                in_vars.push_back(b_ih_v);
             }
             if (has_bias_hh) {
-                next_funcs.push_back(b_hh_var->grad_fn());
-                in_vars.push_back(*b_hh_var);
+                next_funcs.push_back(b_hh_v.grad_fn());
+                in_vars.push_back(b_hh_v);
             }
 
             auto gfn_out = std::make_shared<CudnnGRUTrainBackward>(has_bias_ih, has_bias_hh, saved);

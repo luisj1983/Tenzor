@@ -111,6 +111,27 @@ auto dispatch_flash_attention(const std::vector<::tenzor::Tensor>& inputs,
             "tenzor_flash_attention: expected 3 inputs (Q, K, V), got " +
             std::to_string(inputs.size()));
     }
+    // JIT-R029-residual (found via Float16ScaledDotProductAttentionParity):
+    // widen F16/BF16 Q/K/V to Float32 before dispatching, narrow the result
+    // back -- mirrors dispatch_rope_apply's identical fix (JIT-R042, this
+    // same file). Raw Float16 inputs into OpId::FlashAttention produced NaN
+    // on the Vulkan backend (confirmed via this test diverging only on
+    // target=vulkan-spirv, "nan vs 0.02" against the CPU eager reference);
+    // computing in Float32 matches eager's numerical behavior on every
+    // backend.
+    const auto orig_dtype = inputs[0].dtype();
+    const bool widen = (orig_dtype == ::tenzor::DType::Float16 ||
+                        orig_dtype == ::tenzor::DType::BFloat16);
+    std::vector<::tenzor::Tensor> widened_inputs;
+    const std::vector<::tenzor::Tensor>* inputs_ptr = &inputs;
+    if (widen) {
+        widened_inputs.reserve(inputs.size());
+        for (const auto& t : inputs) {
+            widened_inputs.push_back(t.to(::tenzor::DType::Float32));
+        }
+        inputs_ptr = &widened_inputs;
+    }
+    const auto& compute_inputs = *inputs_ptr;
     const auto kv     = parse_backend_config(backend_config);
     const bool causal = parse_bool (kv.count("causal") ? kv.at("causal") : "",
                                     false);
@@ -124,7 +145,7 @@ auto dispatch_flash_attention(const std::vector<::tenzor::Tensor>& inputs,
     // A literal scale of 0 (all scores 0 -> uniform attention) is not a
     // meaningful config, so overloading 0 as the sentinel is safe.
     if (scale == 0.0f) {
-        const auto& q     = inputs[0];
+        const auto& q     = compute_inputs[0];
         const auto rank   = q.shape().size();
         if (rank >= 1) {
             const auto D = q.shape()[rank - 1];
@@ -139,12 +160,12 @@ auto dispatch_flash_attention(const std::vector<::tenzor::Tensor>& inputs,
     attrs.set(::tenzor::AttrKey::IsTraining, false);
 
     auto outs = ::tenzor::dispatch<::tenzor::OpId::FlashAttention>(
-        inputs, attrs);
+        compute_inputs, attrs);
     if (outs.empty()) {
         throw std::runtime_error(
             "tenzor_flash_attention: dispatch returned no outputs");
     }
-    return outs[0];
+    return widen ? outs[0].to(orig_dtype) : outs[0];
 }
 
 auto dispatch_gqa(const std::vector<::tenzor::Tensor>& inputs,
@@ -192,10 +213,10 @@ auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& inputs,
             "tenzor_rope_apply: expected 3 inputs (x, cos, sin), got " +
             std::to_string(inputs.size()));
     }
-    const auto& x   = inputs[0];
-    const auto& cos = inputs[1];
-    const auto& sin = inputs[2];
-    const auto x_shape = x.shape();
+    const auto& x_in   = inputs[0];
+    const auto& cos_in = inputs[1];
+    const auto& sin_in = inputs[2];
+    const auto x_shape = x_in.shape();
     const int64_t rank = static_cast<int64_t>(x_shape.size());
     if (rank < 1) {
         throw std::runtime_error("tenzor_rope_apply: x must have rank >= 1");
@@ -207,6 +228,22 @@ auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& inputs,
     }
     const int64_t H = D / 2;
     const int64_t last_dim = rank - 1;
+
+    // JIT-R042: sibling of JIT-R007 (handle_rope_apply_expand, the MLIR
+    // expand-path lowering) — this is the SEPARATE plugin/custom-call C++
+    // reimplementation, and it had the identical gap: computing the
+    // rotation entirely in storage dtype instead of widening F16/BF16 to
+    // F32 the way eager's rope.cpp ("F121") and every other numeric
+    // handler in this codebase do. Widen here too, narrowing the final
+    // result back to the original dtype.
+    const ::tenzor::DType orig_dtype = x_in.dtype();
+    const bool is_half = (orig_dtype == ::tenzor::DType::Float16 ||
+                          orig_dtype == ::tenzor::DType::BFloat16);
+    const ::tenzor::DType work_dtype =
+        is_half ? ::tenzor::DType::Float32 : orig_dtype;
+    const ::tenzor::Tensor x   = is_half ? x_in.to(work_dtype)   : x_in;
+    ::tenzor::Tensor cos = is_half ? cos_in.to(work_dtype) : cos_in;
+    ::tenzor::Tensor sin = is_half ? sin_in.to(work_dtype) : sin_in;
 
     const auto kv = parse_backend_config(backend_config);
     const int64_t offset =
@@ -257,7 +294,8 @@ auto dispatch_rope_apply(const std::vector<::tenzor::Tensor>& inputs,
     auto cos_b = align_trailing(cos_t);
     auto sin_b = align_trailing(sin_t);
 
-    return x * cos_b + rotated * sin_b;
+    ::tenzor::Tensor result = x * cos_b + rotated * sin_b;
+    return is_half ? result.to(orig_dtype) : result;
 }
 
 auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& inputs,

@@ -12,6 +12,49 @@
 namespace tenzor {
 namespace jit {
 
+namespace {
+
+// JIT-R010: local re-implementations of graph.cpp's anonymous-namespace
+// attr_vec_or_scalar()/pool_output_dim() helpers (that file's helpers are not
+// exported/shared across translation units, and infer_conv2d above already
+// established the pattern of this file carrying its own self-contained
+// symbolic formula rather than depending on graph.cpp).
+
+auto attr_vec_or_scalar(const Node& node, const char* name, size_t rank,
+                        int64_t default_value) -> std::vector<int64_t> {
+    auto values = node.get_vec_attr(name);
+    if (!values.empty()) {
+        if (values.size() == 1 && rank > 1) {
+            values.resize(rank, values[0]);
+        }
+        return values;
+    }
+    if (node.has_int_attr(name)) {
+        return std::vector<int64_t>(rank, node.get_int_attr(name));
+    }
+    return std::vector<int64_t>(rank, default_value);
+}
+
+// Mirrors graph.cpp's pool_output_dim exactly (same concrete formula with
+// ceil_mode boundary correction; falls back to plain floor-division for a
+// genuinely dynamic input dim, matching that file's documented limitation).
+auto pool_output_dim(const SymbolicDim& in, int64_t k, int64_t s, int64_t p, int64_t d,
+                     bool ceil_mode) -> SymbolicDim {
+    if (in.is_concrete()) {
+        const int64_t in_v = in.value();
+        const int64_t num = in_v + 2 * p - d * (k - 1) - 1;
+        int64_t o = ceil_mode ? (num + s - 1) / s + 1 : num / s + 1;
+        if (ceil_mode && (o - 1) * s >= in_v + p) --o;
+        return SymbolicDim::concrete(o);
+    }
+    SymbolicDim pad2 = SymbolicDim::concrete(2 * p);
+    SymbolicDim kernel_term = SymbolicDim::concrete(d * (k - 1) + 1);
+    SymbolicDim stride_dim = SymbolicDim::concrete(s);
+    return (in + pad2 - kernel_term) / stride_dim + SymbolicDim::concrete(1);
+}
+
+}  // namespace
+
 // ============================================================================
 // Helper: gather symbolic shapes from node inputs
 // ============================================================================
@@ -52,6 +95,9 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::Ge:
         case OpType::LogicalAnd:
         case OpType::LogicalOr:
+        // JIT-R010: Fmod broadcasts like every other binary elementwise op
+        // (mirrors graph.cpp's infer_symbolic_types Fmod case).
+        case OpType::Fmod:
             return infer_elementwise(node);
 
         // Unary elementwise / shape-preserving: preserve input[0] shape.
@@ -68,6 +114,9 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::Sin:
         case OpType::Cos:
         case OpType::Rsqrt:
+        case OpType::Reciprocal:
+        case OpType::FlashAttention:
+        case OpType::SliceScatter:
         case OpType::Dropout:
         case OpType::GELU:
         case OpType::Softmax:
@@ -78,6 +127,7 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         // or a GroupNorm/RMSNorm/activation) froze the marked dynamic dim to the
         // trace-time size in SymbolicTracePass (JIT-F040).
         case OpType::Cast:
+        case OpType::ToDevice:
         case OpType::LeakyReLU:
         case OpType::ELU:
         case OpType::Mish:
@@ -87,6 +137,18 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::RMSNorm:
         case OpType::Flip:
         case OpType::LogicalNot:
+        // JIT-R010: shape-preserving ops previously missing from this
+        // switch (mirrors graph.cpp's infer_symbolic_types, which groups
+        // all of these as simple "output shape == input[0]" cases).
+        case OpType::Round:
+        case OpType::SiLU:
+        case OpType::RoPE:
+        case OpType::Roll:
+        case OpType::Scatter:
+        case OpType::Dequantize:
+        case OpType::Quantize:
+        case OpType::DenseToSparse:
+        case OpType::ResidualAdd:
         case OpType::LayerNorm: {
             auto input_shapes = gather_input_shapes(node);
             if (!input_shapes.empty()) {
@@ -100,7 +162,23 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
             return infer_matmul(node);
 
         case OpType::Conv2d:
+        // JIT-R010: QuantizedConv2d shares Conv2d's shape rule exactly
+        // (mirrors graph.cpp's infer_symbolic_types, JIT-026).
+        case OpType::QuantizedConv2d:
             return infer_conv2d(node);
+
+        // JIT-R010: previously missing entirely -- fell to `default -> {}`
+        // and froze downstream dynamic dims (the same JIT-F040 pattern this
+        // file's other additions document).
+        case OpType::ConvTranspose:
+            return infer_conv_transpose(node);
+
+        case OpType::MaxPool2d:
+        case OpType::AvgPool2d:
+            return infer_pool2d(node);
+
+        case OpType::AdaptiveAvgPool2d:
+            return infer_adaptive_avg_pool2d(node);
 
         case OpType::Reshape:
             return infer_reshape(node);
@@ -125,6 +203,11 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
             return infer_permute(node);
 
         case OpType::Linear:
+        // JIT-R010: QuantizedLinear/QuantizedLinearStatic share Linear's
+        // [x, weight] -> (*, out_features) shape rule exactly (mirrors
+        // graph.cpp's infer_symbolic_types, JIT-026).
+        case OpType::QuantizedLinear:
+        case OpType::QuantizedLinearStatic:
             return infer_linear(node);
 
         // Rank-changing / select ops that previously fell to `default -> {}` and
@@ -138,6 +221,180 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
             return infer_unsqueeze(node);
         case OpType::Flatten:
             return infer_flatten(node);
+
+        case OpType::AsStrided:
+            // Output shape is the explicit target `size`, always fully
+            // concrete (as_strided's API takes concrete int64_t sizes) —
+            // independent of the input's shape.
+            if (node->has_attr("size")) {
+                return {SymbolicShape::from_concrete(node->get_vec_attr("size"))};
+            }
+            return {};
+
+        case OpType::Triu:
+        case OpType::Tril: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                return {input_shapes[0]};
+            }
+            return {};
+        }
+
+        case OpType::Trace:
+            // 2D -> scalar (0-D), known regardless of symbolic-ness of dims.
+            return {SymbolicShape(std::vector<SymbolicDim>{})};
+
+        case OpType::Diag: {
+            // Only handle the fully-concrete case (matches graph.cpp's
+            // infer_symbolic_types formulas); a genuinely symbolic leading
+            // dim is left unresolved rather than guessed at.
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].is_fully_concrete()) {
+                int64_t d = node->get_int_attr("diagonal");
+                auto in_shape = input_shapes[0].to_concrete();
+                if (in_shape.size() == 1) {
+                    int64_t n = in_shape[0];
+                    int64_t size = n + std::abs(d);
+                    return {SymbolicShape::from_concrete({size, size})};
+                }
+                if (in_shape.size() == 2) {
+                    int64_t rows = in_shape[0];
+                    int64_t cols = in_shape[1];
+                    int64_t start_row = d >= 0 ? 0 : -d;
+                    int64_t start_col = d >= 0 ? d : 0;
+                    int64_t diag_len = std::min(rows - start_row, cols - start_col);
+                    return {SymbolicShape::from_concrete(
+                        {std::max<int64_t>(diag_len, 0)})};
+                }
+            }
+            return {};
+        }
+
+        case OpType::ViewAsReal: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                std::vector<SymbolicDim> dims;
+                dims.reserve(input_shapes[0].rank() + 1);
+                for (size_t i = 0; i < input_shapes[0].rank(); ++i) {
+                    dims.push_back(input_shapes[0][i]);
+                }
+                dims.push_back(SymbolicDim::concrete(2));
+                return {SymbolicShape(std::move(dims))};
+            }
+            return {};
+        }
+
+        case OpType::ViewAsComplex: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() > 0) {
+                std::vector<SymbolicDim> dims;
+                dims.reserve(input_shapes[0].rank() - 1);
+                for (size_t i = 0; i + 1 < input_shapes[0].rank(); ++i) {
+                    dims.push_back(input_shapes[0][i]);
+                }
+                return {SymbolicShape(std::move(dims))};
+            }
+            return {};
+        }
+
+        // ====================================================================
+        // JIT-R010: remaining ops previously missing from this switch,
+        // mirroring graph.cpp's infer_symbolic_types formulas exactly.
+        // ====================================================================
+
+        case OpType::Embedding: {
+            // weight [num_embeddings, embedding_dim], indices [*] ->
+            // indices_shape + [embedding_dim].
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2) {
+                auto out_shape = input_shapes[1];
+                if (input_shapes[0].rank() >= 2) {
+                    out_shape.push_back(input_shapes[0][1]);
+                }
+                return {std::move(out_shape)};
+            }
+            return {};
+        }
+
+        case OpType::EmbeddingBag: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2 && input_shapes[1].rank() >= 1 &&
+                node->has_int_attr("embedding_dim")) {
+                bool include_last = node->has_bool_attr("include_last_offset") &&
+                                    node->get_bool_attr("include_last_offset");
+                SymbolicDim num_bags = input_shapes[1][0];
+                if (include_last && num_bags.is_concrete()) {
+                    num_bags = SymbolicDim::concrete(
+                        std::max<int64_t>(num_bags.value() - 1, 0));
+                }
+                return {SymbolicShape({
+                    num_bags, SymbolicDim::concrete(node->get_int_attr("embedding_dim"))})};
+            }
+            return {};
+        }
+
+        case OpType::Eigvalsh: {
+            // (..., N, N) -> (..., N)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto sym_shape = input_shapes[0];
+                sym_shape.erase(sym_shape.rank() - 1);
+                return {std::move(sym_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Norm:
+            // Scalar output.
+            return {SymbolicShape()};
+
+        case OpType::Slogdet: {
+            // (..., N, N) -> sign: (...), logabsdet: (...)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto sym_shape = input_shapes[0];
+                sym_shape.erase(sym_shape.rank() - 1);
+                sym_shape.erase(sym_shape.rank() - 1);
+                return {sym_shape, sym_shape};
+            }
+            return {};
+        }
+
+        case OpType::If: {
+            std::vector<SymbolicShape> out;
+            if (node->then_branch()) {
+                for (const auto& o : node->then_branch()->outputs()) {
+                    out.push_back(o->symbolic_shape());
+                }
+            }
+            return out;
+        }
+
+        case OpType::Loop: {
+            // Loop-carried values preserve shapes.
+            auto input_shapes = gather_input_shapes(node);
+            std::vector<SymbolicShape> out;
+            for (size_t i = 2; i < input_shapes.size(); ++i) {
+                out.push_back(input_shapes[i]);
+            }
+            return out;
+        }
+
+        case OpType::FusedFFN: {
+            // (*, in) -> (*, out) via the second linear's weight (input[2]).
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 3) {
+                auto out_shape = input_shapes[0];
+                if (out_shape.rank() >= 1 && input_shapes[2].rank() > 0) {
+                    out_shape[out_shape.rank() - 1] = input_shapes[2][0];
+                }
+                return {std::move(out_shape)};
+            }
+            if (!input_shapes.empty()) {
+                return {input_shapes[0]};
+            }
+            return {};
+        }
 
         default:
             // For unhandled ops, return empty (no inference available)
@@ -713,6 +970,96 @@ auto SymbolicShapeInference::infer_linear(const Node* node) -> std::vector<Symbo
     }
 
     return {std::move(out_shape)};
+}
+
+
+// JIT-R010: transposed/deconv N-D convolution. Mirrors graph.cpp's
+// conv_sym_output_shape's ConvTranspose formula: out = (in-1)*stride -
+// 2*padding + dilation*(kernel-1) + output_padding + 1, out_channels =
+// weight.shape[1] * groups.
+auto SymbolicShapeInference::infer_conv_transpose(const Node* node) -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.size() < 2 || input_shapes[0].rank() < 3 ||
+        input_shapes[1].rank() != input_shapes[0].rank()) {
+        return {};
+    }
+    const auto& in_shape = input_shapes[0];
+    const auto& w_shape = input_shapes[1];
+    const size_t spatial_rank = in_shape.rank() - 2;
+    const int64_t groups = node->has_attr("groups") ? node->get_int_attr("groups") : 1;
+    auto stride = attr_vec_or_scalar(*node, "stride", spatial_rank, 1);
+    auto padding = attr_vec_or_scalar(*node, "padding", spatial_rank, 0);
+    auto dilation = attr_vec_or_scalar(*node, "dilation", spatial_rank, 1);
+    auto output_padding = attr_vec_or_scalar(*node, "output_padding", spatial_rank, 0);
+
+    std::vector<SymbolicDim> dims;
+    dims.reserve(in_shape.rank());
+    dims.push_back(in_shape[0]);
+    dims.push_back(w_shape[1] * SymbolicDim::concrete(groups));
+    for (size_t i = 0; i < spatial_rank; ++i) {
+        auto in_size = in_shape[i + 2];
+        auto kernel = w_shape[i + 2];
+        dims.push_back((in_size - SymbolicDim::concrete(1)) *
+                       SymbolicDim::concrete(stride[i]) -
+                       SymbolicDim::concrete(2 * padding[i]) +
+                       SymbolicDim::concrete(dilation[i]) *
+                       (kernel - SymbolicDim::concrete(1)) +
+                       SymbolicDim::concrete(output_padding[i] + 1));
+    }
+    return {SymbolicShape(std::move(dims))};
+}
+
+// JIT-R010: MaxPool2d/AvgPool2d. Mirrors graph.cpp's rank-4 pooling case
+// exactly (rectangular kernel/stride/padding/dilation via scalar-or-[h,w]
+// attrs, ceil_mode).
+auto SymbolicShapeInference::infer_pool2d(const Node* node) -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.empty() || input_shapes[0].rank() != 4) {
+        return {};
+    }
+    auto& in_shape = input_shapes[0];
+    auto read_pair = [&](const char* name, int64_t dflt) -> std::pair<int64_t, int64_t> {
+        if (node->has_vec_attr(name)) {
+            auto v = node->get_vec_attr(name);
+            if (v.size() >= 2) return {v[0], v[1]};
+            if (v.size() == 1) return {v[0], v[0]};
+        }
+        if (node->has_int_attr(name)) {
+            int64_t s = node->get_int_attr(name);
+            return {s, s};
+        }
+        return {dflt, dflt};
+    };
+    auto [kh, kw] = read_pair("kernel_size", 1);
+    bool has_stride = node->has_int_attr("stride") || node->has_vec_attr("stride");
+    auto [sh, sw] = has_stride ? read_pair("stride", 1)
+                               : std::pair<int64_t, int64_t>{kh, kw};
+    auto [ph, pw] = read_pair("padding", 0);
+    auto [dh, dw] = read_pair("dilation", 1);
+    bool ceil_mode = node->has_int_attr("ceil_mode") &&
+                     node->get_int_attr("ceil_mode") != 0;
+
+    SymbolicDim H_out = pool_output_dim(in_shape[2], kh, sh, ph, dh, ceil_mode);
+    SymbolicDim W_out = pool_output_dim(in_shape[3], kw, sw, pw, dw, ceil_mode);
+    return {SymbolicShape({in_shape[0], in_shape[1], H_out, W_out})};
+}
+
+// JIT-R010: AdaptiveAvgPool2d -- output spatial dims come straight from the
+// "output_size" attr (always concrete: the eager API takes a concrete
+// target size), batch/channel dims propagate symbolically.
+auto SymbolicShapeInference::infer_adaptive_avg_pool2d(const Node* node) -> std::vector<SymbolicShape> {
+    auto input_shapes = gather_input_shapes(node);
+    if (input_shapes.empty() || input_shapes[0].rank() != 4) {
+        return {};
+    }
+    auto output_size = node->get_vec_attr("output_size");
+    if (output_size.size() < 2) {
+        return {};
+    }
+    return {SymbolicShape({
+        input_shapes[0][0], input_shapes[0][1],
+        SymbolicDim::concrete(output_size[0]),
+        SymbolicDim::concrete(output_size[1])})};
 }
 
 } // namespace jit

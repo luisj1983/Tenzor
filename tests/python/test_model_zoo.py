@@ -9,7 +9,10 @@ Uses small configurations to keep memory/time low.
 import pytest
 import tenzor as tz
 
-ALL_DEVICES = ["cpu", "cuda", "vulkan", "oneapi", "rocm"]
+# JIT-R044: import the single source of truth from conftest.py rather than
+# duplicating the device list (a prior verbatim duplication across 5 files
+# was how the MPS omission propagated undetected).
+from conftest import ALL_DEVICES
 
 
 def make_var(shape, device="cpu"):

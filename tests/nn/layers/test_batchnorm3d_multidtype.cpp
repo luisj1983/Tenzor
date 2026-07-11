@@ -17,6 +17,14 @@ class BatchNorm3dMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     float variance_tolerance() const {
         if (dtype() == DType::Float16) return 0.2f;
+        // BFloat16: every backend already accumulates mean/variance in
+        // Float32 and narrows only the final stored result (see
+        // test_batchnorm2d_multidtype.cpp's identical rationale); residual
+        // error here is expected BFloat16 output-rounding noise. CPU
+        // empirically observed ~1.6e-3 (just over the shared 1e-3 default,
+        // which is why only CPU failed while other backends happened to
+        // land under it).
+        if (dtype() == DType::BFloat16) return 5e-3f;
         return 1e-3f;
     }
 };

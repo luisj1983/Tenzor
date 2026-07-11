@@ -307,7 +307,14 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
             perm[0] = 0;
             perm[1] = one_hot.ndim() - 1;
             for (int64_t i = 2; i < one_hot.ndim(); ++i) perm[static_cast<size_t>(i)] = i - 1;
-            one_hot = one_hot.permute(perm).contiguous();
+            // JIT-R091: raw Tensor::permute() is pure metadata (zero
+            // dispatch), invisible to the tracer's view-op recording path.
+            // `one_hot` is a live, per-call value (derived from the real
+            // `target` argument via the dispatched OneHot op) — an untraced
+            // permute here disconnects it from that lineage, freezing the
+            // trace-dummy's one-hot data as a constant on replay. Route
+            // through the tracer-aware Variable-level autograd::permute.
+            one_hot = tenzor::permute(Variable(one_hot, false), perm).tensor().contiguous();
         }
 
         // Convert to input dtype if needed (one_hot shader produces Float32)
@@ -513,7 +520,14 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
             perm[0] = 0;
             perm[1] = one_hot.ndim() - 1;
             for (int64_t i = 2; i < one_hot.ndim(); ++i) perm[static_cast<size_t>(i)] = i - 1;
-            one_hot = one_hot.permute(perm).contiguous();
+            // JIT-R091: raw Tensor::permute() is pure metadata (zero
+            // dispatch), invisible to the tracer's view-op recording path.
+            // `one_hot` is a live, per-call value (derived from the real
+            // `target` argument via the dispatched OneHot op) — an untraced
+            // permute here disconnects it from that lineage, freezing the
+            // trace-dummy's one-hot data as a constant on replay. Route
+            // through the tracer-aware Variable-level autograd::permute.
+            one_hot = tenzor::permute(Variable(one_hot, false), perm).tensor().contiguous();
         }
 
         if (one_hot.dtype() != input_c.tensor().dtype()) {

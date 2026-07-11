@@ -85,17 +85,25 @@ enum class OpType {
     Sin,      ///< Elementwise sine
     Cos,      ///< Elementwise cosine
     Rsqrt,    ///< Elementwise reciprocal square root (1/sqrt(x))
+    Reciprocal, ///< Elementwise reciprocal (1/x)
     Round,    ///< Elementwise round-to-nearest-even
     Fmod,     ///< Elementwise C-style truncated modulo (sign follows dividend)
 
     // Indexing
     Slice,
     Cat,
+    SliceScatter,  ///< Copy of input with src written into a dim slice [start,end,step)
+    AsStrided,     ///< Arbitrary-stride view: (size, stride, storage_offset)
+    ViewAsReal,    ///< Complex tensor -> real tensor with a trailing dim of 2
+    ViewAsComplex, ///< Real tensor (trailing dim of 2) -> complex tensor
 
     // Other
     Dropout,
     Linear,
     Embedding,
+    EmbeddingBag,  ///< Embedding lookup + per-bag aggregation (sum/mean/max);
+                   ///< inputs [weight, offsets], attrs embedding_bag_mode/
+                   ///< embedding_dim/include_last_offset
 
     // Activations (extended)
     GELU,
@@ -131,13 +139,27 @@ enum class OpType {
     SwapIn,           ///< CPU -> GPU async prefetch before reuse
 
     // Quantized operations
-    QuantizedLinear,  ///< INT8 quantized linear layer
+    QuantizedLinear,  ///< INT8 quantized linear layer — Retagged from Linear
+                      ///< by QuantizationPass (dynamic quantization of a DENSE
+                      ///< weight at replay time); inputs [x, weight(, bias)].
+                      ///< NOT the same convention as OpId::QuantizedLinear's
+                      ///< actual dispatch contract — see QuantizedLinearStatic.
+    QuantizedLinearStatic, ///< The real dispatch<OpId::QuantizedLinear> contract:
+                           ///< inputs [input_int8, weight_int8, bias_f32(, wscale,
+                           ///< wzp)], attrs input_scale/weight_scale/output_scale
+                           ///< (float) + input_zero_point/weight_zero_point (int).
+                           ///< Pre-quantized (static) int8 tensors — distinct from
+                           ///< QuantizedLinear above.
     QuantizedConv2d,  ///< INT8 quantized 2D convolution
     Dequantize,       ///< INT8 -> Float32 dequantization
     Quantize,         ///< Float32 -> INT8 quantization
 
     // Sparse operations
-    SparseMatMul,     ///< Sparse-dense matrix multiplication (SpMM)
+    SparseMatMul,     ///< Sparse-dense matrix multiplication (SpMM) — dense
+                      ///< weight retagged sparse by SparsePass; inputs [x, weight(, bias)]
+    SparseSpMM,       ///< CSR sparse-dense matmul; inputs [crow, col, values, dense],
+                      ///< attrs M/K — the direct OpId::SparseSpMM dispatch convention
+                      ///< (distinct from SparseMatMul above)
     DenseToSparse,    ///< Convert dense weight to sparse format
 
     // Control flow
@@ -147,6 +169,10 @@ enum class OpType {
     // Layout and type conversion (inserted by optimization passes)
     LayoutConvert, ///< Convert memory format (e.g., NCHW -> NHWC)
     Cast,          ///< Convert dtype (e.g., Float32 -> Float16)
+    ToDevice,      ///< Cross-device transfer (e.g., CPU -> CUDA:0). Interpreter-
+                   ///< only: MLIR/IREE compiles to a single HAL target, so a
+                   ///< graph containing this node cannot be lowered there and
+                   ///< must run through the interpreter or fall back to eager.
 
     // ── Phase 13 / MVP-1 additions ──
     SiLU,             ///< x * sigmoid(x)
@@ -188,7 +214,161 @@ enum class OpType {
     Gather,           ///< Gather along dim by index tensor
     Scatter,          ///< Scatter src into input along dim by index tensor
     Flip,             ///< Reverse along dims
-    Roll              ///< Circular shift along dim
+    Roll,             ///< Circular shift along dim
+    Triu,             ///< Upper triangle (zero below diagonal), shape-preserving
+    Tril,             ///< Lower triangle (zero above diagonal), shape-preserving
+    Diag,             ///< 1D->2D diagonal matrix construction, or 2D->1D diagonal extraction
+    Trace,            ///< Sum of the main diagonal of a 2D matrix -> scalar
+
+    // JIT-R091: appended at the end (not inserted mid-enum) so no existing
+    // OpType's ordinal value shifts — see git history/findings.txt for the
+    // regression an earlier mid-enum insertion caused.
+    OneHot,           ///< Integer class-index -> one-hot encoding (appends a
+                      ///< trailing class axis: [N, d1, ..., dk] ->
+                      ///< [N, d1, ..., dk, num_classes]); attrs: num_classes (int)
+
+    // JIT-R098: appended at the end (see JIT-R091's comment above on why —
+    // ordinal stability for existing entries). Same direct-dispatch CSR
+    // convention as SparseSpMM: inputs [crow, col, values, dense/vec/b],
+    // attrs as noted per op.
+    SparseSpMV,       ///< CSR sparse-dense matvec; inputs [crow, col, values, vec],
+                      ///< attrs M/K, output shape (M,)
+    SparseAdd,        ///< CSR sparse + dense elementwise add; inputs
+                      ///< [crow, col, values, dense], attrs M/K, output shape == dense
+    SparseTrsv,       ///< CSR triangular solve, 1D RHS; inputs [crow, col, values, b],
+                      ///< attrs N/upper, output shape == b
+    SparseTrsm,       ///< CSR triangular solve, 2D RHS; inputs [crow, col, values, B],
+                      ///< attrs N/upper, output shape == B
+
+    // JIT-R098 (continued): mapping these general-purpose ops was required
+    // to unblock SparseAdd's manually-recorded node above — sparse::add()'s
+    // CPU path calls SparseTensor::to_dense(), which itself dispatches
+    // these two internally, and (being dispatched, not manually recorded)
+    // they were reaching the interceptor unmapped and poisoning the WHOLE
+    // trace with a spurious graph break. Mapping them is also a general win
+    // for any other traced code using scatter_add()/repeat_interleave()
+    // directly. RepeatInterleave's shape rule is intentionally NOT added to
+    // infer_types below — its output size can depend on the runtime VALUES
+    // of a per-element `repeats` tensor, not just input shapes, so the safe
+    // choice is to leave each node's shape at whatever was actually
+    // observed during tracing rather than guess at a (possibly wrong)
+    // symbolic rule.
+    ScatterAdd,       ///< accumulate src into input at index positions along
+                      ///< dim; inputs [input, index, src], attrs dim;
+                      ///< shape-preserving (== input)
+    RepeatInterleave, ///< repeat each element `repeats` times along dim;
+                      ///< inputs [input] (attrs dim/num_repeats, scalar mode)
+                      ///< or [input, repeats] (num_repeats==-1, tensor mode)
+
+    // JIT-R084: elementwise unary activations whose OpId was unmapped here,
+    // so their no-grad-fast-path dispatch<OpId::X>() call graph-broke the
+    // whole trace (a "masked landmine," not silent-wrong-answer) — reachable
+    // in real deployed inference via nn::Swish (MobileNetV3/EfficientNet-
+    // style blocks). Shape/dtype-preserving elementwise ops, mirroring
+    // GELU/Mish/Softplus's existing treatment.
+    Swish,       ///< x * sigmoid(x); shape/dtype-preserving elementwise
+    RReLU,       ///< randomized leaky ReLU; attrs lower/upper (eval-mode
+                 ///< fixed slope = (lower+upper)/2); shape/dtype-preserving
+    LogSigmoid,  ///< log(sigmoid(x)) = -softplus(-x); shape/dtype-preserving
+
+    // JIT-R064: OpId::Minimum/OpId::IndexCopy were unmapped, so
+    // Embedding::renorm_embeddings' non-differentiable max_norm clamp
+    // (scale = min(1, max_norm/norm); weight = index_copy(weight, 0, idx,
+    // rows * scale)) graph-broke the WHOLE trace on every forward call for
+    // any Embedding(max_norm>0) module, deterministically blocking such
+    // models from ever JIT-compiling.
+    Minimum,    ///< elementwise min(a, b); broadcasts like Add; no autograd
+                ///< overload exists anywhere in the codebase (mirrors Fmod)
+    IndexCopy,  ///< writes source rows into input at index positions along
+                ///< dim; inputs [input, index, source], attrs dim;
+                ///< shape-preserving (== input[0])
+
+    // JIT-R100: general-purpose ops needed to unblock the SparseTensor
+    // structural-conversion nodes below — their real implementations
+    // internally dispatch these on the CPU/OneAPI/Vulkan on-device
+    // conversion paths (CUDA/ROCm mostly use opaque native cusparse/
+    // rocsparse kernels that bypass dispatch entirely). Same rationale as
+    // ScatterAdd/RepeatInterleave under JIT-R098: left unmapped, each would
+    // poison the WHOLE trace with a spurious graph break even though the
+    // outer Sparse* node's own manual recording (below) would otherwise
+    // succeed. Interpreter-replay only (grad_mode unconditionally
+    // unsupported), matching ScatterAdd/RepeatInterleave's policy.
+    CumSum,     ///< cumulative sum along dim; inputs [x], attrs dim;
+                ///< shape-preserving (== input)
+    Sort,       ///< sort along dim; inputs [x], attrs dim/descending; TWO
+                ///< outputs [sorted_values, indices], shape-preserving
+    Nonzero,    ///< positions of non-zero elements; inputs [x]; ONE output;
+                ///< data-dependent output size — shape kept at whatever was
+                ///< actually observed during tracing (RepeatInterleave policy)
+    Bincount,   ///< per-value occurrence counts; inputs [x], attrs minlength;
+                ///< ONE output; data-dependent output size (same policy)
+
+    // JIT-R100: SparseTensor structural-conversion ops (from_dense/to_dense/
+    // coalesce/transpose/to_csr/to_csc/to_bsr) — manually recorded directly
+    // inside the corresponding SparseTensor method, the same way SparseAdd
+    // is (JIT-R098), since these methods' real inputs/outputs are raw
+    // component tensors (crow/col/values, etc.), not autograd Variables, and
+    // are NEVER auto-mapped from a generic dispatch<OpId> call site (so
+    // there is deliberately no opid_to_optype case for any of these —
+    // OpId::SparseToDense/DenseToSparse's own pre-existing, unrelated
+    // dispatch-kernel convention, used only by the JVP rules, is left as-is
+    // and continues to safely graph-break under tracing, unchanged).
+    // Every input/output tensor list uses this fixed per-layout ordering
+    // (an int attr records which layout applies on each side, since
+    // transpose()/coalesce() can change layout, e.g. CSC transposes to CSR):
+    //   COO=[indices,values]  CSR=[crow,col,values]  CSC=[ccol,row,values]
+    //   BSR=[row_ptr,col_ind,values] (+ int_attrs block_h/block_w)
+    // Interpreter-replay only (grad_mode unconditionally unsupported,
+    // matching SparseAdd/SparseSpMM/SparseTrsv's policy — none of these 7
+    // methods are ever called through Variable/autograd, only on raw
+    // SparseTensor).
+    SparseFromDense,  ///< dense -> sparse; inputs [dense], attrs out_layout
+                      ///< (+ out_block_h/out_block_w if BSR); outputs per
+                      ///< out_layout's convention above
+    SparseToDense,    ///< sparse -> dense; inputs per in_layout convention,
+                      ///< attrs in_layout (+ in_block_h/in_block_w if BSR);
+                      ///< ONE output [dense]
+    SparseCoalesce,   ///< COO dedup+sort (no-op passthrough for non-COO
+                      ///< layouts); inputs/outputs per in_layout/out_layout
+                      ///< convention (data-dependent nnz when recomputed)
+    SparseTranspose,  ///< 2D sparse transpose; inputs per in_layout
+                      ///< convention, attrs in_layout; outputs per
+                      ///< out_layout convention (NOT always == in_layout:
+                      ///< CSC transposes to CSR, BSR to COO)
+    SparseToCsr,      ///< inputs per in_layout convention, attrs in_layout;
+                      ///< outputs [crow,col,values]
+    SparseToCsc,      ///< inputs per in_layout convention, attrs in_layout;
+                      ///< outputs [ccol,row,values]
+    SparseToBsr,      ///< inputs per in_layout convention, attrs in_layout,
+                      ///< target block_h/block_w; outputs [row_ptr,col_ind,values]
+
+    // JIT-R082/R086/R087: object-detection primitives (src/ops/detection.cpp,
+    // src/nn/detection/roi_ops.cpp) already dispatch through OpId — mapping
+    // them here lets the generic dispatch<OpId> interceptor auto-record them,
+    // same OpId-mapping treatment as JIT-R100's CumSum/Sort/Nonzero/Bincount.
+    // grad_mode replay unconditionally unsupported for BoxIoU/NMS (both
+    // produce index/score tensors with no autograd meaning); ROIAlignForward
+    // DOES support differentiable replay (see execute_node) since its real
+    // backward (ROIAlignBackward) is a registered, tested autograd Function.
+    BoxIoU,           ///< pairwise IoU; inputs [boxes1, boxes2], attrs
+                      ///< iou_type (int); ONE output [num_boxes1, num_boxes2]
+    NMS,              ///< non-max suppression; inputs [boxes, scores], attrs
+                      ///< iou_threshold (float); ONE output, data-dependent
+                      ///< size (Nonzero/Bincount policy)
+    ROIAlignForward,  ///< RoIAlign pooling; inputs [features, rois], attrs
+                      ///< output_size (vec [h,w]), spatial_scale (float),
+                      ///< sampling_ratio (int), aligned (bool)
+
+    // JIT-R085: AnchorGenerator::generate has NO tensor inputs at all (a pure
+    // function of host-side scalars feat_h/feat_w/stride plus the generator's
+    // own sizes_/aspect_ratios_ config) and zero dispatch() calls internally
+    // — manually recorded directly inside AnchorGenerator::generate, mirroring
+    // JIT-R098/R100's manual-recording pattern. sizes_/aspect_ratios_ travel
+    // as small CPU Float32 tensor_attrs (not vec_attrs, since they're floats)
+    // so execute_node can reconstruct and re-call generate() exactly.
+    AnchorGenerate    ///< no tensor inputs; attrs feat_h/feat_w/stride (int),
+                      ///< tensor_attrs sizes/aspect_ratios (1D Float32); ONE
+                      ///< output [total_anchors, 4], always requires_grad=false
 };
 
 /**
@@ -435,6 +615,22 @@ public:
     auto set_parameters(std::vector<std::shared_ptr<Variable>> params) -> void;
 
     /**
+     * @brief Declare the non-trainable buffers the traced function closes
+     *        over (JIT-R005 fix — mirrors set_parameters() exactly).
+     *
+     * Records each buffer's storage identity so end_trace() can classify a
+     * non-produced op input that reads a buffer as a BUFFER LEAF (bound to
+     * the buffer index, rebound to its live value on every replay) instead
+     * of freezing it as an opaque constant — the gap that let BatchNorm/
+     * InstanceNorm running_mean_/running_var_ go stale across replays of a
+     * compiled graph. Must be called AFTER start_trace(). No-op with an
+     * empty list.
+     *
+     * @param buffers Non-trainable buffer Variables (e.g. nn::Module::buffers()).
+     */
+    auto set_buffers(std::vector<std::shared_ptr<Variable>> buffers) -> void;
+
+    /**
      * @brief Get metadata for a tensor ID.
      *
      * @param tensor_id Tensor identifier
@@ -566,6 +762,12 @@ private:
     /// end_trace() uses this to classify a non-produced op input as a parameter
     /// leaf when its storage matches a declared parameter.
     std::unordered_map<const void*, size_t> param_storage_index_;
+    /// Declared non-trainable buffers the traced function closes over
+    /// (JIT-R005 fix). Mirrors parameters_ exactly.
+    std::vector<std::shared_ptr<Variable>> buffers_;
+    /// Buffer storage identity (tensor data pointer) -> buffer index. Mirrors
+    /// param_storage_index_ exactly.
+    std::unordered_map<const void*, size_t> buffer_storage_index_;
     int64_t next_tensor_id_{0};                                 ///< Counter for unique IDs
 
     /**

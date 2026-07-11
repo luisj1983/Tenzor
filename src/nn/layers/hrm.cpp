@@ -18,6 +18,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 #include <numeric>
 #include <random>
@@ -899,6 +900,33 @@ auto HRM::forward_impl(const Variable& input) -> Variable {
 
 auto HRM::forward_with_aux(const Variable& input, const Tensor& mask)
     -> std::pair<Variable, std::vector<Variable>> {
+    // JIT-R051: HRM's Adaptive Computation Time (ACT) halting decision below
+    // (`should_halt`/`select_action`) reads a runtime tensor value host-side
+    // (.item<float>()) and uses it to `break` out of the high-cycle loop —
+    // a host-side branch on a runtime value, invisible to the tracer by
+    // construction (not just bypassed dispatch, like JIT-R003's while_loop
+    // sibling). A trace bakes in the EXACT cycle count the trace dummy
+    // happened to halt at; every future input would be forced through that
+    // frozen count regardless of its own halting signal — a silent wrong
+    // answer, not a crash. No dedicated OpType exists to represent
+    // data-dependent early-exit over a hand-rolled C++ loop (would need
+    // real JIT-aware dynamic-shape primitives — a new feature, not a point
+    // fix). Refuse loudly instead of silently compiling something wrong,
+    // matching JIT-R050's identical MoE fix. Only fires when a halting
+    // mechanism is actually configured — with neither act_ nor
+    // qlearning_act_ set, this loop is a genuinely static, fully
+    // traceable n_high_cycles-iteration unroll.
+    if ((act_ || qlearning_act_) &&
+        ::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "HRM::forward: cannot be traced by @tz.jit while an ACT halting "
+            "mechanism (act_ or qlearning_act_) is configured — the halting "
+            "decision reads a runtime tensor value host-side and would be "
+            "permanently frozen to this trace call's cycle count, silently "
+            "producing wrong output for every other input. Run this module "
+            "eagerly (outside a traced region), or construct it without ACT "
+            "for a fixed-cycle-count model that traces correctly.");
+    }
 
     Variable x = input;
 
@@ -991,8 +1019,17 @@ auto HRM::forward_with_aux(const Variable& input, const Tensor& mask)
     stats_.actual_high_cycles = actual_cycles;
     stats_.actual_low_steps = actual_cycles * config_.t_low_steps;
     stats_.actual_segments = 1;  // Single segment in forward_with_aux
-    stats_.h_participation_ratio = compute_participation_ratio(h_state);
-    stats_.l_participation_ratio = compute_participation_ratio(l_state);
+    // JIT-R051: participation-ratio stats are diagnostic-only (read via
+    // last_forward_stats(), not part of the traced output) and compute via
+    // .item<double>() -- a host-side sync that would trigger an unrelated
+    // graph break even for a fully static (no-ACT) trace, wasting a
+    // compile that would otherwise succeed. Skip while tracing; a stale/
+    // unchanged value from the previous eager call is fine for a pure
+    // introspection API.
+    if (!::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        stats_.h_participation_ratio = compute_participation_ratio(h_state);
+        stats_.l_participation_ratio = compute_participation_ratio(l_state);
+    }
 
     // Q-learning stats
     if (qlearning_act_) {
@@ -1024,6 +1061,26 @@ auto HRM::forward_with_segments(const Variable& input,
     -> std::tuple<Variable, std::vector<Variable>, Variable> {
     // Segment-based training as described in HRM paper
     // Multiple forward passes ("segments") with deep supervision
+
+    // JIT-R051: same architectural gap as forward_with_aux above — the
+    // per-segment Q-learning halting decision (`select_action`) reads a
+    // runtime tensor value host-side and `break`s the segment loop on it.
+    // Only fires when qlearning_act_ is actually configured; with it unset
+    // this loop is a genuinely static, fully traceable max_segments-
+    // iteration unroll (this function has no simple act_-based per-segment
+    // halting path, only the per-cycle inner loop, which never checks
+    // act_/qlearning_act_ at all here).
+    if (qlearning_act_ &&
+        ::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "HRM::forward_with_segments: cannot be traced by @tz.jit while "
+            "qlearning_act_ is configured — the per-segment halting decision "
+            "reads a runtime tensor value host-side and would be permanently "
+            "frozen to this trace call's segment count, silently producing "
+            "wrong output for every other input. Run this module eagerly "
+            "(outside a traced region), or construct it without Q-learning "
+            "ACT for a fixed-segment-count model that traces correctly.");
+    }
 
     Variable x = input;
 
@@ -1148,8 +1205,12 @@ auto HRM::forward_with_segments(const Variable& input,
     stats_.actual_high_cycles = total_cycles;
     stats_.actual_low_steps = total_cycles * config_.t_low_steps;
     stats_.actual_segments = actual_segments;
-    stats_.h_participation_ratio = compute_participation_ratio(h_state);
-    stats_.l_participation_ratio = compute_participation_ratio(l_state);
+    // JIT-R051: see forward_with_aux's identical fix above for the
+    // rationale — diagnostic-only stats, skip while tracing.
+    if (!::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        stats_.h_participation_ratio = compute_participation_ratio(h_state);
+        stats_.l_participation_ratio = compute_participation_ratio(l_state);
+    }
 
     if (qlearning_act_) {
         auto q_stats = qlearning_act_->stats();

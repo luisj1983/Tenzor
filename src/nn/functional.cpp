@@ -386,22 +386,40 @@ auto conv_transpose1d(const Variable& input, const Variable& weight,
     }
 
     // Go through the autograd-aware conv_transpose2d so backward flows.
-    // ConvTranspose2dBackward only supports isotropic params, but here
-    // the H dim is a fake singleton so feeding it the scalar 1D params is
-    // safe — H/W scalars happen to match (stride_h=1=stride itself when
-    // stride=1; padding_h=0=padding itself when padding=0; etc.). For
-    // non-unit stride we require H-direction params to match the W-direction
-    // params, which is trivially true because H is of length 1.
+    // The H dim is a fake singleton (H_in=1, kH=1). Passing the REAL padding/
+    // output_padding to it is wrong: H_out = (H_in-1)*stride - 2*padding +
+    // dilation*(kH-1) + output_padding + 1 = 1 - 2*padding + output_padding,
+    // which goes non-positive for common stride>1 configs (e.g. padding=1,
+    // output_padding=1 gives H_out=0) — discovered via JIT-R067's double-
+    // backward gradgrad-check testing. Mirror ConvTranspose1d::forward_impl's
+    // already-correct pattern instead: pin H's padding/output_padding to 0
+    // and dilation to 1 in the kernel call, put the real padding/
+    // output_padding/dilation only on W, then apply the real `padding` as a
+    // post-hoc differentiable trim on W (this function has no custom
+    // grad_fn of its own — every step, including the trim, must stay
+    // Variable-level so backward flows through it).
     auto input_4d = ::tenzor::unsqueeze(input, 2);
     auto weight_4d = ::tenzor::unsqueeze(weight, 2);
     auto out_4d = conv_transpose2d(
         input_4d, weight_4d, bias,
-        /*stride=*/  {stride,   stride},
-        /*padding=*/ {padding,  padding},
-        /*output_padding=*/ {output_padding, output_padding},
+        /*stride=*/  {stride, stride},
+        /*padding=*/ {0, 0},
+        /*output_padding=*/ {0, output_padding},
         groups,
-        /*dilation=*/{dilation, dilation});
-    return ::tenzor::squeeze(out_4d, 2);
+        /*dilation=*/{1, dilation});
+    auto out_1d = ::tenzor::squeeze(out_4d, 2);
+    if (padding > 0) {
+        int64_t L_full = out_1d.shape()[2];
+        int64_t L_trimmed = L_full - 2 * padding;
+        if (L_trimmed <= 0) {
+            throw std::invalid_argument(
+                "F::conv_transpose1d: output length after padding trim is "
+                "non-positive (L_full=" + std::to_string(L_full) +
+                ", padding=" + std::to_string(padding) + ")");
+        }
+        out_1d = ::tenzor::narrow(out_1d, 2, padding, L_trimmed);
+    }
+    return out_1d;
 }
 
 auto conv_transpose2d(const Variable& input, const Variable& weight,
@@ -558,7 +576,8 @@ auto conv_transpose3d(const Variable& input, const Variable& weight,
 auto max_pool2d(const Variable& input,
                 std::pair<int64_t, int64_t> kernel_size,
                 std::pair<int64_t, int64_t> stride,
-                std::pair<int64_t, int64_t> padding) -> Variable {
+                std::pair<int64_t, int64_t> padding,
+                bool ceil_mode) -> Variable {
     if (input.shape().size() != 4) {
         throw std::invalid_argument(
             "F::max_pool2d expects 4D input [N, C, H, W]");
@@ -572,11 +591,13 @@ auto max_pool2d(const Variable& input,
     // wired up. Use the per-axis (std::array) ctor so a rectangular
     // kernel/stride/padding passed via the pair API is honored on both axes
     // (matches PyTorch's MaxPool2d(kernel_size=(2, 3))) rather than silently
-    // dropping the width component.
+    // dropping the width component. ceil_mode (JIT-R060) now forwards
+    // through instead of being hardcoded false, so JIT grad-mode replay
+    // (graph.cpp's execute_node) can correctly honor a traced ceil_mode=true.
     ::tenzor::nn::MaxPool2d pool({kernel_size.first, kernel_size.second},
                                  {stride.first, stride.second},
                                  {padding.first, padding.second},
-                                 /*ceil_mode=*/false,
+                                 ceil_mode,
                                  /*return_indices=*/false);
     return pool.forward(input);
 }
@@ -2286,34 +2307,54 @@ auto multi_head_attention_forward(
     // grad_fn to propagate and no gradient reaches the projection weights.
     // Training callers must route through the MultiheadAttention nn module or
     // the Variable-based scaled_dot_product_attention instead.
+    //
+    // JIT-R054: the Tensor-level tenzor::slice()/transpose()/permute()
+    // overloads used throughout this function are thin wrappers around the
+    // raw Tensor::slice()/transpose()/permute() metadata ops — zero
+    // dispatch(), invisible to the JIT tracer. tenzor::reshape(Tensor,...)
+    // and tenzor::matmul(Tensor,Tensor) are NOT affected (both dispatch
+    // internally). These helpers route slice/transpose/permute through the
+    // Variable-level (dispatched) overload with requires_grad=false, making
+    // the op a real traced graph node while preserving the documented
+    // no-gradient contract exactly (a requires_grad=false Variable never
+    // gets a grad_fn attached).
+    auto traced_slice = [](const Tensor& t, int64_t dim, int64_t start, int64_t end) {
+        return tenzor::slice(Variable(t, false), dim, start, end).tensor();
+    };
+    auto traced_transpose = [](const Tensor& t, int64_t dim0, int64_t dim1) {
+        return tenzor::transpose(Variable(t, false), dim0, dim1).tensor();
+    };
+    auto traced_permute = [](const Tensor& t, std::vector<int64_t> dims) {
+        return tenzor::permute(Variable(t, false), std::move(dims)).tensor();
+    };
 
     // 1. Input projection: project Q, K, V using combined weight
     //    in_proj_weight is [3*E, E], in_proj_bias is [3*E]
     //    We split the weight into three [E, E] chunks for Q, K, V
 
     // Slice projection weight and bias for Q, K, V
-    auto w_q = tenzor::slice(in_proj_weight, 0, 0, embed_dim);           // [E, E]
-    auto w_k = tenzor::slice(in_proj_weight, 0, embed_dim, 2 * embed_dim);   // [E, E]
-    auto w_v = tenzor::slice(in_proj_weight, 0, 2 * embed_dim, 3 * embed_dim); // [E, E]
+    auto w_q = traced_slice(in_proj_weight, 0, 0, embed_dim);           // [E, E]
+    auto w_k = traced_slice(in_proj_weight, 0, embed_dim, 2 * embed_dim);   // [E, E]
+    auto w_v = traced_slice(in_proj_weight, 0, 2 * embed_dim, 3 * embed_dim); // [E, E]
 
-    auto b_q = tenzor::slice(in_proj_bias, 0, 0, embed_dim);             // [E]
-    auto b_k = tenzor::slice(in_proj_bias, 0, embed_dim, 2 * embed_dim);     // [E]
-    auto b_v = tenzor::slice(in_proj_bias, 0, 2 * embed_dim, 3 * embed_dim);   // [E]
+    auto b_q = traced_slice(in_proj_bias, 0, 0, embed_dim);             // [E]
+    auto b_k = traced_slice(in_proj_bias, 0, embed_dim, 2 * embed_dim);     // [E]
+    auto b_v = traced_slice(in_proj_bias, 0, 2 * embed_dim, 3 * embed_dim);   // [E]
 
     // Project: Q = query @ w_q^T + b_q, etc.
     // query is [B, Sq, E], w_q^T is [E, E] => result is [B, Sq, E]
-    auto w_q_t = tenzor::transpose(w_q, 0, 1);
-    auto w_k_t = tenzor::transpose(w_k, 0, 1);
-    auto w_v_t = tenzor::transpose(w_v, 0, 1);
+    auto w_q_t = traced_transpose(w_q, 0, 1);
+    auto w_k_t = traced_transpose(w_k, 0, 1);
+    auto w_v_t = traced_transpose(w_v, 0, 1);
 
     auto Q = tenzor::matmul(query, w_q_t) + b_q;   // [B, Sq, E]
     auto K = tenzor::matmul(key, w_k_t) + b_k;      // [B, Sk, E]
     auto V = tenzor::matmul(value, w_v_t) + b_v;     // [B, Sk, E]
 
     // 2. Reshape to (batch, num_heads, seq_len, head_dim)
-    Q = tenzor::permute(tenzor::reshape(Q, {batch_size, seq_len_q, num_heads, head_dim}), {0, 2, 1, 3});
-    K = tenzor::permute(tenzor::reshape(K, {batch_size, seq_len_k, num_heads, head_dim}), {0, 2, 1, 3});
-    V = tenzor::permute(tenzor::reshape(V, {batch_size, seq_len_k, num_heads, head_dim}), {0, 2, 1, 3});
+    Q = traced_permute(tenzor::reshape(Q, {batch_size, seq_len_q, num_heads, head_dim}), {0, 2, 1, 3});
+    K = traced_permute(tenzor::reshape(K, {batch_size, seq_len_k, num_heads, head_dim}), {0, 2, 1, 3});
+    V = traced_permute(tenzor::reshape(V, {batch_size, seq_len_k, num_heads, head_dim}), {0, 2, 1, 3});
 
     // 3. Scaled dot-product attention via existing functional
     //    scaled_dot_product_attention expects Variables with shape [B, H, L, E]
@@ -2337,7 +2378,7 @@ auto multi_head_attention_forward(
         auto d_k_f = static_cast<float>(head_dim);
         float scale = 1.0f / std::sqrt(d_k_f);
 
-        auto kt = tenzor::transpose(K, -2, -1);  // [B, H, head_dim, Sk]
+        auto kt = traced_transpose(K, -2, -1);  // [B, H, head_dim, Sk]
         auto scores = tenzor::matmul(Q, kt);      // [B, H, Sq, Sk]
         scores = scores * scale;
 
@@ -2352,11 +2393,11 @@ auto multi_head_attention_forward(
     // 4. Reshape back to (batch, seq_len, embed_dim)
     //    attended: [B, H, Sq, head_dim] -> permute -> [B, Sq, H, head_dim] -> reshape -> [B, Sq, E]
     auto merged = tenzor::reshape(
-        tenzor::permute(attended.tensor(), {0, 2, 1, 3}),
+        traced_permute(attended.tensor(), {0, 2, 1, 3}),
         {batch_size, seq_len_q, embed_dim});
 
     // 5. Output projection: output = merged @ out_proj_weight^T + out_proj_bias
-    auto out_w_t = tenzor::transpose(out_proj_weight, 0, 1);
+    auto out_w_t = traced_transpose(out_proj_weight, 0, 1);
     auto output = tenzor::matmul(merged, out_w_t) + out_proj_bias;
 
     // Return (output, attention_weights)

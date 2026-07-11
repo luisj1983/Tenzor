@@ -32,6 +32,16 @@ protected:
             return 0.2f;  // Float16 accumulates significant error in variance
         } else if (dtype() == DType::Float64) {
             return 1e-4f;
+        } else if (dtype() == DType::BFloat16) {
+            // BFloat16 has only 8 mantissa bits (~2-3 decimal digits). Every
+            // backend already accumulates mean/variance in Float32 (CPU:
+            // Kahan summation; CUDA/ROCm: widen-compute-narrow; Vulkan: F32
+            // accumulator buffers in batchnorm2d_mean_var_bf16.comp) and
+            // narrows only the final stored result, so the residual error
+            // here is expected BFloat16 output-rounding noise, not
+            // accumulated computational error. Empirically observed up to
+            // ~1.9e-3 across backends (Vulkan highest).
+            return 8e-3f;
         }
         return 1e-4f;
     }

@@ -17,6 +17,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <random>
@@ -293,12 +294,47 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
     // relative_position_bias_table_; adding it with the normal autograd add
     // keeps that gradient path intact.
     auto bias = get_relative_position_bias();  // Variable (num_heads, N, N)
+    // JIT-R103: relative_position_bias_table_ stays wherever the module was
+    // constructed (CPU by default) until moved, so get_relative_position_bias()
+    // (which derives entirely from the table) can return a bias on a
+    // different device than the actual input/attn — a lazily-placed module
+    // (constructed on CPU, called with a GPU input) hit a device-mismatch
+    // dispatch error. Reconcile with the autograd-aware to_device() so
+    // gradients still flow back to the table (mirrors Linear::forward_impl's
+    // established pattern).
+    if (bias.tensor().device() != attn.tensor().device()) {
+        bias = tenzor::to_device(bias, attn.tensor().device());
+    }
     // Unsqueeze to (1, num_heads, N, N) for broadcasting (autograd free fn)
     bias = tenzor::unsqueeze(bias, 0);
     attn = attn + bias;
 
     // Apply attention mask if provided
     if (mask.is_valid() && mask.numel() > 0) {
+        // JIT-R070: `mask` is a plain (non-Parameter) Tensor argument, so
+        // end_trace() freezes it as an opaque trace-time constant rather
+        // than a live-rebound leaf — proven empirically: even after fixing
+        // the raw Tensor::unsqueeze() calls below to dispatch (a real,
+        // necessary fix on its own), tracing once and replaying with a
+        // DIFFERENT mask value (same shape — e.g. a caller re-deriving the
+        // shifted-window mask per call instead of caching it) silently
+        // replays the FIRST call's mask. Matches JIT-R083 (RoPE)/JIT-R090
+        // (KVCache)'s established "fail loudly instead of producing wrong
+        // numerics" fix: refuse to trace whenever a real mask is supplied.
+        // The common, safe case (mask precomputed once per resolution and
+        // reused — the standard Swin/ViT pattern) is unaffected since no
+        // mask ever needs to vary within a single compiled graph's
+        // lifetime there; only a caller that rebuilds/changes the mask
+        // across calls to the SAME compiled function is protected here.
+        if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+            throw std::runtime_error(
+                "WindowAttention::forward: cannot be JIT-traced with a "
+                "non-null attention mask — the mask is baked into the "
+                "compiled graph as a constant, so a later call with a "
+                "different mask (e.g. a different resolution/shift) would "
+                "silently replay the wrong mask. Call outside "
+                "jit.compile()/jit.trace(), or omit the mask.");
+        }
         // mask shape: (num_windows, N, N)
         // attn shape: (B, num_heads, N, N) where B = batch_size * num_windows
         int64_t num_windows = mask.shape()[0];
@@ -307,9 +343,16 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
         // Reshape attn: (B, nH, N, N) -> (batch_size, num_windows, nH, N, N)
         attn = attn.reshape({batch_size, num_windows, num_heads_, N, N});
 
-        // Reshape mask: (num_windows, N, N) -> (1, num_windows, 1, N, N) for broadcasting
-        auto mask_expanded = mask.unsqueeze(0).unsqueeze(2);  // (1, num_windows, 1, N, N)
-        attn = attn + Variable(mask_expanded, false);
+        // Reshape mask: (num_windows, N, N) -> (1, num_windows, 1, N, N) for broadcasting.
+        // Still routed through the dispatched Variable-level overload (not
+        // the raw Tensor::unsqueeze()) even though tracing now always
+        // refuses above — this keeps the eager computation itself correct
+        // and consistent with the rest of the codebase's tracer-visibility
+        // conventions, and matters if is_value_identity_op-style analysis
+        // is ever added for non-traced call sites.
+        auto mask_expanded = tenzor::unsqueeze(
+            tenzor::unsqueeze(Variable(mask, false), 0), 2);  // (1, num_windows, 1, N, N)
+        attn = attn + mask_expanded;
 
         // Reshape back: (batch_size, num_windows, nH, N, N) -> (B, nH, N, N)
         attn = attn.reshape({B, num_heads_, N, N});

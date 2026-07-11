@@ -126,6 +126,22 @@ auto MemoryPlanner::plan(Graph& graph) -> MemoryPlan {
 // ============================================================================
 
 auto MemoryPlanner::compute_live_ranges(const Graph& graph) -> std::vector<LiveRange> {
+    // JIT-R023: IMPORTANT INVARIANT (previously unenforced/undocumented) —
+    // this function (and greedy_assign() below, which decides buffer-slot
+    // aliasing purely from [begin,end] INDEX-interval overlap) assumes node
+    // i's writes complete before node i+1 starts, i.e. topological index is
+    // a valid proxy for EXECUTION TIME. This holds today because the only
+    // consumer is the strictly-sequential interpreter (Graph::execute_node,
+    // one node at a time) — see JIT-R024: this plan isn't currently wired to
+    // any real tensor-placement code, so there is no live aliasing-
+    // corruption risk yet. The invariant would break the moment this plan
+    // is wired to a backend that executes independent nodes concurrently
+    // (multi-stream CUDA/ROCm, or a future IREE async lowering): two nodes
+    // with non-overlapping INDEX ranges but overlapping REAL execution time
+    // could then be aliased to the same buffer slot, reading not-yet-
+    // written or already-overwritten data. Re-verify (or make aliasing
+    // conservative around any concurrency boundary) before wiring this
+    // planner's output to actual buffer placement on such a backend.
     std::vector<LiveRange> ranges;
 
     // Build node index map: node pointer -> topological index

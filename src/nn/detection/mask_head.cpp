@@ -12,6 +12,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/nn/loss/losses.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -199,6 +200,26 @@ auto process_masks(const Tensor& mask_logits,
     // mask_logits: (num_detections, num_classes, mask_h, mask_w)
     // boxes: (num_detections, 4) as (x1, y1, x2, y2)
     // class_labels: (num_detections,)
+
+    // JIT-R088: process_masks is a genuinely variable-trip-count per-
+    // detection host loop (num_detections is itself the data-dependent
+    // output count of an upstream NMS/detection-filtering stage) whose body
+    // computes a PER-DETECTION dynamic ops::interpolate target size
+    // ({roi_h, roi_w}, read from raw per-box pixel coordinates via a host
+    // loop) and finishes with a raw per-pixel host paste into a CPU output
+    // buffer via direct pointer writes — not a traceable computation at all,
+    // the same class of genuinely-dynamic-trip-count problem as JIT-R051's
+    // HRM ACT loop. Refuse loudly rather than silently freeze the trace-
+    // dummy's detection count/mask sizes as fixed structure.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "MaskHead::process_masks cannot be traced by @tz.jit — mask "
+            "resizing/pasting is a variable-trip-count, per-detection host "
+            "loop over a data-dependent detection count and per-box dynamic "
+            "target sizes, and would be permanently frozen to this trace "
+            "call's specific detections. Run mask postprocessing eagerly "
+            "(outside a traced region).");
+    }
 
     auto num_detections = mask_logits.shape()[0];
 

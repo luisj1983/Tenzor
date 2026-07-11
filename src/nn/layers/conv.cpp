@@ -24,6 +24,24 @@ namespace tenzor::nn {
 // Helper namespace for convolution operations
 namespace {
 
+// JIT-R073: Tensor::unsqueeze()/squeeze() are pure TensorImpl metadata
+// tricks with ZERO dispatch() calls, invisible to both the tracer's generic
+// dispatch<OpId> interception and its own tensor lineage map — the SAME bug
+// class as JIT-R052/R058a. Currently masked (OpId::DepthwiseConv1d is
+// unmapped, so the dispatch() call these wrap graph-breaks first regardless
+// of whether the operands were traced), but this is the correct fix ready
+// for when depthwise Conv1d JIT tracing support is added. Mirrors quantized_
+// layers.cpp's traced_unsqueeze/traced_squeeze exactly: routes through the
+// Variable-level autograd wrappers, which DO call jit_record_shape_op() when
+// tracing is active. Safe to wrap in Variable(t, false) — every call site is
+// inference-only glue around a dispatch() call, not user-facing autograd.
+inline auto traced_unsqueeze(const Tensor& t, int64_t dim) -> Tensor {
+    return ::tenzor::unsqueeze(::tenzor::Variable(t, false), dim).tensor();
+}
+inline auto traced_squeeze(const Tensor& t, int64_t dim) -> Tensor {
+    return ::tenzor::squeeze(::tenzor::Variable(t, false), dim).tensor();
+}
+
 // Calculate output size for convolution
 auto calculate_output_size(int64_t input_size, int64_t kernel_size,
                            int64_t stride, int64_t padding, int64_t dilation) -> int64_t {
@@ -63,6 +81,83 @@ auto pad_1d(const Tensor& input, int64_t padding) -> Tensor {
 // ============================================================================
 // Conv2dBackward - Autograd Function
 // ============================================================================
+
+// ============================================================================
+// Conv2dGradWeightBackward - JIT-R067
+//
+// grad_weight[oc,ic,kh,kw] = sum_{b,oh,ow} grad_out[b,oc,oh,ow] *
+// input[b,ic, oh*sH-pH+kh*dH, ow*sW-pW+kw*dW] is BILINEAR in (grad_out,
+// input). Given upstream gradient G (same shape as weight), the two partial
+// derivatives collapse onto the SAME primitives Conv2dBackward's own
+// grad_input already uses:
+//   d(Loss)/d(grad_out) = conv2d(input, G, stride, padding, dilation, groups)
+//   d(Loss)/d(input)    = conv_transpose2d(grad_out, G, stride, padding,
+//                                           output_padding=0, groups, dilation)
+// (the second is literally grad_input's own formula with G substituted for
+// weight — falls out of bilinearity). Both route through the already-
+// differentiable, already-multi-backend-verified functional::conv2d /
+// conv_transpose2d, so this needs no new backend kernel work and inherits
+// correctness from those existing, tested entry points. This closes the
+// gap where a 3rd-order gradient (a loss depending on grad_weight from a
+// create_graph=true backward, differentiated again) silently returned zero.
+// ============================================================================
+class Conv2dGradWeightBackward : public Function {
+public:
+    Conv2dGradWeightBackward(int64_t stride_h, int64_t stride_w,
+                              int64_t padding_h, int64_t padding_w,
+                              int64_t dilation_h, int64_t dilation_w,
+                              int64_t groups,
+                              std::vector<Tensor> tensors_to_save)
+        : sH_(stride_h), sW_(stride_w), pH_(padding_h), pW_(padding_w),
+          dH_(dilation_h), dW_(dilation_w), groups_(groups) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("Conv2dGradWeightBackward::forward should not be called");
+    }
+
+    // input_variables()/next_functions() order is {grad_out_var, input_var};
+    // grad_outputs[0] = G (upstream gradient w.r.t. grad_weight, same shape
+    // as weight). Returns {d(Loss)/d(grad_out), d(Loss)/d(input)}.
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& G = grad_outputs[0];
+        const Tensor& grad_out_t = saved_tensors_[0];
+        const Tensor& input_t = saved_tensors_[1];
+
+        Variable Gv(G, false);
+        Variable d_grad_out = ::tenzor::nn::functional::conv2d(
+            Variable(input_t, false), Gv, std::nullopt,
+            {sH_, sW_}, {pH_, pW_}, {dH_, dW_}, groups_);
+        Variable d_input = ::tenzor::nn::functional::conv_transpose2d(
+            Variable(grad_out_t, false), Gv, std::nullopt,
+            {sH_, sW_}, {pH_, pW_}, {0, 0}, groups_, {dH_, dW_});
+        return {d_grad_out.tensor(), d_input.tensor()};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        Variable G = grad_outputs[0];
+        Variable grad_out_var, input_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            grad_out_var = saved_variables_[0];
+            input_var = saved_variables_[1];
+        } else {
+            grad_out_var = Variable(saved_tensors_[0], false);
+            input_var = Variable(saved_tensors_[1], false);
+        }
+        Variable d_grad_out = ::tenzor::nn::functional::conv2d(
+            input_var, G, std::nullopt, {sH_, sW_}, {pH_, pW_}, {dH_, dW_}, groups_);
+        Variable d_input = ::tenzor::nn::functional::conv_transpose2d(
+            grad_out_var, G, std::nullopt, {sH_, sW_}, {pH_, pW_}, {0, 0}, groups_, {dH_, dW_});
+        return {d_grad_out, d_input};
+    }
+
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
+
+private:
+    int64_t sH_, sW_, pH_, pW_, dH_, dW_, groups_;
+};
 
 class Conv2dBackward : public Function {
 public:
@@ -204,7 +299,28 @@ public:
                                            input_var.tensor(),
                                            weight_var.tensor()};
         auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight, gw_inputs, backward_attrs)[0];
-        Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
+
+        // JIT-R067: attach a differentiable grad_fn (Conv2dGradWeightBackward,
+        // defined above) so a 3rd-order gradient — a loss that depends on
+        // grad_weight from this create_graph=true backward, differentiated
+        // again — flows correctly back to grad_out_var/input_var instead of
+        // silently stopping here. grad_input's path already supports this;
+        // this closes the matching gap on the weight-gradient path.
+        bool gw_requires_grad = ::tenzor::is_grad_enabled() &&
+            (grad_out_var.requires_grad() || input_var.requires_grad());
+        Variable grad_weight(grad_weight_t, gw_requires_grad);
+        if (gw_requires_grad) {
+            auto gw_fn = std::make_shared<Conv2dGradWeightBackward>(
+                stride_h_, stride_w_, padding_h_, padding_w_,
+                dilation_h_, dilation_w_, groups_,
+                std::vector<Tensor>{grad_out_var.tensor(), input_var.tensor()});
+            if (::tenzor::is_creating_graph()) {
+                gw_fn->save_variables_for_backward({grad_out_var, input_var});
+            }
+            gw_fn->set_next_functions({grad_out_var.grad_fn(), input_var.grad_fn()});
+            gw_fn->set_input_variables({grad_out_var, input_var});
+            grad_weight.set_grad_fn(gw_fn);
+        }
 
         if (has_bias) {
             // grad_bias = sum(grad_output, dims=[0,2,3])
@@ -438,6 +554,68 @@ auto Conv2d::reset_parameters() -> void {
 // Conv1d Implementation (similar structure with 1D operations)
 // ============================================================================
 
+// ============================================================================
+// Conv1dGradWeightBackward - JIT-R067 (see Conv2dGradWeightBackward above for
+// the full derivation; identical bilinear structure, 1D functional entry
+// points). d(Loss)/d(grad_out) = conv1d(input, G, ...); d(Loss)/d(input) =
+// conv_transpose1d(grad_out, G, ...). Uses the ORIGINAL (unpadded) input_var
+// and the real padding_ attribute via the native functional::conv1d /
+// conv_transpose1d entry points, rather than replaying the manual
+// pad_1d+unsqueeze-to-4D shoehorn the tensor-level kernel dispatch uses for
+// computing grad_weight's forward VALUE — that shoehorn exists only because
+// the raw backend kernel needs a 4D shape, not because the math needs it.
+// ============================================================================
+class Conv1dGradWeightBackward : public Function {
+public:
+    Conv1dGradWeightBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                              std::vector<Tensor> tensors_to_save)
+        : stride_(stride), padding_(padding), dilation_(dilation), groups_(groups) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("Conv1dGradWeightBackward::forward should not be called");
+    }
+
+    // input_variables()/next_functions() order is {grad_out_var, input_var}.
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& G = grad_outputs[0];
+        const Tensor& grad_out_t = saved_tensors_[0];
+        const Tensor& input_t = saved_tensors_[1];
+
+        Variable Gv(G, false);
+        Variable d_grad_out = ::tenzor::nn::functional::conv1d(
+            Variable(input_t, false), Gv, std::nullopt, stride_, padding_, dilation_, groups_);
+        Variable d_input = ::tenzor::nn::functional::conv_transpose1d(
+            Variable(grad_out_t, false), Gv, std::nullopt, stride_, padding_,
+            /*output_padding=*/0, groups_, dilation_);
+        return {d_grad_out.tensor(), d_input.tensor()};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        Variable G = grad_outputs[0];
+        Variable grad_out_var, input_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            grad_out_var = saved_variables_[0];
+            input_var = saved_variables_[1];
+        } else {
+            grad_out_var = Variable(saved_tensors_[0], false);
+            input_var = Variable(saved_tensors_[1], false);
+        }
+        Variable d_grad_out = ::tenzor::nn::functional::conv1d(
+            input_var, G, std::nullopt, stride_, padding_, dilation_, groups_);
+        Variable d_input = ::tenzor::nn::functional::conv_transpose1d(
+            grad_out_var, G, std::nullopt, stride_, padding_, /*output_padding=*/0, groups_, dilation_);
+        return {d_grad_out, d_input};
+    }
+
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
+
+private:
+    int64_t stride_, padding_, dilation_, groups_;
+};
+
 class Conv1dBackward : public Function {
 public:
     Conv1dBackward(int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
@@ -555,7 +733,25 @@ public:
 
         std::vector<Tensor> gw_inputs = {grad_4d, input_4d, weight_4d};
         auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight, gw_inputs, backward_attrs)[0];
-        Variable grad_weight(grad_weight_t.squeeze(2), grad_out_var.requires_grad());
+
+        // JIT-R067: attach a differentiable grad_fn (Conv1dGradWeightBackward,
+        // defined above) — see Conv2dGradWeightBackward's comment for the
+        // full derivation. Closes the 3rd-order-gradient gap on the
+        // weight-gradient path.
+        bool gw_requires_grad = ::tenzor::is_grad_enabled() &&
+            (grad_out_var.requires_grad() || input_var.requires_grad());
+        Variable grad_weight(grad_weight_t.squeeze(2), gw_requires_grad);
+        if (gw_requires_grad) {
+            auto gw_fn = std::make_shared<Conv1dGradWeightBackward>(
+                stride_, padding_, dilation_, groups_,
+                std::vector<Tensor>{grad_out_var.tensor(), input_var.tensor()});
+            if (::tenzor::is_creating_graph()) {
+                gw_fn->save_variables_for_backward({grad_out_var, input_var});
+            }
+            gw_fn->set_next_functions({grad_out_var.grad_fn(), input_var.grad_fn()});
+            gw_fn->set_input_variables({grad_out_var, input_var});
+            grad_weight.set_grad_fn(gw_fn);
+        }
 
         if (has_bias) {
             auto gb = ::tenzor::sum(grad_out_var, 0, false);  // sum over batch
@@ -680,7 +876,8 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     if (depthwise_conv1d_kernel_available && eligible_depthwise) {
         // Depthwise path keeps the proven manual-pad + unsqueeze-to-4D form.
         Tensor padded = (padding_ > 0) ? pad_1d(input_tensor, padding_) : input_tensor;
-        std::vector<Tensor> dw_inputs = {padded.unsqueeze(2), weight_matched.unsqueeze(2)};
+        std::vector<Tensor> dw_inputs = {traced_unsqueeze(padded, 2),
+                                         traced_unsqueeze(weight_matched, 2)};
         if (bias_ptr != nullptr) {
             dw_inputs.push_back(*bias_ptr);
         }
@@ -691,7 +888,7 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         dw_attrs.set(AttrKey::Groups, groups_);
         auto r = dispatch(OpId::DepthwiseConv1d,
                           std::span<const Tensor>(dw_inputs), dw_attrs);
-        output = r[0].squeeze(2);
+        output = traced_squeeze(r[0], 2);
     } else {
         // Native 1-D conv: dispatch OpId::Conv1dForward with 3-D operands and
         // the real padding. The backend kernel pads the length axis only
@@ -762,6 +959,96 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
 // Both backward() and backward_with_variables() pack per-axis attrs so the
 // adjoint Conv2d dispatch (Conv2dForward + Conv2dBackwardWeight via swapped
 // roles) sees the anisotropic config in its registered kernel.
+// ============================================================================
+// ConvTranspose2dGradWeightBackward - JIT-R067 (see Conv2dGradWeightBackward
+// and ConvTranspose1dGradWeightBackward above for the full derivation and
+// role-swap rationale). A=input_var, B=grad_out_var:
+//   d(Loss)/d(input_var)    = conv2d(grad_out_var, G, ...) [cropped to
+//                              input_shape, mirroring this class's own
+//                              grad_input correction]
+//   d(Loss)/d(grad_out_var) = conv_transpose2d(input_var, G, ..., opH_, opW_)
+//                              [defensively cropped to grad_out_var's shape]
+// ============================================================================
+class ConvTranspose2dGradWeightBackward : public Function {
+public:
+    ConvTranspose2dGradWeightBackward(int64_t sH, int64_t sW, int64_t pH, int64_t pW,
+                                       int64_t opH, int64_t opW, int64_t dH, int64_t dW,
+                                       int64_t groups,
+                                       std::vector<Tensor> tensors_to_save)
+        : sH_(sH), sW_(sW), pH_(pH), pW_(pW), opH_(opH), opW_(opW),
+          dH_(dH), dW_(dW), groups_(groups) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("ConvTranspose2dGradWeightBackward::forward should not be called");
+    }
+
+    static auto crop_to(const Tensor& t, std::span<const int64_t> target_shape) -> Tensor {
+        auto s = t.shape();
+        if (s.size() != 4 || target_shape.size() != 4) return t;
+        Tensor out = t;
+        if (s[2] != target_shape[2]) out = tenzor::slice(out, 2, 0, target_shape[2]);
+        if (s[3] != target_shape[3]) out = tenzor::slice(out, 3, 0, target_shape[3]);
+        return out;
+    }
+
+    static auto crop_to_var(const Variable& v, std::span<const int64_t> target_shape) -> Variable {
+        auto s = v.tensor().shape();
+        if (s.size() != 4 || target_shape.size() != 4) return v;
+        Variable out = v;
+        if (s[2] != target_shape[2]) out = ::tenzor::narrow(out, 2, 0, target_shape[2]);
+        if (s[3] != target_shape[3]) out = ::tenzor::narrow(out, 3, 0, target_shape[3]);
+        return out;
+    }
+
+    // input_variables()/next_functions() order is {input_var, grad_out_var}.
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& G = grad_outputs[0];
+        const Tensor& input_t = saved_tensors_[0];
+        const Tensor& grad_out_t = saved_tensors_[1];
+
+        Variable Gv(G, false);
+        Variable d_input_var = ::tenzor::nn::functional::conv2d(
+            Variable(grad_out_t, false), Gv, std::nullopt,
+            {sH_, sW_}, {pH_, pW_}, {dH_, dW_}, groups_);
+        Tensor d_input = crop_to(d_input_var.tensor(), input_t.shape());
+
+        Variable d_grad_out_var = ::tenzor::nn::functional::conv_transpose2d(
+            Variable(input_t, false), Gv, std::nullopt,
+            {sH_, sW_}, {pH_, pW_}, {opH_, opW_}, groups_, {dH_, dW_});
+        Tensor d_grad_out = crop_to(d_grad_out_var.tensor(), grad_out_t.shape());
+        return {d_input, d_grad_out};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        Variable G = grad_outputs[0];
+        Variable input_var, grad_out_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            input_var = saved_variables_[0];
+            grad_out_var = saved_variables_[1];
+        } else {
+            input_var = Variable(saved_tensors_[0], false);
+            grad_out_var = Variable(saved_tensors_[1], false);
+        }
+
+        Variable d_input = ::tenzor::nn::functional::conv2d(
+            grad_out_var, G, std::nullopt, {sH_, sW_}, {pH_, pW_}, {dH_, dW_}, groups_);
+        d_input = crop_to_var(d_input, input_var.tensor().shape());
+
+        Variable d_grad_out = ::tenzor::nn::functional::conv_transpose2d(
+            input_var, G, std::nullopt, {sH_, sW_}, {pH_, pW_}, {opH_, opW_}, groups_, {dH_, dW_});
+        d_grad_out = crop_to_var(d_grad_out, grad_out_var.tensor().shape());
+        return {d_input, d_grad_out};
+    }
+
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
+
+private:
+    int64_t sH_, sW_, pH_, pW_, opH_, opW_, dH_, dW_, groups_;
+};
+
 class ConvTranspose2dBackward : public Function {
 public:
     ConvTranspose2dBackward(int64_t sH, int64_t sW,
@@ -896,7 +1183,25 @@ public:
         std::vector<Tensor> weight_grad_inputs = {input_var.tensor(), grad_out_var.tensor(), weight_var.tensor()};
         auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight,
             std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs)[0];
-        Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
+
+        // JIT-R067: attach a differentiable grad_fn
+        // (ConvTranspose2dGradWeightBackward, defined above) so a 3rd-order
+        // gradient flows correctly back to input_var/grad_out_var instead of
+        // silently stopping here.
+        bool gw_requires_grad = ::tenzor::is_grad_enabled() &&
+            (input_var.requires_grad() || grad_out_var.requires_grad());
+        Variable grad_weight(grad_weight_t, gw_requires_grad);
+        if (gw_requires_grad) {
+            auto gw_fn = std::make_shared<ConvTranspose2dGradWeightBackward>(
+                sH_, sW_, pH_, pW_, opH_, opW_, dH_, dW_, groups_,
+                std::vector<Tensor>{input_var.tensor(), grad_out_var.tensor()});
+            if (::tenzor::is_creating_graph()) {
+                gw_fn->save_variables_for_backward({input_var, grad_out_var});
+            }
+            gw_fn->set_next_functions({input_var.grad_fn(), grad_out_var.grad_fn()});
+            gw_fn->set_input_variables({input_var, grad_out_var});
+            grad_weight.set_grad_fn(gw_fn);
+        }
 
         if (has_bias) {
             auto gb = ::tenzor::sum(grad_out_var, 0, false);
@@ -1104,6 +1409,69 @@ auto ConvTranspose2d::reset_parameters() -> void {
 // Audit I5: Conv3dBackward now carries per-axis stride/padding/dilation. The
 // scalar-arg ctor delegates to the per-axis ctor with identical D/H/W values
 // to keep legacy callers compiling.
+// ============================================================================
+// Conv3dGradWeightBackward - JIT-R067 (see Conv2dGradWeightBackward above for
+// the full derivation; identical bilinear structure, 3D functional entries).
+// d(Loss)/d(grad_out) = conv3d(input, G, ...); d(Loss)/d(input) =
+// conv_transpose3d(grad_out, G, ...) — the latter is Conv3dBackward's own
+// grad_input formula with G substituted for weight.
+// ============================================================================
+class Conv3dGradWeightBackward : public Function {
+public:
+    Conv3dGradWeightBackward(int64_t sD, int64_t sH, int64_t sW,
+                              int64_t pD, int64_t pH, int64_t pW,
+                              int64_t dD, int64_t dH, int64_t dW,
+                              int64_t groups,
+                              std::vector<Tensor> tensors_to_save)
+        : sD_(sD), sH_(sH), sW_(sW), pD_(pD), pH_(pH), pW_(pW),
+          dD_(dD), dH_(dH), dW_(dW), groups_(groups) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("Conv3dGradWeightBackward::forward should not be called");
+    }
+
+    // input_variables()/next_functions() order is {grad_out_var, input_var}.
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& G = grad_outputs[0];
+        const Tensor& grad_out_t = saved_tensors_[0];
+        const Tensor& input_t = saved_tensors_[1];
+
+        Variable Gv(G, false);
+        Variable d_grad_out = ::tenzor::nn::functional::conv3d(
+            Variable(input_t, false), Gv, std::nullopt,
+            {sD_, sH_, sW_}, {pD_, pH_, pW_}, {dD_, dH_, dW_}, groups_);
+        Variable d_input = ::tenzor::nn::functional::conv_transpose3d(
+            Variable(grad_out_t, false), Gv, std::nullopt,
+            {sD_, sH_, sW_}, {pD_, pH_, pW_}, {0, 0, 0}, groups_, {dD_, dH_, dW_});
+        return {d_grad_out.tensor(), d_input.tensor()};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        Variable G = grad_outputs[0];
+        Variable grad_out_var, input_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            grad_out_var = saved_variables_[0];
+            input_var = saved_variables_[1];
+        } else {
+            grad_out_var = Variable(saved_tensors_[0], false);
+            input_var = Variable(saved_tensors_[1], false);
+        }
+        Variable d_grad_out = ::tenzor::nn::functional::conv3d(
+            input_var, G, std::nullopt, {sD_, sH_, sW_}, {pD_, pH_, pW_}, {dD_, dH_, dW_}, groups_);
+        Variable d_input = ::tenzor::nn::functional::conv_transpose3d(
+            grad_out_var, G, std::nullopt, {sD_, sH_, sW_}, {pD_, pH_, pW_}, {0, 0, 0}, groups_, {dD_, dH_, dW_});
+        return {d_grad_out, d_input};
+    }
+
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
+
+private:
+    int64_t sD_, sH_, sW_, pD_, pH_, pW_, dD_, dH_, dW_, groups_;
+};
+
 class Conv3dBackward : public Function {
 public:
     Conv3dBackward(int64_t sD, int64_t sH, int64_t sW,
@@ -1229,7 +1597,25 @@ public:
 
         std::vector<Tensor> bw_inputs = {grad_out_var.tensor(), input_var.tensor(), weight_var.tensor()};
         auto grad_weight_t = dispatch<OpId::Conv3dBackwardWeight>(bw_inputs, bw_attrs)[0];
-        Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
+
+        // JIT-R067: attach a differentiable grad_fn (Conv3dGradWeightBackward,
+        // defined above) — see Conv2dGradWeightBackward's comment for the
+        // full derivation. Closes the 3rd-order-gradient gap on the
+        // weight-gradient path.
+        bool gw_requires_grad = ::tenzor::is_grad_enabled() &&
+            (grad_out_var.requires_grad() || input_var.requires_grad());
+        Variable grad_weight(grad_weight_t, gw_requires_grad);
+        if (gw_requires_grad) {
+            auto gw_fn = std::make_shared<Conv3dGradWeightBackward>(
+                sD_, sH_, sW_, pD_, pH_, pW_, dD_, dH_, dW_, groups_,
+                std::vector<Tensor>{grad_out_var.tensor(), input_var.tensor()});
+            if (::tenzor::is_creating_graph()) {
+                gw_fn->save_variables_for_backward({grad_out_var, input_var});
+            }
+            gw_fn->set_next_functions({grad_out_var.grad_fn(), input_var.grad_fn()});
+            gw_fn->set_input_variables({grad_out_var, input_var});
+            grad_weight.set_grad_fn(gw_fn);
+        }
 
         if (has_bias) {
             auto gb = ::tenzor::sum(grad_out_var, 0, false);
@@ -1485,6 +1871,100 @@ auto Conv3d::reset_parameters() -> void {
 // ============================================================================
 
 // Audit I5-followup: per-axis ConvTranspose3dBackward.
+// ============================================================================
+// ConvTranspose3dGradWeightBackward - JIT-R067 (see Conv2dGradWeightBackward
+// and ConvTranspose1dGradWeightBackward above for the full derivation and
+// role-swap rationale). A=input_var, B=grad_out_var:
+//   d(Loss)/d(input_var)    = conv3d(grad_out_var, G, ...) [cropped to
+//                              input_shape, mirroring this class's own
+//                              grad_input correction]
+//   d(Loss)/d(grad_out_var) = conv_transpose3d(input_var, G, ..., opD_/opH_/opW_)
+//                              [defensively cropped to grad_out_var's shape]
+// ============================================================================
+class ConvTranspose3dGradWeightBackward : public Function {
+public:
+    ConvTranspose3dGradWeightBackward(int64_t sD, int64_t sH, int64_t sW,
+                                       int64_t pD, int64_t pH, int64_t pW,
+                                       int64_t opD, int64_t opH, int64_t opW,
+                                       int64_t dD, int64_t dH, int64_t dW,
+                                       int64_t groups,
+                                       std::vector<Tensor> tensors_to_save)
+        : sD_(sD), sH_(sH), sW_(sW), pD_(pD), pH_(pH), pW_(pW),
+          opD_(opD), opH_(opH), opW_(opW), dD_(dD), dH_(dH), dW_(dW), groups_(groups) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("ConvTranspose3dGradWeightBackward::forward should not be called");
+    }
+
+    static auto crop_to(const Tensor& t, std::span<const int64_t> target_shape) -> Tensor {
+        auto s = t.shape();
+        if (s.size() != 5 || target_shape.size() != 5) return t;
+        Tensor out = t;
+        if (s[2] != target_shape[2]) out = tenzor::slice(out, 2, 0, target_shape[2]);
+        if (s[3] != target_shape[3]) out = tenzor::slice(out, 3, 0, target_shape[3]);
+        if (s[4] != target_shape[4]) out = tenzor::slice(out, 4, 0, target_shape[4]);
+        return out;
+    }
+
+    static auto crop_to_var(const Variable& v, std::span<const int64_t> target_shape) -> Variable {
+        auto s = v.tensor().shape();
+        if (s.size() != 5 || target_shape.size() != 5) return v;
+        Variable out = v;
+        if (s[2] != target_shape[2]) out = ::tenzor::narrow(out, 2, 0, target_shape[2]);
+        if (s[3] != target_shape[3]) out = ::tenzor::narrow(out, 3, 0, target_shape[3]);
+        if (s[4] != target_shape[4]) out = ::tenzor::narrow(out, 4, 0, target_shape[4]);
+        return out;
+    }
+
+    // input_variables()/next_functions() order is {input_var, grad_out_var}.
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& G = grad_outputs[0];
+        const Tensor& input_t = saved_tensors_[0];
+        const Tensor& grad_out_t = saved_tensors_[1];
+
+        Variable Gv(G, false);
+        Variable d_input_var = ::tenzor::nn::functional::conv3d(
+            Variable(grad_out_t, false), Gv, std::nullopt,
+            {sD_, sH_, sW_}, {pD_, pH_, pW_}, {dD_, dH_, dW_}, groups_);
+        Tensor d_input = crop_to(d_input_var.tensor(), input_t.shape());
+
+        Variable d_grad_out_var = ::tenzor::nn::functional::conv_transpose3d(
+            Variable(input_t, false), Gv, std::nullopt,
+            {sD_, sH_, sW_}, {pD_, pH_, pW_}, {opD_, opH_, opW_}, groups_, {dD_, dH_, dW_});
+        Tensor d_grad_out = crop_to(d_grad_out_var.tensor(), grad_out_t.shape());
+        return {d_input, d_grad_out};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        Variable G = grad_outputs[0];
+        Variable input_var, grad_out_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            input_var = saved_variables_[0];
+            grad_out_var = saved_variables_[1];
+        } else {
+            input_var = Variable(saved_tensors_[0], false);
+            grad_out_var = Variable(saved_tensors_[1], false);
+        }
+
+        Variable d_input = ::tenzor::nn::functional::conv3d(
+            grad_out_var, G, std::nullopt, {sD_, sH_, sW_}, {pD_, pH_, pW_}, {dD_, dH_, dW_}, groups_);
+        d_input = crop_to_var(d_input, input_var.tensor().shape());
+
+        Variable d_grad_out = ::tenzor::nn::functional::conv_transpose3d(
+            input_var, G, std::nullopt, {sD_, sH_, sW_}, {pD_, pH_, pW_}, {opD_, opH_, opW_}, groups_, {dD_, dH_, dW_});
+        d_grad_out = crop_to_var(d_grad_out, grad_out_var.tensor().shape());
+        return {d_input, d_grad_out};
+    }
+
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
+
+private:
+    int64_t sD_, sH_, sW_, pD_, pH_, pW_, opD_, opH_, opW_, dD_, dH_, dW_, groups_;
+};
+
 class ConvTranspose3dBackward : public Function {
 public:
     ConvTranspose3dBackward(int64_t sD, int64_t sH, int64_t sW,
@@ -1633,9 +2113,40 @@ public:
         pack_t3d_attrs(bw_attrs);
         bw_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
-        std::vector<Tensor> bw_inputs = {input_var.tensor(), grad_out_var.tensor(), weight_var.tensor()};
+        // Pre-existing bug fixed alongside JIT-R067: this previously passed
+        // {input, grad_out, weight}, but ConvTranspose3dBackward::backward()
+        // (the tensor-level sibling) and the CUDA cuDNN kernel wrapper both
+        // expect {grad_out, input, weight} — dispatch<OpId::
+        // ConvTranspose3dBackwardWeight> reads in_channels from inputs[1]'s
+        // channel dim, so the swapped order silently fed it grad_out's
+        // channel count instead of input's. On CPU/Vulkan/ROCm this went
+        // undetected (their kernels don't validate against it the same way);
+        // on CUDA it threw a shape-mismatch in validate_grad_shape_or_throw
+        // for any ConvTranspose3d with in_channels != out_channels/groups —
+        // discovered via JIT-R067's gradgrad-check testing, unreachable
+        // before because nothing previously built a real 2nd-order graph
+        // through ConvTranspose3d with asymmetric channels.
+        std::vector<Tensor> bw_inputs = {grad_out_var.tensor(), input_var.tensor(), weight_var.tensor()};
         auto grad_weight_t = dispatch<OpId::ConvTranspose3dBackwardWeight>(bw_inputs, bw_attrs)[0];
-        Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
+
+        // JIT-R067: attach a differentiable grad_fn
+        // (ConvTranspose3dGradWeightBackward, defined above) so a 3rd-order
+        // gradient flows correctly back to input_var/grad_out_var instead of
+        // silently stopping here.
+        bool gw_requires_grad = ::tenzor::is_grad_enabled() &&
+            (input_var.requires_grad() || grad_out_var.requires_grad());
+        Variable grad_weight(grad_weight_t, gw_requires_grad);
+        if (gw_requires_grad) {
+            auto gw_fn = std::make_shared<ConvTranspose3dGradWeightBackward>(
+                sD_, sH_, sW_, pD_, pH_, pW_, opD_, opH_, opW_, dD_, dH_, dW_, groups_,
+                std::vector<Tensor>{input_var.tensor(), grad_out_var.tensor()});
+            if (::tenzor::is_creating_graph()) {
+                gw_fn->save_variables_for_backward({input_var, grad_out_var});
+            }
+            gw_fn->set_next_functions({input_var.grad_fn(), grad_out_var.grad_fn()});
+            gw_fn->set_input_variables({input_var, grad_out_var});
+            grad_weight.set_grad_fn(gw_fn);
+        }
 
         if (has_bias) {
             auto gb = ::tenzor::sum(grad_out_var, 0, false);
@@ -1832,6 +2343,95 @@ auto ConvTranspose3d::reset_parameters() -> void {
 // ConvTranspose1d Implementation
 // ============================================================================
 
+// ============================================================================
+// ConvTranspose1dGradWeightBackward - JIT-R067 (see Conv2dGradWeightBackward
+// above for the full derivation). ConvTranspose1dBackward's grad_weight
+// dispatch uses "swapped roles" — input_var plays the role Conv's grad_out
+// plays, grad_out_var plays the role Conv's input plays (per the existing
+// class's own "Swap roles" comment) — so with A=input_var, B=grad_out_var:
+//   d(Loss)/d(input_var)    = conv1d(grad_out_var, G, ...)
+//                              [same formula as this class's own grad_input,
+//                               with G substituted for weight — needs the
+//                               SAME crop-to-input_shape correction]
+//   d(Loss)/d(grad_out_var) = conv_transpose1d(input_var, G, ..., output_padding_)
+//                              [uses the REAL output_padding_ so the result
+//                               naturally reproduces grad_out_var's shape;
+//                               defensively cropped as a safety net]
+// ============================================================================
+class ConvTranspose1dGradWeightBackward : public Function {
+public:
+    ConvTranspose1dGradWeightBackward(int64_t stride, int64_t padding, int64_t output_padding,
+                                       int64_t dilation, int64_t groups,
+                                       std::vector<Tensor> tensors_to_save)
+        : stride_(stride), padding_(padding), output_padding_(output_padding),
+          dilation_(dilation), groups_(groups) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("ConvTranspose1dGradWeightBackward::forward should not be called");
+    }
+
+    // input_variables()/next_functions() order is {input_var, grad_out_var}.
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& G = grad_outputs[0];
+        const Tensor& input_t = saved_tensors_[0];
+        const Tensor& grad_out_t = saved_tensors_[1];
+        auto input_shape = input_t.shape();
+        auto grad_out_shape = grad_out_t.shape();
+
+        Variable Gv(G, false);
+        Variable d_input_var = ::tenzor::nn::functional::conv1d(
+            Variable(grad_out_t, false), Gv, std::nullopt, stride_, padding_, dilation_, groups_);
+        Tensor d_input = d_input_var.tensor();
+        if (d_input.shape().size() == 3 && d_input.shape()[2] != input_shape[2]) {
+            d_input = tenzor::slice(d_input, 2, 0, input_shape[2]);
+        }
+
+        Variable d_grad_out_var = ::tenzor::nn::functional::conv_transpose1d(
+            Variable(input_t, false), Gv, std::nullopt, stride_, padding_,
+            output_padding_, groups_, dilation_);
+        Tensor d_grad_out = d_grad_out_var.tensor();
+        if (d_grad_out.shape().size() == 3 && d_grad_out.shape()[2] != grad_out_shape[2]) {
+            d_grad_out = tenzor::slice(d_grad_out, 2, 0, grad_out_shape[2]);
+        }
+        return {d_input, d_grad_out};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        Variable G = grad_outputs[0];
+        Variable input_var, grad_out_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            input_var = saved_variables_[0];
+            grad_out_var = saved_variables_[1];
+        } else {
+            input_var = Variable(saved_tensors_[0], false);
+            grad_out_var = Variable(saved_tensors_[1], false);
+        }
+        auto input_shape = input_var.tensor().shape();
+        auto grad_out_shape = grad_out_var.tensor().shape();
+
+        Variable d_input = ::tenzor::nn::functional::conv1d(
+            grad_out_var, G, std::nullopt, stride_, padding_, dilation_, groups_);
+        if (d_input.tensor().shape().size() == 3 && d_input.tensor().shape()[2] != input_shape[2]) {
+            d_input = ::tenzor::narrow(d_input, 2, 0, input_shape[2]);
+        }
+
+        Variable d_grad_out = ::tenzor::nn::functional::conv_transpose1d(
+            input_var, G, std::nullopt, stride_, padding_, output_padding_, groups_, dilation_);
+        if (d_grad_out.tensor().shape().size() == 3 && d_grad_out.tensor().shape()[2] != grad_out_shape[2]) {
+            d_grad_out = ::tenzor::narrow(d_grad_out, 2, 0, grad_out_shape[2]);
+        }
+        return {d_input, d_grad_out};
+    }
+
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
+
+private:
+    int64_t stride_, padding_, output_padding_, dilation_, groups_;
+};
+
 class ConvTranspose1dBackward : public Function {
 public:
     ConvTranspose1dBackward(int64_t stride, int64_t padding, int64_t output_padding,
@@ -1974,9 +2574,28 @@ public:
 
         // Swap roles: input acts as grad_output, grad_output acts as input
         std::vector<Tensor> weight_grad_inputs = {input_4d, grad_4d, weight_4d};
-        auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight,
-            std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs)[0];
-        Variable grad_weight(grad_weight_t.squeeze(2), grad_out_var.requires_grad());
+        auto weight_grad_result = dispatch(OpId::Conv2dBackwardWeight,
+            std::span<const Tensor>(weight_grad_inputs), weight_grad_attrs);
+        Tensor grad_weight_t = weight_grad_result[0].squeeze(2);
+
+        // JIT-R067: attach a differentiable grad_fn
+        // (ConvTranspose1dGradWeightBackward, defined above) so a 3rd-order
+        // gradient flows correctly back to input_var/grad_out_var instead of
+        // silently stopping here.
+        bool gw_requires_grad = ::tenzor::is_grad_enabled() &&
+            (input_var.requires_grad() || grad_out_var.requires_grad());
+        Variable grad_weight(grad_weight_t, gw_requires_grad);
+        if (gw_requires_grad) {
+            auto gw_fn = std::make_shared<ConvTranspose1dGradWeightBackward>(
+                stride_, padding_, output_padding_, dilation_, groups_,
+                std::vector<Tensor>{input_var.tensor(), grad_out_var.tensor()});
+            if (::tenzor::is_creating_graph()) {
+                gw_fn->save_variables_for_backward({input_var, grad_out_var});
+            }
+            gw_fn->set_next_functions({input_var.grad_fn(), grad_out_var.grad_fn()});
+            gw_fn->set_input_variables({input_var, grad_out_var});
+            grad_weight.set_grad_fn(gw_fn);
+        }
 
         if (has_bias) {
             // grad_bias = sum(grad_output, dims=[0,2])
@@ -2088,8 +2707,8 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         // kernel would otherwise pad BOTH H and W), squeeze, then trim the W
         // axis by padding_ (ConvTranspose "padding" trims output edges). The H
         // axis is a singleton so dH must stay 1.
-        auto input_4d = input.tensor().unsqueeze(2);
-        auto weight_4d = weight_matched.tensor().unsqueeze(2);
+        auto input_4d = tenzor::unsqueeze(Variable(input.tensor(), false), 2).tensor();
+        auto weight_4d = tenzor::unsqueeze(Variable(weight_matched.tensor(), false), 2).tensor();
         std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
         if (bias_ptr != nullptr) {
             inputs_vec.push_back(*bias_ptr);
@@ -2112,7 +2731,7 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         forward_attrs.set(AttrKey::Groups, groups_);
         auto output_result = dispatch(OpId::ConvTranspose2dForward,
             std::span<const Tensor>(inputs_vec), forward_attrs);
-        output = output_result[0].squeeze(2);
+        output = tenzor::squeeze(Variable(output_result[0], false), 2).tensor();
 
         if (padding_ > 0) {
             int64_t L_full = output.shape()[2];
@@ -2123,8 +2742,8 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
                     "padding trim is non-positive (L_full=" + std::to_string(L_full) +
                     ", padding=" + std::to_string(padding_) + ")");
             }
-            output = tenzor::slice(output, /*dim=*/2, /*start=*/padding_,
-                                   /*end=*/padding_ + L_trimmed);
+            output = tenzor::slice(Variable(output, false), /*dim=*/2, /*start=*/padding_,
+                                   /*end=*/padding_ + L_trimmed).tensor();
         }
     }
     if (output.dtype() != original_dtype) {

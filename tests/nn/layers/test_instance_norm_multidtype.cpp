@@ -32,6 +32,16 @@ protected:
             return 0.2f;
         } else if (dtype() == DType::Float64) {
             return 1e-4f;
+        } else if (dtype() == DType::BFloat16) {
+            // BFloat16 has only 8 mantissa bits (~2-3 decimal digits). The
+            // CPU kernel (src/backends/cpu/kernels/nn_kernels.cpp's
+            // instance_norm_impl<BFloat16>) already accumulates mean/
+            // variance in double precision and narrows only the final
+            // stored output; every backend shows the same small-magnitude
+            // residual, consistent with expected BFloat16 output-rounding
+            // noise rather than a computational bug. Empirically observed
+            // up to ~1.95e-3 across backends.
+            return 5e-3f;
         }
         return 1e-4f;
     }
@@ -128,7 +138,21 @@ TEST_P(InstanceNormMultiDTypeTest, InstanceNorm2d_BackwardGradientFlow) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = tenzor::ones(shape_vec, dtype(), device());
+    // A constant (all-ones) grad_output is a mathematically degenerate probe
+    // for a normalization layer: InstanceNorm's backward w.r.t. input is
+    // proportional to (grad_output - mean(grad_output) - normalized *
+    // mean(grad_output * normalized)), which analytically vanishes to ~0
+    // when grad_output is constant across the whole normalized (per-
+    // instance spatial) axis, since mean(grad_output) == grad_output and
+    // mean(normalized) == 0 by construction. The tiny "nonzero" value this
+    // test previously relied on was pure floating-point rounding noise from
+    // the reduction, not a real gradient signal — confirmed to collapse to
+    // exactly 0.0 for Float64/BFloat16 on Vulkan at some shapes (a more
+    // precise/differently-ordered reduction rounds the analytically-zero
+    // result to exactly zero instead of leaving noise). Use a varying
+    // grad_output so the test verifies genuine gradient flow, not rounding
+    // artifacts.
+    auto grad_output = createRandn(shape_vec);
     output.backward(grad_output);
 
     EXPECT_GRAD_FLOWS(input);
@@ -228,7 +252,11 @@ TEST_P(InstanceNormMultiDTypeTest, InstanceNorm3d_BackwardGradientFlow) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = tenzor::ones(shape_vec, dtype(), device());
+    // See InstanceNorm2d_BackwardGradientFlow above: a constant grad_output
+    // drives InstanceNorm's true input gradient to ~0 analytically, so this
+    // used a varying grad_output instead of ones() to test real gradient
+    // flow rather than floating-point rounding noise.
+    auto grad_output = createRandn(shape_vec);
     output.backward(grad_output);
 
     EXPECT_GRAD_FLOWS(input);

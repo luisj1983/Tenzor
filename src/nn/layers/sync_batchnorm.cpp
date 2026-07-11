@@ -17,6 +17,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <utility>
@@ -388,6 +389,31 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
     int64_t global_count = 0;
 
     if (is_training()) {
+        // JIT-R049: all_reduce_fn_ is a host-side callback that mutates a
+        // tensor via a side effect entirely outside the dispatch()/tracer
+        // mechanism — there is no OpType that can represent "wait for a
+        // cross-process collective" in the graph IR, so a compiled graph
+        // can only ever replay using whatever value the all-reduce produced
+        // AT TRACE TIME, silently diverging from the true synchronized-
+        // across-workers statistics on every subsequent call (the exact bug
+        // this finding described). Rather than silently producing a wrong
+        // compiled graph, fail loudly and force eager fallback for the
+        // world_size_>1 case — matching this codebase's established
+        // "fail loudly instead of producing wrong numerics" pattern for
+        // other operations this JIT cannot correctly represent (e.g.
+        // BatchNorm2d's grad-mode replay, Cast's grad-mode replay). The
+        // world_size_<=1 / no-callback case has no actual collective to
+        // desynchronize and remains fully traceable (fixed below).
+        if (world_size_ > 1 && all_reduce_fn_ &&
+            ::tenzor::jit::Tracer::get_instance().is_tracing()) {
+            throw std::runtime_error(
+                "SyncBatchNorm: cannot be JIT-traced across a multi-worker "
+                "all-reduce (world_size=" + std::to_string(world_size_) +
+                "); the collective is a host-side side effect with no graph "
+                "representation. Call outside jit.compile()/jit.trace(), or "
+                "use world_size=1 for JIT-compiled inference.");
+        }
+
         int64_t local_count = N * H * W;
 
         // audit-2026-05-03 Phase 10 — only cast UP, never DOWN. Casting
@@ -414,15 +440,15 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
 
         // ---- Pass 1: per-channel mean ----------------------------------
         auto local_sum = sum(sum(sum(x_compute, 3, false), 2, false), 0, false);
-        auto count_tensor = full({1}, static_cast<double>(local_count), compute_dtype).to(x.device());
+        auto count_tensor = full({1}, static_cast<double>(local_count), compute_dtype, x.device());
         auto packed1 = cat({local_sum, count_tensor}, 0);
 
         if (world_size_ > 1 && all_reduce_fn_) {
             all_reduce_fn_(packed1);
         }
 
-        auto global_sum = packed1.slice(0, 0, C);
-        auto global_count_t = packed1.slice(0, C, C + 1);
+        auto global_sum = tenzor::slice(Variable(packed1, false), 0, 0, C).tensor();
+        auto global_count_t = tenzor::slice(Variable(packed1, false), 0, C, C + 1).tensor();
         double global_count_d;
         if (compute_dtype == DType::Float64) {
             global_count_d = global_count_t.to(Device::cpu()).data<double>()[0];
@@ -430,7 +456,7 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
             global_count_d = static_cast<double>(global_count_t.to(Device::cpu()).data<float>()[0]);
         }
         global_count = static_cast<int64_t>(global_count_d);
-        auto inv_count_t = full({1}, 1.0 / global_count_d, compute_dtype).to(x.device());
+        auto inv_count_t = full({1}, 1.0 / global_count_d, compute_dtype, x.device());
         batch_mean = global_sum * inv_count_t;
 
         // ---- Pass 2: per-channel sum of squared deviations -------------
@@ -471,6 +497,19 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         if (track_running_stats_) {
             float decay = static_cast<float>(1.0 - momentum_);
             float mom = static_cast<float>(momentum_);
+            // JIT-R103: align running_mean_/running_var_ to the input's
+            // device before mixing with batch_mean/unbiased_var (computed
+            // from x, on the input's device) — buffers stay wherever the
+            // module was constructed (CPU by default) until moved, so a
+            // lazily-placed module (constructed on CPU, called with a GPU
+            // input) hit a device-mismatch dispatch error. Mirrors
+            // BatchNorm1d's identical fix (batchnorm.cpp).
+            if (running_mean_.tensor().device() != x.device()) {
+                running_mean_ = Variable(running_mean_.tensor().to(x.device()), false);
+            }
+            if (running_var_.tensor().device() != x.device()) {
+                running_var_ = Variable(running_var_.tensor().to(x.device()), false);
+            }
             auto rm = running_mean_.tensor() * decay + batch_mean * mom;
             // Running variance uses the unbiased (Bessel-corrected) estimate,
             // matching PyTorch and this codebase's BatchNorm2d; the biased
@@ -526,6 +565,12 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         auto& rv_buf = buffers_["running_var"];
         batch_mean = rm_buf ? rm_buf->tensor() : running_mean_.tensor();
         batch_var  = rv_buf ? rv_buf->tensor() : running_var_.tensor();
+        // JIT-R103: reconcile device with the input, mirroring BatchNorm1d/
+        // BatchNorm2d's eval branch — running stats stay wherever the
+        // module was constructed/last used until moved, but normalization
+        // below mixes them directly with x.
+        if (batch_mean.device() != x.device()) batch_mean = batch_mean.to(x.device());
+        if (batch_var.device() != x.device()) batch_var = batch_var.to(x.device());
         global_count = N * H * W;  // not used for backward in eval, but set for completeness
     }
 

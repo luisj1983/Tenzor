@@ -450,7 +450,7 @@ void register_jit(py::module_& m) {
     // Compile API (torch.compile equivalent)
     jit.def("compile", [](py::function fn, bool fullgraph, std::string mode,
                           std::string backend, std::string target, bool strict,
-                          py::object parameters) {
+                          py::object parameters, py::object buffers) {
         // The C++ side stores the callable in N-input form; the Python
         // wrapper unpacks the span as positional arguments so user code
         // can keep writing `def f(x):` or `def f(x, y, z):` naturally.
@@ -511,6 +511,18 @@ void register_jit(py::module_& m) {
             compiled->set_parameters(std::move(params));
         }
 
+        // JIT-R005: same mechanism for non-trainable buffers (e.g.
+        // model.buffers(), BatchNorm running_mean_/running_var_) — without
+        // this they're frozen as trace-time constants and later eager EMA
+        // updates are silently invisible to subsequent replays.
+        if (!buffers.is_none()) {
+            std::vector<std::shared_ptr<tenzor::Variable>> bufs;
+            for (auto item : buffers) {
+                bufs.push_back(item.cast<std::shared_ptr<tenzor::Variable>>());
+            }
+            compiled->set_buffers(std::move(bufs));
+        }
+
         // Returned py::cpp_function accepts any positional Variables. The
         // pybind11 *args dispatch happens via py::args; we then forward to
         // the span-based operator().
@@ -532,11 +544,16 @@ void register_jit(py::module_& m) {
     py::arg("target") = "auto",
     py::arg("strict") = false,
     py::arg("parameters") = py::none(),
+    py::arg("buffers") = py::none(),
     "Compile a function for automatic graph capture and optimization.\n"
     "parameters: optional iterable of Variables (e.g. model.parameters()) read by\n"
     "  the function via closure, registered as trainable leaves so gradients flow\n"
     "  to them for training-through-JIT; without it they are frozen as constants\n"
     "  and receive no gradient.\n"
+    "buffers: optional iterable of Variables (e.g. model.buffers()) read by the\n"
+    "  function via closure, registered as live leaves so later eager mutations\n"
+    "  (e.g. BatchNorm's running-stats EMA update) are seen on the next replay;\n"
+    "  without it they are frozen as constants at trace time (JIT-R005).\n"
     "First call traces and compiles; subsequent calls use cached compiled graph.\n"
     "Shape mismatches trigger recompilation (up to 8 shapes cached).\n"
     "Accepts any number of positional Variable arguments.\n"
@@ -547,9 +564,9 @@ void register_jit(py::module_& m) {
     // tenzor.compile alias
     m.def("compile", [jit](py::function fn, bool fullgraph, std::string mode,
                            std::string backend, std::string target, bool strict,
-                           py::object parameters) {
+                           py::object parameters, py::object buffers) {
         return jit.attr("compile")(fn, fullgraph, mode, backend, target, strict,
-                                   parameters);
+                                   parameters, buffers);
     },
     py::arg("fn"),
     py::arg("fullgraph") = false,
@@ -558,9 +575,13 @@ void register_jit(py::module_& m) {
     py::arg("target") = "auto",
     py::arg("strict") = false,
     py::arg("parameters") = py::none(),
+    py::arg("buffers") = py::none(),
     "Compile a function for automatic graph capture (alias for jit.compile).\n"
     "parameters: optional iterable of Variables to register as trainable leaves\n"
-    "  so gradients flow to them for training-through-JIT (JIT-F043).");
+    "  so gradients flow to them for training-through-JIT (JIT-F043).\n"
+    "buffers: optional iterable of Variables to register as live (non-frozen)\n"
+    "  leaves, e.g. model.buffers(), so BatchNorm running stats etc. don't go\n"
+    "  stale across replays of the same compiled graph (JIT-R005).");
 
     // compile_script — Python-subset scripting frontend
     jit.def("compile_script", [](const std::string& source) {
@@ -648,6 +669,31 @@ void register_jit(py::module_& m) {
              "Declare the closure-captured trainable parameters (e.g. "
              "model.parameters()) so training-through-JIT produces correct "
              "gradients and uses updated weights. Returns self for chaining.")
+        // JIT-R005: same mechanism as with_parameters(), for non-trainable
+        // buffers (e.g. BatchNorm/InstanceNorm running_mean_/running_var_).
+        // Without this a captured module's running stats are frozen into
+        // the compiled graph as an opaque constant at trace time, so later
+        // eager EMA updates are silently invisible to every subsequent
+        // replay of the same compiled graph — wrong output, no error, no
+        // retrace trigger.
+        .def("with_buffers",
+             [](std::shared_ptr<tenzor::jit::CompiledFunction> self,
+                py::iterable buffers)
+                 -> std::shared_ptr<tenzor::jit::CompiledFunction> {
+                 std::vector<std::shared_ptr<tenzor::Variable>> bs;
+                 for (auto& b : buffers) {
+                     bs.push_back(
+                         py::reinterpret_borrow<py::object>(b)
+                             .cast<std::shared_ptr<tenzor::Variable>>());
+                 }
+                 self->set_buffers(std::move(bs));
+                 return self;
+             },
+             py::arg("buffers"),
+             "Declare the closure-captured non-trainable buffers (e.g. "
+             "model.buffers()) so their live values are seen on every "
+             "replay instead of being frozen as trace-time constants. "
+             "Returns self for chaining.")
         // JIT-R012: these existed in C++ (compile.hpp) but were never bound,
         // so Python had no way to tell "ran compiled" from "silently fell
         // back to eager" for a given function -- the only prior signal was a
@@ -711,13 +757,23 @@ void register_jit(py::module_& m) {
             // This matches the @tz.jit Python decorator docstring.
             config.strict = !fallback_to_eager;
 
-            // Audit-4 W.15: under config.strict the CompiledFunction ctor
-            // may eagerly run IREE compilation (long-running C++/MLIR work
-            // that never touches Python objects after the trace lambda has
-            // released the GIL itself). Drop the GIL here so other Python
-            // threads can make progress during compilation. The trace
-            // lambda above re-acquires the GIL via py::gil_scoped_acquire
-            // before calling the user-supplied Python @fn.
+            // JIT-R028 (corrected 2026-07-11; was Audit-4 W.15): this
+            // comment previously claimed the CompiledFunction ctor "may
+            // eagerly run IREE compilation." Verified false — NEITHER
+            // CompiledFunction constructor (src/jit/compile.cpp) does any
+            // tracing/IREE compilation at construction; they only validate
+            // mode/backend strings and allocate an empty mlir_cache_. Real
+            // compilation happens lazily on first CALL
+            // (mlir_invoke_impl/trace_and_compile), and BOTH this wrapper's
+            // returned callable and CompiledFunctionHandle::__call__
+            // already release the GIL around THAT actual work. The GIL
+            // release here is therefore just a harmless, negligible-cost
+            // release around a cheap constructor call — kept for
+            // consistency/defense-in-depth (a future constructor change
+            // that started doing real work here would already be covered),
+            // not because it's load-bearing today. The trace lambda above
+            // re-acquires the GIL via py::gil_scoped_acquire before calling
+            // the user-supplied Python @fn.
             py::gil_scoped_release release;
             return std::make_shared<tenzor::jit::CompiledFunction>(
                 tenzor::jit::CompiledFunction::FnTypeN(std::move(cpp_fn)),
@@ -766,7 +822,7 @@ void register_jit(py::module_& m) {
             if (!cf) {
                 throw std::runtime_error(
                     "show_mlir: passed object is not a tz.jit-compiled "
-                    "function");
+                    "function (no _tz_compiled attribute)");
             }
             std::vector<tenzor::Variable> inputs;
             inputs.reserve(examples.size());
@@ -788,7 +844,7 @@ void register_jit(py::module_& m) {
             if (!cf) {
                 throw std::runtime_error(
                     "show_stablehlo: passed object is not a tz.jit-compiled "
-                    "function");
+                    "function (no _tz_compiled attribute)");
             }
             std::vector<tenzor::Variable> inputs;
             inputs.reserve(examples.size());
@@ -810,7 +866,7 @@ void register_jit(py::module_& m) {
             if (!cf) {
                 throw std::runtime_error(
                     "show_iree: passed object is not a tz.jit-compiled "
-                    "function");
+                    "function (no _tz_compiled attribute)");
             }
             std::vector<tenzor::Variable> inputs;
             inputs.reserve(examples.size());

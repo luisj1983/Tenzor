@@ -145,6 +145,22 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
         throw std::runtime_error("CompiledModule has no graph");
     }
 
+    // JIT-R004: route to the differentiable replay when the input requires
+    // grad, exactly mirroring CompiledFunction::operator()'s any_requires_grad
+    // gate (compile.cpp). Without this, a fused CUDA/ROCm subgraph's
+    // execute_fused_gpu_node unconditionally returns a detached
+    // (requires_grad=false) Variable ("generated kernels have NO backward") —
+    // model.optimize_for_inference() followed by a call with a
+    // requires_grad-True input would silently sever autograd instead of
+    // either computing real grads or throwing.
+    if (input.requires_grad() && is_grad_enabled()) {
+        auto outs = forward_grad({input});
+        if (outs.empty()) {
+            throw std::runtime_error("CompiledModule produced no outputs");
+        }
+        return outs[0];
+    }
+
     // If dynamic shapes are configured, bind symbolic dims to actual values
     if (!dynamic_dims_.empty()) {
         SymbolicShapeEnvironment env;
@@ -194,6 +210,17 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             // neutral) the instant any input triggered a retrace, while a
             // module the caller HAD optimized stayed unfused on this path.
             if (was_optimized_) retraced->optimize_for_inference();
+            // JIT-R015: propagate the dynamic-dims config and user metadata_
+            // onto the retraced replacement too, mirroring was_optimized_
+            // just above. Without this, a device/dtype/ShapeGuard-driven
+            // retrace silently drops mark_dynamic_dims()'s symbolic-shape
+            // structure — confirmed perf-only (compute_shape_key() already
+            // retraces unconditionally on every shape change regardless, so
+            // this was never a correctness bug), but it degrades a caller's
+            // "reuse one dynamic-shape graph" configuration into "retrace on
+            // every shape change" for the remaining lifetime of the module.
+            if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
+            retraced->metadata_ = metadata_;
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
                 shape_cache_[key] = retraced->graph_;
             }
@@ -226,6 +253,17 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             // neutral) the instant any input triggered a retrace, while a
             // module the caller HAD optimized stayed unfused on this path.
             if (was_optimized_) retraced->optimize_for_inference();
+            // JIT-R015: propagate the dynamic-dims config and user metadata_
+            // onto the retraced replacement too, mirroring was_optimized_
+            // just above. Without this, a device/dtype/ShapeGuard-driven
+            // retrace silently drops mark_dynamic_dims()'s symbolic-shape
+            // structure — confirmed perf-only (compute_shape_key() already
+            // retraces unconditionally on every shape change regardless, so
+            // this was never a correctness bug), but it degrades a caller's
+            // "reuse one dynamic-shape graph" configuration into "retrace on
+            // every shape change" for the remaining lifetime of the module.
+            if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
+            retraced->metadata_ = metadata_;
             shape_cache_[key] = retraced->graph_;
             graph_ = retraced->graph_;
         }
@@ -268,6 +306,19 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
 
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
+    }
+
+    // JIT-R004: same any_requires_grad gate as the single-input overload
+    // above — see its comment for the fused-GPU-kernel-severs-autograd
+    // rationale.
+    {
+        bool any_requires_grad = false;
+        for (const auto& v : inputs) {
+            if (v.requires_grad()) { any_requires_grad = true; break; }
+        }
+        if (any_requires_grad && is_grad_enabled()) {
+            return forward_grad(inputs);
+        }
     }
 
     // If dynamic shapes are configured, bind symbolic dims to actual values
@@ -330,6 +381,17 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
             // neutral) the instant any input triggered a retrace, while a
             // module the caller HAD optimized stayed unfused on this path.
             if (was_optimized_) retraced->optimize_for_inference();
+            // JIT-R015: propagate the dynamic-dims config and user metadata_
+            // onto the retraced replacement too, mirroring was_optimized_
+            // just above. Without this, a device/dtype/ShapeGuard-driven
+            // retrace silently drops mark_dynamic_dims()'s symbolic-shape
+            // structure — confirmed perf-only (compute_shape_key() already
+            // retraces unconditionally on every shape change regardless, so
+            // this was never a correctness bug), but it degrades a caller's
+            // "reuse one dynamic-shape graph" configuration into "retrace on
+            // every shape change" for the remaining lifetime of the module.
+            if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
+            retraced->metadata_ = metadata_;
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
                 shape_cache_[key] = retraced->graph_;
             }
@@ -361,6 +423,17 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
             // neutral) the instant any input triggered a retrace, while a
             // module the caller HAD optimized stayed unfused on this path.
             if (was_optimized_) retraced->optimize_for_inference();
+            // JIT-R015: propagate the dynamic-dims config and user metadata_
+            // onto the retraced replacement too, mirroring was_optimized_
+            // just above. Without this, a device/dtype/ShapeGuard-driven
+            // retrace silently drops mark_dynamic_dims()'s symbolic-shape
+            // structure — confirmed perf-only (compute_shape_key() already
+            // retraces unconditionally on every shape change regardless, so
+            // this was never a correctness bug), but it degrades a caller's
+            // "reuse one dynamic-shape graph" configuration into "retrace on
+            // every shape change" for the remaining lifetime of the module.
+            if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
+            retraced->metadata_ = metadata_;
             shape_cache_[key] = retraced->graph_;
             graph_ = retraced->graph_;
         }
@@ -412,7 +485,44 @@ auto CompiledModule::forward_grad(const std::vector<Variable>& inputs)
     // Differentiable replay. No CUDA-graph capture and no fused-kernel path is
     // reachable here: the grad variant was compiled without fusion, and
     // Graph::execute_node throws on any fusion node in grad mode.
-    return graph_->forward(inputs, /*grad_mode=*/true);
+    auto results = graph_->forward(inputs, /*grad_mode=*/true);
+
+    // JIT-R030: unlike the two inference forward() overloads, this graph_
+    // has no source_module_/retrace_fn_ counterpart that produces a
+    // DIFFERENTIABLE (unfused) replacement graph — those closures only ever
+    // retrace in inference mode (CompiledModule::trace / retrace_fn_), so
+    // silently reusing them here would swap in a non-differentiable fused
+    // graph, defeating the whole point of forward_grad. There is therefore
+    // no safe self-heal available at this layer. Per the documented
+    // contract in graph.cpp ("the caller is required to check
+    // needs_retrace() before trusting this result"), forward_grad was the
+    // one caller that skipped this check entirely: Graph::forward() stops
+    // executing as soon as a baked ShapeGuard trips on a call at a
+    // different shape than this graph was traced/retraced for, so
+    // `results` here can be empty or a partial prefix of the real output
+    // list — silently returning it let a misleadingly-worded, UNCAUGHT
+    // "produced no outputs" error surface deep in
+    // CompiledFunction::grad_invoke instead. Throw HERE instead: this
+    // propagates through grad_invoke's existing try/catch around its
+    // `compiled_module->forward_grad(...)` call, which already correctly
+    // falls back to eager autograd on the input's backend (the same
+    // recovery inference already gets via retrace) — this just makes sure
+    // grad_invoke's ALREADY-CORRECT fallback actually triggers instead of
+    // being bypassed by a silently-wrong result.
+    if (graph_->needs_retrace()) {
+        graph_->reset_retrace();
+        throw std::runtime_error(
+            "CompiledModule::forward_grad: input shape (or device/dtype) "
+            "differs from the shape this differentiable graph was traced "
+            "for, tripping a ShapeGuard mid-replay. The grad-mode graph "
+            "cannot self-heal via retrace at this layer (only inference "
+            "mode caches a retrace closure) — the caller must retrace via "
+            "jit.compile()'s cache-miss path instead (this exception is "
+            "expected to be caught there and trigger an eager-autograd "
+            "fallback).");
+    }
+
+    return results;
 }
 
 auto CompiledModule::optimize_for_inference() -> int {

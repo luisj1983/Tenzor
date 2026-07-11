@@ -31,6 +31,17 @@ protected:
             return 0.1f;  // Float16 accumulates significant error in variance
         } else if (dtype() == DType::Float64) {
             return 1e-5f;
+        } else if (dtype() == DType::BFloat16) {
+            // BFloat16 has only 8 mantissa bits (~2-3 decimal digits). The
+            // CPU kernel (src/backends/cpu/kernels/nn_kernels.cpp's
+            // layer_norm_scalar<BFloat16>) already accumulates mean/variance
+            // in double precision and narrows only the final stored output,
+            // and every backend produces bit-identical results for this
+            // test's small inputs — confirming the residual error is
+            // expected BFloat16 output-rounding noise, not a computational
+            // bug. Empirically observed ~4.8e-3 (2D case, the larger of the
+            // two LayerNorm forward tests).
+            return 1e-2f;
         }
         return 1e-4f;
     }

@@ -277,6 +277,18 @@ auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
         emit_float_literal(s, value, d);
         return s.str();
     }
+    // JIT-R006: Bool must be checked BEFORE is_int_dtype(d) — is_int_dtype
+    // deliberately includes DType::Bool (other call sites in this file rely
+    // on that for integer-like buffer/type handling), which meant this
+    // branch order previously routed every Bool value into the plain
+    // integer branch below, emitting MLIR-invalid `0`/`1` instead of
+    // `true`/`false` for a scalar i1 constant — the dedicated Bool branch
+    // was permanently unreachable. Mirrors emit_tensor_constant's
+    // already-correct multi-element Bool handling.
+    if (d == DType::Bool) {
+        // MLIR dense<> i1 splat constants use 'true'/'false'.
+        return value != 0.0 ? "true" : "false";
+    }
     if (is_int_dtype(d)) {
         // Integer constants: emit as int literal (no decimal). Guard against
         // non-finite inputs (e.g. ±inf clamp defaults) before the cast, which
@@ -293,10 +305,6 @@ auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
             s << static_cast<long long>(value);
         }
         return s.str();
-    }
-    if (d == DType::Bool) {
-        // MLIR dense<> i1 splat constants use 'true'/'false'.
-        return value != 0.0 ? "true" : "false";
     }
     throw std::runtime_error(
         "GraphToMLIR: scalar_literal: unsupported DType");
@@ -2203,6 +2211,351 @@ auto handle_conv2d(LoweringContext& ctx,
     }
 }
 
+// ============================================================================
+// Quantization (JIT-R081): Quantize/Dequantize/QuantizedLinear/
+// QuantizedLinearStatic/QuantizedConv2d lowering. Formulas mirror
+// include/tenzor/nn/quantization/quantize.hpp / quantize.cpp EXACTLY:
+//   quantized   = clamp(round_nearest_even(value/scale) + zero_point, qmin, qmax)
+//   dequantized = (quantized - zero_point) * scale
+// Symmetric dynamic scale (matches compute_symmetric_scale, quantize.cpp):
+//   scale = max(max(|value|), 1e-8) / 127   (zero_point = 0, INT8 range)
+// ============================================================================
+
+// Reduce max(|value|) over ALL dims to a rank-0 scalar SSA value.
+auto emit_reduce_max_abs_scalar(LoweringContext& ctx, std::ostream& body,
+                                const std::string& value_name,
+                                const std::vector<int64_t>& shape,
+                                ::tenzor::DType d) -> std::string {
+    auto abs_name = ctx.fresh_name();
+    emit_stablehlo_unary(body, "abs", abs_name, value_name, shape, d);
+    body << '\n';
+    std::vector<int64_t> all_dims;
+    for (int64_t i = 0; i < static_cast<int64_t>(shape.size()); ++i) all_dims.push_back(i);
+    std::string init_lit;
+    if (d == ::tenzor::DType::Float64) init_lit = "0xFFF0000000000000";
+    else if (d == ::tenzor::DType::Float16) init_lit = "0xFC00";
+    else if (d == ::tenzor::DType::BFloat16) init_lit = "0xFF80";
+    else init_lit = "0xFF800000";
+    return emit_reduce_with_keepdim(ctx, body, abs_name, shape, /*result_shape=*/{},
+                                    all_dims, /*keepdim=*/false, "maximum", init_lit, d);
+}
+
+// Symmetric dynamic INT8 fake-quantize (quantize then immediately
+// dequantize), matching quantize_per_tensor_symmetric + dequantize_tensor
+// exactly — the path nn::quantization::quantized_linear_dynamic /
+// quantized_conv2d_dynamic use internally. Returns the SSA name of the
+// round-tripped float tensor (same shape/dtype as the input).
+auto emit_dynamic_symmetric_fake_quant(LoweringContext& ctx, std::ostream& body,
+                                       const std::string& value_name,
+                                       const std::vector<int64_t>& shape,
+                                       ::tenzor::DType d) -> std::string {
+    auto abs_max = emit_reduce_max_abs_scalar(ctx, body, value_name, shape, d);
+    // scale = max(abs_max, 1e-8) / 127
+    auto eps_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, eps_name, scalar_literal(1e-8, d), {}, d);
+    body << '\n';
+    auto safe_max = ctx.fresh_name();
+    emit_stablehlo_binary(body, "maximum", safe_max, abs_max, eps_name, {}, d);
+    body << '\n';
+    auto range_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, range_name, scalar_literal(127.0, d), {}, d);
+    body << '\n';
+    auto scale_scalar = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", scale_scalar, safe_max, range_name, {}, d);
+    body << '\n';
+    auto scale_b = maybe_broadcast(body, ctx, scale_scalar, {}, shape, d);
+
+    auto ratio = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", ratio, value_name, scale_b, shape, d);
+    body << '\n';
+    auto rounded = ctx.fresh_name();
+    emit_stablehlo_unary(body, "round_nearest_even", rounded, ratio, shape, d);
+    body << '\n';
+    auto lo_name = ctx.fresh_name();
+    auto hi_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, lo_name, scalar_literal(-128.0, d), shape, d);
+    body << '\n';
+    emit_stablehlo_splat_constant(body, hi_name, scalar_literal(127.0, d), shape, d);
+    body << '\n';
+    auto clamped = ctx.fresh_name();
+    emit_stablehlo_ternary(body, "clamp", clamped, lo_name, rounded, hi_name, shape, d);
+    body << '\n';
+    // Cast to Int8 and back: a true saturating round-trip through the same
+    // storage dtype the eager kernel materializes, not just a float rounding
+    // approximation.
+    auto q_int8 = ctx.fresh_name();
+    emit_stablehlo_convert(body, q_int8, clamped, shape, d, ::tenzor::DType::Int8);
+    body << '\n';
+    auto dq_float = ctx.fresh_name();
+    emit_stablehlo_convert(body, dq_float, q_int8, shape, ::tenzor::DType::Int8, d);
+    body << '\n';
+    auto result = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", result, dq_float, scale_b, shape, d);
+    body << '\n';
+    return result;
+}
+
+// Static dequantize: (convert(value,out_dtype) - zero_point) * scale, with
+// scale/zero_point known at lowering time (compile-time node attrs).
+auto emit_static_dequant(LoweringContext& ctx, std::ostream& body,
+                         const std::string& value_name,
+                         const std::vector<int64_t>& shape,
+                         ::tenzor::DType in_dtype, double scale, int64_t zero_point,
+                         ::tenzor::DType out_dtype) -> std::string {
+    std::string v = value_name;
+    if (in_dtype != out_dtype) {
+        auto c = ctx.fresh_name();
+        emit_stablehlo_convert(body, c, v, shape, in_dtype, out_dtype);
+        body << '\n';
+        v = c;
+    }
+    std::string shifted = v;
+    if (zero_point != 0) {
+        auto zp_name = ctx.fresh_name();
+        emit_stablehlo_splat_constant(
+            body, zp_name, scalar_literal(static_cast<double>(zero_point), out_dtype),
+            shape, out_dtype);
+        body << '\n';
+        auto sub_name = ctx.fresh_name();
+        emit_stablehlo_binary(body, "subtract", sub_name, v, zp_name, shape, out_dtype);
+        body << '\n';
+        shifted = sub_name;
+    }
+    auto scale_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, scale_name, scalar_literal(scale, out_dtype),
+                                  shape, out_dtype);
+    body << '\n';
+    auto result = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", result, shifted, scale_name, shape, out_dtype);
+    body << '\n';
+    return result;
+}
+
+// Static quantize: clamp(round_nearest_even(value/scale)+zero_point,
+// qmin,qmax), cast to target_dtype.
+auto emit_static_quantize(LoweringContext& ctx, std::ostream& body,
+                          const std::string& value_name,
+                          const std::vector<int64_t>& shape,
+                          ::tenzor::DType in_dtype, double scale, int64_t zero_point,
+                          ::tenzor::DType target_dtype) -> std::string {
+    auto scale_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, scale_name, scalar_literal(scale, in_dtype),
+                                  shape, in_dtype);
+    body << '\n';
+    auto ratio = ctx.fresh_name();
+    emit_stablehlo_binary(body, "divide", ratio, value_name, scale_name, shape, in_dtype);
+    body << '\n';
+    auto rounded = ctx.fresh_name();
+    emit_stablehlo_unary(body, "round_nearest_even", rounded, ratio, shape, in_dtype);
+    body << '\n';
+    std::string with_zp = rounded;
+    if (zero_point != 0) {
+        auto zp_name = ctx.fresh_name();
+        emit_stablehlo_splat_constant(
+            body, zp_name, scalar_literal(static_cast<double>(zero_point), in_dtype),
+            shape, in_dtype);
+        body << '\n';
+        auto added = ctx.fresh_name();
+        emit_stablehlo_binary(body, "add", added, rounded, zp_name, shape, in_dtype);
+        body << '\n';
+        with_zp = added;
+    }
+    int64_t qmin = 0, qmax = 0;
+    switch (target_dtype) {
+        case ::tenzor::DType::Int8:  qmin = -128; qmax = 127; break;
+        case ::tenzor::DType::UInt8: qmin = 0;    qmax = 255; break;
+        default:
+            throw std::runtime_error(
+                "GraphToMLIR: Quantize target dtype must be Int8/UInt8");
+    }
+    auto lo_name = ctx.fresh_name();
+    auto hi_name = ctx.fresh_name();
+    emit_stablehlo_splat_constant(body, lo_name, scalar_literal(static_cast<double>(qmin), in_dtype),
+                                  shape, in_dtype);
+    body << '\n';
+    emit_stablehlo_splat_constant(body, hi_name, scalar_literal(static_cast<double>(qmax), in_dtype),
+                                  shape, in_dtype);
+    body << '\n';
+    auto clamped = ctx.fresh_name();
+    emit_stablehlo_ternary(body, "clamp", clamped, lo_name, with_zp, hi_name, shape, in_dtype);
+    body << '\n';
+    auto result = ctx.fresh_name();
+    emit_stablehlo_convert(body, result, clamped, shape, in_dtype, target_dtype);
+    body << '\n';
+    return result;
+}
+
+// Standalone Quantize/Dequantize (QuantStub/DeQuantStub-style single-tensor
+// ops). NOTE: as of this fix, no producer anywhere in the codebase emits
+// OpType::Quantize/Dequantize as a graph node (verified: zero references
+// outside the enum/shape-inference/interpreter-throw sites) — these two
+// handlers make GraphToMLIR ABLE to lower such a node using the "scale"/
+// "zero_point" node-attr convention below (matching QuantizedLinearStatic's
+// attr naming), but the path is currently unreachable via any tracer/pass.
+// Verified directly via a hand-built Graph/Node in the new lowering test
+// (bypassing the tracer, since there is no traced producer to exercise).
+auto handle_dequantize(LoweringContext& ctx, const ::tenzor::jit::Node& node,
+                       std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Dequantize expects 1 input, 1 output");
+    }
+    const auto& in_val = node.inputs()[0];
+    const auto& out = node.outputs()[0];
+    double scale = node.has_float_attr("scale") ? node.get_attr("scale") : 1.0;
+    int64_t zero_point = node.has_int_attr("zero_point") ? node.get_int_attr("zero_point") : 0;
+    auto result = emit_static_dequant(ctx, body, ctx.name_for(in_val->id()), out->shape(),
+                                      in_val->dtype(), scale, zero_point, out->dtype());
+    ctx.bind(out->id(), result);
+}
+
+auto handle_quantize(LoweringContext& ctx, const ::tenzor::jit::Node& node,
+                     std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Quantize expects 1 input, 1 output");
+    }
+    const auto& in_val = node.inputs()[0];
+    const auto& out = node.outputs()[0];
+    double scale = node.has_float_attr("scale") ? node.get_attr("scale") : 1.0;
+    int64_t zero_point = node.has_int_attr("zero_point") ? node.get_int_attr("zero_point") : 0;
+    auto result = emit_static_quantize(ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
+                                       in_val->dtype(), scale, zero_point, out->dtype());
+    ctx.bind(out->id(), result);
+}
+
+// QuantizedLinear/QuantizedConv2d (dynamic, retagged IN PLACE from Linear/
+// Conv2d by QuantizationPass — see compiler.cpp quantize_linear/
+// quantize_conv2d): inputs/attrs are UNCHANGED from the original float
+// Linear/Conv2d node (no int8 Values exist in the graph at all — the
+// "quantization" is a runtime simulation, matching
+// nn::quantization::quantized_linear_dynamic/quantized_conv2d_dynamic,
+// which is why forward_quantized's real output is float, see
+// quantized_linear.cpp's combined_scale contract). Fake-quantize x and
+// weight symmetrically, then replay the ORIGINAL handle_linear/handle_conv2d
+// on the round-tripped operands so fused-bias/epilogue handling stays
+// exactly consistent with the plain float path. ctx.bind() uses
+// map::emplace (insert-only, no overwrite) so a direct ctx.value_name[]
+// write + restore is used to temporarily substitute the fake-quantized
+// operand for the node's real x/weight inputs.
+auto handle_quantized_linear_dynamic(LoweringContext& ctx,
+                                     const ::tenzor::jit::Node& node,
+                                     std::ostream& body) -> void {
+    if (node.inputs().size() < 2) {
+        throw std::runtime_error("GraphToMLIR: QuantizedLinear expects [x, weight(, bias)]");
+    }
+    const auto& x = node.inputs()[0];
+    const auto& w = node.inputs()[1];
+    auto fq_x = emit_dynamic_symmetric_fake_quant(ctx, body, ctx.name_for(x->id()),
+                                                   x->shape(), x->dtype());
+    auto fq_w = emit_dynamic_symmetric_fake_quant(ctx, body, ctx.name_for(w->id()),
+                                                   w->shape(), w->dtype());
+    auto saved_x = ctx.name_for(x->id());
+    auto saved_w = ctx.name_for(w->id());
+    ctx.value_name[x->id()] = fq_x;
+    ctx.value_name[w->id()] = fq_w;
+    handle_linear(ctx, node, body);
+    ctx.value_name[x->id()] = saved_x;
+    ctx.value_name[w->id()] = saved_w;
+}
+
+auto handle_quantized_conv2d_dynamic(LoweringContext& ctx,
+                                     const ::tenzor::jit::Node& node,
+                                     std::ostream& body) -> void {
+    if (node.inputs().size() < 2) {
+        throw std::runtime_error("GraphToMLIR: QuantizedConv2d expects [x, weight(, bias)]");
+    }
+    const auto& x = node.inputs()[0];
+    const auto& w = node.inputs()[1];
+    auto fq_x = emit_dynamic_symmetric_fake_quant(ctx, body, ctx.name_for(x->id()),
+                                                   x->shape(), x->dtype());
+    auto fq_w = emit_dynamic_symmetric_fake_quant(ctx, body, ctx.name_for(w->id()),
+                                                   w->shape(), w->dtype());
+    auto saved_x = ctx.name_for(x->id());
+    auto saved_w = ctx.name_for(w->id());
+    ctx.value_name[x->id()] = fq_x;
+    ctx.value_name[w->id()] = fq_w;
+    handle_conv2d(ctx, node, body);
+    ctx.value_name[x->id()] = saved_x;
+    ctx.value_name[w->id()] = saved_w;
+}
+
+// QuantizedLinearStatic (see nn::quantization::QuantizedLinear::forward_impl
+// -> jit_record_quantized_linear_static / graph.cpp's execute_node case):
+// inputs [input(float), weight(int8), bias (, weight_scale, weight_zp)].
+// Attrs input_scale/weight_scale/output_scale/input_zero_point/
+// weight_zero_point mirror the interpreter's case exactly. Output contract
+// (quantized_linear_kernel, backends/cpu/kernels/quantization/
+// quantized_linear.cpp):
+//   output = (dequant(x) @ dequant(w)^T) / output_scale + bias
+// (combined_scale = input_scale*weight_scale/output_scale; dividing the
+// dequantized-domain dot product by output_scale is the exact float-domain
+// equivalent since dequant(x)@dequant(w)^T = input_scale*weight_scale*
+// raw_int_dot). Deliberately does NOT reuse handle_linear's fused-bias-add
+// (which would add bias BEFORE the /output_scale, an incorrect order).
+auto handle_quantized_linear_static(LoweringContext& ctx,
+                                    const ::tenzor::jit::Node& node,
+                                    std::ostream& body) -> void {
+    if (node.inputs().size() < 3) {
+        throw std::runtime_error(
+            "GraphToMLIR: QuantizedLinearStatic expects [input, weight, bias(, wscale, wzp)]");
+    }
+    const auto& x = node.inputs()[0];
+    const auto& w = node.inputs()[1];
+    const auto& b = node.inputs()[2];
+    const auto& out = node.outputs()[0];
+    const auto d = out->dtype();
+
+    double input_scale = node.has_float_attr("input_scale") ? node.get_attr("input_scale") : 1.0;
+    double weight_scale = node.has_float_attr("weight_scale") ? node.get_attr("weight_scale") : 1.0;
+    double output_scale = node.has_float_attr("output_scale") ? node.get_attr("output_scale") : 1.0;
+    int64_t input_zp = node.has_int_attr("input_zero_point")
+        ? node.get_int_attr("input_zero_point") : int64_t{0};
+    int64_t weight_zp = node.has_int_attr("weight_zero_point")
+        ? node.get_int_attr("weight_zero_point") : int64_t{0};
+
+    // input[0] is the RAW FLOAT activation (re-quantized+dequantized here,
+    // matching the interpreter's re-quantize-on-replay JIT-R058b fix) —
+    // fake-quantize it with the static input_scale/input_zero_point.
+    auto x_name = ctx.name_for(x->id());
+    auto x_quant = emit_static_quantize(ctx, body, x_name, x->shape(), x->dtype(),
+                                        input_scale, input_zp, ::tenzor::DType::Int8);
+    auto x_dequant = emit_static_dequant(ctx, body, x_quant, x->shape(),
+                                         ::tenzor::DType::Int8, input_scale, input_zp, d);
+
+    // weight is ALREADY int8 at this node (a trace-time quantized constant).
+    auto w_dequant = emit_static_dequant(ctx, body, ctx.name_for(w->id()), w->shape(),
+                                         w->dtype(), weight_scale, weight_zp, d);
+
+    const auto x_shape = x->shape();
+    const auto w_shape = w->shape();
+    const int64_t xr = static_cast<int64_t>(x_shape.size());
+    const int64_t wr = static_cast<int64_t>(w_shape.size());
+    std::vector<int64_t> out_shape = out->shape();
+
+    auto mm_name = ctx.fresh_name();
+    emit_dot_general_widened(body, ctx, mm_name, x_dequant, w_dequant,
+                             /*lhs_batch=*/{}, /*rhs_batch=*/{},
+                             /*lhs_contracting=*/{xr - 1}, /*rhs_contracting=*/{wr - 1},
+                             x_shape, w_shape, out_shape, d, d, d);
+
+    std::string scaled = mm_name;
+    if (output_scale != 1.0) {
+        auto os_name = ctx.fresh_name();
+        emit_stablehlo_splat_constant(body, os_name, scalar_literal(output_scale, d),
+                                      out_shape, d);
+        body << '\n';
+        auto div_name = ctx.fresh_name();
+        emit_stablehlo_binary(body, "divide", div_name, mm_name, os_name, out_shape, d);
+        body << '\n';
+        scaled = div_name;
+    }
+
+    auto bias_b = maybe_broadcast(body, ctx, ctx.name_for(b->id()), b->shape(), out_shape, d);
+    auto result = ctx.fresh_name();
+    emit_stablehlo_binary(body, "add", result, scaled, bias_b, out_shape, d);
+    body << '\n';
+    ctx.bind(out->id(), result);
+}
+
 /// Emit a stablehlo.reduce_window pooling op (MaxPool / AvgPool sum).
 auto emit_reduce_window(std::ostream& body, LoweringContext& ctx,
                         const std::string& result, const std::string& operand,
@@ -2522,6 +2875,22 @@ auto handle_dropout(LoweringContext& ctx,
     if (node.inputs().empty() || node.outputs().empty()) {
         throw std::runtime_error(
             "GraphToMLIR: Dropout expects 1+ input, 1+ output");
+    }
+    // JIT-R013: sibling of the already-fixed handle_batch_norm2d guard
+    // above and JIT-037 (the interpreter's grad-mode Dropout replay).
+    // Unconditional identity here silently drops BOTH the regularization
+    // mask AND the 1/(1-p) scaling for a training-mode Dropout node. The
+    // only real producer of an OpType::Dropout node (nested_dropout,
+    // nested_ops.cpp) already gates `if (!training || p == 0.0) return
+    // input;` BEFORE ever dispatching, so every OpType::Dropout node that
+    // can reach this lowering is training=true by construction — fail
+    // loudly instead of producing wrong numerics, matching
+    // handle_batch_norm2d's established pattern.
+    if (node.get_bool_attr("training")) {
+        throw std::runtime_error(
+            "GraphToMLIR: Dropout(training=true) has no MLIR/IREE lowering "
+            "(the fused kernel it needs is interpreter/backend-only); fall "
+            "back to eager or the interpreter for this graph");
     }
     // Identity: rebind output to input's SSA name.
     ctx.bind(node.outputs()[0]->id(),
@@ -3911,6 +4280,22 @@ auto handle_flash_attention_expand(LoweringContext& ctx,
         scale = 1.0f / std::sqrt(static_cast<float>(D));
     }
 
+    // JIT-R068: sibling of the interpreter path's OpType::FlashAttention
+    // dropout_p guard (JIT-R054, graph.cpp execute_node) — this MLIR
+    // lowering path emits NO dropout step at all, so a traced node with
+    // dropout_p > 0 would silently compile to a dropout-free (wrong)
+    // forward pass instead of failing loudly. Fail the LOWERING itself
+    // (before any IREE compile/cache work) rather than let the interpreter
+    // path's later guard be the only backstop — GraphToMLIR::lower() is a
+    // separate, independently-reachable path.
+    const float dropout_p = get_attr_float(node, {"dropout_p"}, 0.0f);
+    if (dropout_p > 0.0f) {
+        throw std::runtime_error(
+            "GraphToMLIR: FlashAttention (expand) with dropout_p > 0 is not "
+            "wired for MLIR/IREE lowering (the dropout mask is not "
+            "captured); fall back to eager");
+    }
+
     // Compute the scores, scale, mask and softmax in F32 for F16/BF16 (JIT-006).
     // Previously the QK dot_general result, the *scale and the causal mask were
     // all emitted in the storage dtype d, so F16/BF16 attention truncated the
@@ -4023,6 +4408,16 @@ auto handle_gqa_expand(LoweringContext& ctx,
     const bool causal = get_attr_bool (node, {"causal"}, false);
     float scale       = get_attr_float(node, {"scale"},  0.0f);
     if (scale == 0.0f) scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+    // JIT-R068: see handle_flash_attention_expand's identical guard — this
+    // GQA lowering emits no dropout step either.
+    const float dropout_p = get_attr_float(node, {"dropout_p"}, 0.0f);
+    if (dropout_p > 0.0f) {
+        throw std::runtime_error(
+            "GraphToMLIR: GQA (expand) with dropout_p > 0 is not wired for "
+            "MLIR/IREE lowering (the dropout mask is not captured); fall "
+            "back to eager");
+    }
 
     auto expand_kv = [&](const std::string& src_name,
                          const std::vector<int64_t>& src_shape) -> std::string {
@@ -4155,6 +4550,16 @@ auto handle_rope_apply_expand(LoweringContext& ctx,
     }
     const int64_t H = D / 2;
 
+    // JIT-R007: widen F16/BF16 to F32 for the whole rotate-half pipeline,
+    // matching eager's rope.cpp ("F121": computing x*cos +- x*sin in half
+    // loses angle precision and makes cross-backend parity depend on each
+    // backend's half-precision rounding) and every OTHER numeric handler in
+    // this file (softmax/gelu/silu/pow/conv2d/pooling/layer_norm/
+    // batch_norm/flash_attention_expand/gqa_expand all do this).
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+
     // Half-shape: same as x_shape but with last dim = H.
     std::vector<int64_t> half_shape = x_shape;
     half_shape.back() = H;
@@ -4176,7 +4581,23 @@ auto handle_rope_apply_expand(LoweringContext& ctx,
         return s;
     };
 
-    const auto& x = ctx.name_for(x_val->id());
+    auto x = ctx.name_for(x_val->id());
+    auto cos_name = ctx.name_for(cos_val->id());
+    auto sin_name = ctx.name_for(sin_val->id());
+    if (widen) {
+        auto xc = ctx.fresh_name();
+        emit_stablehlo_convert(body, xc, x, x_shape, d, cd);
+        body << '\n';
+        x = xc;
+        auto cosc = ctx.fresh_name();
+        emit_stablehlo_convert(body, cosc, cos_name, cos_val->shape(), d, cd);
+        body << '\n';
+        cos_name = cosc;
+        auto sinc = ctx.fresh_name();
+        emit_stablehlo_convert(body, sinc, sin_name, sin_val->shape(), d, cd);
+        body << '\n';
+        sin_name = sinc;
+    }
 
     // Slice x into x1 = x[..., :H], x2 = x[..., H:].
     // stablehlo.slice uses start_indices/limit_indices/strides per dim.
@@ -4192,9 +4613,9 @@ auto handle_rope_apply_expand(LoweringContext& ctx,
          << ">, limit_indices = array<i64: " << render_dims(limit_lo)
          << ">, strides = array<i64: " << render_dims(strides)
          << ">}> : (";
-    write_tensor_type_for_emit(body, x_shape, d);
+    write_tensor_type_for_emit(body, x_shape, cd);
     body << ") -> ";
-    write_tensor_type_for_emit(body, half_shape, d);
+    write_tensor_type_for_emit(body, half_shape, cd);
     body << '\n';
 
     auto x2 = ctx.fresh_name();
@@ -4203,14 +4624,14 @@ auto handle_rope_apply_expand(LoweringContext& ctx,
          << ">, limit_indices = array<i64: " << render_dims(limit_hi)
          << ">, strides = array<i64: " << render_dims(strides)
          << ">}> : (";
-    write_tensor_type_for_emit(body, x_shape, d);
+    write_tensor_type_for_emit(body, x_shape, cd);
     body << ") -> ";
-    write_tensor_type_for_emit(body, half_shape, d);
+    write_tensor_type_for_emit(body, half_shape, cd);
     body << '\n';
 
     // -x2
     auto neg_x2 = ctx.fresh_name();
-    emit_stablehlo_unary(body, "negate", neg_x2, x2, half_shape, d);
+    emit_stablehlo_unary(body, "negate", neg_x2, x2, half_shape, cd);
     body << '\n';
 
     // rotated = concat([-x2, x1], dim=last).
@@ -4219,10 +4640,10 @@ auto handle_rope_apply_expand(LoweringContext& ctx,
          << ", %" << x1 << ") <{dimension = " << (rank - 1) << " : i64}> : ("
          << "tensor<";
     for (auto v : half_shape) body << v << 'x';
-    body << dtype_suffix(d) << ">, tensor<";
+    body << dtype_suffix(cd) << ">, tensor<";
     for (auto v : half_shape) body << v << 'x';
-    body << dtype_suffix(d) << ">) -> ";
-    write_tensor_type_for_emit(body, x_shape, d);
+    body << dtype_suffix(cd) << ">) -> ";
+    write_tensor_type_for_emit(body, x_shape, cd);
     body << '\n';
 
     // Broadcast cos/sin from their actual shapes to x_shape. The table
@@ -4239,31 +4660,40 @@ auto handle_rope_apply_expand(LoweringContext& ctx,
         for (int64_t i = 0; i < n_tab; ++i) bcast_dims.push_back(off + i);
         auto b = ctx.fresh_name();
         emit_stablehlo_broadcast_in_dim(body, b, tab_name, bcast_dims,
-                                        tab_shape, x_shape, d);
+                                        tab_shape, x_shape, cd);
         body << '\n';
         return b;
     };
 
-    auto cos_b = broadcast_table(ctx.name_for(cos_val->id()),
-                                 cos_val->shape());
-    auto sin_b = broadcast_table(ctx.name_for(sin_val->id()),
-                                 sin_val->shape());
+    auto cos_b = broadcast_table(cos_name, cos_val->shape());
+    auto sin_b = broadcast_table(sin_name, sin_val->shape());
 
     // x_mul_cos = x * cos
     auto x_mul_cos = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", x_mul_cos, x, cos_b, x_shape, d);
+    emit_stablehlo_binary(body, "multiply", x_mul_cos, x, cos_b, x_shape, cd);
     body << '\n';
     // rot_mul_sin = rotated * sin
     auto rot_mul_sin = ctx.fresh_name();
     emit_stablehlo_binary(body, "multiply", rot_mul_sin, rotated, sin_b,
-                          x_shape, d);
+                          x_shape, cd);
     body << '\n';
     // out = x_mul_cos + rot_mul_sin
-    auto out_name = ctx.fresh_name();
-    ctx.bind(out_val->id(), out_name);
-    emit_stablehlo_binary(body, "add", out_name, x_mul_cos, rot_mul_sin,
-                          x_shape, d);
-    body << '\n';
+    if (widen) {
+        auto sum_cd = ctx.fresh_name();
+        emit_stablehlo_binary(body, "add", sum_cd, x_mul_cos, rot_mul_sin,
+                              x_shape, cd);
+        body << '\n';
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out_val->id(), out_name);
+        emit_stablehlo_convert(body, out_name, sum_cd, x_shape, cd, d);
+        body << '\n';
+    } else {
+        auto out_name = ctx.fresh_name();
+        ctx.bind(out_val->id(), out_name);
+        emit_stablehlo_binary(body, "add", out_name, x_mul_cos, rot_mul_sin,
+                              x_shape, cd);
+        body << '\n';
+    }
 }
 
 
@@ -4551,6 +4981,13 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             // x@WT + b). MLIR has no sparse kernel, so lower it as the equivalent
             // dense Linear instead of hitting the default: throw (JIT-025).
             case OpType::SparseMatMul: handle_linear(ctx, *node, body); break;
+
+            // ── Quantization (JIT-R081) ──
+            case OpType::Quantize:             handle_quantize(ctx, *node, body); break;
+            case OpType::Dequantize:           handle_dequantize(ctx, *node, body); break;
+            case OpType::QuantizedLinear:      handle_quantized_linear_dynamic(ctx, *node, body); break;
+            case OpType::QuantizedLinearStatic: handle_quantized_linear_static(ctx, *node, body); break;
+            case OpType::QuantizedConv2d:      handle_quantized_conv2d_dynamic(ctx, *node, body); break;
 
             // ── Shape ──
             case OpType::Reshape:      handle_reshape(ctx, *node, body);   break;

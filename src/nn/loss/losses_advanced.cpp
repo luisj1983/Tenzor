@@ -634,22 +634,29 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
         throw std::invalid_argument("CTCLoss: log_probs must be 3D (T, N, C)");
     }
 
-    int64_t T_max = lp_shape[0];
     int64_t N = lp_shape[1];
-    int64_t C = lp_shape[2];
 
     const Device original_device = log_probs.tensor().device();
     const DType original_dtype = log_probs.tensor().dtype();
     const bool needs_grad = log_probs.requires_grad() && is_grad_enabled();
 
     // -----------------------------------------------------------------------
-    // GPU device path: dispatch to the backend's native CTC kernel
-    // (OpId::CTCLossForward). The kernel returns {loss_per_sample (N,),
-    // raw_grad (T, N, C)} on the same device. Reductions and any necessary
-    // scaling are done with device-native tensor ops — no host round-trip
-    // for the heavy DP arithmetic.
-    // -----------------------------------------------------------------------
-    if (original_device.type != Device::Type::CPU) {
+    // JIT-R092: dispatch to the backend's native CTC kernel (OpId::
+    // CTCLossForward) unconditionally, on every device including CPU. The
+    // kernel returns {loss_per_sample (N,), raw_grad (T, N, C)} on the same
+    // device. Reductions and any necessary scaling are done with device-
+    // native tensor ops — no host round-trip for the heavy DP arithmetic.
+    // Previously this branch was gated to non-CPU devices only, and CPU fell
+    // through to a ~150-line raw-pointer-loop reimplementation below (zero
+    // dispatch() calls, 100% invisible to the JIT tracer — silently froze
+    // the trace-dummy's loss/gradient on any traced CPU call). The CPU
+    // kernel (src/backends/cpu/kernels/ctc.cpp) is already registered for
+    // dispatch parity and computes the identical algorithm; keeping the
+    // Float32-only staging below (matching this branch's prior GPU-only
+    // behavior exactly) rather than also passing through its Float64
+    // support, since that widening hasn't been verified against every
+    // GPU backend's own kernel in this CPU-only environment.
+    {
         // Stage inputs onto the device with the expected dtypes.
         Tensor lp_dev = log_probs.tensor();
         if (lp_dev.dtype() != DType::Float32) lp_dev = lp_dev.to(DType::Float32);
@@ -735,165 +742,6 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
         return out;
     }
 
-    // -----------------------------------------------------------------------
-    // CPU device path: inline implementation (unchanged). The kernel
-    // version in src/backends/cpu/kernels/ctc.cpp is also registered for
-    // dispatch parity, but invoking it here would require an extra
-    // attribute set + dispatch indirection without any benefit over the
-    // direct loop already written below.
-    // -----------------------------------------------------------------------
-    Tensor lp_cpu = log_probs.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
-    Tensor tgt_cpu = targets.to(Device::cpu()).to(DType::Int32).contiguous();
-    Tensor il_cpu = input_lengths.to(Device::cpu()).to(DType::Int32).contiguous();
-    Tensor tl_cpu = target_lengths.to(Device::cpu()).to(DType::Int32).contiguous();
-
-    const float* lp_data = lp_cpu.data<float>();
-    const int32_t* tgt_data = tgt_cpu.data<int32_t>();
-    const int32_t* il_data = il_cpu.data<int32_t>();
-    const int32_t* tl_data = tl_cpu.data<int32_t>();
-
-    // targets shape: (N, S_max)
-    auto tgt_shape = tgt_cpu.shape();
-    int64_t S_max = tgt_shape.size() > 1 ? tgt_shape[1] : tgt_shape[0];
-
-    // Validate per-sample lengths against the available buffer extents BEFORE
-    // any indexing. log_probs (lp_data) and all_grads are sized T_max*N*C, and
-    // each target row spans S_max entries (tgt_data + n*S_max). If a
-    // user-supplied input_lengths[n] > T_max or target_lengths[n] > S_max, the
-    // extraction/write-back loops below and ctc_loss_single would read/write
-    // out of bounds (heap overflow). PyTorch rejects these; do the same. This
-    // is done serially before the parallel region so we never throw across an
-    // OpenMP boundary.
-    for (int64_t n = 0; n < N; ++n) {
-        const int64_t T_n = il_data[n];
-        const int64_t S_n = tl_data[n];
-        if (T_n > T_max) {
-            throw std::invalid_argument(
-                "CTCLoss: input_lengths[" + std::to_string(n) + "] (" +
-                std::to_string(T_n) + ") exceeds log_probs time dimension T (" +
-                std::to_string(T_max) + ")");
-        }
-        if (S_n > S_max) {
-            throw std::invalid_argument(
-                "CTCLoss: target_lengths[" + std::to_string(n) + "] (" +
-                std::to_string(S_n) + ") exceeds targets length dimension S (" +
-                std::to_string(S_max) + ")");
-        }
-    }
-
-    // Compute per-element losses and gradients
-    std::vector<float> losses(N);
-    std::vector<float> all_grads(T_max * N * C, 0.0f);
-
-    #pragma omp parallel for if(N > 4)
-    for (int64_t n = 0; n < N; ++n) {
-        int64_t T_n = il_data[n];
-        int64_t S_n = tl_data[n];
-
-        if (T_n <= 0 || S_n <= 0) {
-            losses[n] = 0.0f;
-            continue;
-        }
-
-        // Extract per-batch log_probs: (T_n, C) from (T, N, C)
-        std::vector<float> lp_n(T_n * C);
-        for (int64_t t = 0; t < T_n; ++t) {
-            for (int64_t c = 0; c < C; ++c) {
-                lp_n[t * C + c] = lp_data[t * N * C + n * C + c];
-            }
-        }
-
-        // Extract per-batch targets: (S_n,)
-        const int32_t* tgt_n = tgt_data + n * S_max;
-
-        auto [loss, grad] = ctc_loss_single(lp_n.data(), tgt_n, T_n, S_n, C, blank_);
-
-        if (zero_infinity_ && std::isinf(loss)) {
-            loss = 0.0f;
-            std::fill(grad.begin(), grad.end(), 0.0f);
-        }
-
-        losses[n] = loss;
-
-        // Write gradients back to (T, N, C) layout
-        for (int64_t t = 0; t < T_n; ++t) {
-            for (int64_t c = 0; c < C; ++c) {
-                all_grads[t * N * C + n * C + c] = grad[t * C + c];
-            }
-        }
-    }
-
-    // (CPU path) Pack the gradient tensor once; used below for both
-    // reductions. original_device, original_dtype, needs_grad were
-    // captured at function entry.
-    Tensor grad_tensor({T_max, N, C}, DType::Float32, Device::cpu());
-    std::memcpy(grad_tensor.data<float>(), all_grads.data(),
-                all_grads.size() * sizeof(float));
-
-    auto attach_grad_fn = [&](Variable& out, bool per_sample, float scale) {
-        if (!needs_grad) return;
-        auto grad_fn = std::make_shared<CTCLossBackward>();
-        grad_fn->raw_grad_ = grad_tensor;
-        grad_fn->is_per_sample_ = per_sample;
-        grad_fn->scale_ = scale;
-        grad_fn->orig_dtype_ = original_dtype;
-        grad_fn->orig_device_ = original_device;
-
-        std::vector<std::shared_ptr<Function>> next_funcs;
-        if (log_probs.grad_fn()) next_funcs.push_back(log_probs.grad_fn());
-        grad_fn->set_next_functions(next_funcs);
-        grad_fn->set_input_variables({log_probs});
-
-        out.set_grad_fn(grad_fn);
-    };
-
-    if (reduction_ == "none") {
-        auto loss_tensor = Tensor({N}, DType::Float32, Device::cpu());
-        std::memcpy(loss_tensor.data<float>(), losses.data(), N * sizeof(float));
-        Variable out(loss_tensor.to(original_dtype).to(original_device), needs_grad);
-        attach_grad_fn(out, /*per_sample=*/true, /*scale=*/1.0f);
-        return out;
-    }
-
-    float total_loss = 0.0f;
-    float scale = 1.0f;  // d(reduced_loss)/d(per-sample-grad-sum)
-    if (reduction_ == "sum") {
-        for (int64_t n = 0; n < N; ++n) {
-            total_loss += losses[n];
-        }
-    } else {  // "mean"
-        // PyTorch reduction="mean" is mean_n( loss_n / max(target_len_n, 1) ),
-        // NOT sum(loss)/sum(target_len). Divide each sample's loss by its OWN
-        // target length, then average over N. The per-sample 1/len_n factor is
-        // baked into the gradient rows below; scale_ carries only the uniform
-        // 1/N mean factor (a single scalar can't express a per-sample divisor).
-        std::vector<float> inv_len(N, 1.0f);
-        for (int64_t n = 0; n < N; ++n) {
-            const float len_n = std::max(static_cast<float>(tl_data[n]), 1.0f);
-            inv_len[n] = 1.0f / len_n;
-            total_loss += losses[n] * inv_len[n];
-        }
-        if (N > 0) {
-            total_loss /= static_cast<float>(N);
-            scale = 1.0f / static_cast<float>(N);
-            // Bake the per-sample 1/len_n into the captured gradient tensor so
-            // the backward's uniform scale_ (=1/N) reproduces
-            // d L / d logits_n = grad_n / (N * len_n).
-            float* gt = grad_tensor.data<float>();
-            for (int64_t t = 0; t < T_max; ++t) {
-                for (int64_t n = 0; n < N; ++n) {
-                    float* row = gt + (t * N + n) * C;
-                    for (int64_t c = 0; c < C; ++c) row[c] *= inv_len[n];
-                }
-            }
-        }
-    }
-
-    auto loss_tensor = Tensor({1}, DType::Float32, Device::cpu());
-    loss_tensor.data<float>()[0] = total_loss;
-    Variable out(loss_tensor.to(original_dtype).to(original_device), needs_grad);
-    attach_grad_fn(out, /*per_sample=*/false, scale);
-    return out;
 }
 
 //==============================================================================

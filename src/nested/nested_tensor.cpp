@@ -8,10 +8,39 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <algorithm>
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
+
+namespace {
+// JIT-R095: NestedTensor's ragged layout (contiguous values_ buffer + an
+// offsets_ tensor of per-sample segment boundaries) is built and consumed
+// entirely via raw host pointer loops (memcpy, direct offsets_.data<>()
+// reads) with zero dispatch() calls anywhere — 100% invisible to the JIT
+// tracer. Unlike a simple missing-OpId-mapping gap, this is not fixable by
+// adding a mapping: segment boundaries are INHERENTLY data-dependent (the
+// number of elements per sample varies with the actual runtime batch, not
+// just its static shape), so no fixed-shape graph node could correctly
+// represent "select samples i's raw_grad boundaries" for an arbitrary later
+// call. Fail loudly instead of silently freezing the trace-dummy's
+// boundaries/padding decisions — matches the established RoPE/KVCache/
+// WindowAttention/QuantizedLinear/Autocast "fail loudly instead of
+// producing wrong numerics" pattern for genuinely untraceable constructs.
+inline auto refuse_if_tracing(const char* where) -> void {
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            std::string("NestedTensor::") + where +
+            ": cannot be JIT-traced — segment boundaries are data-dependent "
+            "and would silently freeze at the trace-time batch's layout, "
+            "producing wrong results for any later call with different "
+            "per-sample lengths. Keep NestedTensor construction/consumption "
+            "outside jit.compile()/jit.trace() (e.g. pad/unpad as a "
+            "preprocessing step before the traced region).");
+    }
+}
+}  // namespace
 
 namespace tenzor {
 
@@ -32,6 +61,7 @@ NestedTensor::NestedTensor(Tensor values, Tensor offsets, int64_t batch_size,
 // =========================================================================
 
 auto NestedTensor::from_tensor_list(std::span<const Tensor> tensors) -> NestedTensor {
+    refuse_if_tracing("from_tensor_list");
     if (tensors.empty()) {
         throw std::runtime_error("NestedTensor::from_tensor_list: empty tensor list");
     }
@@ -326,6 +356,7 @@ auto NestedTensor::max_length() const -> int64_t {
 // =========================================================================
 
 auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
+    refuse_if_tracing("to_padded_tensor");
     int64_t max_len = max_length();
 
     // Output shape: [B, max_len, *regular_shape]
@@ -383,6 +414,7 @@ auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
 }
 
 auto NestedTensor::unbind() const -> std::vector<Tensor> {
+    refuse_if_tracing("unbind");
     auto offsets_cpu = (offsets_.device().type != Device::Type::CPU)
         ? offsets_.to(Device::cpu()) : offsets_;
     const auto* off_ptr = offsets_cpu.data<int64_t>();
@@ -396,6 +428,7 @@ auto NestedTensor::unbind() const -> std::vector<Tensor> {
 }
 
 auto NestedTensor::select(int64_t index) const -> Tensor {
+    refuse_if_tracing("select");
     // Support negative indexing
     if (index < 0) {
         index += batch_size_;

@@ -3695,6 +3695,49 @@ auto ONNXExporter::convert_jit_node_to_onnx(
             }
             break;
         }
+        case jit::OpType::Squeeze: {
+            // JIT-R031: opset 13+ Squeeze takes axes as an OPTIONAL 2nd INPUT
+            // (int64 tensor), not an attribute — this exporter targets opset
+            // 17+ elsewhere (LayerNormalization/GroupNormalization use those),
+            // so an "axes" ATTRIBUTE would be silently ignored by any
+            // spec-compliant reader, and the old default-branch fallback
+            // emitted a nonstandard "dim" int attribute instead. Mirror
+            // graph.cpp's execute_node Squeeze case exactly: a "dims" vec
+            // attr (multi-axis), a scalar "dim" attr (single axis), or no
+            // attr at all (squeeze ALL size-1 dims — ONNX's own no-axes-
+            // input default too, so omitting the 2nd input entirely here is
+            // correct, not a gap).
+            std::vector<int64_t> axes;
+            if (node->has_attr("dims")) {
+                axes = node->get_vec_attr("dims");
+            } else if (node->has_int_attr("dim")) {
+                axes.push_back(node->get_int_attr("dim"));
+            }
+            if (!axes.empty()) {
+                std::string axes_name = graph_.get_unique_name(node_name + "_axes");
+                Tensor axes_tensor({static_cast<int64_t>(axes.size())},
+                                    DType::Int64, Device::cpu());
+                std::memcpy(axes_tensor.data<int64_t>(), axes.data(),
+                            axes.size() * sizeof(int64_t));
+                add_initializer_tensor(axes_tensor, axes_name);
+                onnx_node.add_input(axes_name);
+            }
+            break;
+        }
+        case jit::OpType::Unsqueeze: {
+            // JIT-R031: same opset-13+ axes-as-input requirement as Squeeze
+            // above. Unlike Squeeze, Unsqueeze's "dim" attr is unconditional
+            // (graph.cpp's execute_node always reads it, no has_attr guard)
+            // and ONNX Unsqueeze has no no-axes default, so this input is
+            // always required.
+            int64_t dim = node->get_int_attr("dim");
+            std::string axes_name = graph_.get_unique_name(node_name + "_axes");
+            Tensor axes_tensor({1}, DType::Int64, Device::cpu());
+            *axes_tensor.data<int64_t>() = dim;
+            add_initializer_tensor(axes_tensor, axes_name);
+            onnx_node.add_input(axes_name);
+            break;
+        }
         case jit::OpType::Clamp: {
             // Opset-11+ Clip carries min/max as INPUTS (scalar tensors), not
             // attributes; emitting them as float attributes produced a Clip that

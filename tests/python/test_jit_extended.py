@@ -126,7 +126,10 @@ def test_graph_save_load(tmp_path):
 # device whose backend isn't compiled in / available on this host.
 # ---------------------------------------------------------------------------
 
-ALL_DEVICES = ["cpu", "cuda", "vulkan", "oneapi", "rocm"]
+# JIT-R044: import the single source of truth from conftest.py rather than
+# duplicating the device list (a prior verbatim duplication across 5 files
+# was how the MPS omission propagated undetected).
+from conftest import ALL_DEVICES
 
 
 @pytest.mark.parametrize("device", ALL_DEVICES, indirect=True)
@@ -134,16 +137,46 @@ def test_jit_matches_eager_on_device(device):
     """@tz.jit output must match eager within tolerance on every device this
     build actually has a backend for — not just CPU. Uses target="auto" (the
     @tz.jit default), which is exactly the resolution path JIT-R030 flagged
-    as having zero non-CPU Python coverage."""
+    as having zero non-CPU Python coverage.
+
+    OneAPI and MPS have no IREE HAL target at all (documented, intentional
+    capability limit — see compile.cpp's mlir_invoke C1 branch), so @tz.jit's
+    default strict=True is REQUIRED to raise there rather than silently
+    degrade to eager (the same "JIT coverage gaps throw loudly" contract
+    CUDA/ROCm lowering gaps get). This test verifies that documented
+    RuntimeError on those two devices instead of asserting output equality,
+    and separately verifies the fallback_to_eager=True escape hatch actually
+    produces correct output there — closing JIT-R021/R022's C++-side OneAPI/
+    MPS coverage gap from the Python side too, on real hardware."""
     def eager_fn(x):
         return x * 2.0 + 1.0
+
+    x = tz.randn([4, 8], device=device)
+    eager_out = eager_fn(x)
+
+    if device in ("oneapi", "mps"):
+        @tz.jit
+        def jit_fn_strict(x):
+            return x * 2.0 + 1.0
+
+        with pytest.raises(RuntimeError, match="no IREE target backend"):
+            jit_fn_strict(x)
+
+        @tz.jit(fallback_to_eager=True)
+        def jit_fn_fallback(x):
+            return x * 2.0 + 1.0
+
+        jit_out = jit_fn_fallback(x)
+        assert _allclose(jit_out, eager_out), (
+            f"@tz.jit(fallback_to_eager=True) output diverged from eager on "
+            f"device={device!r}"
+        )
+        return
 
     @tz.jit
     def jit_fn(x):
         return x * 2.0 + 1.0
 
-    x = tz.randn([4, 8], device=device)
-    eager_out = eager_fn(x)
     jit_out = jit_fn(x)
 
     assert _allclose(jit_out, eager_out), (

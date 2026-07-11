@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/utils/variable_cast.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -64,12 +65,43 @@ auto RoPE::forward(const Variable& input, int64_t offset) -> Variable {
                                  " exceeds max_seq_len " + std::to_string(max_seq_len_));
     }
 
+    // JIT-R083: `offset` is a host int64_t captured by the tracing closure —
+    // the compiled graph bakes it as a Slice node's constant start/end
+    // ATTRIBUTE, not a dynamic input. jit.compile()'s cache keys only on
+    // input tensor shape/dtype/device, so a SECOND call with a genuinely
+    // different offset but the SAME input shape (the standard KV-cache
+    // incremental-decode pattern: trace at offset=0/prefill, decode at
+    // offset=1,2,3,...) is a cache HIT that replays the graph interpreter
+    // directly — forward_impl's C++ body (and this very check) never runs
+    // again, so there is no way to detect the mismatch after the fact. The
+    // only way to guarantee correctness is to refuse to cache in the first
+    // place: fail loudly and force eager fallback for every call made while
+    // actually tracing, matching this codebase's established
+    // "fail loudly instead of producing wrong numerics" pattern (mirrors
+    // SyncBatchNorm/JIT-R049). Does not affect plain eager (non-traced)
+    // calls, which remain fully correct for any offset.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "RoPE::forward: cannot be JIT-traced — the `offset` argument is "
+            "baked into the compiled graph as a constant, so any later call "
+            "with a different offset (e.g. incremental KV-cache decoding) "
+            "would silently replay the WRONG rotation. Call outside "
+            "jit.compile()/jit.trace(), or ensure this RoPE call is never "
+            "reached while tracing.");
+    }
+
     int64_t half_dim = dim_ / 2;
 
     // Slice precomputed tables for this position range
     // cos/sin shape: (seq_len, half_dim)
-    Tensor cos_slice = cos_cached_.slice(0, offset, offset + seq_len).contiguous();
-    Tensor sin_slice = sin_cached_.slice(0, offset, offset + seq_len).contiguous();
+    // JIT-R083: raw Tensor::slice() is zero-dispatch and invisible to the JIT
+    // tracer, freezing the trace-time offset's cos/sin rotation permanently —
+    // directly breaks KV-cache incremental decoding (offset increases every
+    // step). Route through the dispatched Variable-level overload
+    // (requires_grad=false — cos_cached_/sin_cached_ are non-trainable
+    // precomputed buffers, matches the existing no-gradient contract).
+    Tensor cos_slice = tenzor::slice(Variable(cos_cached_, false), 0, offset, offset + seq_len).tensor().contiguous();
+    Tensor sin_slice = tenzor::slice(Variable(sin_cached_, false), 0, offset, offset + seq_len).tensor().contiguous();
 
     // Move to input device if needed
     if (input.tensor().device() != cos_slice.device()) {

@@ -57,6 +57,11 @@ if(TENZOR_DEFAULT_ROCM_TARGET)
     target_compile_definitions(tenzor_jit_mlir PRIVATE
         TENZOR_DEFAULT_ROCM_TARGET="${TENZOR_DEFAULT_ROCM_TARGET}")
 endif()
+# JIT-R043: mirrors the ROCm block above.
+if(TENZOR_DEFAULT_CUDA_TARGET)
+    target_compile_definitions(tenzor_jit_mlir PRIVATE
+        TENZOR_DEFAULT_CUDA_TARGET="${TENZOR_DEFAULT_CUDA_TARGET}")
+endif()
 
 # OBJECT library is spliced into the shared tenzor_core; PIC required.
 set_target_properties(tenzor_jit_mlir PROPERTIES POSITION_INDEPENDENT_CODE ON)

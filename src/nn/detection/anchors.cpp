@@ -5,11 +5,18 @@
 
 #include "tenzor/nn/detection/anchors.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 
 namespace tenzor {
 namespace nn {
 namespace detection {
+
+namespace {
+inline auto jit_tracing_active() -> bool {
+    return ::tenzor::jit::Tracer::get_instance().is_tracing();
+}
+}  // namespace
 
 AnchorGenerator::AnchorGenerator(std::vector<float> sizes,
                                  std::vector<float> aspect_ratios)
@@ -74,7 +81,34 @@ auto AnchorGenerator::generate(int64_t feat_height, int64_t feat_width,
 
     // Move to target device if needed
     if (device != Device::cpu()) {
-        return anchors.to(device);
+        anchors = anchors.to(device);
+    }
+
+    // JIT-R085: this function has zero tensor inputs and zero dispatch()
+    // calls anywhere in its body — the output is built via zeros() (traced)
+    // then a raw std::copy pointer write AFTER registration, so the trace
+    // would record "create a zeros tensor" as the producing op while the
+    // REAL anchor coordinates are invisibly written in afterward. Manually
+    // record a fresh node capturing the real output (mirrors JIT-R098/R100's
+    // manual Tracer-API pattern) so the correct values are what gets
+    // registered, not the stale all-zeros snapshot from the traced zeros()
+    // call. sizes_/aspect_ratios_ travel as small CPU Float32 tensor_attrs so
+    // execute_node can reconstruct an equivalent AnchorGenerator and re-call
+    // generate() exactly on replay. No tensor inputs — anchors are a pure
+    // function of these attrs, never differentiable.
+    if (jit_tracing_active()) {
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        auto output_id = tracer.register_new_tensor(anchors);
+        ::tenzor::jit::TracedOp op(
+            ::tenzor::jit::OpType::AnchorGenerate, {}, {output_id});
+        op.int_attrs["feat_h"] = feat_height;
+        op.int_attrs["feat_w"] = feat_width;
+        op.int_attrs["stride"] = stride;
+        op.tensor_attrs["sizes"] =
+            tenzor::from_data(sizes_.data(), {static_cast<int64_t>(sizes_.size())}, Device::cpu());
+        op.tensor_attrs["aspect_ratios"] = tenzor::from_data(
+            aspect_ratios_.data(), {static_cast<int64_t>(aspect_ratios_.size())}, Device::cpu());
+        tracer.record_op(std::move(op));
     }
 
     return anchors;

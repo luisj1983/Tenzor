@@ -76,6 +76,12 @@ inline std::string_view device_type_to_backend_name(Device::Type t) {
         case Device::Type::Vulkan: return "vulkan";
         case Device::Type::OneAPI: return "oneapi";
         case Device::Type::ROCm:   return "rocm";
+        // JIT-R011: MPS is a full 6th Device::Type (Device::mps(),
+        // core/device.hpp) but was structurally omitted from every backend
+        // enumeration function in this file, making it invisible to the
+        // entire JIT backend-parity test infrastructure even on an Apple
+        // host with a working MPS backend.
+        case Device::Type::MPS:   return "mps";
     }
     return "";
 }
@@ -122,6 +128,13 @@ inline bool has_rocm(int32_t index = 0) {
 }
 
 /**
+ * @brief Check if MPS (Apple Metal) backend is available.
+ */
+inline bool has_mps(int32_t index = 0) {
+    return is_backend_available(Device::Type::MPS, index);
+}
+
+/**
  * @brief Parse the base backend name from a possibly-indexed string.
  *
  * "cuda:1" -> "cuda", "cuda" -> "cuda", "cpu" -> "cpu"
@@ -151,6 +164,7 @@ inline Device::Type name_to_device_type(const std::string& name) {
     if (name == "vulkan") return Device::Type::Vulkan;
     if (name == "oneapi") return Device::Type::OneAPI;
     if (name == "rocm") return Device::Type::ROCm;
+    if (name == "mps") return Device::Type::MPS;
     throw std::runtime_error("Unknown backend name: " + name);
 }
 
@@ -204,6 +218,7 @@ inline std::vector<Device> get_available_backends() {
     if (has_oneapi()) backends.push_back(Device::oneapi(0));
     if (has_vulkan()) backends.push_back(Device::vulkan(0));
     if (has_rocm()) backends.push_back(Device::rocm(0));
+    if (has_mps()) backends.push_back(Device::mps(0));
 
     return backends;
 }
@@ -250,7 +265,8 @@ inline std::vector<Device> get_available_backends_all_devices() {
 
     struct BackendInfo { Device::Type type; };
     for (auto type : {Device::Type::CUDA, Device::Type::OneAPI,
-                      Device::Type::Vulkan, Device::Type::ROCm}) {
+                      Device::Type::Vulkan, Device::Type::ROCm,
+                      Device::Type::MPS}) {
         auto* backend = backend_registry().get_backend(type);
         if (!backend || !backend->is_available()) continue;
         for (int32_t i = 0; i < backend->device_count(); ++i) {
@@ -274,6 +290,7 @@ inline std::vector<std::string> get_available_backend_names() {
     if (has_oneapi()) names.push_back("oneapi");
     if (has_vulkan()) names.push_back("vulkan");
     if (has_rocm()) names.push_back("rocm");
+    if (has_mps()) names.push_back("mps");
     return names;
 }
 
@@ -291,6 +308,7 @@ inline std::vector<std::string> get_available_backend_names_all_devices() {
         {"oneapi", Device::Type::OneAPI},
         {"vulkan", Device::Type::Vulkan},
         {"rocm", Device::Type::ROCm},
+        {"mps", Device::Type::MPS},
     };
 
     for (const auto& [name, type] : infos) {

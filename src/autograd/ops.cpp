@@ -683,26 +683,33 @@ auto transpose(const Variable& input, int64_t dim0, int64_t dim1) -> Variable {
 }
 
 auto squeeze(const Variable& input, int64_t dim) -> Variable {
+    // Dispatch OpId::Squeeze (rather than the raw Tensor view) in BOTH
+    // branches so the JIT tracing interceptor always records a first-class
+    // Squeeze node. A raw Tensor::squeeze view is invisible to the
+    // dispatch-level tracer, so any graph that consumes a squeeze view
+    // (e.g. F::conv1d's trailing squeeze) on a grad-requiring input would
+    // silently freeze at its trace-time value instead of tracing correctly
+    // (JIT-R002). Mirrors Tensor::reshape, which already dispatches
+    // OpId::Reshape for the same reason. The Squeeze kernel returns a view,
+    // so storage aliasing is preserved regardless of which branch below
+    // runs. Dim is normalised here (rather than left for a downstream
+    // consumer to normalise) so every reader of the AttrKey::Dim attribute
+    // sees a consistent, already-resolved index.
+    const int64_t ndim = static_cast<int64_t>(input.tensor().ndim());
+    const int64_t norm_dim = (dim < 0) ? dim + ndim : dim;
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, norm_dim);
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto result_tensor = dispatch(OpId::Squeeze, inputs, attrs)[0];
+
     if (!input.requires_grad() || !is_grad_enabled()) {
-        // Dispatch OpId::Squeeze (rather than the raw Tensor view) so the JIT
-        // tracing interceptor records a first-class Squeeze node. A raw
-        // Tensor::squeeze view is invisible to the dispatch-level tracer, so a
-        // graph whose output is a squeeze view (e.g. F::conv1d's trailing
-        // squeeze) produced no graph output at all. Mirrors Tensor::reshape,
-        // which already dispatches OpId::Reshape for the same reason. The
-        // Squeeze kernel returns a view, so storage aliasing is preserved.
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        std::vector<Tensor> inputs = {input.tensor()};
-        return Variable(dispatch(OpId::Squeeze, inputs, attrs)[0], false);
+        return Variable(result_tensor, false);
     }
 
-    // Normalise negative dim at construction so both backward paths
-    // (Tensor / Variable) operate on the same positive index. The
-    // input rank is the pre-squeeze rank, which is exactly what the
-    // unsqueeze in backward expects.
-    auto grad_fn = std::make_shared<SqueezeBackward>(
-        dim, static_cast<int64_t>(input.tensor().ndim()));
+    // dim is already normalised above, so SqueezeBackward's own
+    // negative-dim handling is a no-op here.
+    auto grad_fn = std::make_shared<SqueezeBackward>(norm_dim, ndim);
     std::vector<std::shared_ptr<Function>> next_funcs;
     next_funcs.push_back(input.grad_fn());
     grad_fn->set_next_functions(next_funcs);
@@ -713,7 +720,6 @@ auto squeeze(const Variable& input, int64_t dim) -> Variable {
     }
     grad_fn->set_input_variables(input_vars);
 
-    auto result_tensor = tenzor::squeeze(input.tensor(), dim);
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 
@@ -1026,7 +1032,19 @@ auto split_with_sizes(const Variable& input,
 // narrow_copy "detached storage" contract.
 auto clone(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(input.tensor().clone(), false);
+        // Dispatch OpId::Clone (rather than the raw Tensor::clone()) so the
+        // op is visible to the JIT tracer. OpId::Clone is a registered
+        // kernel on every backend (it already performs a genuine on-device
+        // deep copy via backend->copy(..., DeviceToDevice) for non-CPU
+        // devices — see Tensor::clone()) and is treated by the tracer as a
+        // transparent value-identity op (see is_value_identity_op in
+        // tracing_interceptor.cpp), matching Contiguous. A raw
+        // Tensor::clone() call bypasses dispatch()/the tracer entirely, so
+        // (for a non-grad-requiring input, e.g. under an ambient no_grad()
+        // context) a traced clone() would silently freeze at its trace-time
+        // value instead of tracking the real input on replay (JIT-R032).
+        std::vector<Tensor> inputs = {input.tensor()};
+        return Variable(dispatch(OpId::Clone, inputs)[0], false);
     }
     return input * 1.0;
 }
@@ -1774,17 +1792,20 @@ auto logsumexp(const Variable& input, int64_t dim, bool keepdim) -> Variable {
 // ============================================================================
 
 auto unsqueeze(const Variable& input, int64_t dim) -> Variable {
+    // Dispatch OpId::Unsqueeze (rather than the raw Tensor view) in BOTH
+    // branches so the JIT tracer always records a first-class Unsqueeze
+    // node — see squeeze() above for why (JIT-R002). The Unsqueeze kernel
+    // returns a view, so storage aliasing is preserved regardless of which
+    // branch below runs.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto result = dispatch(OpId::Unsqueeze, inputs, attrs)[0];
+
     if (!input.requires_grad() || !is_grad_enabled()) {
-        // Dispatch OpId::Unsqueeze so the JIT tracer records a first-class
-        // Unsqueeze node (a raw Tensor::unsqueeze view is invisible to the
-        // dispatch-level interceptor). Mirrors Tensor::reshape. The Unsqueeze
-        // kernel returns a view, so storage aliasing is preserved.
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        std::vector<Tensor> inputs = {input.tensor()};
-        return Variable(dispatch(OpId::Unsqueeze, inputs, attrs)[0], false);
+        return Variable(result, false);
     }
-    auto result = tenzor::unsqueeze(input.tensor(), dim);
+
     auto grad_fn = std::make_shared<UnsqueezeBackward>();
     auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
     dim_tensor.data<int64_t>()[0] = dim;
@@ -1826,6 +1847,20 @@ auto to_device(const Variable& input, Device target) -> Variable {
         return input;
     }
     auto result = input.tensor().to(target);
+
+    // Tensor::to(Device) is a raw backend->copy() with no dispatch() call,
+    // so without this the transfer is invisible to the JIT tracer and a
+    // traced cross-device transfer would silently freeze at its trace-time
+    // value on replay (JIT-R034). Record it as a genuine ToDevice node
+    // (interpreter-only — see OpType::ToDevice) rather than aliasing it as
+    // a value-identity op, since the VALUE is unchanged but the DEVICE
+    // (part of a Value's identity for downstream dispatch) is not.
+    if (jit_tracing_active()) {
+        jit_record_shape_op(::tenzor::jit::OpType::ToDevice, {&input}, result,
+                            {{"device_type", static_cast<int64_t>(target.type)},
+                             {"device_index", static_cast<int64_t>(target.index)}});
+    }
+
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(result, false);
     }
@@ -1974,13 +2009,50 @@ auto index_select(const Variable& input, int64_t dim, const Tensor& index) -> Va
 }
 
 auto narrow(const Variable& input, int64_t dim, int64_t start, int64_t length) -> Variable {
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(input.tensor().slice(dim, start, start + length), false);
+    // Normalise dim up front, matching slice()'s handling, since it feeds
+    // both the recorded trace attrs and NarrowBackward.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    int64_t norm_dim = dim;
+    if (norm_dim < 0) {
+        norm_dim += ndim;
     }
-    auto result = input.tensor().slice(dim, start, start + length);
+    if (norm_dim < 0 || norm_dim >= ndim) {
+        throw std::out_of_range("narrow: dim out of range");
+    }
+    const int64_t end = start + length;
+
+    auto compute = [&]() {
+        return input.tensor().slice(norm_dim, start, end);
+    };
+    // narrow() is a special case of slice() (implicit step=1); recording it
+    // as OpType::Slice reuses the existing, fully-supported Slice node
+    // representation in the interpreter/MLIR lowering, and closes the same
+    // tracer-bypass gap slice() itself was already fixed for (JIT-R033):
+    // Tensor::slice() is pure metadata with zero dispatch() calls, so
+    // without this a traced narrow() (e.g. KV-cache windowing) would
+    // silently freeze at its trace-time value on replay, in BOTH branches.
+    auto record = [&](const Tensor& t) {
+        if (jit_tracing_active()) {
+            jit_record_shape_op(::tenzor::jit::OpType::Slice, {&input}, t,
+                                {{"dim", norm_dim},
+                                 {"start", start},
+                                 {"end", end},
+                                 {"step", int64_t{1}}});
+        }
+    };
+
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        auto result = compute();
+        record(result);
+        return Variable(result, false);
+    }
+
+    auto result = compute();
+    record(result);
+
     auto grad_fn = std::make_shared<NarrowBackward>();
     auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
-    dim_tensor.data<int64_t>()[0] = dim;
+    dim_tensor.data<int64_t>()[0] = norm_dim;
     auto start_tensor = zeros({1}, DType::Int64, Device::cpu());
     start_tensor.data<int64_t>()[0] = start;
     const auto& sh = input.tensor().shape();
@@ -2453,13 +2525,39 @@ auto slogdet(const Variable& input) -> std::tuple<Variable, Variable> {
 // ============================================================================
 
 auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable {
-    if (!dense.requires_grad() || !is_grad_enabled()) {
-        // No gradient needed, just compute the forward pass
-        return Variable(sparse::spmm(sparse, dense.tensor()), false);
+    Tensor result_tensor;
+    if (jit_tracing_active()) {
+        // JIT-R098: route through dispatch<OpId::SparseSpMM>(crow, col,
+        // values, dense) instead of calling sparse::spmm() directly —
+        // mirrors the SparseLinear fix (JIT-R055). The direct call bypasses
+        // dispatch()/the tracer entirely (both the CPU path, which is
+        // zero-dispatch, and the GPU path, which calls the backend table
+        // directly and skips DispatchInterceptorStack), so a traced spmm
+        // froze its output as a trace-time constant. Requires CSR layout —
+        // the dispatch kernels' convention — and layout conversion itself
+        // is a data-dependent host operation that can't be safely captured
+        // mid-trace, so fail loudly for other layouts instead of silently
+        // converting.
+        if (sparse.layout() != SparseLayout::CSR) {
+            throw std::runtime_error(
+                "spmm: JIT tracing requires a CSR-layout sparse tensor — "
+                "call .to_csr() before entering a traced region; layout "
+                "conversion itself cannot be safely captured mid-trace.");
+        }
+        NewOpAttributes spmm_attrs;
+        spmm_attrs.set(AttrKey::M, sparse.shape()[0]);
+        spmm_attrs.set(AttrKey::K, sparse.shape()[1]);
+        std::vector<Tensor> spmm_inputs = {
+            sparse.crow_indices(), sparse.col_indices(),
+            sparse.values(), dense.tensor()};
+        result_tensor = dispatch(OpId::SparseSpMM, spmm_inputs, spmm_attrs)[0];
+    } else {
+        result_tensor = sparse::spmm(sparse, dense.tensor());
     }
 
-    // Compute forward: Y = S @ D
-    auto result_tensor = sparse::spmm(sparse, dense.tensor());
+    if (!dense.requires_grad() || !is_grad_enabled()) {
+        return Variable(std::move(result_tensor), false);
+    }
 
     // For backward: grad_D = Sᴴ @ grad_Y (adjoint). For complex sparse S the
     // adjoint is the CONJUGATE transpose — transpose() only swaps indices, so
@@ -2475,18 +2573,37 @@ auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable {
     grad_fn->set_next_functions({dense.grad_fn()});
     grad_fn->set_input_variables({dense});
 
-    Variable output(result_tensor, true);
+    Variable output(std::move(result_tensor), true);
     output.set_grad_fn(grad_fn);
     return output;
 }
 
 auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable {
-    if (!vec.requires_grad() || !is_grad_enabled()) {
-        return Variable(sparse::spmv(sparse, vec.tensor()), false);
+    Tensor result_tensor;
+    if (jit_tracing_active()) {
+        // JIT-R098: same fix as spmm() above — route through
+        // dispatch<OpId::SparseSpMV> instead of calling sparse::spmv()
+        // directly, which bypasses the tracer entirely.
+        if (sparse.layout() != SparseLayout::CSR) {
+            throw std::runtime_error(
+                "spmv: JIT tracing requires a CSR-layout sparse tensor — "
+                "call .to_csr() before entering a traced region; layout "
+                "conversion itself cannot be safely captured mid-trace.");
+        }
+        NewOpAttributes spmv_attrs;
+        spmv_attrs.set(AttrKey::M, sparse.shape()[0]);
+        spmv_attrs.set(AttrKey::K, sparse.shape()[1]);
+        std::vector<Tensor> spmv_inputs = {
+            sparse.crow_indices(), sparse.col_indices(),
+            sparse.values(), vec.tensor()};
+        result_tensor = dispatch(OpId::SparseSpMV, spmv_inputs, spmv_attrs)[0];
+    } else {
+        result_tensor = sparse::spmv(sparse, vec.tensor());
     }
 
-    // Compute forward: y = S @ v
-    auto result_tensor = sparse::spmv(sparse, vec.tensor());
+    if (!vec.requires_grad() || !is_grad_enabled()) {
+        return Variable(std::move(result_tensor), false);
+    }
 
     // For backward: grad_v = Sᴴ @ grad_y (adjoint). Conjugate the transposed
     // values for complex S (transpose() only swaps indices); real → no-op.
@@ -2501,24 +2618,59 @@ auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable {
     grad_fn->set_next_functions({vec.grad_fn()});
     grad_fn->set_input_variables({vec});
 
-    Variable output(result_tensor, true);
+    Variable output(std::move(result_tensor), true);
     output.set_grad_fn(grad_fn);
     return output;
 }
 
 auto sparse_add(const SparseTensor& sparse, const Variable& dense) -> Variable {
-    if (!dense.requires_grad() || !is_grad_enabled()) {
-        return Variable(sparse::add(sparse, dense.tensor()), false);
+    Tensor result_tensor = sparse::add(sparse, dense.tensor());
+
+    if (jit_tracing_active()) {
+        // JIT-R098: sparse::add()'s CPU path densifies via SparseTensor::
+        // to_dense(), which internally calls the free dispatched ops
+        // scatter_add()/repeat_interleave() to build the flat scatter
+        // index. Routing sparse_add's OWN forward through the generic
+        // dispatch<OpId::SparseAdd> (as spmm/spmv/sparse_triangular_solve
+        // do above) re-enters the SAME tracing interceptor for those
+        // nested calls — and OpId::ScatterAdd/OpId::RepeatInterleave have
+        // no opid_to_optype mapping, so each one poisons the WHOLE trace
+        // with a spurious graph break (confirmed via TENZOR_DEBUG_TRACE:
+        // OpId=410/550) even though the outer SparseAdd node itself would
+        // have recorded fine. Record ONE opaque SparseAdd node directly
+        // via the Tracer API instead — mirrors jit_record_shape_op's
+        // manual-recording pattern used for shape ops elsewhere in this
+        // file — which sidesteps nested interception entirely while still
+        // making the op's real inputs/output tracer-visible.
+        if (sparse.layout() != SparseLayout::CSR) {
+            throw std::runtime_error(
+                "sparse_add: JIT tracing requires a CSR-layout sparse tensor "
+                "— call .to_csr() before entering a traced region; layout "
+                "conversion itself cannot be safely captured mid-trace.");
+        }
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        std::vector<std::string> input_ids = {
+            tracer.register_tensor(sparse.crow_indices()),
+            tracer.register_tensor(sparse.col_indices()),
+            tracer.register_tensor(sparse.values()),
+            tracer.register_tensor(dense.tensor())};
+        auto out_id = tracer.register_new_tensor(result_tensor);
+        ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::SparseAdd,
+                                   std::move(input_ids), {out_id});
+        op.int_attrs["m"] = sparse.shape()[0];
+        op.int_attrs["k"] = sparse.shape()[1];
+        tracer.record_op(std::move(op));
     }
 
-    // Compute forward: Y = S + D
-    auto result_tensor = sparse::add(sparse, dense.tensor());
+    if (!dense.requires_grad() || !is_grad_enabled()) {
+        return Variable(std::move(result_tensor), false);
+    }
 
     auto grad_fn = std::make_shared<SparseAddBackward>();
     grad_fn->set_next_functions({dense.grad_fn()});
     grad_fn->set_input_variables({dense});
 
-    Variable output(result_tensor, true);
+    Variable output(std::move(result_tensor), true);
     output.set_grad_fn(grad_fn);
     return output;
 }
@@ -2526,7 +2678,30 @@ auto sparse_add(const SparseTensor& sparse, const Variable& dense) -> Variable {
 auto sparse_triangular_solve(const SparseTensor& L,
                               const Variable& b,
                               bool upper) -> Variable {
-    auto result_tensor = sparse::sparse_triangular_solve(L, b.tensor(), upper);
+    Tensor result_tensor;
+    if (jit_tracing_active()) {
+        // JIT-R098: same fix as spmm() above — route through
+        // dispatch<OpId::SparseTrsv/SparseTrsm> instead of calling
+        // sparse::sparse_triangular_solve() directly, which bypasses the
+        // tracer entirely.
+        if (L.layout() != SparseLayout::CSR) {
+            throw std::runtime_error(
+                "sparse_triangular_solve: JIT tracing requires a CSR-layout "
+                "sparse tensor — call .to_csr() before entering a traced "
+                "region; layout conversion itself cannot be safely captured "
+                "mid-trace.");
+        }
+        NewOpAttributes trsv_attrs;
+        trsv_attrs.set(AttrKey::N, L.shape()[0]);
+        trsv_attrs.set(AttrKey::Upper, upper);
+        std::vector<Tensor> trsv_inputs = {
+            L.crow_indices(), L.col_indices(), L.values(), b.tensor()};
+        const OpId op = (b.tensor().ndim() == 1) ? OpId::SparseTrsv : OpId::SparseTrsm;
+        result_tensor = dispatch(op, trsv_inputs, trsv_attrs)[0];
+    } else {
+        result_tensor = sparse::sparse_triangular_solve(L, b.tensor(), upper);
+    }
+
     if (!b.requires_grad() || !is_grad_enabled()) {
         return Variable(result_tensor, false);
     }
@@ -3314,11 +3489,22 @@ auto vecdot(const Variable& a, const Variable& b, int64_t dim) -> Variable {
 auto as_strided(const Variable& input, std::span<const int64_t> size,
                 std::span<const int64_t> stride,
                 std::optional<int64_t> storage_offset) -> Variable {
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(tenzor::as_strided(input.tensor(), size, stride, storage_offset), false);
+    auto result_tensor = tenzor::as_strided(input.tensor(), size, stride, storage_offset);
+
+    // tenzor::as_strided is pure TensorImpl reconstruction with zero
+    // dispatch() calls, so without this a traced as_strided() call (e.g. a
+    // sliding-window view) would silently freeze at its trace-time value on
+    // replay, in BOTH branches (JIT-R035).
+    if (jit_tracing_active()) {
+        jit_record_shape_op(::tenzor::jit::OpType::AsStrided, {&input}, result_tensor,
+                            {{"storage_offset", storage_offset.value_or(-1)}},
+                            {{"size", std::vector<int64_t>(size.begin(), size.end())},
+                             {"stride", std::vector<int64_t>(stride.begin(), stride.end())}});
     }
 
-    auto result_tensor = tenzor::as_strided(input.tensor(), size, stride, storage_offset);
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result_tensor, false);
+    }
 
     auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     auto size_vec = std::vector<int64_t>(size.begin(), size.end());
@@ -3342,6 +3528,15 @@ auto as_strided(const Variable& input, std::span<const int64_t> size,
 
 auto view_as_real(const Variable& input) -> Variable {
     auto out_t = ::tenzor::view_as_real(input.tensor());
+
+    // tenzor::view_as_real is pure metadata reinterpretation with zero
+    // dispatch() calls, so without this a traced view_as_real() call (the
+    // standard gradcheck bridge for complex-valued ops, e.g. around FFT)
+    // would silently freeze at its trace-time value on replay (JIT-R036).
+    if (jit_tracing_active()) {
+        jit_record_shape_op(::tenzor::jit::OpType::ViewAsReal, {&input}, out_t);
+    }
+
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(out_t, false);
     }
@@ -3355,6 +3550,14 @@ auto view_as_real(const Variable& input) -> Variable {
 
 auto view_as_complex(const Variable& input) -> Variable {
     auto out_t = ::tenzor::view_as_complex(input.tensor());
+
+    // tenzor::view_as_complex is pure metadata reinterpretation with zero
+    // dispatch() calls, so without this a traced view_as_complex() call
+    // would silently freeze at its trace-time value on replay (JIT-R037).
+    if (jit_tracing_active()) {
+        jit_record_shape_op(::tenzor::jit::OpType::ViewAsComplex, {&input}, out_t);
+    }
+
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(out_t, false);
     }

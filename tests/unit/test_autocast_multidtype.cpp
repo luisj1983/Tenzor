@@ -470,18 +470,21 @@ TEST_F(AutocastMultiDTypeTest, AlternatingDtypes) {
 
 // Test default device type behavior
 TEST_F(AutocastMultiDTypeTest, NoDeviceTypeSpecified) {
-    // When device_type is not explicitly specified, CUDA is the default
+    // Per Autocast's constructor doc (include/tenzor/nn/amp/autocast.hpp):
+    // "Default (nullopt) applies to the op's actual device (both CPU and
+    // CUDA), so device-agnostic code autocasts identically on either
+    // backend. Pass an explicit type to restrict." — i.e. leaving
+    // device_type unspecified means UNRESTRICTED (every device), not a
+    // default of CUDA specifically. get_device_type() correctly reports
+    // nullopt (no restriction) rather than a synthesized CUDA value.
     Autocast autocast(true, DType::Float16);
 
     EXPECT_TRUE(Autocast::is_enabled());
-    // Default device type is CUDA
-    EXPECT_TRUE(Autocast::get_device_type().has_value());
-    EXPECT_EQ(Autocast::get_device_type().value(), Device::Type::CUDA);
+    EXPECT_FALSE(Autocast::get_device_type().has_value());
 
-    // Should autocast on CUDA (the default device type)
+    // Should autocast on EVERY device when unrestricted.
     EXPECT_TRUE(Autocast::should_autocast("matmul", Device::cuda(0)));
-    // CPU autocast is not enabled when device_type is CUDA
-    EXPECT_FALSE(Autocast::should_autocast("matmul", Device::cpu()));
+    EXPECT_TRUE(Autocast::should_autocast("matmul", Device::cpu()));
 }
 
 // Test edge case: empty operation name

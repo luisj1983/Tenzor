@@ -627,6 +627,22 @@ void register_core(py::module_& m) {
         return rocm_backend ? rocm_backend->device_count() : 0;
     }, "Get number of available ROCm devices");
 
+    // JIT-R044: MPS (Apple Metal) device availability — mirrors the
+    // cuda/vulkan/oneapi/rocm bindings above. Device::Type::MPS
+    // (core/device.hpp) and BackendLoader's "mps" name mapping
+    // (loader.cpp:45,328) already existed; only this binding was missing.
+    m.def("mps_is_available", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* mps_backend = loader.get_backend("mps");
+        return mps_backend != nullptr && mps_backend->is_available();
+    }, "Check if MPS (Apple Metal) is available");
+
+    m.def("mps_device_count", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* mps_backend = loader.get_backend("mps");
+        return mps_backend ? mps_backend->device_count() : 0;
+    }, "Get number of available MPS devices");
+
     // Audit-11 QQ.17: fork-safety probe for ROCm. HIP shares the
     // CUDA-style driver-context-after-fork hazard.
     m.def("rocm_is_initialized", []() {

@@ -4,6 +4,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <algorithm>
 #include <stdexcept>
 
@@ -544,6 +545,25 @@ auto VariationalDropout::reset_mask() -> void {
 auto VariationalDropout::forward_impl(const Variable& input) -> Variable {
     if (!is_training()) {
         return input;
+    }
+
+    // JIT-R063: the mask (mask_) is cached member state, reused across calls
+    // by design (Gal & Ghahramani — same mask for a whole sequence) until
+    // reset_mask() is called or the input shape changes. A trace can only
+    // ever capture whichever mask_ happened to be resident at trace time —
+    // it gets baked into the compiled graph as a frozen constant, so a
+    // later eager reset_mask() (a new sequence wanting a fresh mask) is
+    // silently ignored by every replay of that graph. Same "fail loudly
+    // instead of producing wrong numerics" class as JIT-R083 (RoPE)/JIT-R090
+    // (KVCache)/JIT-R070 (WindowAttention mask); the eval-mode identity
+    // path above is unaffected (no randomness, no state).
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "VariationalDropout::forward: cannot be JIT-traced in training "
+            "mode — the per-sequence cached mask is baked into the compiled "
+            "graph as a constant, so a later reset_mask() (a new sequence) "
+            "would silently replay the stale mask forever. Call outside "
+            "jit.compile()/jit.trace(), or use eval mode.");
     }
 
     auto shape_span = input.tensor().shape();

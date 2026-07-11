@@ -9,6 +9,8 @@
 
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
+#include "tenzor/utils/log.hpp"
 
 #include <iree/compiler/embedding_api.h>
 
@@ -497,6 +499,16 @@ auto compile_via_subprocess(const std::string& mlir_text,
     if ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty()) {
         args.push_back("--iree-vulkan-target=" + vulkan_arch);
     }
+    // JIT-R025: explicitly pin target-cpu=host here too, matching the
+    // embedding-API path below (compile_mlir) exactly, instead of relying
+    // on the standalone iree-compile CLI's undocumented default behavior
+    // for an omitted flag. Removes the asymmetry between the two compile
+    // paths for the same "llvm-cpu" target rather than leaving it as an
+    // unverified assumption.
+    if (target == "llvm-cpu") {
+        args.push_back("--iree-llvmcpu-target-cpu=host");
+        args.push_back("--iree-llvmcpu-target-cpu-features=host");
+    }
     // Write MLIR text to a temp file rather than piping via stdin. The
     // stdin pipe path was hitting auto-input-type detection failures on
     // larger modules (>32 KB) in IREE 3.11+ — the parser couldn't decide
@@ -540,8 +552,45 @@ auto compile_via_subprocess(const std::string& mlir_text,
     args.push_back(std::string(mlir_tmp_template.data()));  // path; iree-compile mmaps it
     std::string stderr_text, vmfb_unused;
     // Pass empty stdin since we're using a file path.
-    const int rc = run_iree_compile_subprocess(bin, args, std::string{},
-                                               stderr_text, vmfb_unused);
+    int rc = run_iree_compile_subprocess(bin, args, std::string{},
+                                         stderr_text, vmfb_unused);
+    // JIT-R101: a cuda_arch the device genuinely reports (e.g. sm_120 for a
+    // Blackwell-class GPU) can be newer than what THIS installed
+    // iree-compile's NVPTX backend has target support for -- it fails
+    // distinctively ("missing GPU target in #hal.executable.target" for a
+    // numeric sm_XX iree-compile silently doesn't recognize, or "Unknown
+    // CUDA target" for a named alias like "hopper"/"blackwell") rather than
+    // producing any codegen. Retry once with the sm_80 Ampere baseline --
+    // already relied on elsewhere in this file (see cuda_arch resolution in
+    // compile_mlir) as the verified PTX-forward-compatible fallback that
+    // JITs correctly onto newer GPUs -- so a cutting-edge GPU paired with a
+    // not-yet-updated IREE toolchain still gets real on-device GPU codegen
+    // instead of a hard failure.
+    if (rc != 0 && target == "cuda" && cuda_arch != "sm_80" &&
+        (stderr_text.find("missing GPU target") != std::string::npos ||
+         stderr_text.find("Unknown CUDA target") != std::string::npos)) {
+        TENZOR_LOG_WARN(
+            "IREE CUDA compile: target '" + cuda_arch + "' rejected by this "
+            "installed iree-compile (toolchain predates this GPU "
+            "generation); retrying with the sm_80 Ampere baseline, which "
+            "PTX-JITs forward-compatibly onto newer GPUs. Upgrade the IREE "
+            "compiler to get native codegen for this device.");
+        std::vector<std::string> retry_args = args;
+        for (auto& a : retry_args) {
+            if (a.rfind("--iree-cuda-target=", 0) == 0) {
+                a = "--iree-cuda-target=sm_80";
+                break;
+            }
+        }
+        std::string retry_stderr;
+        rc = run_iree_compile_subprocess(bin, retry_args, std::string{},
+                                         retry_stderr, vmfb_unused);
+        if (rc == 0) {
+            stderr_text.clear();
+        } else {
+            stderr_text = std::move(retry_stderr);
+        }
+    }
     ::unlink(mlir_tmp_template.data());
     if (rc != 0) {
         throw JitCompileError(
@@ -712,8 +761,32 @@ auto compile_mlir(const std::string& mlir_text,
 #ifdef TENZOR_DEFAULT_ROCM_TARGET
         rocm_arch = TENZOR_DEFAULT_ROCM_TARGET;
 #else
+        // JIT-R016: unlike CUDA's sm_80 fallback (safe: PTX is intentionally
+        // forward-JIT-compatible onto newer GPUs), ROCm has no ISA
+        // forward/backward-compatibility layer -- compiling for gfx1150 and
+        // loading on a different real chip (e.g. gfx942/MI300) can fail to
+        // load or execute with mismatched wavefront/matrix-core assumptions.
+        // This third-layer fallback only fires when BOTH runtime device
+        // detection (opts.rocm_arch) AND the build-time default
+        // (TENZOR_DEFAULT_ROCM_TARGET) are unavailable, so there is no
+        // reliable way to know the real target chip here -- warn loudly
+        // instead of silently guessing, so a load/execute failure on the
+        // actual device is traceable back to this guess rather than looking
+        // like an unrelated runtime bug.
+        TENZOR_LOG_WARN(
+            "IREE ROCm compile: no device-detected or build-time-default ROCm "
+            "target architecture available; guessing 'gfx1150' as a last "
+            "resort. ROCm has no ISA forward-compat guarantee (unlike CUDA "
+            "PTX) -- this WILL fail to load/execute if the real device uses a "
+            "different chip. Set TENZOR_ROCM_TARGET to the correct gfx code "
+            "for reliable results.");
         rocm_arch = "gfx1150";
 #endif
+    }
+    if (target == "rocm") {
+        if (const char* e = std::getenv("TENZOR_ROCM_TARGET"); e != nullptr && *e != '\0') {
+            rocm_arch = e;  // explicit user override always wins
+        }
     }
 
     // CUDA, like ROCm, requires an explicit target — current iree-compile
@@ -744,10 +817,40 @@ auto compile_mlir(const std::string& mlir_text,
     // than IREE's conservative default (which lacks shaderFloat16).
     std::string vulkan_arch;
     if (target == "vulkan-spirv" || target == "vulkan") {
-        vulkan_arch = opts.vulkan_arch;
+        if (const char* e = std::getenv("TENZOR_VULKAN_TARGET"); e != nullptr && *e != '\0') {
+            vulkan_arch = e;  // explicit user override always wins
+        } else {
+            vulkan_arch = opts.vulkan_arch;
 #ifdef TENZOR_DEFAULT_VULKAN_TARGET
-        if (vulkan_arch.empty()) vulkan_arch = TENZOR_DEFAULT_VULKAN_TARGET;
+            if (vulkan_arch.empty()) vulkan_arch = TENZOR_DEFAULT_VULKAN_TARGET;
 #endif
+        }
+        // JIT-R008: with no resolved vulkan_arch, IREE falls back to its
+        // conservative default SPIR-V environment, which lacks
+        // shaderFloat16/16-bit storage (per this file's own iree_compile.hpp
+        // doc comment) -- an F16/BF16 graph would compile CLEANLY and then
+        // silently compute garbage/NaN on-device, indistinguishable from a
+        // genuine op-level math bug. Detect F16/BF16 usage from the emitted
+        // MLIR text (the dtype names appear literally as stablehlo element
+        // types, e.g. "f16"/"bf16") and refuse to compile rather than
+        // produce wrong numerics with no diagnostic. Pure-F32/F64/int
+        // graphs are unaffected (IREE's conservative default is fine for
+        // those) and still compile with no arch resolved, exactly as before.
+        if (vulkan_arch.empty() &&
+            (mlir_text.find("f16") != std::string::npos ||
+             mlir_text.find("bf16") != std::string::npos)) {
+            throw std::runtime_error(
+                "IREE Vulkan compile: this graph uses Float16/BFloat16, but no "
+                "Vulkan target architecture could be resolved (device vendor "
+                "not recognized as nvidia/amd/intel, and no "
+                "TENZOR_DEFAULT_VULKAN_TARGET build default is set). IREE's "
+                "conservative default SPIR-V environment lacks "
+                "shaderFloat16/16-bit storage support, so compiling anyway "
+                "would silently produce garbage/NaN instead of a clear error. "
+                "Set the TENZOR_VULKAN_TARGET environment variable to a valid "
+                "IREE Vulkan target (e.g. a SPIR-V profile string for this "
+                "device) to proceed.");
+        }
     }
 
     bool is_shared_temp = false;
@@ -763,11 +866,24 @@ auto compile_mlir(const std::string& mlir_text,
     // Fold the ROCm arch into the cache key: two GPUs with different ISAs
     // (e.g. gfx1150 vs gfx90a) produce different bytecode from the same MLIR,
     // and must not alias to one .vmfb. Non-rocm targets keep the bare target.
+    // JIT-R009: llvm-cpu passes --iree-llvmcpu-target-cpu=host and
+    // -target-cpu-features=host, baking the COMPILING machine's specific ISA
+    // (AVX2/AVX-512/etc) into the .vmfb — but the cache key fell through to
+    // the bare "llvm-cpu" target string, identical on every machine. A cache
+    // dir shared across machines with different CPU features (NFS home dir,
+    // CI build-cache volume, a container image's baked-in cache promoted
+    // across a fleet) would then serve an AVX-512-compiled .vmfb as a cache
+    // HIT on a machine lacking AVX-512: SIGILL, or silently wrong results for
+    // feature-dependent codegen. Fold the actual detected SIMD feature set
+    // (get_simd_features().to_string(), e.g. "AVX512BF16 AVX512VNNI ... SSE2")
+    // into the key so two machines with different ISAs never alias.
     std::string key_target =
         (target == "rocm" && !rocm_arch.empty()) ? (target + ":" + rocm_arch)
       : (target == "cuda" && !cuda_arch.empty()) ? (target + ":" + cuda_arch)
       : ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty())
             ? (target + ":" + vulkan_arch)
+      : (target == "llvm-cpu")
+            ? (target + ":" + ::tenzor::backend::get_simd_features().to_string())
                                                  : target;
     // F002: for targets the linked libIREECompiler doesn't register (compiled by
     // a separate iree-compile subprocess), fold that binary's version into the

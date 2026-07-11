@@ -451,7 +451,16 @@ TEST_P(SwinMultiDTypeTest, SwinTinyShiftedWindowGradients) {
     auto grad_data = grad.data<float>();
 
     // Check for non-zero gradients
-    float grad_tol = (dtype() == DType::Float16) ? 1e-3f : atol();
+    // BFloat16 gradients here are empirically as large/accurate as
+    // Float32/Float16's (~1e-3 to 2e-3 magnitude, verified via a
+    // standalone diagnostic comparing raw gradient values across dtypes
+    // with the same seed) -- autograd flows correctly for BFloat16.
+    // atol()'s general-purpose BFloat16 value (1e-2, tuned for broader
+    // numerical-comparison contexts) is coincidentally looser than
+    // Float16's own carve-out below and was misclassifying a genuine,
+    // correctly-sized gradient signal as "no gradient". Match Float16's
+    // carve-out rather than falling through to atol().
+    float grad_tol = (dtype() == DType::Float16 || dtype() == DType::BFloat16) ? 1e-3f : atol();
     bool has_nonzero_grad = false;
     for (size_t i = 0; i < std::min(size_t(100), static_cast<size_t>(grad.numel())); ++i) {
         if (std::abs(grad_data[i]) > grad_tol) {

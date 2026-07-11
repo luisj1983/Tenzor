@@ -5,6 +5,7 @@
 
 #include "tenzor/nn/amp/autocast.hpp"
 #include "tenzor/nn/amp/autocast_interceptor.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <algorithm>
 
 namespace tenzor {
@@ -87,6 +88,38 @@ Autocast::Autocast(bool enabled, DType dtype, std::optional<Device::Type> device
         throw std::invalid_argument(
             "Autocast: dtype must be Float16 or BFloat16"
         );
+    }
+
+    // JIT-R094: entering an autocast scope INSIDE an active JIT trace
+    // silently corrupts the recorded graph. jit::compile() always pushes
+    // its own tracing interceptor before running the traced closure, so an
+    // Autocast constructed inside that closure is necessarily pushed LATER
+    // (inner, closer to the real kernel) than the tracer's interceptor
+    // (outer). The tracer registers each op's INPUT ids from the span it
+    // receives BEFORE calling next() — before autocast's inner interceptor
+    // has substituted the Float32 inputs for its Float16/BFloat16-cast
+    // copies — but registers the OUTPUT id from the REAL result next()
+    // eventually returns, which reflects the substituted (cast) inputs.
+    // The recorded node ends up with a declared input dtype that doesn't
+    // match its declared output dtype, with no consuming edge to the
+    // Cast node autocast's inner `.to(dtype)` call DOES separately record
+    // (confirmed empirically: replaying such a graph on a new input
+    // silently computes in the ORIGINAL dtype instead of the autocast
+    // dtype used at trace time). Rather than silently miscompile, fail
+    // loudly — matching this codebase's established RoPE/KVCache/
+    // WindowAttention/QuantizedLinear "fail loudly instead of producing
+    // wrong numerics" pattern for JIT-hazardous constructs.
+    if (enabled && ::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "Autocast: entering an autocast scope inside an active "
+            "jit.compile()/jit.trace() region is not supported — the "
+            "tracer would record a graph node with a mismatched input/"
+            "output dtype (no Cast edge connecting them), silently "
+            "replaying in the WRONG dtype on any later call. Apply "
+            "autocast OUTSIDE the traced closure (cast inputs/parameters "
+            "to the target dtype before calling the compiled function), "
+            "or trace a version of the model that does not enter autocast "
+            "internally.");
     }
 
     // Set new state

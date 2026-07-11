@@ -10,6 +10,7 @@
 #include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/nn/layers/embedding.hpp"
+#include "tenzor/nn/layers/rnn.hpp"
 #include "tenzor/nn/functional.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -20,10 +21,101 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "../../backends/cpu/kernels/fused_quantized_ops.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <stdexcept>
 
 namespace tenzor {
 namespace nn {
+
+namespace {
+/// Record a per-tensor (non-per-channel, non-INT4, INT8-activation)
+/// `QuantizedLinearStatic` op into the active JIT trace, if any
+/// (JIT-R058b). QuantizedLinear::forward_quantized's CPU path (a raw host
+/// pointer loop, zero dispatch() calls) AND its GPU fast path (dispatches,
+/// but the activation tensor it dispatches is the ALREADY-quantized int8
+/// data — produced by quantize_tensor()'s own raw host pointer loop, so
+/// disconnected from any traced lineage back to the float `input` Variable
+/// regardless of device) are both invisible or lineage-broken for JIT
+/// tracing on their own. `float_input_2d` is therefore the RAW FLOAT
+/// activation (2D [batch, in_features], pre-quantization) — registering
+/// THIS (not the int8 result) keeps the node's input correctly tied to the
+/// traced parameter; execute_node re-quantizes the (possibly NEW, replayed)
+/// float input using the fixed calibrated scale/zero_point before
+/// dispatching the matmul, exactly mirroring what eager forward_impl does
+/// on every call. Only called when activation_qparams_ is set (static/
+/// calibrated quantization) — the dynamic (uncalibrated) path is refused at
+/// trace time instead (see forward_impl's is_tracing() guard), since
+/// quantize_per_tensor_symmetric recomputes scale/zero_point from the
+/// input's live min/max via untraced raw-Tensor code (JIT-R066); baking
+/// THAT as a fixed constant would be a silent wrong-numerics bug, not just
+/// staleness. `weight`/`bias` are the frozen (correctly constant across
+/// calls) int8 weight and FP32 bias; `bias` may be an invalid/empty Tensor.
+inline auto jit_record_quantized_linear_static(
+        const ::tenzor::Tensor& float_input_2d,
+        const ::tenzor::Tensor& weight,
+        const ::tenzor::Tensor& bias,
+        const ::tenzor::Tensor& output,
+        float input_scale, float weight_scale,
+        int32_t input_zp, int32_t weight_zp,
+        bool input_asymmetric) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto in_id = tracer.register_tensor(float_input_2d);
+    auto w_id = tracer.register_tensor(weight);
+    std::vector<std::string> input_ids = {in_id, w_id};
+    if (bias.is_valid() && bias.numel() > 0) {
+        input_ids.push_back(tracer.register_tensor(bias));
+    } else {
+        // execute_node requires >= 3 inputs (input, weight, bias slot always
+        // present, matching the GPU dispatch path's convention of an
+        // always-occupied — possibly empty — bias slot at index 2).
+        input_ids.push_back(tracer.register_tensor(
+            ::tenzor::zeros({0}, DType::Float32, float_input_2d.device())));
+    }
+    auto out_id = tracer.register_new_tensor(output);
+    ::tenzor::jit::TracedOp op(::tenzor::jit::OpType::QuantizedLinearStatic,
+                               input_ids, {out_id});
+    op.attrs["input_scale"] = static_cast<double>(input_scale);
+    op.attrs["weight_scale"] = static_cast<double>(weight_scale);
+    op.attrs["output_scale"] = 1.0;
+    op.int_attrs["input_zero_point"] = static_cast<int64_t>(input_zp);
+    op.int_attrs["weight_zero_point"] = static_cast<int64_t>(weight_zp);
+    op.int_attrs["input_asymmetric"] = input_asymmetric ? 1 : 0;
+    tracer.record_op(std::move(op));
+}
+
+/// Thin wrappers routing raw-Tensor view ops through the tracer-aware
+/// Variable-level autograd functions (JIT-R058a). Tensor::slice()/squeeze()/
+/// unsqueeze()/permute() are pure TensorImpl metadata tricks with ZERO
+/// dispatch() calls, so they're invisible to both the JIT tracer's generic
+/// dispatch<OpId> interception (which only sees ops that actually call
+/// dispatch(), e.g. matmul/sigmoid/tanh/+/*/cat) AND to the tracer's own
+/// tensor lineage map (register_tensor never sees an untraced view op's
+/// output, so it gets treated as a brand-new, disconnected leaf and frozen
+/// as a trace-time constant on replay). The Variable-level ::tenzor::slice/
+/// squeeze/unsqueeze/permute wrappers explicitly call jit_record_shape_op()
+/// when tracing is active, which these raw calls never would. Wrapping in
+/// Variable(t, false) is safe here — every call site below is inference-
+/// only (int8 RNN weights are not differentiable, matching this class's own
+/// "Returning a Variable with requires_grad=false" contract) — and, when
+/// `t` is itself an already-registered traced tensor (a function argument
+/// like h0/c0/hx/cx, or the dispatched output of a prior op like `gates`),
+/// register_tensor's fingerprint match (ptr+dtype+shape+strides) correctly
+/// resolves to the SAME existing graph value rather than minting a new one.
+inline auto traced_slice(const ::tenzor::Tensor& t, int64_t dim, int64_t start,
+                          int64_t end, int64_t step = 1) -> ::tenzor::Tensor {
+    return ::tenzor::slice(::tenzor::Variable(t, false), dim, start, end, step).tensor();
+}
+inline auto traced_squeeze(const ::tenzor::Tensor& t, int64_t dim) -> ::tenzor::Tensor {
+    return ::tenzor::squeeze(::tenzor::Variable(t, false), dim).tensor();
+}
+inline auto traced_unsqueeze(const ::tenzor::Tensor& t, int64_t dim) -> ::tenzor::Tensor {
+    return ::tenzor::unsqueeze(::tenzor::Variable(t, false), dim).tensor();
+}
+inline auto traced_permute(const ::tenzor::Tensor& t, std::vector<int64_t> dims) -> ::tenzor::Tensor {
+    return ::tenzor::permute(::tenzor::Variable(t, false), dims).tensor();
+}
+}  // namespace
 namespace quantization {
 
 // Forward declare kernel functions
@@ -86,10 +178,97 @@ auto QuantizedLinear::forward_impl(const Variable& input) -> Variable {
     // Returning a Variable with requires_grad=false makes this honest.
     // Static quantization: quantize the input with the calibrated activation
     // scale/zero_point; otherwise fall back to dynamic per-call computation.
+    if (!activation_qparams_.has_value() &&
+        ::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        // JIT-R058b/R066: quantize_per_tensor_symmetric recomputes scale/
+        // zero_point from the input's live min/max via raw-Tensor (non-
+        // Variable) code that is invisible to the tracer regardless of any
+        // dispatch-level fix. A cached graph would silently reuse the
+        // trace-time scale/zero_point (and even the trace-time quantized
+        // DATA) on every later replay call, regardless of the actual input
+        // — a silent wrong-numerics bug, not just staleness. Fail loudly
+        // and force an eager fallback instead (matches RoPE/KVCache/
+        // WindowAttention's established "fail loudly instead of producing
+        // wrong numerics" pattern). Calibrate via set_activation_qparams()
+        // to make this layer JIT-traceable.
+        throw std::runtime_error(
+            "QuantizedLinear::forward_impl: dynamic (uncalibrated) "
+            "activation quantization cannot be correctly JIT-traced (see "
+            "JIT-R066 — the core (de)quantize math bypasses dispatch/"
+            "tracing entirely). Call set_activation_qparams() with "
+            "statically calibrated qparams first, or keep this call "
+            "outside jit.compile()/jit.trace().");
+    }
     auto q_input = activation_qparams_.has_value()
         ? quantize_tensor(input.tensor(), *activation_qparams_)
         : quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
+
+    // JIT-R058b: record a trace node for the common per-tensor INT8/INT8
+    // static-quant configuration (weight per-tensor INT8, activation
+    // per-tensor INT8) — the case OpType::QuantizedLinearStatic's convention
+    // matches exactly. Per-channel weight and INT4 remain a documented,
+    // narrower residual gap (see findings.txt): they fall through with no
+    // jit_record call, so a trace reaching them still safely freezes
+    // `output` as a constant (same as before this fix — a landmine, not a
+    // live regression).
+    if (activation_qparams_.has_value()) {
+        const auto& wparams = weight_.params();
+        bool weight_per_tensor =
+            (wparams.scheme == QuantizationScheme::PerTensorSymmetric ||
+             wparams.scheme == QuantizationScheme::PerTensorAsymmetric);
+        bool weight_int8 = weight_.data().dtype() == DType::Int8;
+        bool act_int8 = activation_qparams_->dtype == QuantDType::INT8;
+        bool act_per_tensor =
+            (activation_qparams_->scheme == QuantizationScheme::PerTensorSymmetric ||
+             activation_qparams_->scheme == QuantizationScheme::PerTensorAsymmetric);
+        if (weight_per_tensor && weight_int8 && act_int8 && act_per_tensor) {
+            int64_t rows = in_features_ > 0 ? input.tensor().numel() / in_features_ : 0;
+            Tensor input_2d = (input.tensor().shape().size() == 2)
+                ? input.tensor()
+                : input.tensor().reshape({rows, in_features_});
+
+            Tensor weight_scale_cpu = wparams.scale;
+            if (weight_scale_cpu.device() != Device::cpu()) weight_scale_cpu = weight_scale_cpu.to(Device::cpu());
+            Tensor weight_zp_cpu = wparams.zero_point;
+            if (weight_zp_cpu.device() != Device::cpu()) weight_zp_cpu = weight_zp_cpu.to(Device::cpu());
+            Tensor act_scale_cpu = activation_qparams_->scale;
+            if (act_scale_cpu.device() != Device::cpu()) act_scale_cpu = act_scale_cpu.to(Device::cpu());
+            Tensor act_zp_cpu = activation_qparams_->zero_point;
+            if (act_zp_cpu.device() != Device::cpu()) act_zp_cpu = act_zp_cpu.to(Device::cpu());
+
+            Tensor bias_for_trace;
+            if (bias_.has_value()) {
+                bias_for_trace = *bias_;
+                if (bias_for_trace.dtype() != DType::Float32) {
+                    bias_for_trace = bias_for_trace.to(DType::Float32);
+                }
+                // JIT-R103: also reconcile device — bias_ stays wherever the
+                // module was constructed (CPU by default) until moved.
+                if (bias_for_trace.device() != input.tensor().device()) {
+                    bias_for_trace = bias_for_trace.to(input.tensor().device());
+                }
+            }
+
+            // JIT-R103: weight_ likewise stays wherever the module was
+            // constructed until moved; this trace-node's inputs must all
+            // agree with `output`/`input_2d` (already on the input's real
+            // device) or node registration silently graph-breaks.
+            Tensor weight_for_trace = weight_.data();
+            if (weight_for_trace.device() != input.tensor().device()) {
+                weight_for_trace = weight_for_trace.to(input.tensor().device());
+            }
+
+            bool asymmetric = activation_qparams_->scheme == QuantizationScheme::PerTensorAsymmetric;
+            jit_record_quantized_linear_static(
+                input_2d, weight_for_trace, bias_for_trace, output,
+                act_scale_cpu.data<const float>()[0],
+                weight_scale_cpu.data<const float>()[0],
+                act_zp_cpu.data<int32_t>()[0],
+                weight_zp_cpu.data<int32_t>()[0],
+                asymmetric);
+        }
+    }
     return Variable(output, /*requires_grad=*/false);
 }
 
@@ -175,7 +354,14 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
 
             std::vector<Tensor> inputs_vec;
             inputs_vec.push_back(input_2d);
-            inputs_vec.push_back(weight_.data());
+            // JIT-R103: weight_ stays wherever the module was constructed
+            // (CPU by default) until moved, unlike bias_dev/wscale/wzp below
+            // which already reconcile — a lazily-placed module (constructed
+            // on CPU, called with a GPU input) hit a device-mismatch
+            // dispatch error here.
+            Tensor weight_dev = weight_.data();
+            if (weight_dev.device() != original_device) weight_dev = weight_dev.to(original_device);
+            inputs_vec.push_back(weight_dev);
             // Always occupy the bias slot (inputs[2]) — empty when absent — so the
             // per-channel weight scale/zp land at the fixed inputs[3]/[4] positions
             // the kernel expects.
@@ -200,7 +386,25 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
                 inputs_vec.push_back(wscale.contiguous());
                 inputs_vec.push_back(wzp.contiguous());
             }
-            Tensor disp_out = dispatch<OpId::QuantizedLinear>(inputs_vec, attrs)[0];
+            // JIT-R058b/R103: OpId::QuantizedLinear is deliberately left
+            // unmapped in tracing_interceptor.cpp (see that file's comment)
+            // so a raw reach through it safely aborts the trace rather than
+            // recording a wrong node. But forward_impl relies on manually
+            // recording the CORRECT node afterward (jit_record_quantized_
+            // linear_static, from the raw float input) for exactly the
+            // per-tensor/INT8-both case this dispatch_eligible block
+            // handles — and Tracer::abort_trace_unmappable() THROWS and
+            // sets tracing_=false unconditionally, so the free dispatch<>()
+            // call here (tracer-visible via DispatchInterceptorStack) was
+            // aborting the WHOLE trace before that manual recording ever
+            // ran, making jit_record_quantized_linear_static's GPU path
+            // unreachable dead code. Call the backend table directly
+            // instead — bypasses DispatchInterceptorStack entirely (mirrors
+            // JIT-R098's sparse_add fix: src/autograd/ops.cpp), so this
+            // computation is invisible to the interceptor and the manual
+            // recording below is what makes it tracer-visible instead.
+            auto& table = ::tenzor::DispatchTableRegistry::get_table(original_device.type);
+            Tensor disp_out = table.dispatch(OpId::QuantizedLinear, inputs_vec, attrs)[0];
             // Restore the original leading dims: [rows, out_features] ->
             // input_shape[:-1] + [out_features].
             if (out_shape.size() != 2) {
@@ -313,6 +517,14 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
             input_scale, weight_scale, /*output_scale=*/1.0f,
             input_zp, weight_zp
         );
+        // JIT-R058b: tracing (when the static/calibrated activation case
+        // qualifies) is recorded up in forward_impl instead of here — this
+        // function only ever sees the ALREADY-quantized int8 QuantizedTensor
+        // (no lineage back to the original float Variable, since
+        // quantize_tensor's int8 write is a raw host loop with zero
+        // dispatch() calls), so a jit_record call at this level could only
+        // ever produce a lineage-broken, wrongly-frozen node. See
+        // jit_record_quantized_linear_static's doc comment.
     }
 
     // Restore original leading dims, then move output back to original device.
@@ -471,6 +683,25 @@ QuantizedConv2d::QuantizedConv2d(
 auto QuantizedConv2d::forward_impl(const Variable& input) -> Variable {
     // Inference-only: see QuantizedLinear::forward_impl for rationale.
     // Compose Conv2d + FakeQuantize for QAT training instead.
+    // JIT-R066: unlike QuantizedLinear, forward_quantized's im2col/kernel
+    // path (kernels::quantized_conv2d_kernel/quantized_conv2d_per_channel_
+    // kernel) is a 100% raw host-pointer computation with ZERO dispatch()
+    // calls for either the static (calibrated) or dynamic activation-qparams
+    // case — there is no partial dispatch lineage to build a manual
+    // jit_record_quantized_linear_static-style replay node on top of, the
+    // way QuantizedLinear's GPU fast path allows. Any trace would silently
+    // freeze `output` as a trace-time constant regardless of the real
+    // (replayed) input. Fail loudly instead (matches QuantizedLinear's
+    // dynamic-path treatment, just unconditional here since neither
+    // qparams path is trace-safe).
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "QuantizedConv2d::forward_impl: cannot be JIT-traced (see "
+            "JIT-R066 — forward_quantized's INT8 kernel is a raw host "
+            "computation with no dispatch()-visible lineage back to the "
+            "input, so a trace would silently freeze the output as a "
+            "constant). Call outside jit.compile()/jit.trace().");
+    }
     // Static quantization: quantize input with calibrated activation qparams.
     auto q_input = activation_qparams_.has_value()
         ? quantize_tensor(input.tensor(), *activation_qparams_)
@@ -1182,6 +1413,16 @@ auto QuantizedConv2dBnReLU::forward_impl(const Variable& input) -> Variable {
             "is an inference-only quantized fused layer.  Use a "
             "non-quantized Conv2d+BatchNorm2d+ReLU for QAT/training.");
     }
+    // JIT-R066: see QuantizedConv2d::forward_impl — same raw, dispatch-
+    // invisible INT8 kernel path (always dynamic here, no calibrated-qparams
+    // branch even), so a trace would silently freeze `output` as a constant.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "QuantizedConv2dBnReLU::forward_impl: cannot be JIT-traced (see "
+            "JIT-R066 — the fused conv-bn-relu INT8 kernel is a raw host "
+            "computation with no dispatch()-visible lineage back to the "
+            "input). Call outside jit.compile()/jit.trace().");
+    }
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
     return Variable(output, /*requires_grad=*/false);
@@ -1378,6 +1619,17 @@ QuantizedEmbedding::QuantizedEmbedding(
             std::move(weight_qparams)) {}
 
 auto QuantizedEmbedding::forward_impl(const Variable& input) -> Variable {
+    // JIT-R066: forward_quantized is a raw host loop over `indices` (this
+    // call's actual, per-call-varying input) with zero dispatch() calls —
+    // same hazard class as the raw quantize_tensor/dequantize_tensor
+    // functions, just implemented inline here instead of via those shared
+    // helpers. A trace would silently freeze the looked-up/dequantized
+    // output as a constant regardless of the real (replayed) indices.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "QuantizedEmbedding::forward_impl: cannot be JIT-traced (see "
+            "JIT-R066). Call outside jit.compile()/jit.trace().");
+    }
     Tensor output = forward_quantized(input.tensor());
     return Variable(output, false);  // Quantized inference, no grad
 }
@@ -1524,8 +1776,14 @@ auto QuantizedLSTM::forward_impl(const Variable& input) -> Variable {
     int64_t batch = batch_first_ ? shape[0] : shape[1];
     int64_t num_directions = bidirectional_ ? 2 : 1;
 
-    auto h0 = Variable(zeros({num_layers_ * num_directions, batch, hidden_size_}), false);
-    auto c0 = Variable(zeros({num_layers_ * num_directions, batch, hidden_size_}), false);
+    // JIT-R103: default initial state must live on the input's actual
+    // device — zeros()'s default device is CPU, and h0/c0 get mixed
+    // directly with the real (possibly non-CPU) input/weights below.
+    auto dev = input.tensor().device();
+    auto h0 = Variable(zeros({num_layers_ * num_directions, batch, hidden_size_},
+                              DType::Float32, dev), false);
+    auto c0 = Variable(zeros({num_layers_ * num_directions, batch, hidden_size_},
+                              DType::Float32, dev), false);
 
     auto [output, hn, cn] = forward_with_state(input, h0, c0);
     return output;
@@ -1554,9 +1812,14 @@ auto QuantizedLSTM::forward_with_state(const Variable& input,
             std::to_string(static_cast<int>(input.tensor().dtype())));
     }
 
+    // JIT-R058a: `input` is the traced function's actual (live, per-call-
+    // varying) parameter — permuting it via the raw Tensor member function
+    // would disconnect everything downstream from the traced graph entirely
+    // (the whole layer's output would silently freeze as a giant constant
+    // on replay). traced_permute records this as a real graph node instead.
     auto inp = input.tensor();
     if (batch_first_) {
-        inp = inp.permute({1, 0, 2});  // -> [seq_len, batch, features]
+        inp = traced_permute(inp, {1, 0, 2});  // -> [seq_len, batch, features]
     }
 
     int64_t seq_len = inp.shape()[0];
@@ -1584,16 +1847,32 @@ auto QuantizedLSTM::forward_with_state(const Variable& input,
             auto& lw = layers_[idx];
 
             // Dequantize INT8 weights for this layer/direction once per
-            // forward (amortised across all timesteps).
+            // forward (amortised across all timesteps). dequantize()'s raw
+            // pointer loop is untraced (JIT-R066) but the WEIGHT is
+            // genuinely constant across calls of this compiled layer
+            // instance, so freezing it (and its permute below) as a
+            // trace-time constant is correct JIT behavior, not a bug.
             Tensor w_ih = lw.weight_ih.dequantize();
             Tensor w_hh = lw.weight_hh.dequantize();
+            // JIT-R103: quantized weights stay wherever they were
+            // constructed/quantized until moved, unlike current_input/inp
+            // which are on the actual call's device — a lazily-placed
+            // module (constructed on CPU, called with a GPU input) hit a
+            // device-mismatch dispatch error at the matmul below.
+            if (w_ih.device() != current_input.device()) w_ih = w_ih.to(current_input.device());
+            if (w_hh.device() != current_input.device()) w_hh = w_hh.to(current_input.device());
             Tensor w_ih_t = w_ih.permute({1, 0});
             Tensor w_hh_t = w_hh.permute({1, 0});
 
-            // Initial states for this (layer, direction): contiguous() so
-            // we don't alias-mutate the caller's h0 / c0 storage.
-            Tensor h = h0.tensor().slice(0, idx, idx + 1).squeeze(0).contiguous();
-            Tensor c = c0.tensor().slice(0, idx, idx + 1).squeeze(0).contiguous();
+            // Initial states for this (layer, direction): h0/c0 are live,
+            // call-varying function parameters — must use traced_slice/
+            // traced_squeeze so a replay with different initial state
+            // actually uses it, instead of freezing the trace-time slice.
+            // contiguous() so we don't alias-mutate the caller's h0/c0
+            // storage (a metadata-only op — its own output is a fresh copy,
+            // not a distinct logical value, so it's fine to leave untraced).
+            Tensor h = traced_squeeze(traced_slice(h0.tensor(), 0, idx, idx + 1), 0).contiguous();
+            Tensor c = traced_squeeze(traced_slice(c0.tensor(), 0, idx, idx + 1), 0).contiguous();
 
             std::vector<Tensor> step_outputs;
             step_outputs.reserve(static_cast<size_t>(seq_len));
@@ -1603,24 +1882,34 @@ auto QuantizedLSTM::forward_with_state(const Variable& input,
             int64_t t_step  = (dir == 0) ? 1 : -1;
 
             for (int64_t t = t_start; t != t_end; t += t_step) {
-                auto x_t = current_input.slice(0, t, t + 1).squeeze(0);
+                auto x_t = traced_squeeze(traced_slice(current_input, 0, t, t + 1), 0);
 
                 // gates = x_t @ w_ih^T + h @ w_hh^T + bias
                 auto gates = matmul(x_t, w_ih_t);
                 gates = gates + matmul(h, w_hh_t);
-                if (lw.bias_ih) gates = gates + *lw.bias_ih;
-                if (lw.bias_hh) gates = gates + *lw.bias_hh;
+                if (lw.bias_ih) {
+                    Tensor b = (lw.bias_ih->device() != x_t.device())
+                        ? lw.bias_ih->to(x_t.device()) : *lw.bias_ih;
+                    gates = gates + b;
+                }
+                if (lw.bias_hh) {
+                    Tensor b = (lw.bias_hh->device() != x_t.device())
+                        ? lw.bias_hh->to(x_t.device()) : *lw.bias_hh;
+                    gates = gates + b;
+                }
 
-                // Split gates: [batch, 4*hidden] -> i, f, g, o
-                auto i_gate = sigmoid(gates.slice(1, 0,                 hidden_size_));
-                auto f_gate = sigmoid(gates.slice(1, hidden_size_,     2 * hidden_size_));
-                auto g_gate = tanh   (gates.slice(1, 2 * hidden_size_, 3 * hidden_size_));
-                auto o_gate = sigmoid(gates.slice(1, 3 * hidden_size_, 4 * hidden_size_));
+                // Split gates: [batch, 4*hidden] -> i, f, g, o. `gates` is a
+                // live, per-call-varying dispatched value — traced_slice
+                // keeps each split tied to it instead of freezing.
+                auto i_gate = sigmoid(traced_slice(gates, 1, 0,                 hidden_size_));
+                auto f_gate = sigmoid(traced_slice(gates, 1, hidden_size_,     2 * hidden_size_));
+                auto g_gate = tanh   (traced_slice(gates, 1, 2 * hidden_size_, 3 * hidden_size_));
+                auto o_gate = sigmoid(traced_slice(gates, 1, 3 * hidden_size_, 4 * hidden_size_));
 
                 c = f_gate * c + i_gate * g_gate;
                 h = o_gate * tanh(c);
 
-                step_outputs.push_back(h.unsqueeze(0));  // [1, batch, hidden]
+                step_outputs.push_back(traced_unsqueeze(h, 0));  // [1, batch, hidden]
             }
 
             // Reverse-direction outputs were appended in reverse time order;
@@ -1657,19 +1946,21 @@ auto QuantizedLSTM::forward_with_state(const Variable& input,
         current_input = std::move(layer_output);
     }
 
-    // Stack final (h, c) per (layer, direction) along dim 0.
+    // Stack final (h, c) per (layer, direction) along dim 0. final_h/final_c
+    // entries are live per-call values (each layer/direction's actual final
+    // state) — traced_unsqueeze keeps h_n/c_n tied to them.
     std::vector<Tensor> h_expanded;
     std::vector<Tensor> c_expanded;
     h_expanded.reserve(final_h.size());
     c_expanded.reserve(final_c.size());
-    for (auto& t : final_h) h_expanded.push_back(t.unsqueeze(0));
-    for (auto& t : final_c) c_expanded.push_back(t.unsqueeze(0));
+    for (auto& t : final_h) h_expanded.push_back(traced_unsqueeze(t, 0));
+    for (auto& t : final_c) c_expanded.push_back(traced_unsqueeze(t, 0));
     Tensor h_n = cat(h_expanded, 0);
     Tensor c_n = cat(c_expanded, 0);
 
     Tensor output = current_input;
     if (batch_first_) {
-        output = output.permute({1, 0, 2});
+        output = traced_permute(output, {1, 0, 2});
     }
 
     return {Variable(output, false), Variable(h_n, false), Variable(c_n, false)};
@@ -1677,33 +1968,37 @@ auto QuantizedLSTM::forward_with_state(const Variable& input,
 
 auto QuantizedLSTM::from_float(Module& fp_lstm, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedLSTM> {
-    // Extract parameters from fp_lstm and quantize weights
-    auto params = fp_lstm.named_parameters();
-
-    auto get_param = [&](const std::string& name) -> Tensor {
-        for (auto& [pname, var] : params) {
-            if (pname == name) return var->tensor();
-        }
-        throw std::runtime_error("QuantizedLSTM::from_float: missing parameter " + name);
+    // nn::LSTM composes stacked nn::LSTMCell submodules registered as
+    // "forward_cell_<i>" / "backward_cell_<i>" (each cell's weight_ih/
+    // weight_hh are themselves nested Linear submodules) — NOT flat
+    // PyTorch-style "weight_ih_l<i>" parameters. Looking these up by the
+    // ACTUAL registered submodule names/types (instead of matching
+    // named_parameters() strings against a naming convention this
+    // codebase's nn::LSTM never produces) is required for from_float to
+    // find anything at all; previously every call threw immediately.
+    const auto& submodules = fp_lstm.get_submodules();
+    auto get_cell = [&](const std::string& name) -> std::shared_ptr<LSTMCell> {
+        auto it = submodules.find(name);
+        if (it == submodules.end()) return nullptr;
+        return std::dynamic_pointer_cast<LSTMCell>(it->second);
     };
 
-    // Determine sizes from weight_ih_l0
-    auto w_ih_0 = get_param("weight_ih_l0");
-    int64_t hidden_size = w_ih_0.shape()[0] / 4;
-    int64_t input_size = w_ih_0.shape()[1];
-
-    auto has_param = [&](const std::string& name) -> bool {
-        for (auto& [pname, _] : params) { if (pname == name) return true; }
-        return false;
-    };
+    auto fwd0 = get_cell("forward_cell_0");
+    if (!fwd0) {
+        throw std::runtime_error(
+            "QuantizedLSTM::from_float: fp_lstm has no forward_cell_0 "
+            "submodule of type LSTMCell (expected an nn::LSTM instance)");
+    }
+    int64_t hidden_size = fwd0->weight_ih()->weight()->shape()[0] / 4;
+    int64_t input_size = fwd0->weight_ih()->weight()->shape()[1];
+    bool has_bias = fwd0->weight_ih()->has_bias();
 
     // Count layers
     int64_t num_layers = 0;
-    while (has_param("weight_ih_l" + std::to_string(num_layers))) {
+    while (get_cell("forward_cell_" + std::to_string(num_layers))) {
         num_layers++;
     }
-    bool bidirectional = has_param("weight_ih_l0_reverse");
-    bool has_bias = has_param("bias_ih_l0");
+    bool bidirectional = get_cell("backward_cell_0") != nullptr;
 
     auto result = std::make_shared<QuantizedLSTM>(
         input_size, hidden_size, num_layers, has_bias, true, bidirectional);
@@ -1712,20 +2007,34 @@ auto QuantizedLSTM::from_float(Module& fp_lstm, [[maybe_unused]] const QConfig& 
     for (int64_t layer = 0; layer < num_layers; ++layer) {
         for (int64_t dir = 0; dir < num_directions; ++dir) {
             int64_t idx = layer * num_directions + dir;
-            std::string suffix = "l" + std::to_string(layer);
-            if (dir == 1) suffix += "_reverse";
+            auto cell = (dir == 0)
+                ? get_cell("forward_cell_" + std::to_string(layer))
+                : get_cell("backward_cell_" + std::to_string(layer));
+            if (!cell) {
+                throw std::runtime_error(
+                    "QuantizedLSTM::from_float: missing cell for layer " +
+                    std::to_string(layer) + " direction " + std::to_string(dir));
+            }
 
-            auto w_ih = get_param("weight_ih_" + suffix);
-            auto w_hh = get_param("weight_hh_" + suffix);
+            auto w_ih = cell->weight_ih()->weight()->tensor();
+            auto w_hh = cell->weight_hh()->weight()->tensor();
             auto w_ih_cpu = (w_ih.device() == Device::cpu()) ? w_ih : w_ih.to(Device::cpu());
             auto w_hh_cpu = (w_hh.device() == Device::cpu()) ? w_hh : w_hh.to(Device::cpu());
 
             result->layers_[idx].weight_ih = quantize_per_tensor_symmetric(w_ih_cpu);
             result->layers_[idx].weight_hh = quantize_per_tensor_symmetric(w_hh_cpu);
 
-            if (has_bias) {
-                result->layers_[idx].bias_ih = get_param("bias_ih_" + suffix);
-                result->layers_[idx].bias_hh = get_param("bias_hh_" + suffix);
+            // Query each Linear's own has_bias() independently instead of
+            // assuming weight_ih/weight_hh match (LSTMCell's weight_hh is
+            // constructed with bias=false unconditionally — see
+            // LSTMCell::LSTMCell — so bias()->tensor() would null-deref if
+            // gated on `has_bias` alone; GRUCell's weight_hh does carry a
+            // bias, so this is a no-op there beyond the extra safety).
+            if (has_bias && cell->weight_ih()->has_bias()) {
+                result->layers_[idx].bias_ih = cell->weight_ih()->bias()->tensor();
+            }
+            if (cell->weight_hh()->has_bias()) {
+                result->layers_[idx].bias_hh = cell->weight_hh()->bias()->tensor();
             }
         }
     }
@@ -1771,6 +2080,16 @@ auto QuantizedConv3d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument(
             "QuantizedConv3d: input dtype must be Float32 or Int8; got " +
             std::to_string(static_cast<int>(in_dtype)));
+    }
+
+    // JIT-R066: see QuantizedConv2d::forward_impl — the INT8 conv kernel
+    // path is a raw host computation with no dispatch()-visible lineage
+    // back to the input, so a trace would silently freeze the output as a
+    // constant regardless of the real (replayed) input.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "QuantizedConv3d::forward_impl: cannot be JIT-traced (see "
+            "JIT-R066). Call outside jit.compile()/jit.trace().");
     }
 
     QuantizedTensor q_input = (in_dtype == DType::Float32)
@@ -2096,9 +2415,13 @@ QuantizedGRU::QuantizedGRU(
 }
 
 auto QuantizedGRU::forward_impl(const Variable& input) -> Variable {
+    // JIT-R103: default initial state must live on the input's actual
+    // device — zeros()'s default device is CPU, and h0 gets mixed directly
+    // with the real (possibly non-CPU) input/weights below.
     auto h0 = Variable(zeros({num_layers_ * (bidirectional_ ? 2 : 1),
                                input.tensor().shape()[batch_first_ ? 0 : 1],
-                               hidden_size_}, input.tensor().dtype()), false);
+                               hidden_size_}, input.tensor().dtype(),
+                              input.tensor().device()), false);
     auto [output, h_n] = forward_with_state(input, h0);
     return output;
 }
@@ -2106,9 +2429,12 @@ auto QuantizedGRU::forward_impl(const Variable& input) -> Variable {
 auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
     -> std::pair<Variable, Variable> {
 
+    // JIT-R058a: `input` is the traced function's live parameter — permute
+    // it via traced_permute (not the raw Tensor member function) or
+    // everything downstream loses lineage back to it entirely.
     auto x = input.tensor();
     if (batch_first_) {
-        x = x.permute({1, 0, 2}); // [batch, seq, feat] -> [seq, batch, feat]
+        x = traced_permute(x, {1, 0, 2}); // [batch, seq, feat] -> [seq, batch, feat]
     }
 
     int64_t seq_len = x.shape()[0];
@@ -2128,11 +2454,22 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
             int64_t idx = layer * num_directions + dir;
             auto& lw = layers_[idx];
 
-            // Dequantize weights to FP32
+            // Dequantize weights to FP32. dequantize()'s raw pointer loop is
+            // untraced (JIT-R066) but the weight is genuinely constant
+            // across calls of this compiled layer instance, so freezing it
+            // as a trace-time constant is correct JIT behavior, not a bug.
             auto w_ih = lw.weight_ih.dequantize();
             auto w_hh = lw.weight_hh.dequantize();
+            // JIT-R103: quantized weights stay wherever they were
+            // constructed/quantized until moved, unlike x/output which are
+            // on the actual call's device — a lazily-placed module
+            // (constructed on CPU, called with a GPU input) hit a
+            // device-mismatch dispatch error at the matmul below.
+            if (w_ih.device() != x.device()) w_ih = w_ih.to(x.device());
+            if (w_hh.device() != x.device()) w_hh = w_hh.to(x.device());
 
-            auto h = h0.tensor().slice(0, idx, idx + 1).squeeze(0);
+            // h0 is a live, call-varying function parameter.
+            auto h = traced_squeeze(traced_slice(h0.tensor(), 0, idx, idx + 1), 0);
 
             std::vector<Tensor> outputs;
             outputs.reserve(seq_len);
@@ -2144,31 +2481,52 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
             Tensor current_input = (layer == 0) ? x : output;
 
             for (int64_t t = t_start; t != t_end; t += t_step) {
-                auto x_t = current_input.slice(0, t, t + 1).squeeze(0);
+                auto x_t = traced_squeeze(traced_slice(current_input, 0, t, t + 1), 0);
 
                 // gates_x = x_t @ w_ih^T + bias_ih
                 auto gates_x = matmul(x_t, w_ih.permute({1, 0}));
-                if (lw.bias_ih) gates_x = gates_x + *lw.bias_ih;
+                if (lw.bias_ih) {
+                    Tensor b = (lw.bias_ih->device() != x_t.device())
+                        ? lw.bias_ih->to(x_t.device()) : *lw.bias_ih;
+                    gates_x = gates_x + b;
+                }
 
                 // gates_h = h @ w_hh^T + bias_hh
                 auto gates_h = matmul(h, w_hh.permute({1, 0}));
-                if (lw.bias_hh) gates_h = gates_h + *lw.bias_hh;
+                if (lw.bias_hh) {
+                    Tensor b = (lw.bias_hh->device() != h.device())
+                        ? lw.bias_hh->to(h.device()) : *lw.bias_hh;
+                    gates_h = gates_h + b;
+                }
 
-                // Split: [batch, 3*hidden] -> r, z, n
-                auto r_x = gates_x.slice(1, 0, hidden_size_);
-                auto z_x = gates_x.slice(1, hidden_size_, 2 * hidden_size_);
-                auto n_x = gates_x.slice(1, 2 * hidden_size_, 3 * hidden_size_);
+                // Split: [batch, 3*hidden] -> r, z, n. gates_x/gates_h are
+                // live dispatched values — traced_slice keeps the splits
+                // tied to them instead of freezing.
+                auto r_x = traced_slice(gates_x, 1, 0, hidden_size_);
+                auto z_x = traced_slice(gates_x, 1, hidden_size_, 2 * hidden_size_);
+                auto n_x = traced_slice(gates_x, 1, 2 * hidden_size_, 3 * hidden_size_);
 
-                auto r_h = gates_h.slice(1, 0, hidden_size_);
-                auto z_h = gates_h.slice(1, hidden_size_, 2 * hidden_size_);
-                auto n_h = gates_h.slice(1, 2 * hidden_size_, 3 * hidden_size_);
+                auto r_h = traced_slice(gates_h, 1, 0, hidden_size_);
+                auto z_h = traced_slice(gates_h, 1, hidden_size_, 2 * hidden_size_);
+                auto n_h = traced_slice(gates_h, 1, 2 * hidden_size_, 3 * hidden_size_);
 
                 auto r_gate = sigmoid(r_x + r_h);
                 auto z_gate = sigmoid(z_x + z_h);
                 auto n_gate = tanh(n_x + r_gate * n_h);
 
-                h = (ones_like(z_gate) - z_gate) * n_gate + z_gate * h;
-                outputs.push_back(h.unsqueeze(0));
+                // JIT-R058a: ones_like(z_gate) on CPU is a raw allocate+fill
+                // with ZERO dispatch() calls (ones()'s CPU path bypasses
+                // dispatch entirely, unlike its GPU path) — invisible to the
+                // tracer, so the later Sub's input registration falls back
+                // to the fingerprint-dedup lookup and can alias it to an
+                // unrelated, coincidentally-same-address earlier tensor
+                // (confirmed: silently resolved to a stale n_x slice from
+                // this same timestep, corrupting the whole gate chain).
+                // `1.0 - z_gate` uses neg()+scalar-add instead, both of
+                // which dispatch (OpId::Neg / OpId::Add) and are correctly
+                // traced, avoiding the untraced constant entirely.
+                h = (1.0 - z_gate) * n_gate + z_gate * h;
+                outputs.push_back(traced_unsqueeze(h, 0));
             }
 
             if (dir == 1) {
@@ -2176,7 +2534,7 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
             }
 
             // Record the final hidden state for this (layer, direction).
-            final_h[idx] = h.unsqueeze(0);  // [1, batch, hidden]
+            final_h[idx] = traced_unsqueeze(h, 0);  // [1, batch, hidden]
 
             auto dir_output = cat(outputs, 0);
             if (dir == 0) {
@@ -2190,7 +2548,7 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
     }
 
     if (batch_first_) {
-        output = output.permute({1, 0, 2});
+        output = traced_permute(output, {1, 0, 2});
     }
 
     // Stack the per-(layer,direction) final hidden states into h_n with shape
@@ -2202,30 +2560,32 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
 
 auto QuantizedGRU::from_float(Module& fp_gru, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedGRU> {
-    auto params = fp_gru.named_parameters();
-
-    auto get_param = [&](const std::string& name) -> Tensor {
-        for (auto& [pname, var] : params) {
-            if (pname == name) return var->tensor();
-        }
-        throw std::runtime_error("QuantizedGRU::from_float: missing parameter " + name);
+    // See QuantizedLSTM::from_float's comment: nn::GRU composes stacked
+    // nn::GRUCell submodules ("forward_cell_<i>" / "backward_cell_<i>",
+    // each with nested Linear weight_ih/weight_hh submodules) — not flat
+    // PyTorch-style "weight_ih_l<i>" parameters.
+    const auto& submodules = fp_gru.get_submodules();
+    auto get_cell = [&](const std::string& name) -> std::shared_ptr<GRUCell> {
+        auto it = submodules.find(name);
+        if (it == submodules.end()) return nullptr;
+        return std::dynamic_pointer_cast<GRUCell>(it->second);
     };
 
-    auto has_param = [&](const std::string& name) -> bool {
-        for (auto& [pname, _] : params) { if (pname == name) return true; }
-        return false;
-    };
-
-    auto w_ih_0 = get_param("weight_ih_l0");
-    int64_t hidden_size = w_ih_0.shape()[0] / 3;
-    int64_t input_size = w_ih_0.shape()[1];
+    auto fwd0 = get_cell("forward_cell_0");
+    if (!fwd0) {
+        throw std::runtime_error(
+            "QuantizedGRU::from_float: fp_gru has no forward_cell_0 "
+            "submodule of type GRUCell (expected an nn::GRU instance)");
+    }
+    int64_t hidden_size = fwd0->weight_ih()->weight()->shape()[0] / 3;
+    int64_t input_size = fwd0->weight_ih()->weight()->shape()[1];
+    bool has_bias = fwd0->weight_ih()->has_bias();
 
     int64_t num_layers = 0;
-    while (has_param("weight_ih_l" + std::to_string(num_layers))) {
+    while (get_cell("forward_cell_" + std::to_string(num_layers))) {
         num_layers++;
     }
-    bool bidirectional = has_param("weight_ih_l0_reverse");
-    bool has_bias = has_param("bias_ih_l0");
+    bool bidirectional = get_cell("backward_cell_0") != nullptr;
 
     auto result = std::make_shared<QuantizedGRU>(
         input_size, hidden_size, num_layers, has_bias, true, bidirectional);
@@ -2234,20 +2594,34 @@ auto QuantizedGRU::from_float(Module& fp_gru, [[maybe_unused]] const QConfig& qc
     for (int64_t layer = 0; layer < num_layers; ++layer) {
         for (int64_t dir = 0; dir < num_directions; ++dir) {
             int64_t idx = layer * num_directions + dir;
-            std::string suffix = "l" + std::to_string(layer);
-            if (dir == 1) suffix += "_reverse";
+            auto cell = (dir == 0)
+                ? get_cell("forward_cell_" + std::to_string(layer))
+                : get_cell("backward_cell_" + std::to_string(layer));
+            if (!cell) {
+                throw std::runtime_error(
+                    "QuantizedGRU::from_float: missing cell for layer " +
+                    std::to_string(layer) + " direction " + std::to_string(dir));
+            }
 
-            auto w_ih = get_param("weight_ih_" + suffix);
-            auto w_hh = get_param("weight_hh_" + suffix);
+            auto w_ih = cell->weight_ih()->weight()->tensor();
+            auto w_hh = cell->weight_hh()->weight()->tensor();
             auto w_ih_cpu = (w_ih.device() == Device::cpu()) ? w_ih : w_ih.to(Device::cpu());
             auto w_hh_cpu = (w_hh.device() == Device::cpu()) ? w_hh : w_hh.to(Device::cpu());
 
             result->layers_[idx].weight_ih = quantize_per_tensor_symmetric(w_ih_cpu);
             result->layers_[idx].weight_hh = quantize_per_tensor_symmetric(w_hh_cpu);
 
-            if (has_bias) {
-                result->layers_[idx].bias_ih = get_param("bias_ih_" + suffix);
-                result->layers_[idx].bias_hh = get_param("bias_hh_" + suffix);
+            // Query each Linear's own has_bias() independently instead of
+            // assuming weight_ih/weight_hh match (LSTMCell's weight_hh is
+            // constructed with bias=false unconditionally — see
+            // LSTMCell::LSTMCell — so bias()->tensor() would null-deref if
+            // gated on `has_bias` alone; GRUCell's weight_hh does carry a
+            // bias, so this is a no-op there beyond the extra safety).
+            if (has_bias && cell->weight_ih()->has_bias()) {
+                result->layers_[idx].bias_ih = cell->weight_ih()->bias()->tensor();
+            }
+            if (cell->weight_hh()->has_bias()) {
+                result->layers_[idx].bias_hh = cell->weight_hh()->bias()->tensor();
             }
         }
     }
@@ -2288,6 +2662,15 @@ auto QuantizedConv1d::forward_impl(const Variable& input) -> Variable {
             "QuantizedConv1d: input has requires_grad=true but this is "
             "an inference-only quantized layer.  Use a non-quantized "
             "Conv1d for training.");
+    }
+    // JIT-R066: see QuantizedConv2d::forward_impl — the im2col + INT8
+    // kernel path is a raw host computation with no dispatch()-visible
+    // lineage back to the input, so a trace would silently freeze the
+    // output as a constant regardless of the real (replayed) input.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "QuantizedConv1d::forward_impl: cannot be JIT-traced (see "
+            "JIT-R066). Call outside jit.compile()/jit.trace().");
     }
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
@@ -2620,6 +3003,19 @@ auto QuantizedConvTranspose2d::forward_impl(const Variable& input) -> Variable {
             "this is an inference-only quantized layer.  Use a "
             "non-quantized ConvTranspose2d for training.");
     }
+    // JIT-R066: forward_quantized's core math (functional::conv_transpose2d)
+    // IS dispatch-visible, but it operates on `input.dequantize()`'s raw,
+    // untraced-host-loop OUTPUT — a fresh Tensor disconnected from this
+    // Variable's traced lineage (same class as QuantizedLinear's dynamic
+    // path: quantize_per_tensor_symmetric() here recomputes qparams from
+    // this call's live min/max via the same untraced code). A trace would
+    // silently freeze the conv_transpose2d output as a constant regardless
+    // of the real (replayed) input.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "QuantizedConvTranspose2d::forward_impl: cannot be JIT-traced "
+            "(see JIT-R066). Call outside jit.compile()/jit.trace().");
+    }
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
     return Variable(output, /*requires_grad=*/false);
@@ -2631,6 +3027,17 @@ auto QuantizedConvTranspose2d::forward_quantized(const QuantizedTensor& input) -
     // naive 7-deep scalar scatter loop.
     Tensor fp_input = input.dequantize();
     Tensor fp_weight = weight_.dequantize();
+    // JIT-R066 follow-up (found via QuantizedConvTranspose2dRefusesToTrace's
+    // eager-path assertion): weight_ defaults to CPU and dequantize_tensor's
+    // `.to(original_device)` is a no-op unless weight_ was explicitly moved,
+    // so fp_weight silently stayed on CPU while fp_input follows the real
+    // input's device — functional::conv_transpose2d then dispatched with
+    // mismatched-device operands, which on Vulkan surfaces as "Invalid
+    // buffer pointer: buffer not tracked" (the CPU weight's pointer was
+    // never Vulkan-allocated). Mirrors the bias reconciliation just below.
+    if (fp_weight.device() != fp_input.device()) {
+        fp_weight = fp_weight.to(fp_input.device());
+    }
 
     Variable v_input(fp_input, /*requires_grad=*/false);
     Variable v_weight(fp_weight, /*requires_grad=*/false);
@@ -2786,17 +3193,33 @@ auto QuantizedLSTMCell::forward_cell(const Variable& input,
     auto h = hx.tensor();
     auto c = cx.tensor();
 
+    // JIT-R103: quantized weights (and from_float() always quantizes on
+    // CPU) stay wherever they were constructed/quantized until moved,
+    // unlike x/h/c which are on the actual call's device — a lazily-placed
+    // module (constructed on CPU, called with a GPU input) hit a
+    // device-mismatch dispatch error at the matmul below.
+    if (w_ih.device() != x.device()) w_ih = w_ih.to(x.device());
+    if (w_hh.device() != x.device()) w_hh = w_hh.to(x.device());
+
     // gates = x @ w_ih^T + h @ w_hh^T + bias
     auto gates = matmul(x, w_ih.permute({1, 0}));
     gates = gates + matmul(h, w_hh.permute({1, 0}));
-    if (bias_ih_) gates = gates + *bias_ih_;
-    if (bias_hh_) gates = gates + *bias_hh_;
+    if (bias_ih_) {
+        Tensor b_ih = (bias_ih_->device() != x.device()) ? bias_ih_->to(x.device()) : *bias_ih_;
+        gates = gates + b_ih;
+    }
+    if (bias_hh_) {
+        Tensor b_hh = (bias_hh_->device() != x.device()) ? bias_hh_->to(x.device()) : *bias_hh_;
+        gates = gates + b_hh;
+    }
 
-    // Split gates: [batch, 4*hidden] -> 4x [batch, hidden]
-    auto i_gate = sigmoid(gates.slice(1, 0, hidden_size_));
-    auto f_gate = sigmoid(gates.slice(1, hidden_size_, 2 * hidden_size_));
-    auto g_gate = tanh(gates.slice(1, 2 * hidden_size_, 3 * hidden_size_));
-    auto o_gate = sigmoid(gates.slice(1, 3 * hidden_size_, 4 * hidden_size_));
+    // Split gates: [batch, 4*hidden] -> 4x [batch, hidden]. `gates` is a
+    // live, per-call-varying dispatched value — traced_slice (JIT-R058a)
+    // keeps each split tied to it instead of freezing at trace time.
+    auto i_gate = sigmoid(traced_slice(gates, 1, 0, hidden_size_));
+    auto f_gate = sigmoid(traced_slice(gates, 1, hidden_size_, 2 * hidden_size_));
+    auto g_gate = tanh(traced_slice(gates, 1, 2 * hidden_size_, 3 * hidden_size_));
+    auto o_gate = sigmoid(traced_slice(gates, 1, 3 * hidden_size_, 4 * hidden_size_));
 
     auto c_new = f_gate * c + i_gate * g_gate;
     auto h_new = o_gate * tanh(c_new);
@@ -2806,25 +3229,21 @@ auto QuantizedLSTMCell::forward_cell(const Variable& input,
 
 auto QuantizedLSTMCell::from_float(Module& fp_lstm_cell, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedLSTMCell> {
-    auto params = fp_lstm_cell.named_parameters();
+    // nn::LSTMCell's weight_ih/weight_hh are nested Linear submodules
+    // ("weight_ih.weight" in named_parameters() terms), not flat "weight_ih"
+    // parameters — matching QuantizedLSTM::from_float's fix above.
+    auto* cell = dynamic_cast<LSTMCell*>(&fp_lstm_cell);
+    if (!cell) {
+        throw std::runtime_error(
+            "QuantizedLSTMCell::from_float: fp_lstm_cell is not an "
+            "nn::LSTMCell instance");
+    }
 
-    auto get_param = [&](const std::string& name) -> Tensor {
-        for (auto& [pname, var] : params) {
-            if (pname == name) return var->tensor();
-        }
-        throw std::runtime_error("QuantizedLSTMCell::from_float: missing parameter " + name);
-    };
-
-    auto has_param = [&](const std::string& name) -> bool {
-        for (auto& [pname, _] : params) { if (pname == name) return true; }
-        return false;
-    };
-
-    auto w_ih = get_param("weight_ih");
-    auto w_hh = get_param("weight_hh");
+    auto w_ih = cell->weight_ih()->weight()->tensor();
+    auto w_hh = cell->weight_hh()->weight()->tensor();
     int64_t hidden_size = w_ih.shape()[0] / 4;
     int64_t input_size = w_ih.shape()[1];
-    bool has_bias = has_param("bias_ih");
+    bool has_bias = cell->weight_ih()->has_bias();
 
     auto w_ih_cpu = (w_ih.device() == Device::cpu()) ? w_ih : w_ih.to(Device::cpu());
     auto w_hh_cpu = (w_hh.device() == Device::cpu()) ? w_hh : w_hh.to(Device::cpu());
@@ -2835,9 +3254,13 @@ auto QuantizedLSTMCell::from_float(Module& fp_lstm_cell, [[maybe_unused]] const 
     result->weight_ih_ = quantize_per_tensor_symmetric(w_ih_cpu);
     result->weight_hh_ = quantize_per_tensor_symmetric(w_hh_cpu);
 
-    if (has_bias) {
-        result->bias_ih_ = get_param("bias_ih");
-        result->bias_hh_ = get_param("bias_hh");
+    // weight_hh's Linear is constructed with bias=false unconditionally
+    // (see LSTMCell::LSTMCell) — only weight_ih ever carries a bias.
+    if (has_bias && cell->weight_ih()->has_bias()) {
+        result->bias_ih_ = cell->weight_ih()->bias()->tensor();
+    }
+    if (cell->weight_hh()->has_bias()) {
+        result->bias_hh_ = cell->weight_hh()->bias()->tensor();
     }
 
     return result;
@@ -2859,6 +3282,15 @@ QuantizedEmbeddingBag::QuantizedEmbeddingBag(
               std::move(weight_qparams)) {}
 
 auto QuantizedEmbeddingBag::forward_impl(const Variable& input) -> Variable {
+    // JIT-R066: see QuantizedEmbedding::forward_impl — forward_quantized is
+    // a raw host loop over `indices`/`offsets` with zero dispatch() calls;
+    // a trace would silently freeze the output as a constant regardless of
+    // the real (replayed) input.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "QuantizedEmbeddingBag::forward_impl: cannot be JIT-traced (see "
+            "JIT-R066). Call outside jit.compile()/jit.trace().");
+    }
     // Simple forward: treat entire input as one bag with no offsets
     Tensor offsets = tenzor::zeros({1}, DType::Int64, input.tensor().device());
     Tensor output = forward_quantized(input.tensor(), offsets);

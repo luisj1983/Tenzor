@@ -885,6 +885,56 @@ public:
         return param_leaves_;
     }
 
+    // ========================================================================
+    // Closure-captured module BUFFERS (JIT-R005 fix)
+    // ========================================================================
+    //
+    // Mirrors set_parameters()/add_param_leaf()/param_leaves() exactly, for
+    // non-trainable module state (BatchNorm/InstanceNorm running_mean_/
+    // running_var_, etc.) living in nn::Module::buffers_ rather than
+    // parameters_. Before this, buffers had no "live leaf" bucket at all —
+    // only frozen-constant or trainable-parameter — so a captured module's
+    // running stats were baked into constants_ at trace time and every
+    // subsequent eager EMA update (via the correct grad-mode-replay-throws-
+    // and-falls-back-to-eager path) was silently invisible to later replays
+    // of the SAME compiled graph. A buffer leaf is always bound to its
+    // CURRENT value as a non-grad Variable (buffers are never differentiated
+    // through, so there is no grad_mode/inference distinction to make here
+    // the way there is for parameters).
+
+    /**
+     * @brief Declare the non-trainable buffers this graph closes over.
+     *
+     * Same by-reference sharing contract as set_parameters(): the vector
+     * holds the SAME shared_ptr<Variable> the caller holds (from
+     * nn::Module::buffers()), so a later eager mutation of the buffer's
+     * tensor (e.g. BatchNorm's EMA update) is visible to the next replay.
+     */
+    auto set_buffers(std::vector<std::shared_ptr<Variable>> buffers) -> void {
+        buffers_ = std::move(buffers);
+    }
+
+    /// The declared buffers (empty for a graph that closes over none).
+    auto buffers() const -> const std::vector<std::shared_ptr<Variable>>& {
+        return buffers_;
+    }
+
+    /**
+     * @brief Record that a graph value is a BUFFER LEAF bound to buffer
+     *        index `buffer_index`. Unlike set_constant(), the value is NOT
+     *        frozen: Graph::forward() rereads the live buffer tensor each
+     *        call.
+     */
+    auto add_buffer_leaf(const std::string& value_id, size_t buffer_index) -> void {
+        buffer_leaves_[value_id] = buffer_index;
+    }
+
+    /// Read the buffer-leaf table (value id -> buffer index).
+    auto buffer_leaves() const
+        -> const std::unordered_map<std::string, size_t>& {
+        return buffer_leaves_;
+    }
+
 private:
     std::vector<std::shared_ptr<Node>> nodes_;              ///< All nodes (topologically sorted)
     std::unordered_map<std::string, std::shared_ptr<Value>> values_;  ///< ID -> Value map
@@ -906,6 +956,13 @@ private:
     /// frozen as constants — the fix for stale weights and severed grads when a
     /// compiled function captures module parameters via closure.
     std::unordered_map<std::string, size_t> param_leaves_;
+    /// Declared non-trainable buffers this graph closes over (JIT-R005 fix).
+    /// Mirrors parameters_ exactly but for nn::Module::buffers() state.
+    std::vector<std::shared_ptr<Variable>> buffers_;
+    /// Buffer-leaf table: graph value id -> index into buffers_. Rebound to
+    /// the LIVE buffer tensor at every forward() (always non-grad) instead
+    /// of being frozen as a constant.
+    std::unordered_map<std::string, size_t> buffer_leaves_;
     int64_t next_node_id_{0};                               ///< Node ID counter
     mutable bool needs_retrace_{false};                        ///< Set when ShapeGuard detects mismatch
     /// Runtime replay device, set by forward() before executing nodes. Used to

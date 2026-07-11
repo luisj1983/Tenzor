@@ -183,8 +183,26 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    auto dispatch_result = dispatch_to_device(OpId::MaxPool2dForward,
-        contig_input.tensor().device().type, inputs, fwd_attrs);
+    // JIT-R069: dispatch_to_device() routes through DispatchInterceptorStack
+    // (same entry point the free dispatch<OpId> template uses), and
+    // OpId::MaxPool2dForward IS mapped in opid_to_optype — so the generic
+    // interceptor was ALSO auto-recording a node here, in addition to the
+    // manual one below (which alone correctly carries the per-axis W/
+    // ceil_mode attrs). The auto-recorded node's output id gets immediately
+    // shadowed when the manual block below mints a fresh id for the SAME
+    // `output` tensor (register_new_tensor always allocates fresh,
+    // overwriting the fingerprint->id mapping), so end_trace()'s
+    // reachable-from-outputs graph construction silently drops the orphaned
+    // auto-recorded node — genuinely harmless today, but wasteful
+    // bookkeeping and a landmine if that pruning behavior ever changes.
+    // Call the backend table directly instead — bypasses
+    // DispatchInterceptorStack entirely (mirrors JIT-R098's sparse_add fix
+    // and JIT-R103's QuantizedLinear fix), so only the manual recording
+    // below makes this op tracer-visible, exactly as the comments here
+    // already believed was happening.
+    auto& dispatch_table = ::tenzor::DispatchTableRegistry::get_table_const(
+        contig_input.tensor().device().type);
+    auto dispatch_result = dispatch_table.dispatch(OpId::MaxPool2dForward, inputs, fwd_attrs);
     Tensor output  = dispatch_result[0];
     Tensor indices = dispatch_result[1];
 
@@ -391,8 +409,19 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
             "pooling kernels on any backend; use ceil_mode=false");
     }
 
-    auto dispatch_result = dispatch_to_device(OpId::AvgPool2dForward,
-        contig_input.tensor().device().type, inputs, fwd_attrs);
+    // JIT-R069: see MaxPool2d::forward_impl's identical fix above —
+    // dispatch_to_device() was routing OpId::AvgPool2dForward (mapped in
+    // opid_to_optype) through DispatchInterceptorStack, so the generic
+    // interceptor auto-recorded a node in addition to the manual one below
+    // (the only one carrying count_include_pad/per-axis attrs). Harmless
+    // today (the auto-recorded node's output id gets shadowed by the
+    // manual block's fresh id and pruned by end_trace()'s reachability
+    // walk) but wasteful and contrary to what the count_include_pad
+    // comment below already believed ("bypassing the tracing
+    // interceptor") — call the backend table directly instead.
+    auto& dispatch_table = ::tenzor::DispatchTableRegistry::get_table_const(
+        contig_input.tensor().device().type);
+    auto dispatch_result = dispatch_table.dispatch(OpId::AvgPool2dForward, inputs, fwd_attrs);
     Tensor output = dispatch_result[0];
 
     {
@@ -412,10 +441,10 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
             op.int_attrs["stride_w"]      = stride_w_;
             op.int_attrs["padding_w"]     = padding_w_;
             // count_include_pad: this manual trace path (the layer dispatches
-            // directly via dispatch_to_device, bypassing the tracing
-            // interceptor) must record the flag itself, or replay defaults to
-            // true and diverges from an eager count_include_pad=false pool at
-            // the padded border cells.
+            // directly via the backend table, bypassing the tracing
+            // interceptor — see the JIT-R069 comment above) must record the
+            // flag itself, or replay defaults to true and diverges from an
+            // eager count_include_pad=false pool at the padded border cells.
             op.int_attrs["count_include_pad"] =
                 count_include_pad_ ? int64_t{1} : int64_t{0};
             tracer.record_op(std::move(op));

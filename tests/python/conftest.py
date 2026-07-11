@@ -57,7 +57,7 @@ _SKIP_BACKENDS = {
     s.strip() for s in os.getenv("TENZOR_SKIP_BACKENDS", "").split(",") if s.strip()
 }
 ALL_DEVICES = [
-    d for d in ["cpu", "cuda", "vulkan", "oneapi", "rocm"]
+    d for d in ["cpu", "cuda", "vulkan", "oneapi", "rocm", "mps"]
     if d not in _SKIP_BACKENDS
 ]
 
@@ -69,6 +69,7 @@ AVAILABLE_DEVICES = ["cpu"] + [
         ("vulkan", lambda: tz.vulkan_is_available()),
         ("oneapi", lambda: tz.oneapi_is_available()),
         ("rocm",   lambda: tz.rocm_is_available()),
+        ("mps",    lambda: tz.mps_is_available()),
     ) if check() and name not in _SKIP_BACKENDS
 ]
 
@@ -98,6 +99,8 @@ def device(request):
         pytest.skip("OneAPI not available")
     elif dev == "rocm" and not tz.rocm_is_available():
         pytest.skip("ROCm not available")
+    elif dev == "mps" and not tz.mps_is_available():
+        pytest.skip("MPS not available")
     return dev
 
 

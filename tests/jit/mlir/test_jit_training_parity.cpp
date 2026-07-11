@@ -60,9 +60,21 @@ namespace mj = ::tenzor::jit::mlir_jit;
 // The IREE target a device maps to under target="auto".
 auto iree_target_for(const Device& dev) -> std::string {
     switch (dev.type) {
-        case Device::Type::CUDA: return "cuda";
-        case Device::Type::ROCm: return "rocm";
-        default:                 return "llvm-cpu";
+        case Device::Type::CPU:    return "llvm-cpu";
+        case Device::Type::CUDA:   return "cuda";
+        case Device::Type::ROCm:   return "rocm";
+        case Device::Type::Vulkan: return "vulkan-spirv";
+        // JIT-R021/R022: OneAPI and MPS have no IREE HAL target at all (see
+        // mlir_target_util.hpp's all_iree_targets() comment). The previous
+        // `default: return "llvm-cpu";` silently mapped BOTH of these onto
+        // the CPU target string, and target_hw_present("llvm-cpu") is
+        // unconditionally true regardless of the actual device under test —
+        // so a OneAPI/MPS case here would have wrongly asserted "went
+        // through IREE" (iree_runnable_for erroneously true) even though
+        // target="auto" on these devices never touches IREE at all (C1
+        // branch: eager fallback). Empty string means "no IREE target
+        // exists"; iree_runnable_for below treats that as never-runnable.
+        default: return "";
     }
 }
 
@@ -71,6 +83,7 @@ auto iree_target_for(const Device& dev) -> std::string {
 // skipped for that case.
 auto iree_runnable_for(const Device& dev) -> bool {
     const std::string t = iree_target_for(dev);
+    if (t.empty()) return false;
     return mt::target_hw_present(t) && mt::iree_target_supported(t);
 }
 
@@ -302,6 +315,19 @@ TEST(MlirTrainingParity, InferenceMatchesEager_Vulkan) {
     }
     run_inference(Device::vulkan(0), "vulkan");
 }
+// JIT-R022: the comment above claims OneAPI's eager-fallback JIT path "is
+// covered by the inference-vs-eager equivalence there" — but no test here
+// actually exercised the real C1 branch (target="auto" on genuine OneAPI
+// hardware). run_inference on OneAPI: iree_runnable_for is now correctly
+// false (see iree_target_for's fix above), so the "went through IREE" stats
+// assertion is skipped and only output-matches-eager is checked — exactly
+// the real strict=false/target="auto" C1 eager-fallback contract.
+TEST(MlirTrainingParity, InferenceMatchesEager_Oneapi) {
+    if (!mt::backend_present("oneapi")) {
+        GTEST_SKIP() << "no OneAPI backend";
+    }
+    run_inference(Device::oneapi(0), "oneapi");
+}
 
 // ── TRAINING parity per backend ──────────────────────────────────────────────
 TEST(MlirTrainingParity, TrainingThroughJIT_Cpu) {
@@ -324,6 +350,20 @@ TEST(MlirTrainingParity, TrainingThroughJIT_Vulkan) {
         GTEST_SKIP() << "no Vulkan backend";
     }
     run_training(Device::vulkan(0), "vulkan");  // JIT-F036
+}
+// JIT-R021: TRAINING (grad_invoke) never touches IREE — it always replays
+// through the backend-agnostic interpreter (CompiledModule::forward_grad ->
+// Graph::forward(grad_mode=true)) on the tensors' OWN device, architecturally
+// independent of the IREE-HAL gate that legitimately excludes OneAPI from the
+// INFERENCE path (compile.cpp's mlir_invoke C1 check). No test anywhere
+// verified compiled.num_grad_forwards()>0 or gradient parity for OneAPI under
+// an mlir-configured CompiledFunction — a bug in the OneAPI interpreter-replay
+// path would have gone undetected. This exercises it on real OneAPI hardware.
+TEST(MlirTrainingParity, TrainingThroughJIT_Oneapi) {
+    if (!mt::backend_present("oneapi")) {
+        GTEST_SKIP() << "no OneAPI backend";
+    }
+    run_training(Device::oneapi(0), "oneapi");
 }
 
 // ── CPU finite-difference gradcheck on a CLOSURE-CAPTURED parameter ───────────

@@ -98,7 +98,12 @@ auto PositionalEncoding::forward_impl(const Variable& x) -> Variable {
 
     // Slice first seq_len rows: pe_local shape is (max_len_, d_model_)
     // Use slice view (zero-copy) then reshape to (1, seq_len, d_model)
-    Tensor pe_slice = pe_local.slice(0, 0, seq_len);
+    // JIT-R057: raw Tensor::slice() is zero-dispatch and invisible to the JIT
+    // tracer, freezing the trace-time seq_len's PE slice permanently. Route
+    // through the dispatched Variable-level overload (requires_grad=false —
+    // pe_local is a non-trainable cached buffer, matches the existing
+    // no-gradient contract of this positional-encoding tensor exactly).
+    Tensor pe_slice = tenzor::slice(Variable(pe_local, false), 0, 0, seq_len).tensor();
     Tensor pe_for_seq = reshape(pe_slice, {1, seq_len, d_model_});
 
     // Broadcast positional encoding to match batch size

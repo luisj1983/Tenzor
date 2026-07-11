@@ -6,6 +6,9 @@
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <random>
 #include <utility>
@@ -32,10 +35,17 @@ namespace tenzor::nn {
 // ============================================================================
 class SparseLinearBackward : public Function {
 public:
-    /// Set the sparse pattern (forward S) and its transpose (used in backward).
-    void set_sparse(SparseTensor sparse, SparseTensor sparse_t) {
+    /// Set the sparse pattern (forward S). S^T is computed lazily inside
+    /// backward() (JIT-R055): SparseTensor::transpose()->to_csr()->bincount()
+    /// reads a scalar via Tensor::item() to build the new CSR row pointers —
+    /// eagerly computing it here (at forward/construction time) unconditionally
+    /// graph-broke any trace whenever wants_grad was true (the common case for
+    /// a trainable SparseLinear). backward() is never traced in this codebase
+    /// (autograd traversal runs raw-Tensor, outside any JIT trace), so
+    /// deferring the transpose there is free of that hazard and produces the
+    /// identical eager result.
+    void set_sparse(SparseTensor sparse) {
         sparse_.emplace(std::move(sparse));
-        sparse_transposed_.emplace(std::move(sparse_t));
     }
 
     auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
@@ -88,8 +98,10 @@ public:
         }
 
         // grad_input_t = S^T @ grad_result_t (standard sparse-dense matmul).
-        if (sparse_transposed_.has_value()) {
-            result[1] = sparse::spmm(sparse_transposed_.value(), grad_result_t);
+        // Computed lazily here (never traced) rather than cached from
+        // forward-time — see set_sparse()'s comment.
+        if (sparse_.has_value()) {
+            result[1] = sparse::spmm(sparse_.value().transpose(), grad_result_t);
         }
         return result;
     }
@@ -110,7 +122,6 @@ public:
 
 private:
     std::optional<SparseTensor> sparse_;             ///< S in CSR (fixed pattern)
-    std::optional<SparseTensor> sparse_transposed_;  ///< S^T in CSR, for grad_input_t
 };
 
 namespace {
@@ -123,10 +134,23 @@ namespace {
 auto sparse_linear_spmm(const Variable& values_var,
                         const SparseTensor& sparse,
                         const Variable& input_t) -> Variable {
-    // Compute forward at the Tensor level (avoids constructing the sparse op
-    // dispatch graph — S's pattern is constant so the standard sparse::spmm
-    // suffices).
-    auto result_tensor = sparse::spmm(sparse, input_t.tensor());
+    // JIT-R055: route through dispatch<OpId::SparseSpMM>(crow, col, values,
+    // dense) — the same convention already used by the JVP sparse rules
+    // (src/autograd/jvp_rules.cpp) — instead of calling sparse::spmm()
+    // directly. The direct call bypassed dispatch()/the tracer entirely, so
+    // a traced SparseLinear froze its whole output as a trace-time constant
+    // (values_var never being re-read on replay, even after an optimizer
+    // step updated the trainable values). The CSR pattern (crow/col) is a
+    // genuinely fixed, non-trainable constant per SparseLinear instance —
+    // correct to capture as-is — while values_var and input_t are real
+    // tensor inputs that now correctly track new data on replay.
+    NewOpAttributes spmm_attrs;
+    spmm_attrs.set(AttrKey::M, sparse.shape()[0]);
+    spmm_attrs.set(AttrKey::K, sparse.shape()[1]);
+    std::vector<Tensor> spmm_inputs = {
+        sparse.crow_indices(), sparse.col_indices(),
+        values_var.tensor(), input_t.tensor()};
+    auto result_tensor = dispatch(OpId::SparseSpMM, spmm_inputs, spmm_attrs)[0];
 
     const bool wants_grad =
         is_grad_enabled() &&
@@ -137,7 +161,7 @@ auto sparse_linear_spmm(const Variable& values_var,
     }
 
     auto grad_fn = std::make_shared<SparseLinearBackward>();
-    grad_fn->set_sparse(sparse, sparse.transpose());
+    grad_fn->set_sparse(sparse);
 
     // Save input_t for backward; values_var is encoded via the sparse pattern.
     grad_fn->save_for_backward({input_t.tensor()});
@@ -239,6 +263,23 @@ auto SparseLinear::forward_impl(const Variable& input) -> Variable {
     // Route through the Variable-aware permute / sparse_linear_spmm so the
     // autograd graph sees (input -> permute -> spmm -> permute) AND so the
     // gradient flows back to both `input` and the values-Parameter.
+
+    // JIT-R103: align the sparse weight's values Parameter to the input's
+    // device BEFORE syncing. sync_sparse_weight_values() below only follows
+    // the values Parameter's OWN device (rebuilding crow/col to match it
+    // after an explicit module.to(device) call) — it never reconciles
+    // against the actual input's device, so a lazily-placed module
+    // (constructed on CPU, called with a GPU input, and never explicitly
+    // .to()'d) kept the sparse weight on CPU forever. Mirrors the
+    // established weight_ih_->to(input_device) pattern (LSTMCell::forward).
+    {
+        auto values_it = parameters_.find("sparse_weight.values");
+        if (values_it != parameters_.end() &&
+            values_it->second->tensor().device() != input.tensor().device()) {
+            values_it->second->tensor() =
+                values_it->second->tensor().to(input.tensor().device());
+        }
+    }
 
     // (1) Make sure the SparseTensor's values() reflects the latest Parameter
     // tensor.  Optimisers replace Variable::tensor() each step, so a no-op

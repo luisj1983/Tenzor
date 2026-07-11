@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -9,9 +10,36 @@
 
 namespace tenzor::nn {
 
+namespace {
+// JIT-R097: pack_padded_sequence/pad_packed_sequence/pack_sequence/
+// pad_sequence are entirely raw-Tensor (permute()/zeros()+memcpy/direct
+// .data<>() reads, zero dispatch() calls) — 100% invisible to the JIT
+// tracer, same mechanism as JIT-R095 (NestedTensor). The packing/padding
+// structure (batch_sizes, sorted order, max_len) is computed host-side
+// directly from the ACTUAL runtime lengths/sequence sizes — inherently
+// data-dependent, not fixable by adding an OpId mapping, since no fixed-
+// shape graph node could correctly represent "pack these lengths" for an
+// arbitrary later call with a different length distribution. Fail loudly
+// instead of silently freezing the trace-dummy's packing layout.
+inline auto refuse_if_tracing(const char* where) -> void {
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            std::string("tenzor::nn::") + where +
+            ": cannot be JIT-traced — the packing/padding layout is "
+            "data-dependent (computed from the actual runtime lengths/"
+            "sequence sizes) and would silently freeze at the trace-time "
+            "batch's layout, producing wrong results for any later call "
+            "with a different length distribution. Keep sequence packing/"
+            "padding outside jit.compile()/jit.trace() (e.g. as a "
+            "preprocessing step before the traced region).");
+    }
+}
+}  // namespace
+
 auto pack_padded_sequence(const Tensor& input, const Tensor& lengths,
                           bool batch_first, bool enforce_sorted)
     -> PackedSequence {
+    refuse_if_tracing("pack_padded_sequence");
     if (lengths.ndim() != 1) {
         throw std::invalid_argument("lengths must be a 1D tensor");
     }
@@ -149,6 +177,7 @@ auto pad_packed_sequence(const PackedSequence& packed,
                          float padding_value,
                          int64_t total_length)
     -> std::pair<Tensor, Tensor> {
+    refuse_if_tracing("pad_packed_sequence");
 
     auto bs_tensor = packed.batch_sizes;
     if (bs_tensor.numel() == 0) {
@@ -253,6 +282,7 @@ auto pad_packed_sequence(const PackedSequence& packed,
 
 auto pack_sequence(const std::vector<Tensor>& sequences, bool enforce_sorted)
     -> PackedSequence {
+    refuse_if_tracing("pack_sequence");
     if (sequences.empty()) {
         throw std::invalid_argument("pack_sequence: empty sequence list");
     }
@@ -320,6 +350,7 @@ auto pad_sequence(const std::vector<Tensor>& sequences,
                   bool batch_first,
                   float padding_value)
     -> Tensor {
+    refuse_if_tracing("pad_sequence");
     if (sequences.empty()) {
         throw std::invalid_argument("pad_sequence: got empty list of sequences");
     }

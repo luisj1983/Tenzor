@@ -12,6 +12,7 @@
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
 #include "../../include/tenzor/ops/indexing.hpp"
+#include "../../include/tenzor/ops/advanced.hpp"
 #include "../../include/tenzor/ops/vision.hpp"
 #include "../../include/tenzor/ops/linalg.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
@@ -21,6 +22,9 @@
 #include "../../include/tenzor/sparse/sparse_ops.hpp"
 #include "../../include/tenzor/backend/fast_dispatch.hpp"
 #include "../../include/tenzor/core/shape.hpp"
+#include "../../include/tenzor/ops/detection.hpp"
+#include "../../include/tenzor/nn/detection/roi_ops.hpp"
+#include "../../include/tenzor/nn/detection/anchors.hpp"
 #include <algorithm>
 #include <numeric>
 #include <queue>
@@ -539,6 +543,7 @@ auto Graph::infer_types() -> void {
             case OpType::LogicalAnd:
             case OpType::LogicalOr:
             case OpType::Fmod:
+            case OpType::Minimum:  // JIT-R064: elementwise min, broadcasts like Add
                 if (input_shapes.size() >= 2) {
                     output_shapes.push_back(
                         broadcast_shapes(input_shapes[0], input_shapes[1]));
@@ -603,6 +608,7 @@ auto Graph::infer_types() -> void {
             case OpType::Sin:
             case OpType::Cos:
             case OpType::Rsqrt:
+            case OpType::Reciprocal:
             case OpType::Round:
             case OpType::Dropout:
             case OpType::SiLU:
@@ -613,11 +619,15 @@ auto Graph::infer_types() -> void {
             case OpType::LeakyReLU:
             case OpType::Mish:
             case OpType::Softplus:
+            case OpType::Swish:       // JIT-R084: x*sigmoid(x), shape-preserving
+            case OpType::RReLU:       // JIT-R084: shape-preserving
+            case OpType::LogSigmoid:  // JIT-R084: shape-preserving
             case OpType::Flip:
             case OpType::Roll:
             case OpType::GroupNorm:
             case OpType::InstanceNorm:
             case OpType::Scatter:      // scatters into self; output shape == input[0]
+            case OpType::IndexCopy:    // JIT-R064: writes source rows into self at index; output shape == input[0]
             case OpType::LogicalNot:   // unary; Bool output shape == input shape
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
@@ -765,6 +775,17 @@ auto Graph::infer_types() -> void {
                 }
                 break;
 
+            case OpType::OneHot:
+                if (!input_shapes.empty()) {
+                    // JIT-R091: appends a trailing class axis — [N, d1, ...,
+                    // dk] -> [N, d1, ..., dk, num_classes], matching
+                    // cpu::one_hot_kernel's eager output shape exactly.
+                    auto shape = input_shapes[0];
+                    shape.push_back(node->get_int_attr("num_classes"));
+                    output_shapes.push_back(shape);
+                }
+                break;
+
             case OpType::Flatten:
                 if (!input_shapes.empty()) {
                     auto& in_shape = input_shapes[0];
@@ -884,8 +905,11 @@ auto Graph::infer_types() -> void {
                                                : std::pair<int64_t,int64_t>{kh, kw};
                     auto [ph, pw] = read_pair("padding", 0, true);
                     auto [dh, dw] = read_pair("dilation", 1, true);
-                    bool ceil_mode = node->has_bool_attr("ceil_mode") &&
-                                     node->get_bool_attr("ceil_mode");
+                    // ceil_mode is stored as an INT64 (0|1), not a bool — see
+                    // the copy_int(AttrKey::CeilMode,...) comment in
+                    // tracing_interceptor.cpp (JIT-R060).
+                    bool ceil_mode = node->has_int_attr("ceil_mode") &&
+                                     node->get_int_attr("ceil_mode") != 0;
                     auto out_dim = [&](int64_t in, int64_t k, int64_t s,
                                        int64_t p, int64_t d) -> int64_t {
                         int64_t num = in + 2 * p - d * (k - 1) - 1;
@@ -952,6 +976,21 @@ auto Graph::infer_types() -> void {
                 break;
 
             // ================================================================
+            // EmbeddingBag: [gathered_embeddings, offsets] -> (num_bags, embedding_dim)
+            // ================================================================
+            case OpType::EmbeddingBag:
+                if (input_shapes.size() >= 2 && !input_shapes[1].empty() &&
+                    node->has_int_attr("embedding_dim")) {
+                    int64_t num_offsets = input_shapes[1][0];
+                    bool include_last = node->has_bool_attr("include_last_offset") &&
+                                        node->get_bool_attr("include_last_offset");
+                    int64_t num_bags = include_last
+                        ? std::max<int64_t>(num_offsets - 1, 0) : num_offsets;
+                    output_shapes.push_back({num_bags, node->get_int_attr("embedding_dim")});
+                }
+                break;
+
+            // ================================================================
             // Indexing
             // ================================================================
             case OpType::Slice:
@@ -982,6 +1021,15 @@ auto Graph::infer_types() -> void {
                         shape[dim] = len;
                     }
                     output_shapes.push_back(shape);
+                }
+                break;
+
+            case OpType::SliceScatter:
+                // Output shape == the base tensor's shape (input[0]); src
+                // (input[1]) is written into the [start,end,step) slice but
+                // never changes the base's overall shape.
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
                 }
                 break;
 
@@ -1310,17 +1358,105 @@ auto Graph::infer_types() -> void {
                 break;
 
             case OpType::LayoutConvert:
-            case OpType::Cast:
+            case OpType::ToDevice:
                 // Shape-preserving: output has same shape as input
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
                 }
                 break;
 
+            case OpType::Cast:
+                // JIT-R012: shape-preserving like LayoutConvert/ToDevice, but
+                // Cast's entire PURPOSE is changing dtype -- unlike those two,
+                // its output Value's dtype must be reconciled to the node's
+                // "target_dtype" attr (matching execute_node's Cast case),
+                // not left at whatever create_value() set at trace time. A
+                // future pass that retypes/replaces a Cast node's target
+                // dtype (or a hand-built graph via the public API) would
+                // otherwise leave a stale/wrong dtype on the output Value
+                // with nothing to catch it.
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                if (!node->outputs().empty() && node->has_int_attr("target_dtype")) {
+                    node->outputs()[0]->set_dtype(
+                        static_cast<DType>(node->get_int_attr("target_dtype")));
+                }
+                break;
+
+            case OpType::AsStrided:
+                // Output shape is the explicit target `size`, not the input
+                // shape — as_strided reinterprets storage with an arbitrary
+                // shape/stride.
+                if (node->has_attr("size")) {
+                    output_shapes.push_back(node->get_vec_attr("size"));
+                }
+                break;
+
+            case OpType::ViewAsReal:
+                // Appends a trailing dim of size 2 (real, imaginary).
+                if (!input_shapes.empty()) {
+                    auto shape = input_shapes[0];
+                    shape.push_back(2);
+                    output_shapes.push_back(std::move(shape));
+                }
+                break;
+
+            case OpType::ViewAsComplex:
+                // Removes the trailing dim of size 2.
+                if (!input_shapes.empty() && !input_shapes[0].empty()) {
+                    auto shape = input_shapes[0];
+                    shape.pop_back();
+                    output_shapes.push_back(std::move(shape));
+                }
+                break;
+
+            case OpType::Triu:
+            case OpType::Tril:
+                // Shape-preserving.
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            case OpType::Diag: {
+                // 1D (size n) -> 2D [n+|d|, n+|d|]; 2D (rows, cols) -> 1D
+                // [min(rows-start_row, cols-start_col)] (0 if <= 0), matching
+                // cpu::diag_kernel's exact formulas.
+                if (!input_shapes.empty()) {
+                    int64_t d = node->get_int_attr("diagonal");
+                    const auto& in_shape = input_shapes[0];
+                    if (in_shape.size() == 1) {
+                        int64_t n = in_shape[0];
+                        int64_t size = n + std::abs(d);
+                        output_shapes.push_back({size, size});
+                    } else if (in_shape.size() == 2) {
+                        int64_t rows = in_shape[0];
+                        int64_t cols = in_shape[1];
+                        int64_t start_row = d >= 0 ? 0 : -d;
+                        int64_t start_col = d >= 0 ? d : 0;
+                        int64_t diag_len = std::min(rows - start_row, cols - start_col);
+                        output_shapes.push_back({std::max<int64_t>(diag_len, 0)});
+                    }
+                }
+                break;
+            }
+
+            case OpType::Trace:
+                // 2D -> scalar (0-D).
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back({});
+                }
+                break;
+
             case OpType::QuantizedLinear:
+            case OpType::QuantizedLinearStatic:
             case OpType::SparseMatMul:
-                // Inputs [x, weight(, bias)]; output = x[:-1] + [out_features],
-                // out_features = weight.shape[0]. (Same shape rule as Linear.)
+                // Inputs [x, weight(, bias, ...)]; output = x[:-1] + [out_features],
+                // out_features = weight.shape[0]. (Same shape rule as Linear;
+                // QuantizedLinearStatic's input is always 2D [batch, in_features]
+                // at this node — forward_quantized flattens/unflattens with
+                // separately-traced Reshape nodes around it.)
                 if (input_shapes.size() >= 2 && input_shapes[0].size() >= 1 &&
                     !input_shapes[1].empty()) {
                     std::vector<int64_t> os(input_shapes[0].begin(),
@@ -1340,6 +1476,47 @@ auto Graph::infer_types() -> void {
                     output_shapes.push_back(input_shapes[0]);
                 }
                 break;
+
+            case OpType::SparseSpMM:
+                // Inputs [crow, col, values, dense]; sparse is (M,K) via the M
+                // attr, dense is (K, N...) -> output (M, N...).
+                if (input_shapes.size() >= 4 && node->has_int_attr("m")) {
+                    std::vector<int64_t> os = {node->get_int_attr("m")};
+                    auto& dense_shape = input_shapes[3];
+                    if (dense_shape.size() >= 2) {
+                        os.insert(os.end(), dense_shape.begin() + 1, dense_shape.end());
+                    }
+                    output_shapes.push_back(std::move(os));
+                }
+                break;
+
+            case OpType::SparseSpMV:
+                // Inputs [crow, col, values, vec]; sparse is (M,K) -> output (M,).
+                if (node->has_int_attr("m")) {
+                    output_shapes.push_back({node->get_int_attr("m")});
+                }
+                break;
+
+            case OpType::SparseAdd:
+            case OpType::SparseTrsv:
+            case OpType::SparseTrsm:
+                // Inputs [crow, col, values, dense/b/B]; output shape matches
+                // the dense/RHS operand's shape (elementwise add / solve).
+                if (input_shapes.size() >= 4) {
+                    output_shapes.push_back(input_shapes[3]);
+                }
+                break;
+
+            case OpType::ScatterAdd:
+                // Shape-preserving: output has the same shape as the
+                // destination operand (input[0]) regardless of index/src
+                // values.
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+            // OpType::RepeatInterleave intentionally has no case here — see
+            // its doc comment in tracer.hpp.
         }
 
         // Update output shapes
@@ -1401,6 +1578,7 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::LogicalAnd:
             case OpType::LogicalOr:
             case OpType::Fmod:
+            case OpType::Minimum:  // JIT-R064: elementwise min, broadcasts like Add
                 if (input_sym_shapes.size() >= 2) {
                     output_sym_shapes.push_back(
                         broadcast_symbolic_shapes(input_sym_shapes[0], input_sym_shapes[1]));
@@ -1464,6 +1642,7 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Sin:
             case OpType::Cos:
             case OpType::Rsqrt:
+            case OpType::Reciprocal:
             case OpType::Round:
             case OpType::Dropout:
             case OpType::SiLU:
@@ -1474,11 +1653,15 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::LeakyReLU:
             case OpType::Mish:
             case OpType::Softplus:
+            case OpType::Swish:       // JIT-R084: x*sigmoid(x), shape-preserving
+            case OpType::RReLU:       // JIT-R084: shape-preserving
+            case OpType::LogSigmoid:  // JIT-R084: shape-preserving
             case OpType::Flip:
             case OpType::Roll:
             case OpType::GroupNorm:
             case OpType::InstanceNorm:
             case OpType::Scatter:      // scatters into self; output shape == input[0]
+            case OpType::IndexCopy:    // JIT-R064: writes source rows into self at index; output shape == input[0]
             case OpType::LogicalNot:   // unary; Bool output shape == input shape
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
@@ -1648,6 +1831,16 @@ auto Graph::infer_symbolic_types() -> void {
                 }
                 break;
 
+            case OpType::OneHot:
+                if (!input_sym_shapes.empty()) {
+                    // JIT-R091: see infer_types' OneHot case — appends a
+                    // trailing concrete class axis.
+                    auto sym_shape = input_sym_shapes[0];
+                    sym_shape.push_back(SymbolicDim::concrete(node->get_int_attr("num_classes")));
+                    output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
             case OpType::Flatten:
                 if (!input_sym_shapes.empty()) {
                     auto& in_shape = input_sym_shapes[0];
@@ -1786,8 +1979,11 @@ auto Graph::infer_symbolic_types() -> void {
                                                : std::pair<int64_t, int64_t>{kh, kw};
                     auto [ph, pw] = read_pair("padding", 0);
                     auto [dh, dw] = read_pair("dilation", 1);
-                    bool ceil_mode = node->has_bool_attr("ceil_mode") &&
-                                     node->get_bool_attr("ceil_mode");
+                    // ceil_mode is stored as an INT64 (0|1), not a bool — see
+                    // the copy_int(AttrKey::CeilMode,...) comment in
+                    // tracing_interceptor.cpp (JIT-R060).
+                    bool ceil_mode = node->has_int_attr("ceil_mode") &&
+                                     node->get_int_attr("ceil_mode") != 0;
 
                     SymbolicDim H_out = pool_output_dim(in_shape[2], kh, sh, ph, dh, ceil_mode);
                     SymbolicDim W_out = pool_output_dim(in_shape[3], kw, sw, pw, dw, ceil_mode);
@@ -1830,6 +2026,7 @@ auto Graph::infer_symbolic_types() -> void {
             // rule (out last dim = weight[0] = out_features); they were wrongly
             // lumped into the shape-preserving group below (JIT-026).
             case OpType::QuantizedLinear:
+            case OpType::QuantizedLinearStatic:
             case OpType::SparseMatMul:
                 if (input_sym_shapes.size() >= 2) {
                     auto out_shape = input_sym_shapes[0];
@@ -1838,6 +2035,53 @@ auto Graph::infer_symbolic_types() -> void {
                         out_shape[out_shape.rank() - 1] = input_sym_shapes[1][0];
                     }
                     output_sym_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            // ================================================================
+            // SparseSpMM: [crow, col, values, dense] -> (M, dense[1:])
+            // ================================================================
+            case OpType::SparseSpMM:
+                if (input_sym_shapes.size() >= 4 && node->has_int_attr("m")) {
+                    std::vector<SymbolicDim> dims = {
+                        SymbolicDim::concrete(node->get_int_attr("m"))};
+                    auto& dense_sym = input_sym_shapes[3];
+                    for (size_t i = 1; i < dense_sym.rank(); ++i) {
+                        dims.push_back(dense_sym[i]);
+                    }
+                    output_sym_shapes.push_back(SymbolicShape(std::move(dims)));
+                }
+                break;
+
+            // ================================================================
+            // SparseSpMV: [crow, col, values, vec] -> (M,)
+            // ================================================================
+            case OpType::SparseSpMV:
+                if (node->has_int_attr("m")) {
+                    output_sym_shapes.push_back(SymbolicShape(
+                        {SymbolicDim::concrete(node->get_int_attr("m"))}));
+                }
+                break;
+
+            // ================================================================
+            // SparseAdd/SparseTrsv/SparseTrsm: output shape == the
+            // dense/RHS operand's shape (last input).
+            // ================================================================
+            case OpType::SparseAdd:
+            case OpType::SparseTrsv:
+            case OpType::SparseTrsm:
+                if (input_sym_shapes.size() >= 4) {
+                    output_sym_shapes.push_back(input_sym_shapes[3]);
+                }
+                break;
+
+            // ================================================================
+            // ScatterAdd: shape-preserving (== destination operand, input[0]).
+            // RepeatInterleave intentionally omitted — see tracer.hpp.
+            // ================================================================
+            case OpType::ScatterAdd:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
                 }
                 break;
 
@@ -1853,6 +2097,24 @@ auto Graph::infer_symbolic_types() -> void {
                         out_shape.push_back(input_sym_shapes[0][1]);
                     }
                     output_sym_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            // ================================================================
+            // EmbeddingBag: [gathered_embeddings, offsets] -> (num_bags, embedding_dim)
+            // ================================================================
+            case OpType::EmbeddingBag:
+                if (input_sym_shapes.size() >= 2 && input_sym_shapes[1].rank() >= 1 &&
+                    node->has_int_attr("embedding_dim")) {
+                    bool include_last = node->has_bool_attr("include_last_offset") &&
+                                        node->get_bool_attr("include_last_offset");
+                    SymbolicDim num_bags = input_sym_shapes[1][0];
+                    if (include_last && num_bags.is_concrete()) {
+                        num_bags = SymbolicDim::concrete(
+                            std::max<int64_t>(num_bags.value() - 1, 0));
+                    }
+                    output_sym_shapes.push_back(SymbolicShape({
+                        num_bags, SymbolicDim::concrete(node->get_int_attr("embedding_dim"))}));
                 }
                 break;
 
@@ -1899,6 +2161,12 @@ auto Graph::infer_symbolic_types() -> void {
                         // the dim symbolic rather than emit a garbage length.
                     }
                     output_sym_shapes.push_back(std::move(sym_shape));
+                }
+                break;
+
+            case OpType::SliceScatter:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
                 }
                 break;
 
@@ -1973,16 +2241,28 @@ auto Graph::infer_symbolic_types() -> void {
 	                break;
 
 	            case OpType::Interpolate:
+	                // JIT-R018: the push_back must be INSIDE the `!size.empty()`
+	                // guard, mirroring the concrete infer_types case's structure
+	                // exactly. When size is empty (scale_factor-only form), do
+	                // NOT push anything -- leave the trace-time output symbolic
+	                // shape intact instead of overwriting it with the unscaled
+	                // input shape (the previous unconditional push did exactly
+	                // that, corrupting the shape whenever this node reaches this
+	                // path without an "output_size" attr).
 	                if (!input_sym_shapes.empty()) {
-	                    auto out_shape = input_sym_shapes[0];
 	                    auto size = node->get_vec_attr("output_size");
-	                    if (!size.empty() && out_shape.rank() >= size.size() + 2) {
-	                        const auto offset = out_shape.rank() - size.size();
-	                        for (size_t i = 0; i < size.size(); ++i) {
-	                            out_shape[offset + i] = SymbolicDim::concrete(size[i]);
+	                    if (!size.empty()) {
+	                        auto out_shape = input_sym_shapes[0];
+	                        if (out_shape.rank() >= size.size() + 2) {
+	                            const auto offset = out_shape.rank() - size.size();
+	                            for (size_t i = 0; i < size.size(); ++i) {
+	                                out_shape[offset + i] = SymbolicDim::concrete(size[i]);
+	                            }
 	                        }
+	                        output_sym_shapes.push_back(std::move(out_shape));
 	                    }
-	                    output_sym_shapes.push_back(std::move(out_shape));
+	                    // else: scale_factor form -- leave the trace-time output
+	                    // shape intact (see infer_types' identical comment).
 	                }
 	                break;
 
@@ -2257,10 +2537,98 @@ auto Graph::infer_symbolic_types() -> void {
                 break;
 
             case OpType::LayoutConvert:
-            case OpType::Cast:
+            case OpType::ToDevice:
                 // Shape-preserving: output has same shape as input
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::Cast:
+                // JIT-R012: see the identical-purpose comment in infer_types'
+                // Cast case above -- reconcile the output Value's dtype to
+                // "target_dtype" instead of leaving it at whatever
+                // create_value() set at trace time.
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                if (!node->outputs().empty() && node->has_int_attr("target_dtype")) {
+                    node->outputs()[0]->set_dtype(
+                        static_cast<DType>(node->get_int_attr("target_dtype")));
+                }
+                break;
+
+            case OpType::AsStrided:
+                // Output shape is the explicit target `size`, always fully
+                // concrete (as_strided's API takes concrete int64_t sizes).
+                if (node->has_attr("size")) {
+                    output_sym_shapes.push_back(
+                        SymbolicShape::from_concrete(node->get_vec_attr("size")));
+                }
+                break;
+
+            case OpType::ViewAsReal:
+                // Appends a trailing dim of size 2 (real, imaginary).
+                if (!input_sym_shapes.empty()) {
+                    std::vector<SymbolicDim> dims;
+                    dims.reserve(input_sym_shapes[0].rank() + 1);
+                    for (size_t i = 0; i < input_sym_shapes[0].rank(); ++i) {
+                        dims.push_back(input_sym_shapes[0][i]);
+                    }
+                    dims.push_back(SymbolicDim::concrete(2));
+                    output_sym_shapes.push_back(SymbolicShape(std::move(dims)));
+                }
+                break;
+
+            case OpType::ViewAsComplex:
+                // Removes the trailing dim of size 2.
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() > 0) {
+                    std::vector<SymbolicDim> dims;
+                    dims.reserve(input_sym_shapes[0].rank() - 1);
+                    for (size_t i = 0; i + 1 < input_sym_shapes[0].rank(); ++i) {
+                        dims.push_back(input_sym_shapes[0][i]);
+                    }
+                    output_sym_shapes.push_back(SymbolicShape(std::move(dims)));
+                }
+                break;
+
+            case OpType::Triu:
+            case OpType::Tril:
+                // Shape-preserving.
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::Diag: {
+                // Only handle the fully-concrete case (matches infer_types'
+                // formulas); a genuinely symbolic leading dim is left
+                // unresolved rather than guessed at.
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].is_fully_concrete()) {
+                    int64_t d = node->get_int_attr("diagonal");
+                    auto in_shape = input_sym_shapes[0].to_concrete();
+                    if (in_shape.size() == 1) {
+                        int64_t n = in_shape[0];
+                        int64_t size = n + std::abs(d);
+                        output_sym_shapes.push_back(
+                            SymbolicShape::from_concrete({size, size}));
+                    } else if (in_shape.size() == 2) {
+                        int64_t rows = in_shape[0];
+                        int64_t cols = in_shape[1];
+                        int64_t start_row = d >= 0 ? 0 : -d;
+                        int64_t start_col = d >= 0 ? d : 0;
+                        int64_t diag_len = std::min(rows - start_row, cols - start_col);
+                        output_sym_shapes.push_back(SymbolicShape::from_concrete(
+                            {std::max<int64_t>(diag_len, 0)}));
+                    }
+                }
+                break;
+            }
+
+            case OpType::Trace:
+                // 2D -> scalar (0-D), known regardless of symbolic-ness of dims.
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(SymbolicShape(std::vector<SymbolicDim>{}));
                 }
                 break;
 
@@ -2372,6 +2740,28 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
             Tensor placed = (t.device() == target_device) ? t : t.to(target_device);
             value_map[id] = Variable(std::move(placed), /*requires_grad=*/false);
         }
+    }
+
+    // Closure-captured module BUFFERS (JIT-R005 fix). Unlike constants,
+    // these are reread from the LIVE buffer tensor each call so a later
+    // eager mutation (e.g. BatchNorm's running_mean_/running_var_ EMA
+    // update, which always happens via the eager-fallback path since
+    // grad-mode replay of a training-mode norm layer already throws) is
+    // visible on the next replay instead of silently frozen at trace time.
+    // Buffers are never differentiated through, so — unlike param_leaves_ —
+    // there is no grad_mode branch: always bind the current value as a
+    // non-grad Variable placed on the replay device.
+    for (const auto& [id, buffer_index] : buffer_leaves_) {
+        if (buffer_index >= buffers_.size() || !buffers_[buffer_index]) {
+            throw std::runtime_error(
+                "JIT: buffer leaf '" + id + "' references buffer index " +
+                std::to_string(buffer_index) +
+                " but only " + std::to_string(buffers_.size()) +
+                " buffers were declared");
+        }
+        const Tensor& t = buffers_[buffer_index]->tensor();
+        Tensor placed = (t.device() == target_device) ? t : t.to(target_device);
+        value_map[id] = Variable(std::move(placed), /*requires_grad=*/false);
     }
 
     // Publish the replay device so tensor-attr-backed node payloads (Constant
@@ -2588,6 +2978,88 @@ auto execute_fused_gpu_node(const Node& node,
         }
     }
     return Variable(out, /*requires_grad=*/false);
+}
+
+// JIT-R100: reconstruct a SparseTensor from a manually-recorded structural-
+// conversion node's flat input tensor list, per the fixed per-layout
+// ordering documented on OpType::SparseFromDense..SparseToBsr (tracer.hpp):
+// COO=[indices,values] CSR=[crow,col,values] CSC=[ccol,row,values]
+// BSR=[row_ptr,col_ind,values]. Mirrors the recording side's
+// sparse_component_tensors() in sparse_tensor.cpp (kept as a separate,
+// small, hand-matched switch rather than a shared header — same style as
+// the existing SparseAdd/SparseSpMM cases below, which already inline
+// SparseTensor::sparse_csr(...) directly rather than share a helper).
+auto reconstruct_sparse_tensor(SparseLayout layout,
+                               const std::vector<Tensor>& comps,
+                               const std::vector<int64_t>& shape,
+                               std::pair<int64_t, int64_t> block_size)
+    -> SparseTensor {
+    switch (layout) {
+        case SparseLayout::COO:
+            if (comps.size() < 2) {
+                throw std::runtime_error("JIT: sparse COO reconstruction expects [indices, values]");
+            }
+            return SparseTensor::sparse_coo(comps[0], comps[1], shape, /*validate=*/false);
+        case SparseLayout::CSR:
+            if (comps.size() < 3) {
+                throw std::runtime_error("JIT: sparse CSR reconstruction expects [crow, col, values]");
+            }
+            return SparseTensor::sparse_csr(comps[0], comps[1], comps[2], shape, /*validate=*/false);
+        case SparseLayout::CSC:
+            if (comps.size() < 3) {
+                throw std::runtime_error("JIT: sparse CSC reconstruction expects [ccol, row, values]");
+            }
+            return SparseTensor::sparse_csc(comps[0], comps[1], comps[2], shape);
+        case SparseLayout::BSR:
+            if (comps.size() < 3) {
+                throw std::runtime_error("JIT: sparse BSR reconstruction expects [row_ptr, col_ind, values]");
+            }
+            return SparseTensor::sparse_bsr(comps[0], comps[1], comps[2], shape, block_size);
+    }
+    throw std::runtime_error("JIT: sparse reconstruction: unknown layout");
+}
+
+// Gathers a SparseTensor's component tensors as Variables, per the same
+// fixed per-layout ordering (mirrors sparse_component_tensors() above and
+// in sparse_tensor.cpp).
+auto sparse_tensor_output_vars(const SparseTensor& sp) -> std::vector<Variable> {
+    switch (sp.layout()) {
+        case SparseLayout::COO:
+            return {Variable(sp.indices(), false), Variable(sp.values(), false)};
+        case SparseLayout::CSR:
+            return {Variable(sp.crow_indices(), false), Variable(sp.col_indices(), false),
+                    Variable(sp.values(), false)};
+        case SparseLayout::CSC:
+            return {Variable(sp.ccol_indices(), false), Variable(sp.row_indices(), false),
+                    Variable(sp.values(), false)};
+        case SparseLayout::BSR:
+            return {Variable(sp.bsr_row_ptr(), false), Variable(sp.bsr_col_ind(), false),
+                    Variable(sp.values(), false)};
+    }
+    throw std::runtime_error("JIT: sparse_tensor_output_vars: unknown layout");
+}
+
+// Reads the in_layout/in_shape/in_block_h/in_block_w attrs a JIT-R100
+// structural-conversion node recorded for its SparseTensor input side, and
+// reconstructs that input SparseTensor from `input_vars`.
+auto reconstruct_sparse_input(const std::shared_ptr<Node>& node,
+                              const std::vector<Variable>& input_vars) -> SparseTensor {
+    if (!node->has_int_attr("in_layout")) {
+        throw std::runtime_error("JIT: sparse structural-conversion node missing in_layout attr");
+    }
+    auto layout = static_cast<SparseLayout>(node->get_int_attr("in_layout"));
+    std::pair<int64_t, int64_t> block_size{0, 0};
+    if (layout == SparseLayout::BSR) {
+        if (!node->has_int_attr("in_block_h") || !node->has_int_attr("in_block_w")) {
+            throw std::runtime_error("JIT: sparse BSR input node missing in_block_h/in_block_w attrs");
+        }
+        block_size = {node->get_int_attr("in_block_h"), node->get_int_attr("in_block_w")};
+    }
+    auto shape = node->get_vec_attr("in_shape");
+    std::vector<Tensor> comps;
+    comps.reserve(input_vars.size());
+    for (auto& v : input_vars) comps.push_back(v.tensor());
+    return reconstruct_sparse_tensor(layout, comps, shape, block_size);
 }
 
 }  // namespace
@@ -2823,12 +3295,21 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh);
                 pool_attrs.set(AttrKey::PaddingW,
                     node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph);
+                // JIT-R060: ceil_mode is stored as an INT64 (0|1), matching
+                // tracing_interceptor.cpp's copy_int(AttrKey::CeilMode,...).
+                // Without honoring it here, replay always used the floor
+                // formula regardless of the real ceil_mode, producing a
+                // wrong-shaped output (Vulkan/MPS, the only backends where
+                // ceil_mode=true is reachable).
+                const bool ceil_mode = node->has_int_attr("ceil_mode") &&
+                                       node->get_int_attr("ceil_mode") != 0;
+                pool_attrs.set(AttrKey::CeilMode, ceil_mode ? int64_t{1} : int64_t{0});
                 if (grad_mode) {
                     const int64_t kw = node->has_attr("kernel_size_w") ? node->get_int_attr("kernel_size_w") : kh;
                     const int64_t sw = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : sh;
                     const int64_t pw = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : ph;
                     outputs.push_back(nn::functional::max_pool2d(
-                        input_vars[0], {kh, kw}, {sh, sw}, {ph, pw}));
+                        input_vars[0], {kh, kw}, {sh, sw}, {ph, pw}, ceil_mode));
                     break;
                 }
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
@@ -3228,6 +3709,17 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        // JIT-R091: non-differentiable (integer class-index input) — always
+        // compute via the Tensor-level free function and wrap as a non-
+        // tracking Variable, matching Fmod/comparison ops above.
+        case OpType::OneHot:
+            if (!input_vars.empty()) {
+                int64_t num_classes = node->get_int_attr("num_classes");
+                outputs.push_back(Variable(
+                    tenzor::one_hot(input_vars[0].tensor(), num_classes), false));
+            }
+            break;
+
         case OpType::Flatten:
             if (!input_vars.empty()) {
                 int64_t start_dim = node->has_attr("start_dim") ? node->get_int_attr("start_dim") : 0;
@@ -3478,6 +3970,17 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        case OpType::Reciprocal:
+            if (!input_vars.empty()) {
+                if (grad_mode) {
+                    outputs.push_back(tenzor::reciprocal(input_vars[0]));
+                } else {
+                    auto result = tenzor::reciprocal(input_vars[0].tensor());
+                    outputs.push_back(Variable(result, false));
+                }
+            }
+            break;
+
         case OpType::Pow:
             if (input_vars.size() >= 2) {
                 // Binary form: the exponent is a second (Constant) SCALAR input.
@@ -3521,6 +4024,17 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             if (input_vars.size() >= 2) {
                 outputs.push_back(Variable(
                     tenzor::fmod(input_vars[0].tensor(), input_vars[1].tensor()), false));
+            }
+            break;
+
+        // JIT-R064: tenzor::minimum has no Variable-level (autograd) overload
+        // anywhere in the codebase (renorm_embeddings' own usage is a raw
+        // Tensor-level, non-differentiable clamp), matching Fmod above. Wrap
+        // as a non-tracking Variable exactly like Fmod/Eq/Lt/etc.
+        case OpType::Minimum:
+            if (input_vars.size() >= 2) {
+                outputs.push_back(Variable(
+                    tenzor::minimum(input_vars[0].tensor(), input_vars[1].tensor()), false));
             }
             break;
 
@@ -3582,6 +4096,17 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
                     outputs.push_back(tenzor::slice(input_vars[0], dim, start, end, step));
                 }
+            }
+            break;
+
+        case OpType::SliceScatter:
+            if (input_vars.size() >= 2) {
+                int64_t dim = node->get_int_attr("dim");
+                int64_t start = node->get_int_attr("start");
+                int64_t end = node->get_int_attr("end");
+                int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
+                outputs.push_back(tenzor::slice_scatter(
+                    input_vars[0], input_vars[1], dim, start, end, step));
             }
             break;
 
@@ -3665,6 +4190,46 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        case OpType::Swish:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::nn::swish(input_vars[0]));
+            }
+            break;
+
+        case OpType::LogSigmoid:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::nn::log_sigmoid(input_vars[0]));
+            }
+            break;
+
+        case OpType::RReLU: {
+            // JIT-R084: the only real producer of an OpType::RReLU node
+            // (nn::rrelu's dispatch<OpId::RReLU>() call) is reached from
+            // BOTH the genuine eval-mode path (training=false, deterministic
+            // midpoint slope — safe to replay) AND an inference-without-grad
+            // call on a training=true-configured module (the kernel draws
+            // ITS OWN fresh random slope on every call — a trace can only
+            // ever capture one such draw and would freeze it forever on
+            // replay). Mirrors OpType::Dropout's identical JIT-R013 guard:
+            // fail loudly instead of silently replaying stale/frozen
+            // randomness.
+            if (node->get_bool_attr("training")) {
+                throw std::runtime_error(
+                    "JIT replay: RReLU(training=true) is not wired for "
+                    "replay (the eval-mode fixed-midpoint-slope kernel path "
+                    "is the only one captured; the training path draws fresh "
+                    "per-call randomness that a trace cannot represent); "
+                    "fall back to eager");
+            }
+            if (!input_vars.empty()) {
+                double lower = node->has_attr("lower") ? node->get_attr("lower") : (1.0 / 8.0);
+                double upper = node->has_attr("high") ? node->get_attr("high") : (1.0 / 3.0);
+                outputs.push_back(
+                    tenzor::nn::rrelu(input_vars[0], lower, upper, /*training=*/false));
+            }
+            break;
+        }
+
         case OpType::Gather:
             if (input_vars.size() >= 2) {
                 int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : 0;
@@ -3730,6 +4295,18 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        // JIT-R064: mirrors OpType::Scatter above — differentiable Variable-level
+        // overload exists (tenzor::index_copy(Variable, dim, Tensor index,
+        // Variable source)); index (input_vars[1]) is non-differentiable and
+        // passed as a plain Tensor.
+        case OpType::IndexCopy:
+            if (input_vars.size() >= 3) {
+                int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : 0;
+                outputs.push_back(tenzor::index_copy(input_vars[0], dim,
+                                                     input_vars[1].tensor(), input_vars[2]));
+            }
+            break;
+
         case OpType::Interpolate:
             if (!input_vars.empty()) {
                 auto size = node->get_vec_attr("output_size");
@@ -3782,7 +4359,6 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // Other
         // ====================================================================
         case OpType::Dropout:
-            // Inference replay: dropout runs in eval mode -> identity (correct).
             // Grad (training) replay: dropout must apply a Bernoulli mask and the
             // 1/(1-p) inverted scale that stay consistent between forward and
             // backward. The traced graph does not capture the mask, so replaying
@@ -3795,6 +4371,24 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 throw std::runtime_error(
                     "JIT grad replay: Dropout is not wired for differentiable "
                     "replay (mask/scale not captured); fall back to eager");
+            }
+            // JIT-R013: the non-grad ("inference") replay path is NOT the same
+            // thing as "the traced Dropout node was in eval mode" — grad_mode
+            // here reflects whether THIS call has a requires_grad input, not
+            // the nn::Module.training state the graph was traced under. The
+            // only real producer of an OpType::Dropout node (nested_dropout)
+            // already gates `if (!training || p == 0.0) return input;` BEFORE
+            // dispatching, so every OpType::Dropout node that exists at all is
+            // training=true by construction — identity here would silently
+            // drop the regularization for a training-mode model evaluated
+            // without requires_grad inputs (e.g. under a no-grad training
+            // step, or a training-configured model probed for inference).
+            // Fail loudly instead, exactly like the grad_mode branch above.
+            if (node->get_bool_attr("training")) {
+                throw std::runtime_error(
+                    "JIT replay: Dropout(training=true) is not wired for "
+                    "non-differentiable replay either (mask/scale not "
+                    "captured); fall back to eager");
             }
             if (!input_vars.empty()) {
                 outputs.push_back(input_vars[0]);
@@ -3831,6 +4425,42 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 }
             }
             break;
+
+        case OpType::EmbeddingBag: {
+            // input_vars[0] = already-gathered per-index embeddings
+            // [total_elements, embedding_dim] (NOT the raw weight table —
+            // EmbeddingBag looks up indices into `weight` BEFORE this op),
+            // input_vars[1] = offsets. JIT-R056: no Variable-level
+            // differentiable per-bag aggregation is composed from other
+            // graph nodes (EmbeddingBagBackward's own forward/backward pair
+            // is a raw-Tensor Function, not reusable here), so mirror
+            // Dropout/SparseMatMul/ConvTranspose's established precedent —
+            // fail loudly and force eager fallback for grad-mode replay
+            // rather than risk wrong gradients.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: EmbeddingBag is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() >= 2 && node->has_int_attr("embedding_bag_mode")) {
+                OpAttributes bag_attrs;
+                static const char* kModes[] = {"sum", "mean", "max"};
+                int64_t mode_idx = node->get_int_attr("embedding_bag_mode");
+                bag_attrs.set(AttrKey::Mode,
+                    std::string(kModes[mode_idx >= 0 && mode_idx <= 2 ? mode_idx : 0]));
+                bag_attrs.set(AttrKey::EmbeddingDim, node->get_int_attr("embedding_dim"));
+                bag_attrs.set(AttrKey::IncludeLastOffset,
+                    node->has_bool_attr("include_last_offset") &&
+                    node->get_bool_attr("include_last_offset"));
+                std::vector<Tensor> bag_inputs = {
+                    input_vars[0].tensor(), input_vars[1].tensor()};
+                auto result = dispatch(OpId::EmbeddingBagForward, bag_inputs, bag_attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+        }
 
         case OpType::GELU:
             if (!input_vars.empty()) {
@@ -4122,6 +4752,23 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 auto& K = input_vars[1];
                 auto& V = input_vars[2];
 
+                // JIT-R054: a direct tenzor::flash_attention() dispatch (the
+                // eager fast path scaled_dot_product_attention() takes for
+                // 4D/no-mask/supported-dtype inputs) sets dropout_p on the
+                // SAME OpId::FlashAttention this node replays. Dropout draws
+                // a fresh Bernoulli mask per call (same architectural issue
+                // as OpType::Dropout, JIT-037) — a captured graph cannot
+                // replay it correctly. Fail loudly and force eager fallback
+                // rather than silently produce a dropout-free (wrong)
+                // forward pass on every replay.
+                if (node->has_float_attr("dropout_p") &&
+                    node->get_attr("dropout_p") > 0.0) {
+                    throw std::runtime_error(
+                        "JIT replay: FlashAttention with dropout_p > 0 is not "
+                        "wired for differentiable/deterministic replay (the "
+                        "dropout mask is not captured); fall back to eager");
+                }
+
                 // FuseAttentionPass matches MatMul -> Mul(scale) -> [Add(mask)]
                 // -> Softmax -> MatMul and accepts ANY scalar constant as the
                 // scale (temperature / learned), storing it as the "scale"
@@ -4150,6 +4797,29 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 // input is authoritative.
                 if (input_vars.size() >= 4) {
                     scaled = scaled + input_vars[3];
+                }
+
+                // A direct tenzor::flash_attention() dispatch with causal=true
+                // (and no explicit mask input) needs the SAME upper-triangular
+                // additive mask eager's scaled_dot_product_attention() manual
+                // path builds — without this, replay silently drops the
+                // causal constraint and attends to future positions.
+                if (input_vars.size() < 4 && node->has_bool_attr("causal") &&
+                    node->get_bool_attr("causal")) {
+                    auto q_shape = Q.tensor().shape();
+                    auto k_shape = K.tensor().shape();
+                    int64_t L = q_shape[q_shape.size() - 2];
+                    int64_t S = k_shape[k_shape.size() - 2];
+                    const DType q_dtype = Q.tensor().dtype();
+                    const float mask_neg = (q_dtype == DType::Float16 ||
+                                            q_dtype == DType::BFloat16) ? -1e4f : -1e9f;
+                    auto causal_mask = tenzor::triu(
+                        tenzor::ones({L, S}, DType::Float32, Q.tensor().device()),
+                        /*diagonal=*/1) * mask_neg;
+                    if (q_dtype != DType::Float32) {
+                        causal_mask = causal_mask.to(q_dtype);
+                    }
+                    scaled = scaled + Variable(causal_mask, false);
                 }
 
                 auto attn = nn::softmax(scaled, -1);
@@ -4343,6 +5013,98 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
         }
 
+        case OpType::ToDevice: {
+            // Cross-device transfer, e.g. CPU -> CUDA:0. Reuses the
+            // Variable-level tenzor::to_device (rather than a grad_mode-
+            // gated throw) since DeviceTransferBackward already provides a
+            // complete, correct gradient rule. Uses the same
+            // Tensor::to(Device) mechanism as eager execution under the
+            // hood, so this is a genuine on-device (or cross-device)
+            // transfer for every backend, not a CPU-mediated copy.
+            if (!input_vars.empty()) {
+                int64_t device_type_int = node->get_int_attr("device_type");
+                int64_t device_index = node->get_int_attr("device_index");
+                Device target{static_cast<Device::Type>(device_type_int),
+                              static_cast<int32_t>(device_index)};
+                outputs.push_back(tenzor::to_device(input_vars[0], target));
+            }
+            break;
+        }
+
+        case OpType::AsStrided: {
+            // Reuses the Variable-level tenzor::as_strided (rather than a
+            // grad_mode-gated throw) since AsStridedBackward already
+            // provides a complete, correct gradient rule — no need to force
+            // an eager fallback for the differentiable case.
+            if (!input_vars.empty()) {
+                auto size = node->get_vec_attr("size");
+                auto stride = node->get_vec_attr("stride");
+                int64_t raw_offset = node->get_int_attr("storage_offset");
+                std::optional<int64_t> storage_offset =
+                    (raw_offset < 0) ? std::nullopt : std::optional<int64_t>(raw_offset);
+                outputs.push_back(
+                    tenzor::as_strided(input_vars[0], size, stride, storage_offset));
+            }
+            break;
+        }
+
+        case OpType::ViewAsReal: {
+            // Reuses the Variable-level tenzor::view_as_real —
+            // ViewAsRealBackward already provides a complete gradient rule.
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::view_as_real(input_vars[0]));
+            }
+            break;
+        }
+
+        case OpType::ViewAsComplex: {
+            // Reuses the Variable-level tenzor::view_as_complex —
+            // ViewAsComplexBackward already provides a complete gradient rule.
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::view_as_complex(input_vars[0]));
+            }
+            break;
+        }
+
+        case OpType::Triu: {
+            // Reuses the Variable-level tenzor::triu — TriuBackward already
+            // provides a complete gradient rule.
+            if (!input_vars.empty()) {
+                int64_t diagonal = node->get_int_attr("diagonal");
+                outputs.push_back(tenzor::triu(input_vars[0], diagonal));
+            }
+            break;
+        }
+
+        case OpType::Tril: {
+            // Reuses the Variable-level tenzor::tril — TrilBackward already
+            // provides a complete gradient rule.
+            if (!input_vars.empty()) {
+                int64_t diagonal = node->get_int_attr("diagonal");
+                outputs.push_back(tenzor::tril(input_vars[0], diagonal));
+            }
+            break;
+        }
+
+        case OpType::Diag: {
+            // Reuses the Variable-level tenzor::diag — DiagBackward already
+            // provides a complete gradient rule.
+            if (!input_vars.empty()) {
+                int64_t diagonal = node->get_int_attr("diagonal");
+                outputs.push_back(tenzor::diag(input_vars[0], diagonal));
+            }
+            break;
+        }
+
+        case OpType::Trace: {
+            // Reuses the Variable-level tenzor::trace — TraceBackward already
+            // provides a complete gradient rule.
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::trace(input_vars[0]));
+            }
+            break;
+        }
+
         case OpType::QuantizedLinear: {
             // Retagged from Linear by QuantizationPass; inputs = [x, weight(, bias)].
             // int8 matmul is inference-only (non-differentiable).
@@ -4360,6 +5122,81 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             Tensor out = nn::quantization::quantized_linear_dynamic(
                 input_vars[0].tensor(), input_vars[1].tensor(), bias);
             outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::QuantizedLinearStatic: {
+            // JIT-R058b: the real dispatch<OpId::QuantizedLinear> contract —
+            // inputs [input_int8, weight_int8, bias_f32(, wscale, wzp)],
+            // attrs input_scale/weight_scale/output_scale (float) +
+            // input_zero_point/weight_zero_point (int). Pre-quantized
+            // (static) int8 data, distinct from QuantizedLinear above (which
+            // dynamically quantizes a dense float weight). No Variable-level
+            // differentiable path is composed from other graph nodes for a
+            // pre-quantized int8 matmul; mirrors QuantizedLinear/
+            // QuantizedConv2d's own established grad_mode throw.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: QuantizedLinearStatic is inference-only "
+                    "(the static int8 matmul is not differentiable); fall "
+                    "back to eager");
+            }
+            if (input_vars.size() < 3) {
+                throw std::runtime_error(
+                    "JIT: QuantizedLinearStatic expects [input, weight, bias"
+                    "(, weight_scale, weight_zero_point)]");
+            }
+            OpAttributes q_attrs;
+            double input_scale =
+                node->has_float_attr("input_scale") ? node->get_attr("input_scale") : 1.0;
+            q_attrs.set(AttrKey::InputScale, input_scale);
+            q_attrs.set(AttrKey::WeightScaleQ,
+                node->has_float_attr("weight_scale") ? node->get_attr("weight_scale") : 1.0);
+            q_attrs.set(AttrKey::OutputScale,
+                node->has_float_attr("output_scale") ? node->get_attr("output_scale") : 1.0);
+            int64_t input_zp =
+                node->has_int_attr("input_zero_point") ? node->get_int_attr("input_zero_point") : int64_t{0};
+            q_attrs.set(AttrKey::InputZeroPoint, input_zp);
+            q_attrs.set(AttrKey::WeightZeroPoint,
+                node->has_int_attr("weight_zero_point") ? node->get_int_attr("weight_zero_point") : int64_t{0});
+
+            // JIT-R058b: input_vars[0] is the RAW FLOAT activation, not
+            // pre-quantized int8 — quantizing it at TRACE time would freeze
+            // the trace-time DATA as a constant, since quantize_tensor()'s
+            // int8 write is a raw host pointer loop with zero dispatch()
+            // calls and hence no lineage back to the traced Variable (see
+            // jit_record_quantized_linear_static in quantized_layers.cpp).
+            // Re-quantize it here instead, on the ACTUAL (possibly new)
+            // replayed input, using the fixed calibrated scale/zero_point —
+            // exactly mirroring what QuantizedLinear::forward_impl does
+            // eagerly on every call. Only reached for statically-calibrated
+            // activations (the tracer refuses to trace the dynamic/
+            // uncalibrated path — see forward_impl's is_tracing() guard).
+            bool input_asymmetric = node->has_int_attr("input_asymmetric") &&
+                node->get_int_attr("input_asymmetric") != 0;
+            Tensor float_input = input_vars[0].tensor();
+            nn::quantization::QuantizationParams input_qparams(
+                tenzor::full({1}, input_scale, DType::Float32, Device::cpu()),
+                tenzor::full({1}, static_cast<double>(input_zp), DType::Int32, Device::cpu()),
+                nn::quantization::QuantDType::INT8,
+                input_asymmetric
+                    ? nn::quantization::QuantizationScheme::PerTensorAsymmetric
+                    : nn::quantization::QuantizationScheme::PerTensorSymmetric);
+            Tensor input_int8 = nn::quantization::quantize_tensor(float_input, input_qparams).data();
+            if (input_int8.device() != float_input.device()) {
+                input_int8 = input_int8.to(float_input.device());
+            }
+
+            std::vector<Tensor> q_inputs;
+            q_inputs.reserve(input_vars.size());
+            q_inputs.push_back(input_int8);
+            for (std::size_t qi = 1; qi < input_vars.size(); ++qi) {
+                q_inputs.push_back(input_vars[qi].tensor());
+            }
+            auto result = dispatch(OpId::QuantizedLinear, q_inputs, q_attrs);
+            if (!result.empty()) {
+                outputs.push_back(Variable(result[0], /*requires_grad=*/false));
+            }
             break;
         }
 
@@ -4421,13 +5258,470 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
         }
 
+        case OpType::SparseSpMM: {
+            // Direct dispatch<OpId::SparseSpMM> convention: inputs =
+            // [crow, col, values, dense], attrs M/K. The sparsity PATTERN
+            // (crow/col) is static, but `values` (trainable, e.g.
+            // SparseLinear's weight) and `dense` (the per-call input) are
+            // genuine tensor inputs that correctly track new data on replay
+            // — unlike JIT-R083/R090, this op has no host-scalar baked as a
+            // graph attribute, so replay-with-new-inputs is safe. Grad-mode
+            // replay is unconditionally unsupported (mirrors SparseMatMul
+            // immediately below and OpType::Dropout/JIT-037's established
+            // pattern) since there is no Variable-level differentiable
+            // sparse SpMM composed from other graph nodes.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseSpMM is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() < 4) {
+                throw std::runtime_error(
+                    "JIT: SparseSpMM expects [crow, col, values, dense]");
+            }
+            if (!node->has_int_attr("m") || !node->has_int_attr("k")) {
+                throw std::runtime_error(
+                    "JIT: SparseSpMM requires m/k attributes");
+            }
+            int64_t M = node->get_int_attr("m");
+            int64_t K = node->get_int_attr("k");
+            auto sp = SparseTensor::sparse_csr(
+                input_vars[0].tensor(), input_vars[1].tensor(),
+                input_vars[2].tensor(), {M, K}, /*validate=*/false);
+            Tensor out = tenzor::sparse::spmm(sp, input_vars[3].tensor());
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::SparseSpMV: {
+            // JIT-R098: same direct-dispatch CSR convention as SparseSpMM
+            // above, for autograd::spmv. See that case's comment for the
+            // grad_mode-unsupported rationale.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseSpMV is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() < 4) {
+                throw std::runtime_error(
+                    "JIT: SparseSpMV expects [crow, col, values, vec]");
+            }
+            if (!node->has_int_attr("m") || !node->has_int_attr("k")) {
+                throw std::runtime_error("JIT: SparseSpMV requires m/k attributes");
+            }
+            int64_t M = node->get_int_attr("m");
+            int64_t K = node->get_int_attr("k");
+            auto sp = SparseTensor::sparse_csr(
+                input_vars[0].tensor(), input_vars[1].tensor(),
+                input_vars[2].tensor(), {M, K}, /*validate=*/false);
+            Tensor out = tenzor::sparse::spmv(sp, input_vars[3].tensor());
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::SparseAdd: {
+            // JIT-R098: same direct-dispatch CSR convention, for
+            // autograd::sparse_add.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseAdd is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() < 4) {
+                throw std::runtime_error(
+                    "JIT: SparseAdd expects [crow, col, values, dense]");
+            }
+            if (!node->has_int_attr("m") || !node->has_int_attr("k")) {
+                throw std::runtime_error("JIT: SparseAdd requires m/k attributes");
+            }
+            int64_t M = node->get_int_attr("m");
+            int64_t K = node->get_int_attr("k");
+            auto sp = SparseTensor::sparse_csr(
+                input_vars[0].tensor(), input_vars[1].tensor(),
+                input_vars[2].tensor(), {M, K}, /*validate=*/false);
+            Tensor out = tenzor::sparse::add(sp, input_vars[3].tensor());
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::SparseTrsv:
+        case OpType::SparseTrsm: {
+            // JIT-R098: same direct-dispatch CSR convention, for
+            // autograd::sparse_triangular_solve (1D b -> Trsv, 2D B -> Trsm;
+            // both replay through the same sparse::sparse_triangular_solve).
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseTrsv/SparseTrsm is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() < 4) {
+                throw std::runtime_error(
+                    "JIT: SparseTrsv/SparseTrsm expects [crow, col, values, b]");
+            }
+            if (!node->has_int_attr("n")) {
+                throw std::runtime_error(
+                    "JIT: SparseTrsv/SparseTrsm requires n attribute");
+            }
+            int64_t N = node->get_int_attr("n");
+            bool upper = node->get_bool_attr("upper");
+            auto sp = SparseTensor::sparse_csr(
+                input_vars[0].tensor(), input_vars[1].tensor(),
+                input_vars[2].tensor(), {N, N}, /*validate=*/false);
+            Tensor out = tenzor::sparse::sparse_triangular_solve(
+                sp, input_vars[3].tensor(), upper);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::ScatterAdd: {
+            // JIT-R098: needed so scatter_add() calls nested inside
+            // SparseTensor::to_dense() (itself called from sparse::add(),
+            // the terminal for the manually-recorded SparseAdd node above)
+            // don't graph-break the whole trace. Grad-mode replay is
+            // unconditionally unsupported, matching the Sparse* ops' policy.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: ScatterAdd is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() < 3) {
+                throw std::runtime_error(
+                    "JIT: ScatterAdd expects [input, index, src]");
+            }
+            int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : 0;
+            Tensor out = tenzor::scatter_add(input_vars[0].tensor(), dim,
+                                             input_vars[1].tensor(),
+                                             input_vars[2].tensor());
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::RepeatInterleave: {
+            // JIT-R098: same rationale as ScatterAdd above.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: RepeatInterleave is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.empty()) {
+                throw std::runtime_error("JIT: RepeatInterleave expects >=1 input");
+            }
+            std::optional<int64_t> dim;
+            if (node->has_int_attr("dim")) dim = node->get_int_attr("dim");
+            int64_t num_repeats = node->has_int_attr("num_repeats")
+                ? node->get_int_attr("num_repeats") : -1;
+            Tensor out;
+            if (num_repeats == -1 && input_vars.size() >= 2) {
+                // Tensor-repeats overload: inputs = [input, repeats].
+                out = tenzor::repeat_interleave(input_vars[0].tensor(),
+                                                input_vars[1].tensor(), dim);
+            } else {
+                // Scalar-repeats overload: inputs = [input].
+                out = tenzor::repeat_interleave(input_vars[0].tensor(),
+                                                num_repeats, dim);
+            }
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::CumSum: {
+            // JIT-R100: same rationale as ScatterAdd/RepeatInterleave above.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: CumSum is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.empty()) {
+                throw std::runtime_error("JIT: CumSum expects 1 input");
+            }
+            int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : 0;
+            Tensor out = tenzor::cumsum(input_vars[0].tensor(), dim);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::Sort: {
+            // JIT-R100: same rationale as ScatterAdd/RepeatInterleave above.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: Sort is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.empty()) {
+                throw std::runtime_error("JIT: Sort expects 1 input");
+            }
+            int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : 0;
+            bool descending = node->get_bool_attr("descending");
+            auto [values, indices] = tenzor::sort(input_vars[0].tensor(), dim, descending);
+            outputs.push_back(Variable(values, /*requires_grad=*/false));
+            outputs.push_back(Variable(indices, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::Nonzero: {
+            // JIT-R100: same rationale as ScatterAdd/RepeatInterleave above.
+            // Data-dependent output size — no infer_types shape rule (same
+            // policy as RepeatInterleave).
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: Nonzero is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.empty()) {
+                throw std::runtime_error("JIT: Nonzero expects 1 input");
+            }
+            Tensor out = tenzor::nonzero(input_vars[0].tensor());
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::Bincount: {
+            // JIT-R100: same rationale as ScatterAdd/RepeatInterleave above.
+            // Data-dependent output size — no infer_types shape rule (same
+            // policy as RepeatInterleave).
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: Bincount is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.empty()) {
+                throw std::runtime_error("JIT: Bincount expects >=1 input");
+            }
+            int64_t minlength = node->has_int_attr("minlength")
+                ? node->get_int_attr("minlength") : 0;
+            std::optional<Tensor> weights;
+            if (input_vars.size() >= 2) weights = input_vars[1].tensor();
+            Tensor out = tenzor::bincount(input_vars[0].tensor(), weights, minlength);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::SparseFromDense: {
+            // JIT-R100: manually-recorded SparseTensor::from_dense — see
+            // that method's recording site (sparse_tensor.cpp) and the
+            // OpType::SparseFromDense doc comment (tracer.hpp) for the
+            // input/output convention. Not wired for differentiable replay
+            // (from_dense is never called through Variable/autograd, only
+            // on raw SparseTensor), matching SparseAdd/SparseSpMM's policy.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseFromDense is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.empty()) {
+                throw std::runtime_error("JIT: SparseFromDense expects 1 input");
+            }
+            if (!node->has_int_attr("target_layout")) {
+                throw std::runtime_error("JIT: SparseFromDense requires target_layout attr");
+            }
+            auto target_layout = static_cast<SparseLayout>(node->get_int_attr("target_layout"));
+            SparseTensor result = SparseTensor::from_dense(input_vars[0].tensor(), target_layout);
+            outputs = sparse_tensor_output_vars(result);
+            break;
+        }
+
+        case OpType::SparseToDense: {
+            // JIT-R100: manually-recorded SparseTensor::to_dense.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseToDense is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            SparseTensor sp = reconstruct_sparse_input(node, input_vars);
+            Tensor out = sp.to_dense();
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::SparseCoalesce: {
+            // JIT-R100: manually-recorded SparseTensor::coalesce.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseCoalesce is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            SparseTensor sp = reconstruct_sparse_input(node, input_vars);
+            SparseTensor result = sp.coalesce();
+            outputs = sparse_tensor_output_vars(result);
+            break;
+        }
+
+        case OpType::SparseTranspose: {
+            // JIT-R100: manually-recorded SparseTensor::transpose. Output
+            // layout is NOT always == input layout (CSC transposes to CSR,
+            // BSR to COO) — sparse_tensor_output_vars reads it straight off
+            // the freshly-recomputed `result`, so this is correct either way.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseTranspose is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            SparseTensor sp = reconstruct_sparse_input(node, input_vars);
+            SparseTensor result = sp.transpose();
+            outputs = sparse_tensor_output_vars(result);
+            break;
+        }
+
+        case OpType::SparseToCsr: {
+            // JIT-R100: manually-recorded SparseTensor::to_csr.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseToCsr is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            SparseTensor sp = reconstruct_sparse_input(node, input_vars);
+            SparseTensor result = sp.to_csr();
+            outputs = sparse_tensor_output_vars(result);
+            break;
+        }
+
+        case OpType::SparseToCsc: {
+            // JIT-R100: manually-recorded SparseTensor::to_csc.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseToCsc is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            SparseTensor sp = reconstruct_sparse_input(node, input_vars);
+            SparseTensor result = sp.to_csc();
+            outputs = sparse_tensor_output_vars(result);
+            break;
+        }
+
+        case OpType::SparseToBsr: {
+            // JIT-R100: manually-recorded SparseTensor::to_bsr. Target block
+            // size is a genuine call parameter (not derivable from the input
+            // or a freshly-recomputed result before that result exists), so
+            // it travels as an attr set at recording time.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: SparseToBsr is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (!node->has_int_attr("target_block_h") || !node->has_int_attr("target_block_w")) {
+                throw std::runtime_error("JIT: SparseToBsr requires target_block_h/target_block_w attrs");
+            }
+            SparseTensor sp = reconstruct_sparse_input(node, input_vars);
+            std::pair<int64_t, int64_t> target_block{node->get_int_attr("target_block_h"),
+                                                      node->get_int_attr("target_block_w")};
+            SparseTensor result = sp.to_bsr(target_block);
+            outputs = sparse_tensor_output_vars(result);
+            break;
+        }
+
+        case OpType::BoxIoU: {
+            // JIT-R086: box_iou already dispatches through OpId::BoxIoU
+            // unconditionally — no autograd meaning for an IoU matrix (used
+            // only for GT-matching index computation), so replay is
+            // interpreter-only, matching Nonzero/Sort's policy.
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: BoxIoU is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() < 2) {
+                throw std::runtime_error("JIT: BoxIoU expects [boxes1, boxes2]");
+            }
+            auto iou_type = node->has_int_attr("iou_type")
+                ? static_cast<ops::IoUType>(node->get_int_attr("iou_type"))
+                : ops::IoUType::IoU;
+            Tensor out = ops::box_iou(input_vars[0].tensor(), input_vars[1].tensor(), iou_type);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::NMS: {
+            // JIT-R087: nms() already dispatches through OpId::NMS on every
+            // non-CPU device; CPU's raw host-loop path is fixed separately at
+            // the ops::nms call site (JIT-R085 manual-recording treatment).
+            // Output is a surviving-index tensor — no autograd meaning,
+            // data-dependent size (Nonzero/Bincount policy).
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: NMS is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() < 2) {
+                throw std::runtime_error("JIT: NMS expects [boxes, scores]");
+            }
+            double iou_threshold = node->has_attr("iou_threshold")
+                ? node->get_attr("iou_threshold") : 0.5;
+            Tensor out = ops::nms(input_vars[0].tensor(), input_vars[1].tensor(), iou_threshold);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
+        case OpType::ROIAlignForward: {
+            // JIT-R082: unlike BoxIoU/NMS, ROIAlign has a real, tested,
+            // registered backward (ROIAlignBackward in roi_ops.cpp) — replay
+            // through the Variable-level nn::detection::ROIAlign::forward so
+            // grad_mode replay gets a genuine differentiable graph (matching
+            // Conv2d/MatMul's policy), not an unconditional throw.
+            if (input_vars.size() < 2) {
+                throw std::runtime_error("JIT: ROIAlignForward expects [features, rois]");
+            }
+            auto output_size = node->get_vec_attr("output_size");
+            if (output_size.size() < 2) {
+                throw std::runtime_error("JIT: ROIAlignForward requires output_size attr [h, w]");
+            }
+            double spatial_scale = node->has_attr("spatial_scale")
+                ? node->get_attr("spatial_scale") : 1.0;
+            int64_t sampling_ratio = node->has_int_attr("sampling_ratio")
+                ? node->get_int_attr("sampling_ratio") : 0;
+            bool aligned = node->get_bool_attr("aligned");
+            ::tenzor::nn::detection::ROIAlign roi_align(
+                output_size[0], output_size[1], spatial_scale, sampling_ratio, aligned);
+            Variable out = roi_align.forward(input_vars[0], input_vars[1].tensor());
+            outputs.push_back(std::move(out));
+            break;
+        }
+
+        case OpType::AnchorGenerate: {
+            // JIT-R085: manually recorded — AnchorGenerator::generate has no
+            // tensor inputs and zero dispatch() calls internally, so it is
+            // reconstructed and re-invoked wholesale from attrs on every
+            // replay. Never differentiable (anchors are fixed geometry).
+            if (!node->has_int_attr("feat_h") || !node->has_int_attr("feat_w") ||
+                !node->has_int_attr("stride")) {
+                throw std::runtime_error(
+                    "JIT: AnchorGenerate requires feat_h/feat_w/stride attrs");
+            }
+            if (!node->has_tensor_attr("sizes") || !node->has_tensor_attr("aspect_ratios")) {
+                throw std::runtime_error(
+                    "JIT: AnchorGenerate requires sizes/aspect_ratios tensor_attrs");
+            }
+            int64_t feat_h = node->get_int_attr("feat_h");
+            int64_t feat_w = node->get_int_attr("feat_w");
+            int64_t stride = node->get_int_attr("stride");
+            Tensor sizes_t = node->get_tensor_attr("sizes").to(Device::cpu()).to(DType::Float32);
+            Tensor ratios_t = node->get_tensor_attr("aspect_ratios").to(Device::cpu()).to(DType::Float32);
+            const float* sizes_ptr = sizes_t.data<float>();
+            const float* ratios_ptr = ratios_t.data<float>();
+            std::vector<float> sizes(sizes_ptr, sizes_ptr + sizes_t.numel());
+            std::vector<float> ratios(ratios_ptr, ratios_ptr + ratios_t.numel());
+            ::tenzor::nn::detection::AnchorGenerator gen(std::move(sizes), std::move(ratios));
+            Tensor out = gen.generate(feat_h, feat_w, stride, exec_target_device_);
+            outputs.push_back(Variable(out, /*requires_grad=*/false));
+            break;
+        }
+
         case OpType::Dequantize:
         case OpType::Quantize:
         case OpType::DenseToSparse:
+            // JIT-R081: the previous message ("lower this graph through a
+            // backend compiler/codegen path") was misleading — GraphToMLIR
+            // (src/jit/mlir/lowering.cpp) has NO handler for any of these
+            // three OpTypes either (confirmed: zero references anywhere in
+            // that file), so there is in fact no lowering path that accepts
+            // them. Both the interpreter and GraphToMLIR::lower() correctly
+            // fail cleanly rather than silently mishandling the op; state
+            // that plainly instead of pointing at a path that doesn't exist.
             throw std::runtime_error(
                 "JIT interpreter does not execute specialized op " +
                 op_type_to_string(node->op_type()) +
-                "; lower this graph through a backend compiler/codegen path");
+                "; there is currently no interpreter OR MLIR/IREE lowering "
+                "support for this op — use eager execution for this "
+                "subgraph instead");
     }
 
     // Store outputs in value map
@@ -4634,6 +5928,36 @@ auto Graph::partition_at(const std::vector<size_t>& break_indices)
                     output_ids_seen.insert(id).second) {
                     sub_outputs.push_back(output);
                 }
+            }
+        }
+
+        // JIT-R020: a boundary input backed by this (parent) graph's
+        // constants_/parameters_/param_leaves_/buffers_/buffer_leaves_ must
+        // be re-classified onto the sub-graph the SAME way, not left as a
+        // generic boundary "sub_input" — otherwise a caller reconstructing
+        // that wiring manually (e.g. snapshotting a parameter's current
+        // value once instead of replicating add_param_leaf's live-rebind
+        // semantics) would reintroduce the exact frozen-value bug JIT-R005
+        // fixed, at every partition boundary. Forward the full parameters_/
+        // buffers_ vectors once per sub-graph (cheap: shared_ptr copies)
+        // so add_param_leaf/add_buffer_leaf's indices resolve correctly.
+        sub_graph->set_parameters(parameters_);
+        sub_graph->set_buffers(buffers_);
+        for (const auto& input : sub_inputs) {
+            const auto& id = input->id();
+            auto pit = param_leaves_.find(id);
+            if (pit != param_leaves_.end()) {
+                sub_graph->add_param_leaf(id, pit->second);
+                continue;
+            }
+            auto bit = buffer_leaves_.find(id);
+            if (bit != buffer_leaves_.end()) {
+                sub_graph->add_buffer_leaf(id, bit->second);
+                continue;
+            }
+            auto cit = constants_.find(id);
+            if (cit != constants_.end()) {
+                sub_graph->set_constant(id, cit->second);
             }
         }
 

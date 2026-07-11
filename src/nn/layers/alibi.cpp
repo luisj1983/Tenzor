@@ -2,10 +2,29 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/variable.hpp"
 #include <cmath>
 #include <stdexcept>
 
 namespace tenzor::nn {
+
+namespace {
+// JIT-R071: tenzor::reshape(Tensor, shape) is a thin wrapper around
+// Tensor::reshape() — a pure TensorImpl metadata trick with ZERO
+// dispatch() calls, invisible to the tracer's generic dispatch<OpId>
+// interception (same bug class as JIT-R052/R058a/R072/R073). Unlike those,
+// ALiBi has no OpId-based circuit breaker protecting it — every op
+// get_bias() uses (arange/abs/sub/mul) is an ordinary, mapped, dispatched
+// op — so if a caller invoked get_bias() inside an active JIT trace today
+// the frozen-constant hazard would be immediately live, not masked. Mirrors
+// the established traced_reshape pattern: routes through the Variable-level
+// autograd wrapper, which calls jit_record_shape_op() when tracing is
+// active.
+inline auto traced_reshape(const Tensor& t, std::vector<int64_t> shape) -> Tensor {
+    return ::tenzor::reshape(::tenzor::Variable(t, false), std::move(shape)).tensor();
+}
+}  // namespace
 
 ALiBi::ALiBi(int64_t num_heads) : num_heads_(num_heads) {
     if (num_heads <= 0) {
@@ -62,7 +81,7 @@ auto ALiBi::get_bias(int64_t seq_q, int64_t seq_k, Device device, DType dtype) -
     // Distance matrix via broadcasting: |pos_q - pos_k|
     auto pos_q = arange(0.0, static_cast<double>(seq_q), 1.0, DType::Float32, device);
     auto pos_k = arange(0.0, static_cast<double>(seq_k), 1.0, DType::Float32, device);
-    auto dist = abs(sub(reshape(pos_q, {seq_q, 1}), reshape(pos_k, {1, seq_k})));
+    auto dist = abs(sub(traced_reshape(pos_q, {seq_q, 1}), traced_reshape(pos_k, {1, seq_k})));
 
     // Slopes tensor: small (num_heads), create on CPU then transfer
     auto slopes_tensor = Tensor({num_heads_}, DType::Float32, Device::cpu());
@@ -75,8 +94,8 @@ auto ALiBi::get_bias(int64_t seq_q, int64_t seq_k, Device device, DType dtype) -
     }
 
     // bias = slopes(1, num_heads, 1, 1) * dist(1, 1, seq_q, seq_k)
-    auto bias = mul(reshape(slopes_tensor, {1, num_heads_, 1, 1}),
-                    reshape(dist, {1, 1, seq_q, seq_k}));
+    auto bias = mul(traced_reshape(slopes_tensor, {1, num_heads_, 1, 1}),
+                    traced_reshape(dist, {1, 1, seq_q, seq_k}));
 
     if (dtype != DType::Float32) {
         bias = bias.to(dtype);

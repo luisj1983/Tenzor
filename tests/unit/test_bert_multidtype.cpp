@@ -164,9 +164,9 @@ protected:
 
     // Helper: Get scalar value from tensor
     float get_scalar(const Tensor& tensor) const {
-        // Move to CPU and convert Float16 to Float32 for scalar extraction
+        // Move to CPU and convert Float16/BFloat16 to Float32 for scalar extraction
         Tensor t = tensor.to(Device::cpu());
-        if (t.dtype() == DType::Float16) {
+        if (t.dtype() == DType::Float16 || t.dtype() == DType::BFloat16) {
             t = t.to(DType::Float32);
         }
         if (t.dtype() == DType::Float64) {

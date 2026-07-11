@@ -295,6 +295,67 @@ struct MulOp {
 };
 
 /**
+ * @brief NaN-propagating minimum functor (torch.minimum semantics: if
+ * EITHER operand is NaN the result is NaN), for the broadcast_kernel path.
+ * Mirrors minimum_kernel_f32/_f64/_f16's scalar (same-shape) logic — see
+ * those kernels' comment for why is_nan_bits()/make_qnan() are used instead
+ * of `isnan`/direct compare (this TU builds with -ffast-math). Non-template
+ * overloads for float/double/__half win overload resolution for those
+ * types; the template fallback below serves the plain-compare integer
+ * dtypes (Int8/Int32/Int64), which have no NaN concept.
+ */
+struct MinOp {
+    __device__ float operator()(float a, float b) const {
+        if (tenzor::rocm::is_nan_bits(a) || tenzor::rocm::is_nan_bits(b)) {
+            return tenzor::rocm::make_qnan<float>();
+        }
+        return (a < b) ? a : b;
+    }
+    __device__ double operator()(double a, double b) const {
+        if (tenzor::rocm::is_nan_bits(a) || tenzor::rocm::is_nan_bits(b)) {
+            return tenzor::rocm::make_qnan<double>();
+        }
+        return (a < b) ? a : b;
+    }
+    __device__ __half operator()(__half a, __half b) const {
+        if (tenzor::rocm::is_nan_bits(a) || tenzor::rocm::is_nan_bits(b)) {
+            return tenzor::rocm::make_qnan<__half>();
+        }
+        float fa = tenzor::rocm::safe_h2f(a), fb = tenzor::rocm::safe_h2f(b);
+        return tenzor::rocm::safe_f2h((fa < fb) ? fa : fb);
+    }
+    template<typename T>
+    __device__ T operator()(T a, T b) const { return (a < b) ? a : b; }
+};
+
+/**
+ * @brief NaN-propagating maximum functor — see MinOp above.
+ */
+struct MaxOp {
+    __device__ float operator()(float a, float b) const {
+        if (tenzor::rocm::is_nan_bits(a) || tenzor::rocm::is_nan_bits(b)) {
+            return tenzor::rocm::make_qnan<float>();
+        }
+        return (a > b) ? a : b;
+    }
+    __device__ double operator()(double a, double b) const {
+        if (tenzor::rocm::is_nan_bits(a) || tenzor::rocm::is_nan_bits(b)) {
+            return tenzor::rocm::make_qnan<double>();
+        }
+        return (a > b) ? a : b;
+    }
+    __device__ __half operator()(__half a, __half b) const {
+        if (tenzor::rocm::is_nan_bits(a) || tenzor::rocm::is_nan_bits(b)) {
+            return tenzor::rocm::make_qnan<__half>();
+        }
+        float fa = tenzor::rocm::safe_h2f(a), fb = tenzor::rocm::safe_h2f(b);
+        return tenzor::rocm::safe_f2h((fa > fb) ? fa : fb);
+    }
+    template<typename T>
+    __device__ T operator()(T a, T b) const { return (a > b) ? a : b; }
+};
+
+/**
  * @brief IEEE-754 division robust under -ffast-math.
  *
  * This TU is compiled with -ffast-math (see src/backends/rocm/CMakeLists.txt),
@@ -6048,109 +6109,275 @@ auto logical_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) ->
 // Host Wrappers: Element-wise Min/Max
 // ============================================================================
 
-auto minimum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+// JIT-R064 follow-up: found via Embedding::renorm_embeddings' max_norm clamp
+// (scale = minimum(ratio, one) where `one` is a 0-d scalar broadcast against
+// a (num_idx, 1) tensor) — this kernel previously hard-required matching
+// numel with no broadcast path at all, unlike every other backend's
+// minimum() (CPU/CUDA/Vulkan/OneAPI all broadcast correctly), so ANY
+// broadcast-shaped minimum() call on ROCm threw instead of computing.
+// Broadcast path mirrors add_kernel's structure (detail::are_broadcastable
+// / compute_broadcast_shape / compute_broadcast_strides / broadcast_kernel).
+auto minimum_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("minimum: tensors must have the same dtype");
     }
-    if (a.numel() != b.numel()) {
+
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
+
+    auto a_shape_span = a.shape();
+    auto b_shape_span = b.shape();
+    std::vector<int64_t> a_shape_vec(a_shape_span.begin(), a_shape_span.end());
+    std::vector<int64_t> b_shape_vec(b_shape_span.begin(), b_shape_span.end());
+
+    if (!detail::are_broadcastable(a_shape_vec, b_shape_vec)) {
         throw std::runtime_error("minimum: tensors must have the same number of elements");
     }
 
-    int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device());
+    const bool same_shape = detail::have_same_shape(a, b);
+    std::vector<int64_t> output_shape = same_shape
+        ? a_shape_vec : detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
 
+    int64_t n = result.numel();
     if (n == 0) return result;
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
+    if (same_shape) {
+        if (a.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(minimum_kernel_f32, grid, block, 0, stream,
+                a.data<float>(), b.data<float>(), result.data<float>(), n);
+        } else if (a.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(minimum_kernel_f64, grid, block, 0, stream,
+                a.data<double>(), b.data<double>(), result.data<double>(), n);
+        } else if (a.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(minimum_kernel_f16, grid, block, 0, stream,
+                reinterpret_cast<const __half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            // Widen-narrow: BFloat16 has no native compare path here.
+            auto a_f32 = cast_kernel(a, DType::Float32, stream);
+            auto b_f32 = cast_kernel(b, DType::Float32, stream);
+            hipLaunchKernelGGL(minimum_kernel_f32, grid, block, 0, stream,
+                a_f32.data<float>(), b_f32.data<float>(), a_f32.data<float>(), n);
+            HIP_CHECK(hipGetLastError());
+            return cast_kernel(a_f32, DType::BFloat16, stream);
+        } else if (a.dtype() == DType::Int8) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int8_t>), grid, block, 0, stream,
+                a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+        } else if (a.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int32_t>), grid, block, 0, stream,
+                a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+        } else if (a.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int64_t>), grid, block, 0, stream,
+                a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        } else {
+            throw std::runtime_error("minimum operation only supports Float32, Float64, Float16, BFloat16, Int8, Int32, and Int64 dtypes");
+        }
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+
+    // Broadcast path.
+    std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
+    std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
+    int64_t* d_strides_a;
+    int64_t* d_strides_b;
+    int64_t* d_output_shape;
+    HIP_CHECK(hipMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpyAsync(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    int64_t ndim = static_cast<int64_t>(output_shape.size());
+
+    auto free_meta = [&]() {
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
+    };
+
     if (a.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(minimum_kernel_f32, grid, block, 0, stream,
-            a.data<float>(), b.data<float>(), result.data<float>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<float, MinOp>), grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MinOp());
     } else if (a.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(minimum_kernel_f64, grid, block, 0, stream,
-            a.data<double>(), b.data<double>(), result.data<double>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<double, MinOp>), grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MinOp());
     } else if (a.dtype() == DType::Float16) {
-        hipLaunchKernelGGL(minimum_kernel_f16, grid, block, 0, stream,
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<__half, MinOp>), grid, block, 0, stream,
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
-            reinterpret_cast<__half*>(result.data<Float16>()), n);
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MinOp());
     } else if (a.dtype() == DType::BFloat16) {
         // Widen-narrow: BFloat16 has no native compare path here.
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
-        hipLaunchKernelGGL(minimum_kernel_f32, grid, block, 0, stream,
-            a_f32.data<float>(), b_f32.data<float>(), a_f32.data<float>(), n);
+        Tensor result_f32(output_shape, DType::Float32, a.device());
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<float, MinOp>), grid, block, 0, stream,
+            a_f32.data<float>(), b_f32.data<float>(), result_f32.data<float>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MinOp());
         HIP_CHECK(hipGetLastError());
-        return cast_kernel(a_f32, DType::BFloat16, stream);
+        free_meta();
+        return cast_kernel(result_f32, DType::BFloat16, stream);
     } else if (a.dtype() == DType::Int8) {
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int8_t>), grid, block, 0, stream,
-            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int8_t, MinOp>), grid, block, 0, stream,
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MinOp());
     } else if (a.dtype() == DType::Int32) {
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int32_t>), grid, block, 0, stream,
-            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int32_t, MinOp>), grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MinOp());
     } else if (a.dtype() == DType::Int64) {
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(minimum_kernel_int<int64_t>), grid, block, 0, stream,
-            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int64_t, MinOp>), grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MinOp());
     } else {
+        free_meta();
         throw std::runtime_error("minimum operation only supports Float32, Float64, Float16, BFloat16, Int8, Int32, and Int64 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
+    free_meta();
     return result;
 }
 
-auto maximum_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+// JIT-R064 follow-up: see minimum_kernel above — identical missing-broadcast
+// bug, fixed identically.
+auto maximum_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("maximum: tensors must have the same dtype");
     }
-    if (a.numel() != b.numel()) {
+
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
+
+    auto a_shape_span = a.shape();
+    auto b_shape_span = b.shape();
+    std::vector<int64_t> a_shape_vec(a_shape_span.begin(), a_shape_span.end());
+    std::vector<int64_t> b_shape_vec(b_shape_span.begin(), b_shape_span.end());
+
+    if (!detail::are_broadcastable(a_shape_vec, b_shape_vec)) {
         throw std::runtime_error("maximum: tensors must have the same number of elements");
     }
 
-    int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device());
+    const bool same_shape = detail::have_same_shape(a, b);
+    std::vector<int64_t> output_shape = same_shape
+        ? a_shape_vec : detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
 
+    int64_t n = result.numel();
     if (n == 0) return result;
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
+    if (same_shape) {
+        if (a.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(maximum_kernel_f32, grid, block, 0, stream,
+                a.data<float>(), b.data<float>(), result.data<float>(), n);
+        } else if (a.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(maximum_kernel_f64, grid, block, 0, stream,
+                a.data<double>(), b.data<double>(), result.data<double>(), n);
+        } else if (a.dtype() == DType::Float16) {
+            hipLaunchKernelGGL(maximum_kernel_f16, grid, block, 0, stream,
+                reinterpret_cast<const __half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            // Widen-narrow: BFloat16 has no native compare path here.
+            auto a_f32 = cast_kernel(a, DType::Float32, stream);
+            auto b_f32 = cast_kernel(b, DType::Float32, stream);
+            hipLaunchKernelGGL(maximum_kernel_f32, grid, block, 0, stream,
+                a_f32.data<float>(), b_f32.data<float>(), a_f32.data<float>(), n);
+            HIP_CHECK(hipGetLastError());
+            return cast_kernel(a_f32, DType::BFloat16, stream);
+        } else if (a.dtype() == DType::Int8) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int8_t>), grid, block, 0, stream,
+                a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+        } else if (a.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int32_t>), grid, block, 0, stream,
+                a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+        } else if (a.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int64_t>), grid, block, 0, stream,
+                a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        } else {
+            throw std::runtime_error("maximum operation only supports Float32, Float64, Float16, BFloat16, Int8, Int32, and Int64 dtypes");
+        }
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+
+    // Broadcast path.
+    std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
+    std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
+    int64_t* d_strides_a;
+    int64_t* d_strides_b;
+    int64_t* d_output_shape;
+    HIP_CHECK(hipMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpyAsync(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    int64_t ndim = static_cast<int64_t>(output_shape.size());
+
+    auto free_meta = [&]() {
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
+    };
+
     if (a.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(maximum_kernel_f32, grid, block, 0, stream,
-            a.data<float>(), b.data<float>(), result.data<float>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<float, MaxOp>), grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MaxOp());
     } else if (a.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(maximum_kernel_f64, grid, block, 0, stream,
-            a.data<double>(), b.data<double>(), result.data<double>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<double, MaxOp>), grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MaxOp());
     } else if (a.dtype() == DType::Float16) {
-        hipLaunchKernelGGL(maximum_kernel_f16, grid, block, 0, stream,
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<__half, MaxOp>), grid, block, 0, stream,
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
-            reinterpret_cast<__half*>(result.data<Float16>()), n);
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MaxOp());
     } else if (a.dtype() == DType::BFloat16) {
         // Widen-narrow: BFloat16 has no native compare path here.
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
-        hipLaunchKernelGGL(maximum_kernel_f32, grid, block, 0, stream,
-            a_f32.data<float>(), b_f32.data<float>(), a_f32.data<float>(), n);
+        Tensor result_f32(output_shape, DType::Float32, a.device());
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<float, MaxOp>), grid, block, 0, stream,
+            a_f32.data<float>(), b_f32.data<float>(), result_f32.data<float>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MaxOp());
         HIP_CHECK(hipGetLastError());
-        return cast_kernel(a_f32, DType::BFloat16, stream);
+        free_meta();
+        return cast_kernel(result_f32, DType::BFloat16, stream);
     } else if (a.dtype() == DType::Int8) {
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int8_t>), grid, block, 0, stream,
-            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int8_t, MaxOp>), grid, block, 0, stream,
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MaxOp());
     } else if (a.dtype() == DType::Int32) {
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int32_t>), grid, block, 0, stream,
-            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int32_t, MaxOp>), grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MaxOp());
     } else if (a.dtype() == DType::Int64) {
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(maximum_kernel_int<int64_t>), grid, block, 0, stream,
-            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int64_t, MaxOp>), grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MaxOp());
     } else {
+        free_meta();
         throw std::runtime_error("maximum operation only supports Float32, Float64, Float16, BFloat16, Int8, Int32, and Int64 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
+    free_meta();
     return result;
 }
 

@@ -36,6 +36,36 @@ inline auto jit_record_embedding(const ::tenzor::Tensor& weight,
     tracer.record_op(std::move(op));
 }
 
+/// Record an `EmbeddingBag` op into the active JIT trace, if any (JIT-R056).
+/// EmbeddingBagBackward::forward()'s CPU fallback (no OpId::EmbeddingBagForward
+/// kernel registered for CPU) and EmbeddingBag::aggregate_embeddings()'s
+/// no-grad CPU aggregation both compute the per-bag reduction via a raw host
+/// loop — zero dispatch() calls — so the dispatch interceptor never sees
+/// them. `embeddings` is the ALREADY-GATHERED per-index rows (shape
+/// [total_elements, embedding_dim], i.e. weight[indices] — not the raw
+/// weight table), matching the same [gathered_embeddings, offsets] input
+/// convention as the OpId::EmbeddingBagForward dispatch path (JIT-R056
+/// EXTENDED) so both paths produce interchangeable graph nodes.
+inline auto jit_record_embedding_bag(const ::tenzor::Tensor& embeddings,
+                                     const ::tenzor::Tensor& offsets,
+                                     const ::tenzor::Tensor& output,
+                                     const std::string& mode,
+                                     int64_t embedding_dim,
+                                     bool include_last_offset) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto e_id = tracer.register_tensor(embeddings);
+    auto o_id = tracer.register_tensor(offsets);
+    auto out_id = tracer.register_new_tensor(output);
+    ::tenzor::jit::TracedOp traced_op(::tenzor::jit::OpType::EmbeddingBag,
+                                      {e_id, o_id}, {out_id});
+    traced_op.int_attrs["embedding_bag_mode"] =
+        (mode == "mean") ? 1 : (mode == "max") ? 2 : 0;
+    traced_op.int_attrs["embedding_dim"] = embedding_dim;
+    traced_op.bool_attrs["include_last_offset"] = include_last_offset;
+    tracer.record_op(std::move(traced_op));
+}
+
 }  // namespace
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
@@ -693,6 +723,10 @@ public:
             output = output.to(original_device);
         }
 
+        jit_record_embedding_bag(
+            emb_tensor,
+            has_offsets_ ? offsets_ : zeros({1}, DType::Int64, original_device),
+            output, mode_, embedding_dim_, include_last_offset_);
         return {Variable(output, inputs[0].requires_grad())};
     }
 
@@ -1401,6 +1435,9 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings,
             output = output.to(original_device);
         }
 
+        jit_record_embedding_bag(
+            emb_tensor, zeros({1}, DType::Int64, original_device),
+            output, mode_, embedding_dim, include_last_offset_);
         return Variable(output, false);
     }
 
@@ -1481,6 +1518,8 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings,
         output = output.to(original_device);
     }
 
+    jit_record_embedding_bag(emb_tensor, offsets_tensor, output,
+                             mode_, embedding_dim, include_last_offset_);
     return Variable(output, false);
 }
 

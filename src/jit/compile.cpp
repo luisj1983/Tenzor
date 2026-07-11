@@ -40,8 +40,13 @@ namespace mlir_detail {
 
 #ifdef TENZOR_HAS_MLIR_JIT
 struct MlirInvokerCache {
+    // JIT-R014: shared_ptr (not unique_ptr) so the cache-hit fast path can
+    // copy a handle out under mutex_ and invoke it AFTER releasing the lock
+    // — mirrors cache_'s (the nvrtc path's) identical shared_ptr<CompiledModule>
+    // pattern, fixing the same "mutex_ held across the full invocation,
+    // serializing every concurrent call" anti-pattern already fixed there.
     std::unordered_map<std::string,
-                       std::unique_ptr<::tenzor::jit::mlir_jit::IreeInvoker>>
+                       std::shared_ptr<::tenzor::jit::mlir_jit::IreeInvoker>>
         invokers;
 };
 #else
@@ -143,6 +148,25 @@ auto CompiledFunction::set_parameters(
 auto CompiledFunction::with_parameters(
     std::vector<std::shared_ptr<Variable>> params) -> CompiledFunction& {
     set_parameters(std::move(params));
+    return *this;
+}
+
+// JIT-R005 fix: mirrors set_parameters()/with_parameters() exactly, for
+// non-trainable buffers (BatchNorm/InstanceNorm running_mean_/running_var_).
+auto CompiledFunction::set_buffers(
+    std::vector<std::shared_ptr<Variable>> buffers) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    buffers_ = std::move(buffers);
+    cache_.clear();
+    if (mlir_cache_) {
+        mlir_cache_->invokers.clear();
+    }
+    warmup_counts_.clear();
+}
+
+auto CompiledFunction::with_buffers(
+    std::vector<std::shared_ptr<Variable>> buffers) -> CompiledFunction& {
+    set_buffers(std::move(buffers));
     return *this;
 }
 
@@ -653,6 +677,13 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs,
         if (!parameters_.empty()) {
             tracer.set_parameters(parameters_);
         }
+        // JIT-R005 fix: same declaration for non-trainable buffers, so
+        // end_trace() classifies a captured buffer (e.g. BatchNorm's
+        // running_mean_/running_var_) as a live buffer leaf instead of
+        // freezing it as a constant.
+        if (!buffers_.empty()) {
+            tracer.set_buffers(buffers_);
+        }
     }
 
     // Push a tracing interceptor onto the dispatch stack
@@ -919,7 +950,31 @@ static auto detect_vulkan_iree_target(const ::tenzor::Device& in_dev)
         std::string v = info.vendor;
         std::transform(v.begin(), v.end(), v.begin(),
                        [](unsigned char c) { return std::tolower(c); });
-        if (v.find("nvidia") != std::string::npos) return "ampere";
+        if (v.find("nvidia") != std::string::npos) {
+            // JIT-R108: a single hardcoded "ampere" for every NVIDIA GPU was
+            // confirmed (via a standalone iree-run-module repro built while
+            // investigating JIT-R106) to fail to even initialize
+            // (VK_ERROR_INITIALIZATION_FAILED / SIGSEGV) on Blackwell
+            // (RTX 50-series) hardware, where "ada" compiles and runs
+            // cleanly instead. Parse the reported product name for a
+            // generation marker rather than guessing a single fixed value.
+            // "ada"/"ampere" are the only two target strings empirically
+            // verified against this IREE build; unrecognized/future NVIDIA
+            // generations fall back to the generic default profile below
+            // rather than a confidently wrong specific target — this IREE
+            // build does not yet recognize a dedicated "blackwell" target,
+            // so Blackwell-generation cards use "ada" as the newest
+            // available, empirically-working profile.
+            std::string name = info.name;
+            std::transform(name.begin(), name.end(), name.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (name.find("rtx 50") != std::string::npos ||
+                name.find("rtx pro 6000") != std::string::npos) return "ada";
+            if (name.find("rtx 40") != std::string::npos) return "ada";
+            if (name.find("rtx 30") != std::string::npos ||
+                name.find("a100") != std::string::npos) return "ampere";
+            return {};
+        }
         if (v.find("amd") != std::string::npos ||
             v.find("radeon") != std::string::npos) return "rdna3";
         if (v.find("intel") != std::string::npos) return "arc";
@@ -1041,32 +1096,42 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
         if (v.requires_grad()) { any_requires_grad = true; break; }
     }
 
-    // Cache-hit fast path.
+    // Cache-hit fast path. JIT-R014: copy the invoker's shared_ptr handle
+    // out under the lock, then RELEASE it before calling invoke() — mirrors
+    // the nvrtc cache-hit fix above (see that comment for the full
+    // rationale). Previously mutex_ was held across the entire IREE
+    // invocation, serializing every concurrent call to this
+    // backend="mlir" CompiledFunction, unlike the identical nvrtc path.
+    std::shared_ptr<mj::IreeInvoker> hit_invoker;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = mlir_cache_->invokers.find(key);
         if (it != mlir_cache_->invokers.end()) {
-            mj::internal::record_cache_hit();
-            auto outs = it->second->invoke(input_tensors);
-            if (outs.size() != 1) {
-                throw std::runtime_error(
-                    "MLIR backend: expected exactly 1 output tensor from "
-                    "@main, got " +
-                    std::to_string(outs.size()));
+            hit_invoker = it->second;
+        } else {
+            // Miss. If we've already compiled something else for a different
+            // shape, this counts as a retrace (a new shape forces a fresh trace).
+            mj::internal::record_cache_miss();
+            if (!mlir_cache_->invokers.empty()) {
+                mj::internal::record_retrace();
             }
-            // Place the host-staged output on the input's device (see the
-            // cache-miss path below for rationale).
-            ::tenzor::Tensor out0 = std::move(outs[0]);
-            const auto out_dev = inputs[0].tensor().device();
-            if (out0.device() != out_dev) out0 = out0.to(out_dev);
-            return Variable(std::move(out0), any_requires_grad);
         }
-        // Miss. If we've already compiled something else for a different
-        // shape, this counts as a retrace (a new shape forces a fresh trace).
-        mj::internal::record_cache_miss();
-        if (!mlir_cache_->invokers.empty()) {
-            mj::internal::record_retrace();
+    }
+    if (hit_invoker) {
+        mj::internal::record_cache_hit();
+        auto outs = hit_invoker->invoke(input_tensors);
+        if (outs.size() != 1) {
+            throw std::runtime_error(
+                "MLIR backend: expected exactly 1 output tensor from "
+                "@main, got " +
+                std::to_string(outs.size()));
         }
+        // Place the host-staged output on the input's device (see the
+        // cache-miss path below for rationale).
+        ::tenzor::Tensor out0 = std::move(outs[0]);
+        const auto out_dev = inputs[0].tensor().device();
+        if (out0.device() != out_dev) out0 = out0.to(out_dev);
+        return Variable(std::move(out0), any_requires_grad);
     }
 
     // Cache miss: trace → lower → compile → load invoker → cache. Thread the

@@ -523,133 +523,35 @@ auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {
 // Triangular, Diagonal, and Flip Operations
 // =========================================================================
 
-namespace {
-// Helper: apply a per-element operation on the last two dims of a tensor
-template<typename Func>
-auto triangular_op(const Tensor& input, int64_t diagonal, Func&& should_keep) -> Tensor {
-    if (input.ndim() < 2) {
-        throw std::runtime_error("triu/tril requires at least 2D tensor");
-    }
-
-    auto cont = input.is_contiguous() ? input : input.contiguous();
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    auto result = zeros(shape_vec, input.dtype(), input.device());
-
-    auto shape = cont.shape();
-    int64_t rows = shape[input.ndim() - 2];
-    int64_t cols = shape[input.ndim() - 1];
-    // A zero-size matrix dimension makes the per-batch element count zero, so
-    // batch_size = numel / (rows*cols) would divide by zero. The result is
-    // already the correctly-shaped zero tensor; return it directly.
-    if (rows == 0 || cols == 0) {
-        return result;
-    }
-    int64_t batch_size = cont.numel() / (rows * cols);
-    auto elem_size = dtype_size(input.dtype());
-
-    const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
-    auto* dst = static_cast<uint8_t*>(result.data_ptr());
-
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t i = 0; i < rows; ++i) {
-            for (int64_t j = 0; j < cols; ++j) {
-                if (should_keep(i, j, diagonal)) {
-                    int64_t idx = (b * rows * cols + i * cols + j) * elem_size;
-                    std::memcpy(dst + idx, src + idx, elem_size);
-                }
-            }
-        }
-    }
-    return result;
-}
-} // anonymous namespace
-
 auto triu(const Tensor& input, int64_t diagonal) -> Tensor {
-    if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Diagonal, diagonal);
-        return dispatch(OpId::Triu, std::span<const Tensor>(&input, 1), attrs)[0];
-    }
-    return triangular_op(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
-        return j >= i + d;  // Keep upper triangle
-    });
+    // Always dispatch OpId::Triu (every backend, including CPU via
+    // cpu::triu_kernel, provides a kernel) instead of a CPU-only manual path
+    // that bypassed dispatch — lets the JIT tracer capture Triu on ALL
+    // backends rather than being invisible to it on CPU (JIT-R038).
+    OpAttributes attrs;
+    attrs.set(AttrKey::Diagonal, diagonal);
+    return dispatch(OpId::Triu, std::span<const Tensor>(&input, 1), attrs)[0];
 }
 
 auto tril(const Tensor& input, int64_t diagonal) -> Tensor {
-    if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Diagonal, diagonal);
-        return dispatch(OpId::Tril, std::span<const Tensor>(&input, 1), attrs)[0];
-    }
-    return triangular_op(input, diagonal, [](int64_t i, int64_t j, int64_t d) {
-        return j <= i + d;  // Keep lower triangle
-    });
+    // Always dispatch OpId::Tril — see triu() above for why (JIT-R038).
+    OpAttributes attrs;
+    attrs.set(AttrKey::Diagonal, diagonal);
+    return dispatch(OpId::Tril, std::span<const Tensor>(&input, 1), attrs)[0];
 }
 
 auto diag(const Tensor& input, int64_t diagonal) -> Tensor {
-    if (input.ndim() == 1) {
-        // 1D -> 2D: construct diagonal matrix
-        int64_t n = input.shape()[0];
-        int64_t abs_diag = std::abs(diagonal);
-        int64_t size = n + abs_diag;
-
-        if (input.device().type != Device::Type::CPU) {
-            OpAttributes attrs;
-            attrs.set(AttrKey::Diagonal, diagonal);
-            return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
-        }
-
-        // Allocate the size x size result only on the CPU path that fills it; the
-        // non-CPU dispatch above produces its own output, so allocating here
-        // would waste an O(n^2) zero-filled tensor on GPU devices.
-        auto result = zeros({size, size}, input.dtype(), input.device());
-
-        auto cont = input.is_contiguous() ? input : input.contiguous();
-        auto elem_size = dtype_size(input.dtype());
-        const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
-        auto* dst = static_cast<uint8_t*>(result.data_ptr());
-
-        for (int64_t i = 0; i < n; ++i) {
-            int64_t row = diagonal >= 0 ? i : i - diagonal;
-            int64_t col = diagonal >= 0 ? i + diagonal : i;
-            int64_t dst_idx = (row * size + col) * elem_size;
-            int64_t src_idx = i * elem_size;
-            std::memcpy(dst + dst_idx, src + src_idx, elem_size);
-        }
-        return result;
-    } else if (input.ndim() == 2) {
-        // 2D -> 1D: extract diagonal
-        if (input.device().type != Device::Type::CPU) {
-            OpAttributes attrs;
-            attrs.set(AttrKey::Diagonal, diagonal);
-            return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
-        }
-
-        auto cont = input.is_contiguous() ? input : input.contiguous();
-        int64_t rows = input.shape()[0];
-        int64_t cols = input.shape()[1];
-        int64_t start_row = diagonal >= 0 ? 0 : -diagonal;
-        int64_t start_col = diagonal >= 0 ? diagonal : 0;
-        int64_t diag_len = std::min(rows - start_row, cols - start_col);
-        if (diag_len <= 0) {
-            return empty({0}, input.dtype(), input.device());
-        }
-
-        auto result = empty({diag_len}, input.dtype(), input.device());
-        auto elem_size = dtype_size(input.dtype());
-        const auto* src = static_cast<const uint8_t*>(cont.data_ptr());
-        auto* dst = static_cast<uint8_t*>(result.data_ptr());
-
-        for (int64_t i = 0; i < diag_len; ++i) {
-            int64_t src_idx = ((start_row + i) * cols + (start_col + i)) * elem_size;
-            int64_t dst_idx = i * elem_size;
-            std::memcpy(dst + dst_idx, src + src_idx, elem_size);
-        }
-        return result;
-    } else {
+    if (input.ndim() != 1 && input.ndim() != 2) {
         throw std::runtime_error("diag: input must be 1D or 2D, got " +
                                  std::to_string(input.ndim()) + "D");
     }
+    // Always dispatch OpId::Diag (handles both the 1D->2D construct and
+    // 2D->1D extract forms — every backend, including CPU via
+    // cpu::diag_kernel, provides a kernel) instead of a CPU-only manual path
+    // that bypassed dispatch — see triu() above for why (JIT-R038).
+    OpAttributes attrs;
+    attrs.set(AttrKey::Diagonal, diagonal);
+    return dispatch(OpId::Diag, std::span<const Tensor>(&input, 1), attrs)[0];
 }
 
 auto trace(const Tensor& input) -> Tensor {
@@ -663,13 +565,8 @@ auto trace(const Tensor& input) -> Tensor {
                                  std::to_string(input.ndim()) + "D");
     }
 
-    if (input.device().type != Device::Type::CPU) {
-        return dispatch(OpId::Trace, std::span<const Tensor>(&input, 1), {})[0];
-    }
-
-    // Extract main diagonal and sum
-    auto diagonal = diag(input, 0);
-    return tenzor::sum(diagonal, std::nullopt, false);
+    // Always dispatch OpId::Trace — see triu() above for why (JIT-R038).
+    return dispatch(OpId::Trace, std::span<const Tensor>(&input, 1), {})[0];
 }
 
 auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor {

@@ -98,7 +98,15 @@ def _compile_function(fn: Callable, *, backend: str, target: str,
         # C++ binding raises a generic RuntimeError (rather than the submodule
         # being absent). Treat that exactly like a disabled build so callers get
         # the consistent JitNotEnabledError contract.
-        if "TENZOR_USE_MLIR_JIT" in str(e):
+        #
+        # JIT-R077: match the exact literal phrase all 7 "built without MLIR
+        # JIT" throw sites in compile.cpp share ("built without
+        # TENZOR_USE_MLIR_JIT=ON"), not just the bare macro name. The two
+        # sides are still coupled only by string convention (no shared
+        # sentinel type/code), but a future coverage-gap error that merely
+        # MENTIONS the macro name in passing (e.g. "set TENZOR_USE_MLIR_JIT=ON
+        # to enable X") no longer collides with this check.
+        if "built without TENZOR_USE_MLIR_JIT=ON" in str(e):
             return _disabled_stub(fn, _MLIR_OFF_MSG)
         raise
 
@@ -116,7 +124,9 @@ def jit(fn: Callable[..., Any] | None = None, *,
             target from the input tensor's device.
         fallback_to_eager: if True, ops not yet supported by the MLIR
             lowering fall back to eager execution silently. Default False
-            — coverage gaps throw JitLoweringError loudly.
+            — coverage gaps throw a RuntimeError loudly (translated by
+            pybind11 from the underlying C++ exception; there is no
+            dedicated JitLoweringError type to catch).
 
     Returns:
         A wrapped function that traces on first call (per shape+dtype),
@@ -172,27 +182,38 @@ def jit(fn: Callable[..., Any] | None = None, *,
             key = (len(call_args),) + tuple(_key_part(i, v) for i, v in static_items)
             variant = _variants.get(key)
             if variant is None:
-                if not static_items:
-                    target_fn: Callable = f
-                else:
-                    _sm = dict(static_items)
-                    _n = len(call_args)
+                # JIT-R075: the get-check-set above is an unprotected race —
+                # two threads hitting the same NEW static-arg key can both
+                # miss and independently compile (wasted duplicate work, not
+                # wrong numerics since both wrap the identical closure).
+                # _lock is the same lock guarding _tz_compiled/_tz_last_examples
+                # below; re-check under the lock (double-checked locking) so a
+                # thread that loses the race reuses the winner's variant
+                # instead of compiling again.
+                with _lock:
+                    variant = _variants.get(key)
+                    if variant is None:
+                        if not static_items:
+                            target_fn: Callable = f
+                        else:
+                            _sm = dict(static_items)
+                            _n = len(call_args)
 
-                    def target_fn(*tensors: Any) -> Any:
-                        merged = []
-                        ti = 0
-                        for i in range(_n):
-                            if i in _sm:
-                                merged.append(_sm[i])
-                            else:
-                                merged.append(tensors[ti])
-                                ti += 1
-                        return f(*merged)
+                            def target_fn(*tensors: Any) -> Any:
+                                merged = []
+                                ti = 0
+                                for i in range(_n):
+                                    if i in _sm:
+                                        merged.append(_sm[i])
+                                    else:
+                                        merged.append(tensors[ti])
+                                        ti += 1
+                                return f(*merged)
 
-                variant = _compile_function(
-                    target_fn, backend="mlir", target=target,
-                    fallback_to_eager=fallback_to_eager)
-                _variants[key] = variant
+                        variant = _compile_function(
+                            target_fn, backend="mlir", target=target,
+                            fallback_to_eager=fallback_to_eager)
+                        _variants[key] = variant
             return variant, tuple(tensor_args)
 
         @functools.wraps(f)
@@ -238,12 +259,25 @@ def jit(fn: Callable[..., Any] | None = None, *,
             try:
                 return variant(*tensor_args)
             except Exception as e:
+                msg = str(e)
+                # JIT-R078: an all-static-argument function (e.g.
+                # `@tz.jit def f(n): return tz.zeros([n])`) has zero tensor
+                # operands to forward to the positional-Variable-only
+                # compiled core, which raises this raw C++-flavored message.
+                # Give a clear @tz.jit-specific explanation instead of
+                # letting it through unmodified.
+                if not tensor_args and "expected at least one positional Variable input" in msg:
+                    raise TypeError(
+                        "@tz.jit: this function has no tensor arguments — every "
+                        "argument was treated as static (baked into the traced "
+                        "graph). A function with no tensor inputs at all cannot "
+                        "be JIT-compiled this way; call it directly without "
+                        f"@tz.jit. (underlying: {e})") from e
                 # The compiled core casts the return value to a SINGLE Variable; a
                 # function returning multiple tensors fails that cast (JIT-060).
                 # Add a clear hint ONLY when the error looks like that cast — do
                 # NOT re-run f() (that would duplicate side effects), and do not
                 # mask unrelated errors.
-                msg = str(e)
                 if (("tuple" in msg or "list" in msg) and
                         ("Variable" in msg or "cast" in msg.lower())):
                     raise TypeError(
@@ -335,6 +369,33 @@ def _jit_show_fn(name: str):
     return fn
 
 
+def _call_show(show: Any, compiled: Any, examples: tuple) -> str:
+    """Invoke a show_*() C++ helper, translating a signature-mismatch
+    TypeError from the seed variant (JIT-R076) into a clear message.
+
+    The seed `_tz_compiled` a @tz.jit-decorated function starts with (before
+    its first real call) always wraps the RAW function `f`, expecting f's
+    FULL signature — including any static (non-tensor) arguments (see
+    `_wrap`'s `_call._tz_compiled = _variant_for(())[0]` seeding). If `f`
+    takes static args and a show_*() helper is called before f() ever ran
+    normally, the seed's retrace fails with a raw "f() missing required
+    positional argument" TypeError from deep in the trace machinery. Give a
+    clear, @tz.jit-specific hint instead of letting that raw message through.
+    """
+    try:
+        return show(compiled, *examples)
+    except TypeError as e:
+        msg = str(e)
+        if "missing" in msg and "positional argument" in msg:
+            raise TypeError(
+                "@tz.jit: this function has never been called normally, and "
+                "its signature includes static (non-tensor) arguments — "
+                "pass ALL of the function's arguments (static and tensor) "
+                "as examples here, or call the function once first. "
+                f"(underlying: {e})") from e
+        raise
+
+
 def show_graph(fn: Any, *examples: Any) -> str:
     """Dump the tenzor::jit::Graph IR after tracing. Pass one example per
     argument of the decorated function (or none to reuse the last call)."""
@@ -342,7 +403,7 @@ def show_graph(fn: Any, *examples: Any) -> str:
     compiled, last = _snapshot_compiled_and_examples(fn)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return show(compiled, *_resolve_examples(last, examples))
+    return _call_show(show, compiled, _resolve_examples(last, examples))
 
 
 def show_mlir(fn: Any, *examples: Any) -> str:
@@ -351,7 +412,7 @@ def show_mlir(fn: Any, *examples: Any) -> str:
     compiled, last = _snapshot_compiled_and_examples(fn)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return show(compiled, *_resolve_examples(last, examples))
+    return _call_show(show, compiled, _resolve_examples(last, examples))
 
 
 def show_stablehlo(fn: Any, *examples: Any) -> str:
@@ -360,7 +421,7 @@ def show_stablehlo(fn: Any, *examples: Any) -> str:
     compiled, last = _snapshot_compiled_and_examples(fn)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return show(compiled, *_resolve_examples(last, examples))
+    return _call_show(show, compiled, _resolve_examples(last, examples))
 
 
 def show_iree(fn: Any, *examples: Any) -> str:
@@ -369,7 +430,7 @@ def show_iree(fn: Any, *examples: Any) -> str:
     compiled, last = _snapshot_compiled_and_examples(fn)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return show(compiled, *_resolve_examples(last, examples))
+    return _call_show(show, compiled, _resolve_examples(last, examples))
 
 
 def cache_stats() -> dict:

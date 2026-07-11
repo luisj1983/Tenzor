@@ -13,6 +13,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cmath>
 #include <tuple>
 
@@ -64,6 +65,30 @@ auto MixtureOfExperts::forward_impl(const Variable& input) -> Variable {
 
 auto MixtureOfExperts::forward_with_loss(const Variable& input)
     -> std::pair<Variable, Variable> {
+    // JIT-R050: MoE's per-expert routing is fundamentally data-dependent —
+    // which experts fire, how many tokens each gets (M = routed.shape()[0]
+    // below), and which tokens get dropped to capacity are all host-side
+    // decisions made from the ACTUAL routing output of THIS call. A trace
+    // captures exactly one input's routing outcome and bakes it in as
+    // static graph structure; every future compiled-and-replayed input
+    // would be forced through that frozen routing regardless of its own
+    // actual routing decision — a silent wrong answer, not a crash. No
+    // dedicated MoE OpType exists to represent dynamic per-expert dispatch
+    // (that needs real JIT-aware dynamic-shape primitives — a new feature,
+    // not a point fix). Refuse loudly instead of silently compiling
+    // something wrong, matching the established "can't be safely captured
+    // mid-trace" contract used elsewhere (e.g. autograd::spmm's
+    // CSR-layout guard in src/autograd/ops.cpp).
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "MixtureOfExperts::forward: cannot be traced by @tz.jit — "
+            "per-expert routing (which experts fire, how many tokens each "
+            "gets, capacity-based token dropping) is data-dependent and "
+            "would be permanently frozen to this trace call's routing "
+            "decision, silently producing wrong output for every other "
+            "input. Run this module eagerly (outside a traced region).");
+    }
+
     // input: [..., input_dim]. Flatten to [N, input_dim] for routing.
     //
     // Followup #21 fix: previous version used raw tensor ops throughout this
@@ -139,8 +164,19 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
         Tensor w_e = tenzor::zeros({N}, input.tensor().dtype(),
                                    input.tensor().device());
         for (int64_t k = 0; k < top_k_; ++k) {
-            auto idx_col = topk_idx.slice(1, k, k + 1).squeeze(1);        // [N] int
-            auto weight_col = topk_weights.slice(1, k, k + 1).squeeze(1); // [N]
+            // JIT-R050: raw Tensor::slice()/squeeze() METHOD calls never go
+            // through dispatch() (tenzor::slice(Tensor,...)/squeeze(Tensor,...)
+            // are themselves thin wrappers around the same raw methods, per
+            // JIT-R031's identical gotcha — NOT dispatched either). Route
+            // through the autograd Variable-level slice/squeeze, which IS
+            // dispatch()-routed (and hence tracer-visible) even when wrapped
+            // requires_grad=false, matching this file's existing
+            // Variable(sel_mask,false)-style idiom for non-differentiable
+            // index/coefficient tensors.
+            auto idx_col = tenzor::squeeze(
+                tenzor::slice(Variable(topk_idx, false), 1, k, k + 1), 1).tensor();        // [N] int
+            auto weight_col = tenzor::squeeze(
+                tenzor::slice(Variable(topk_weights, false), 1, k, k + 1), 1).tensor(); // [N]
             auto e_scalar = tenzor::full({1}, static_cast<double>(e),
                                          idx_col.dtype(), idx_col.device());
             auto mask_f = tenzor::eq(idx_col, e_scalar).to(input.tensor().dtype());
@@ -212,7 +248,9 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
     // Auxiliary load balancing loss (separate path; doesn't need to flow
     // through the expert outputs to remain useful, but it does need to flow
     // through `probs_v` so the router learns).
-    auto top1_idx = topk_idx.slice(1, 0, 1).squeeze(1);
+    // JIT-R050: same raw-Tensor-method dispatch-bypass fix as the loop above.
+    auto top1_idx = tenzor::squeeze(
+        tenzor::slice(Variable(topk_idx, false), 1, 0, 1), 1).tensor();
 
     auto expert_counts = tenzor::zeros({num_experts_}, DType::Float32, input.tensor().device());
     for (int64_t e = 0; e < num_experts_; ++e) {

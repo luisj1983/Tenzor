@@ -8,6 +8,9 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/autograd/variable.hpp"
+#include "tenzor/autograd/ops.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <cstdint>
 #include <complex>
 #include <limits>
@@ -38,6 +41,23 @@ inline void validate_index_dtype(const Tensor& index, const char* op) {
 inline Tensor validate_and_cast_index(const Tensor& index, const char* op) {
     validate_index_dtype(index, op);
     return (index.dtype() == DType::Int32) ? index.to(DType::Int64) : index;
+}
+
+inline auto jit_tracing_active() -> bool {
+    return ::tenzor::jit::Tracer::get_instance().is_tracing();
+}
+
+// JIT-R085: select() is pure `input.slice(...).squeeze(...)` — both raw
+// TensorImpl metadata tricks with ZERO dispatch() calls, invisible to the
+// tracer. Route through the Variable-level tracer-aware wrappers instead
+// (mirrors lstm.cpp/quantized_layers.cpp's traced_slice/traced_squeeze
+// pattern, and src/ops/detection.cpp's identical local copy).
+inline auto traced_slice(const Tensor& t, int64_t dim, int64_t start,
+                          int64_t end, int64_t step = 1) -> Tensor {
+    return ::tenzor::slice(::tenzor::Variable(t, false), dim, start, end, step).tensor();
+}
+inline auto traced_squeeze(const Tensor& t, int64_t dim) -> Tensor {
+    return ::tenzor::squeeze(::tenzor::Variable(t, false), dim).tensor();
 }
 }  // namespace
 
@@ -300,28 +320,16 @@ auto put(const Tensor& input, const Tensor& index, const Tensor& source) -> Tens
     return dispatch(OpId::Put, inputs)[0];
 }
 
-auto nonzero(const Tensor& input) -> Tensor {
+namespace {
+// JIT-R085: the CPU path below never calls dispatch() — a raw host loop,
+// invisible to the tracer's generic dispatch<OpId> interception (unlike the
+// GPU path above, which dispatches OpId::Nonzero and is auto-recorded now
+// that JIT-R100 mapped it in opid_to_optype). Extracted so nonzero() can
+// manually record around it, mirroring JIT-R098/R100's manual Tracer-API
+// pattern.
+Tensor nonzero_cpu_impl(const Tensor& input) {
     auto shape = input.shape();
     int64_t ndim = shape.size();
-
-    // Use backend dispatch for non-CPU devices (avoids GPU→CPU→GPU round-trip)
-    if (input.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        // Pass shape info so the backend can compute multi-dimensional indices
-        std::string shape_str;
-        for (size_t i = 0; i < shape.size(); ++i) {
-            if (i > 0) shape_str += ",";
-            shape_str += std::to_string(shape[i]);
-        }
-        attrs.set(AttrKey::Shape, shape_str);
-        attrs.set(AttrKey::Dim, ndim);
-
-        std::vector<Tensor> inputs = {input};
-        auto results = dispatch(OpId::Nonzero, inputs, attrs);
-        return results[0];
-    }
-
-    // CPU fallback — dtype-aware nonzero check
     auto input_cpu = input.to(Device::cpu());
     int64_t numel = input.numel();
 
@@ -388,6 +396,44 @@ auto nonzero(const Tensor& input) -> Tensor {
     auto result = tenzor::from_data(result_data.data(), {num_nonzero, ndim}, Device::cpu());
     return result;
 }
+}  // namespace
+
+auto nonzero(const Tensor& input) -> Tensor {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    // Use backend dispatch for non-CPU devices (avoids GPU→CPU→GPU round-trip)
+    if (input.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        // Pass shape info so the backend can compute multi-dimensional indices
+        std::string shape_str;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i > 0) shape_str += ",";
+            shape_str += std::to_string(shape[i]);
+        }
+        attrs.set(AttrKey::Shape, shape_str);
+        attrs.set(AttrKey::Dim, ndim);
+
+        std::vector<Tensor> inputs = {input};
+        auto results = dispatch(OpId::Nonzero, inputs, attrs);
+        return results[0];
+    }
+
+    // JIT-R085: nonzero_cpu_impl never dispatches — manually record here so
+    // this call site is tracer-visible, matching the GPU path's now-automatic
+    // recording (JIT-R100's opid_to_optype mapping).
+    if (jit_tracing_active()) {
+        auto& tracer = ::tenzor::jit::Tracer::get_instance();
+        auto input_id = tracer.register_tensor(input);
+        Tensor result = nonzero_cpu_impl(input);
+        auto output_id = tracer.register_new_tensor(result);
+        ::tenzor::jit::TracedOp op(
+            ::tenzor::jit::OpType::Nonzero, {input_id}, {output_id});
+        tracer.record_op(std::move(op));
+        return result;
+    }
+    return nonzero_cpu_impl(input);
+}
 
 auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor {
     // Normalize dimension
@@ -406,8 +452,8 @@ auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor {
     }
 
     // Use slice to get the single element, then squeeze to remove the dimension
-    auto sliced = input.slice(dim, index, index + 1, 1);
-    return sliced.squeeze(dim);
+    auto sliced = traced_slice(input, dim, index, index + 1, 1);
+    return traced_squeeze(sliced, dim);
 }
 
 auto narrow(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> Tensor {
@@ -778,7 +824,8 @@ auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, float val
 
 auto bincount(const Tensor& input,
               const std::optional<Tensor>& weights,
-              int64_t minlength) -> Tensor {
+              int64_t minlength,
+              bool validate) -> Tensor {
     if (input.ndim() != 1) {
         throw std::runtime_error("bincount: input must be 1-dimensional");
     }
@@ -789,7 +836,11 @@ auto bincount(const Tensor& input,
     // bincount counts occurrences of non-negative integers; a negative value
     // would index a negative bin in the backend kernel. Check the minimum via
     // an on-device reduction (only the scalar result reaches the host).
-    if (input.numel() > 0) {
+    // JIT-R100: this .item() read is an unconditional tracer graph-break
+    // (a genuine data-dependent branch), so trusted internal callers with a
+    // provably-valid input (e.g. SparseTensor::to_csr()) pass validate=false
+    // to stay traceable — see this function's doc comment.
+    if (validate && input.numel() > 0) {
         int64_t lo = tenzor::min(input.to(DType::Int64)).item<int64_t>();
         if (lo < 0) {
             throw std::runtime_error(

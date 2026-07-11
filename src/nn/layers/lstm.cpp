@@ -19,6 +19,36 @@
 
 namespace tenzor::nn {
 
+namespace {
+// JIT-R072: Tensor::slice()/reshape()/transpose()/unsqueeze() are pure
+// TensorImpl metadata tricks with ZERO dispatch() calls — invisible to both
+// the tracer's generic dispatch<OpId> interception and its own tensor
+// lineage map (same bug class as JIT-R052/R058a). Currently masked
+// (OpId::LSTMForward/BiLSTMForward/LSTMCudnnTrainForward are all unmapped,
+// so the dispatch() call these wrap graph-breaks first regardless of
+// whether the operands were traced), but this is the correct fix ready for
+// when LSTM JIT tracing support is added. Mirrors quantized_layers.cpp's
+// traced_slice/traced_squeeze/traced_unsqueeze/traced_permute exactly:
+// routes through the Variable-level autograd wrappers, which DO call
+// jit_record_shape_op() when tracing is active. Safe to wrap in
+// Variable(t, false) — every call site below is inference-only glue around
+// a dispatch() call (the can_use_fused / cuDNN-training-forward fast
+// paths), not user-facing autograd.
+inline auto traced_slice(const Tensor& t, int64_t dim, int64_t start,
+                          int64_t end, int64_t step = 1) -> Tensor {
+    return ::tenzor::slice(::tenzor::Variable(t, false), dim, start, end, step).tensor();
+}
+inline auto traced_reshape(const Tensor& t, std::vector<int64_t> shape) -> Tensor {
+    return ::tenzor::reshape(::tenzor::Variable(t, false), std::move(shape)).tensor();
+}
+inline auto traced_transpose(const Tensor& t, int64_t dim0, int64_t dim1) -> Tensor {
+    return ::tenzor::transpose(::tenzor::Variable(t, false), dim0, dim1).tensor();
+}
+inline auto traced_unsqueeze(const Tensor& t, int64_t dim) -> Tensor {
+    return ::tenzor::unsqueeze(::tenzor::Variable(t, false), dim).tensor();
+}
+}  // namespace
+
 // ============================================================================
 // LSTMCell Implementation
 // ============================================================================
@@ -485,6 +515,27 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         !input.requires_grad() &&
         !tenzor::is_grad_enabled();
 
+    // JIT-R102 (non-JIT, same review pass): the fused-kernel blocks below
+    // read Parameter tensors directly (bypassing LSTMCell::forward, whose
+    // own device-alignment above -- `weight_ih_->to(input_device)` -- is
+    // what normally handles a lazily-placed module: constructed on CPU,
+    // then called with a GPU input, the common workflow). Mirror that same
+    // established mutating in-place move here so every raw ->tensor()
+    // extraction below already reads an input-device tensor. Guarded same
+    // as LSTMCell::forward: only moves when the device actually differs.
+    if (can_use_fused) {
+        const auto align_cell = [&](std::shared_ptr<LSTMCell>& cell) {
+            if (cell->weight_ih()->weight()->device() != input.device()) {
+                cell->weight_ih()->to(input.device());
+            }
+            if (cell->weight_hh()->weight()->device() != input.device()) {
+                cell->weight_hh()->to(input.device());
+            }
+        };
+        for (auto& c : forward_cells_) align_cell(c);
+        for (auto& c : backward_cells_) align_cell(c);
+    }
+
     // Special fast path for single-layer bidirectional LSTM
     if (can_use_fused && bidirectional_ && num_layers_ == 1) {
         Tensor layer_input = x.tensor().contiguous();
@@ -535,7 +586,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         // construction; the leaf-Variable rewrap is intentional.
         Variable output(outputs[0], false);
         if (batch_first_) {
-            output = Variable(output.tensor().transpose(0, 1), false);
+            output = Variable(traced_transpose(output.tensor(), 0, 1), false);
         }
 
         return {output, {Variable(outputs[1], false), Variable(outputs[2], false)}};
@@ -583,14 +634,18 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             int64_t fwd_idx = layer * 2;
             int64_t bwd_idx = layer * 2 + 1;
 
-            Tensor h0_fwd = h.tensor().slice(0, fwd_idx, fwd_idx + 1)
-                            .reshape({kernel_batch, hidden_size_}).contiguous();
-            Tensor c0_fwd = c.tensor().slice(0, fwd_idx, fwd_idx + 1)
-                            .reshape({kernel_batch, hidden_size_}).contiguous();
-            Tensor h0_bwd = h.tensor().slice(0, bwd_idx, bwd_idx + 1)
-                            .reshape({kernel_batch, hidden_size_}).contiguous();
-            Tensor c0_bwd = c.tensor().slice(0, bwd_idx, bwd_idx + 1)
-                            .reshape({kernel_batch, hidden_size_}).contiguous();
+            Tensor h0_fwd = traced_reshape(
+                traced_slice(h.tensor(), 0, fwd_idx, fwd_idx + 1),
+                {kernel_batch, hidden_size_}).contiguous();
+            Tensor c0_fwd = traced_reshape(
+                traced_slice(c.tensor(), 0, fwd_idx, fwd_idx + 1),
+                {kernel_batch, hidden_size_}).contiguous();
+            Tensor h0_bwd = traced_reshape(
+                traced_slice(h.tensor(), 0, bwd_idx, bwd_idx + 1),
+                {kernel_batch, hidden_size_}).contiguous();
+            Tensor c0_bwd = traced_reshape(
+                traced_slice(c.tensor(), 0, bwd_idx, bwd_idx + 1),
+                {kernel_batch, hidden_size_}).contiguous();
 
             // Stack h0 and c0 for BiLSTM kernel: (2, batch, hidden)
             std::vector<Tensor> h0_list = {h0_fwd, h0_bwd};
@@ -611,10 +666,14 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             // outputs[2]: c_n (2, batch, hidden)
 
             // Store final states for this layer
-            final_h_states.push_back(outputs[1].slice(0, 0, 1).reshape({1, kernel_batch, hidden_size_}));
-            final_h_states.push_back(outputs[1].slice(0, 1, 2).reshape({1, kernel_batch, hidden_size_}));
-            final_c_states.push_back(outputs[2].slice(0, 0, 1).reshape({1, kernel_batch, hidden_size_}));
-            final_c_states.push_back(outputs[2].slice(0, 1, 2).reshape({1, kernel_batch, hidden_size_}));
+            final_h_states.push_back(traced_reshape(
+                traced_slice(outputs[1], 0, 0, 1), {1, kernel_batch, hidden_size_}));
+            final_h_states.push_back(traced_reshape(
+                traced_slice(outputs[1], 0, 1, 2), {1, kernel_batch, hidden_size_}));
+            final_c_states.push_back(traced_reshape(
+                traced_slice(outputs[2], 0, 0, 1), {1, kernel_batch, hidden_size_}));
+            final_c_states.push_back(traced_reshape(
+                traced_slice(outputs[2], 0, 1, 2), {1, kernel_batch, hidden_size_}));
 
             // Output becomes input for next layer
             layer_input = outputs[0].contiguous();
@@ -627,7 +686,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
 
         Variable output(layer_input, false);
         if (batch_first_) {
-            output = Variable(output.tensor().transpose(0, 1), false);
+            output = Variable(traced_transpose(output.tensor(), 0, 1), false);
         }
 
         // Stack all hidden states: (num_layers*2, batch, hidden)
@@ -668,14 +727,16 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             // the data layout is already (batch, hidden) - just view it
             Tensor h0_tensor, c0_tensor;
             if (h_tensor.is_contiguous() && h_tensor.shape()[0] == 1) {
-                h0_tensor = h_tensor.reshape({kernel_batch, hidden_size_});
+                h0_tensor = traced_reshape(h_tensor, {kernel_batch, hidden_size_});
             } else {
-                h0_tensor = h_tensor.slice(0, 0, 1).reshape({kernel_batch, hidden_size_}).contiguous();
+                h0_tensor = traced_reshape(
+                    traced_slice(h_tensor, 0, 0, 1), {kernel_batch, hidden_size_}).contiguous();
             }
             if (c_tensor.is_contiguous() && c_tensor.shape()[0] == 1) {
-                c0_tensor = c_tensor.reshape({kernel_batch, hidden_size_});
+                c0_tensor = traced_reshape(c_tensor, {kernel_batch, hidden_size_});
             } else {
-                c0_tensor = c_tensor.slice(0, 0, 1).reshape({kernel_batch, hidden_size_}).contiguous();
+                c0_tensor = traced_reshape(
+                    traced_slice(c_tensor, 0, 0, 1), {kernel_batch, hidden_size_}).contiguous();
             }
 
             // Pass both bias_ih and bias_hh for kernel to combine during cache setup
@@ -685,12 +746,12 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
 
             Variable output(outputs[0], false);
             if (batch_first_) {
-                output = Variable(output.tensor().transpose(0, 1), false);
+                output = Variable(traced_transpose(output.tensor(), 0, 1), false);
             }
 
             // outputs[1] is (batch, hidden) - unsqueeze to (1, batch, hidden)
-            Variable h_final(outputs[1].unsqueeze(0), false);
-            Variable c_final(outputs[2].unsqueeze(0), false);
+            Variable h_final(traced_unsqueeze(outputs[1], 0), false);
+            Variable c_final(traced_unsqueeze(outputs[2], 0), false);
 
             return {output, {h_final, c_final}};
         }
@@ -719,23 +780,25 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
                     ? cell->weight_hh()->bias()->tensor()
                     : empty({0}, DType::Float32, input.device());
 
-                Tensor h0_l = h.tensor().slice(0, layer, layer + 1)
-                    .reshape({kernel_batch, hidden_size_}).contiguous();
-                Tensor c0_l = c.tensor().slice(0, layer, layer + 1)
-                    .reshape({kernel_batch, hidden_size_}).contiguous();
+                Tensor h0_l = traced_reshape(
+                    traced_slice(h.tensor(), 0, layer, layer + 1),
+                    {kernel_batch, hidden_size_}).contiguous();
+                Tensor c0_l = traced_reshape(
+                    traced_slice(c.tensor(), 0, layer, layer + 1),
+                    {kernel_batch, hidden_size_}).contiguous();
 
                 std::vector<Tensor> inputs = {cur_input, W_ih_t, W_hh_t,
                                               b_ih, b_hh, h0_l, c0_l};
                 auto outputs = dispatch<OpId::LSTMForward>(inputs);
 
                 cur_input = outputs[0].contiguous();   // (seq, batch, hidden)
-                h_finals.push_back(outputs[1].unsqueeze(0));  // (1, batch, hidden)
-                c_finals.push_back(outputs[2].unsqueeze(0));
+                h_finals.push_back(traced_unsqueeze(outputs[1], 0));  // (1, batch, hidden)
+                c_finals.push_back(traced_unsqueeze(outputs[2], 0));
             }
 
             Variable output(cur_input, false);
             if (batch_first_) {
-                output = Variable(output.tensor().transpose(0, 1), false);
+                output = Variable(traced_transpose(output.tensor(), 0, 1), false);
             }
             Tensor h_n = cat(std::span<const Tensor>(h_finals), 0);
             Tensor c_n = cat(std::span<const Tensor>(c_finals), 0);
@@ -769,10 +832,12 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
                 bias_hh_tensor = empty({0}, DType::Float32, input.device());
             }
 
-            Tensor h0_layer = h.tensor().slice(0, layer, layer + 1)
-                                .reshape({batch_size, hidden_size_}).contiguous();
-            Tensor c0_layer = c.tensor().slice(0, layer, layer + 1)
-                                .reshape({batch_size, hidden_size_}).contiguous();
+            Tensor h0_layer = traced_reshape(
+                traced_slice(h.tensor(), 0, layer, layer + 1),
+                {batch_size, hidden_size_}).contiguous();
+            Tensor c0_layer = traced_reshape(
+                traced_slice(c.tensor(), 0, layer, layer + 1),
+                {batch_size, hidden_size_}).contiguous();
 
             std::vector<Tensor> inputs = {layer_input, W_ih_tensor, W_hh_tensor,
                                            bias_ih_tensor, bias_hh_tensor, h0_layer, c0_layer};
@@ -789,7 +854,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
 
         Variable output(layer_input, false);
         if (batch_first_) {
-            output = Variable(output.tensor().transpose(0, 1), false);
+            output = Variable(traced_transpose(output.tensor(), 0, 1), false);
         }
 
         Variable h_final(stack(std::span<const Tensor>(final_h_states), 0), false);
@@ -827,36 +892,62 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         Variable layer_in = x;  // (seq, batch, feat) seq-major; later (seq, batch, hidden)
         for (int64_t layer = 0; layer < num_layers_; ++layer) {
             auto& cell = forward_cells_[layer];
-            auto W_ih_var = cell->weight_ih()->weight();
-            auto W_hh_var = cell->weight_hh()->weight();
+            // JIT-R102 (non-JIT, same review pass): unlike LSTMCell::forward
+            // (which routes through Linear::forward_impl and inherits its
+            // device auto-alignment), this fused cuDNN training path reads
+            // Parameter Variables directly for kernel dispatch + custom
+            // backward wiring, so it must replicate Linear::forward_impl's
+            // own to_device() alignment itself, or a lazily-placed module
+            // (constructed on CPU, called with a GPU input -- the common
+            // workflow) hits a device-mismatch dispatch error. to_device()
+            // is autograd-aware (mirrors linear.cpp), so gradients still
+            // flow back to the real, original-device Parameter through the
+            // extra device-transfer node when a transfer actually happens;
+            // when devices already match it's a no-op copy, same grad_fn.
+            Variable W_ih_v = *cell->weight_ih()->weight();
+            Variable W_hh_v = *cell->weight_hh()->weight();
+            if (W_ih_v.tensor().device() != input.tensor().device()) {
+                W_ih_v = tenzor::to_device(W_ih_v, input.tensor().device());
+            }
+            if (W_hh_v.tensor().device() != input.tensor().device()) {
+                W_hh_v = tenzor::to_device(W_hh_v, input.tensor().device());
+            }
             // Biases are independent: a cell may carry bias_ih without bias_hh
             // (the common single-bias LSTM). ANDing them silently dropped
             // bias_ih and ran the fused forward with no bias (~0.30 error).
             const bool has_bias_ih = cell->weight_ih()->has_bias();
             const bool has_bias_hh = cell->weight_hh()->has_bias();
-            std::shared_ptr<Variable> b_ih_var, b_hh_var;
+            Variable b_ih_v, b_hh_v;
             Tensor b_ih_t, b_hh_t;
             if (has_bias_ih) {
-                b_ih_var = cell->weight_ih()->bias();
-                b_ih_t = b_ih_var->tensor();
+                b_ih_v = *cell->weight_ih()->bias();
+                if (b_ih_v.tensor().device() != input.tensor().device()) {
+                    b_ih_v = tenzor::to_device(b_ih_v, input.tensor().device());
+                }
+                b_ih_t = b_ih_v.tensor();
             } else {
                 b_ih_t = empty({0}, DType::Float32, input.device());
             }
             if (has_bias_hh) {
-                b_hh_var = cell->weight_hh()->bias();
-                b_hh_t = b_hh_var->tensor();
+                b_hh_v = *cell->weight_hh()->bias();
+                if (b_hh_v.tensor().device() != input.tensor().device()) {
+                    b_hh_v = tenzor::to_device(b_hh_v, input.tensor().device());
+                }
+                b_hh_t = b_hh_v.tensor();
             } else {
                 b_hh_t = empty({0}, DType::Float32, input.device());
             }
 
             Tensor x_t = layer_in.tensor().contiguous();  // (seq, batch, in)
-            Tensor h0_t = h.tensor().slice(0, layer, layer + 1)
-                              .reshape({kb, hidden_size_}).contiguous();
-            Tensor c0_t = c.tensor().slice(0, layer, layer + 1)
-                              .reshape({kb, hidden_size_}).contiguous();
+            Tensor h0_t = traced_reshape(
+                traced_slice(h.tensor(), 0, layer, layer + 1),
+                {kb, hidden_size_}).contiguous();
+            Tensor c0_t = traced_reshape(
+                traced_slice(c.tensor(), 0, layer, layer + 1),
+                {kb, hidden_size_}).contiguous();
 
             std::vector<Tensor> fwd_in = {x_t, h0_t, c0_t,
-                                          W_ih_var->tensor(), W_hh_var->tensor(),
+                                          W_ih_v.tensor(), W_hh_v.tensor(),
                                           b_ih_t, b_hh_t};
             auto outs = dispatch<OpId::LSTMCudnnTrainForward>(fwd_in);
             Tensor output_t = outs[0];      // (seq, batch, hidden)
@@ -865,19 +956,19 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             Tensor wspace   = outs[4];
 
             std::vector<Tensor> saved = {x_t, h0_t, c0_t,
-                                         W_ih_var->tensor(), W_hh_var->tensor(),
+                                         W_ih_v.tensor(), W_hh_v.tensor(),
                                          b_ih_t, b_hh_t, output_t, wspace, reserve};
 
             std::vector<std::shared_ptr<Function>> next_funcs = {
-                layer_in.grad_fn(), W_ih_var->grad_fn(), W_hh_var->grad_fn()};
-            std::vector<Variable> in_vars = {layer_in, *W_ih_var, *W_hh_var};
+                layer_in.grad_fn(), W_ih_v.grad_fn(), W_hh_v.grad_fn()};
+            std::vector<Variable> in_vars = {layer_in, W_ih_v, W_hh_v};
             if (has_bias_ih) {
-                next_funcs.push_back(b_ih_var->grad_fn());
-                in_vars.push_back(*b_ih_var);
+                next_funcs.push_back(b_ih_v.grad_fn());
+                in_vars.push_back(b_ih_v);
             }
             if (has_bias_hh) {
-                next_funcs.push_back(b_hh_var->grad_fn());
-                in_vars.push_back(*b_hh_var);
+                next_funcs.push_back(b_hh_v.grad_fn());
+                in_vars.push_back(b_hh_v);
             }
 
             auto gfn_out = std::make_shared<CudnnLSTMTrainBackward>(false, has_bias_ih, has_bias_hh, saved);

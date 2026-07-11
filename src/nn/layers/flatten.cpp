@@ -316,7 +316,14 @@ auto PixelShuffle::forward_impl(const Variable& input) -> Variable {
     perm.push_back(rndim - 1);  // W
     perm.push_back(rndim - 3);  // r
 
-    auto permuted = reshaped.permute(perm).contiguous();
+    // tenzor::permute (Variable-level) records a real OpType::Permute node
+    // with the JIT tracer when tracing is active. A raw Tensor::permute() is
+    // pure metadata with zero dispatch() calls, so it was invisible to the
+    // tracer; the subsequent .contiguous() (which DOES dispatch
+    // OpId::Contiguous) then aliased its output to that untracked permuted
+    // tensor, so a traced PixelShuffle call froze the whole
+    // permute+contiguous+reshape tail at its trace-time value (JIT-R045).
+    auto permuted = tenzor::permute(Variable(reshaped, false), perm).tensor().contiguous();
 
     // Reshape: (*, C, H, r, W, r) -> (*, C, H*r, W*r)
     std::vector<int64_t> output_shape;
@@ -476,7 +483,10 @@ auto PixelUnshuffle::forward_impl(const Variable& input) -> Variable {
     perm.push_back(rndim - 4);  // H/r
     perm.push_back(rndim - 2);  // W/r
 
-    auto permuted = reshaped.permute(perm).contiguous();
+    // See PixelShuffle::forward_impl above for why tenzor::permute
+    // (Variable-level, tracer-visible) replaces the raw Tensor::permute()
+    // here (JIT-R045).
+    auto permuted = tenzor::permute(Variable(reshaped, false), perm).tensor().contiguous();
 
     // Reshape: (*, C, r, r, H/r, W/r) -> (*, C*r*r, H/r, W/r)
     std::vector<int64_t> output_shape;
@@ -622,7 +632,10 @@ auto ChannelShuffle::forward_impl(const Variable& input) -> Variable {
     perm.push_back(rndim - 2);  // H
     perm.push_back(rndim - 1);  // W
 
-    auto permuted = reshaped.permute(perm).contiguous();
+    // See PixelShuffle::forward_impl above for why tenzor::permute
+    // (Variable-level, tracer-visible) replaces the raw Tensor::permute()
+    // here (JIT-R045).
+    auto permuted = tenzor::permute(Variable(reshaped, false), perm).tensor().contiguous();
 
     // Reshape back: (*, C/G, G, H, W) -> (*, C, H, W)
     std::vector<int64_t> original_shape(shape.begin(), shape.end());

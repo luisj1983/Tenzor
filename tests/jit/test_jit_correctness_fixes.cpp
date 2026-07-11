@@ -89,6 +89,56 @@ TEST(JitCorrectnessFixes, CSEDoesNotDedupDropout) {
         << "CSE replaced one Dropout output with the other";
 }
 
+// =========================================================================
+// JIT-R013: Dropout(training=true) must fail loudly on replay, not
+// silently replay as identity (dropping both regularization and, in
+// grad-mode, gradient scaling).
+// =========================================================================
+namespace {
+auto build_single_dropout_graph(bool training) -> std::shared_ptr<Graph> {
+    auto g = std::make_shared<Graph>();
+    auto in = g->create_value("x", {4, 4}, DType::Float32, Device::cpu());
+    g->set_inputs({in});
+
+    auto d = g->create_node(OpType::Dropout, "drop");
+    d->add_input(in);
+    d->set_bool_attr("training", training);
+    d->set_attr("p", 0.5);
+    auto y = g->create_value("y", {4, 4}, DType::Float32, Device::cpu());
+    d->add_output(y);
+    y->set_node(d);
+    g->add_node(d);
+
+    g->set_outputs({y});
+    return g;
+}
+}  // namespace
+
+TEST(JitCorrectnessFixes, DropoutTrainingModeThrowsOnInferenceReplay) {
+    auto g = build_single_dropout_graph(/*training=*/true);
+    Variable input(full({4, 4}, 1.0, DType::Float32, Device::cpu()), false);
+    EXPECT_THROW(g->forward({input}), std::runtime_error)
+        << "Dropout(training=true) replayed as silent identity instead of "
+           "throwing — this drops the regularization with no error";
+}
+
+TEST(JitCorrectnessFixes, DropoutTrainingModeThrowsOnGradReplay) {
+    auto g = build_single_dropout_graph(/*training=*/true);
+    Variable input(full({4, 4}, 1.0, DType::Float32, Device::cpu()), true);
+    EXPECT_THROW(g->forward({input}, /*grad_mode=*/true), std::runtime_error);
+}
+
+TEST(JitCorrectnessFixes, DropoutEvalModeStillReplaysAsIdentity) {
+    // Sanity: training=false (eval mode) must still be a safe, correct
+    // identity replay — the fix must not over-reject.
+    auto g = build_single_dropout_graph(/*training=*/false);
+    Variable input(full({4, 4}, 1.0, DType::Float32, Device::cpu()), false);
+    auto results = g->forward({input});
+    ASSERT_EQ(results.size(), 1u);
+    auto diff = tenzor::max(tenzor::abs(results[0].tensor() - input.tensor()));
+    EXPECT_LT(diff.item<float>(), 1e-6f);
+}
+
 TEST(JitCorrectnessFixes, CSEStillDedupsPureOps) {
     // Regression guard: pure ops (Add, Mul, etc.) still get deduplicated.
     auto g = std::make_shared<Graph>();

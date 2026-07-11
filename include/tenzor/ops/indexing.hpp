@@ -246,6 +246,15 @@ auto one_hot(const Tensor& input, int64_t num_classes = -1) -> Tensor;
  * @param input 1D tensor of non-negative integers
  * @param weights Optional same-length float tensor of weights
  * @param minlength Minimum output size (default 0)
+ * @param validate When true (default), a host-sync `.item()` read checks
+ *        `input` is non-negative before dispatching (JIT-R100: this scalar
+ *        extraction is an unconditional tracer graph-break — a genuine
+ *        data-dependent branch that can't be safely captured in a static
+ *        graph). Internal callers that already know `input` is a
+ *        provably-valid index tensor (e.g. SparseTensor::to_csr()'s
+ *        row-count computation, whose input was already index-validated at
+ *        COO/CSR construction) pass false to skip the redundant check and
+ *        stay traceable.
  * @return 1D tensor of size max(max(input)+1, minlength)
  *
  * @code
@@ -255,7 +264,8 @@ auto one_hot(const Tensor& input, int64_t num_classes = -1) -> Tensor;
  */
 auto bincount(const Tensor& input,
               const std::optional<Tensor>& weights = std::nullopt,
-              int64_t minlength = 0) -> Tensor;
+              int64_t minlength = 0,
+              bool validate = true) -> Tensor;
 
 /**
  * @brief Reduce source into input at specified indices along a dimension.

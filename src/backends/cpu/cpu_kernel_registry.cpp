@@ -281,6 +281,9 @@ namespace cpu {
     auto fill_kernel(const Tensor& input, double value) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
     auto flip_kernel(const Tensor& input, std::vector<int64_t> dims) -> Tensor;
+    auto triu_kernel(const Tensor& input, int64_t diagonal) -> Tensor;
+    auto tril_kernel(const Tensor& input, int64_t diagonal) -> Tensor;
+    auto diag_kernel(const Tensor& input, int64_t diagonal) -> Tensor;
     auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor;
     auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor;
 
@@ -3674,22 +3677,25 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
     // =========================================================================
     table.register_single_output_kernel(OpId::Triu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
-        return triu(inputs[0], diagonal);
+        return cpu::triu_kernel(inputs[0], diagonal);
     });
 
     table.register_single_output_kernel(OpId::Tril, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
-        return tril(inputs[0], diagonal);
+        return cpu::tril_kernel(inputs[0], diagonal);
     });
 
     table.register_single_output_kernel(OpId::Diag, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t diagonal = attrs.get_int(AttrKey::Diagonal, 0);
-        return diag(inputs[0], diagonal);
+        return cpu::diag_kernel(inputs[0], diagonal);
     });
 
     table.register_single_output_kernel(OpId::Trace, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-        // Forward to the inline tenzor::trace(Tensor) implementation.
-        return tenzor::trace(inputs[0]);
+        // cpu::diag_kernel is a plain leaf implementation (no dispatch), and
+        // tenzor::sum() always dispatches OpId::Sum regardless of device, so
+        // neither call can recurse back into OpId::Trace.
+        auto diagonal = cpu::diag_kernel(inputs[0], 0);
+        return tenzor::sum(diagonal, std::nullopt, false);
     });
 
     table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

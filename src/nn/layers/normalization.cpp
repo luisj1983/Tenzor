@@ -132,219 +132,10 @@ static inline int norm_kernel_threads() {
 }
 
 // ============================================================================
-// SIMD-Optimized Fused LayerNorm (computes output + mean + rstd in single pass)
-// ============================================================================
-
-#if defined(__x86_64__) || defined(_M_X64)
-// Fused LayerNorm that computes output AND saves mean/rstd for backward pass
-// Uses 2-pass algorithm: (1) sum + sum_sq, (2) normalize
-// var = sum((x - mean)^2) / N (numerically stable two-pass algorithm)
-static void fused_layer_norm_f32(
-    const float* __restrict__ input,
-    const float* __restrict__ weight,
-    const float* __restrict__ bias,
-    float* __restrict__ output,
-    float* __restrict__ mean_out,
-    float* __restrict__ rstd_out,
-    int64_t batch_size,
-    int64_t norm_size,
-    float eps)
-{
-    const float inv_n = 1.0f / static_cast<float>(norm_size);
-
-    // LayerNorm is memory-bound, but aggregate memory bandwidth on a multi-core
-    // CPU scales well past a single core (multiple memory channels / CCDs), so
-    // PyTorch parallelizes across all cores and so do we. The previous 4M-element
-    // gate left common transformer shapes (e.g. 8x512x768 = 3.1M) single-threaded,
-    // costing ~8x vs PyTorch which used every core. Parallelize across rows once
-    // there is enough work to amortize the thread-launch cost, using the full
-    // physical-core pool (bounded by the number of rows so we never spawn idle
-    // threads).
-    const int64_t total_elements = batch_size * norm_size;
-    const bool use_parallel = total_elements > 65536 && batch_size > 1;
-    const int max_threads = use_parallel
-        ? std::max(1, std::min(norm_kernel_threads(), static_cast<int>(batch_size)))
-        : 1;
-
-    #pragma omp parallel for if(use_parallel) num_threads(std::max(1, max_threads))
-    for (int64_t b = 0; b < batch_size; b++) {
-        const float* in_ptr = input + b * norm_size;
-        float* out_ptr = output + b * norm_size;
-
-#if defined(__AVX512F__)
-        // AVX-512 path: 16 floats at a time, numerically stable two-pass algorithm
-        // Pass 1: compute mean
-        __m512 vsum = _mm512_setzero_ps();
-        int64_t i = 0;
-
-        for (; i + 16 <= norm_size; i += 16) {
-            _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 64), _MM_HINT_T0);
-            __m512 x = _mm512_loadu_ps(in_ptr + i);
-            vsum = _mm512_add_ps(vsum, x);
-        }
-
-        float sum = _mm512_reduce_add_ps(vsum);
-        for (; i < norm_size; i++) {
-            sum += in_ptr[i];
-        }
-
-        float mean = sum * inv_n;
-
-        // Pass 2: compute variance = sum((x - mean)^2) / N
-        __m512 vmean = _mm512_set1_ps(mean);
-        __m512 vvar = _mm512_setzero_ps();
-        i = 0;
-
-        for (; i + 16 <= norm_size; i += 16) {
-            __m512 x = _mm512_loadu_ps(in_ptr + i);
-            __m512 diff = _mm512_sub_ps(x, vmean);
-            vvar = _mm512_fmadd_ps(diff, diff, vvar);
-        }
-
-        float var = _mm512_reduce_add_ps(vvar);
-        for (; i < norm_size; i++) {
-            float diff = in_ptr[i] - mean;
-            var += diff * diff;
-        }
-        var *= inv_n;
-        float rstd = 1.0f / std::sqrt(var + eps);
-
-        // Save for backward
-        mean_out[b] = mean;
-        rstd_out[b] = rstd;
-
-        // Pass 3: normalize and apply affine transform
-        __m512 vrstd = _mm512_set1_ps(rstd);
-        i = 0;
-
-        for (; i + 16 <= norm_size; i += 16) {
-            _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 64), _MM_HINT_T0);
-            _mm_prefetch(reinterpret_cast<const char*>(weight + i + 64), _MM_HINT_T0);
-            __m512 x = _mm512_loadu_ps(in_ptr + i);
-            __m512 w = _mm512_loadu_ps(weight + i);
-            __m512 bb = _mm512_loadu_ps(bias + i);
-            __m512 norm = _mm512_mul_ps(_mm512_sub_ps(x, vmean), vrstd);
-            __m512 result = _mm512_fmadd_ps(norm, w, bb);
-            _mm512_storeu_ps(out_ptr + i, result);
-        }
-
-        // Handle remainder
-        for (; i < norm_size; i++) {
-            float norm_val = (in_ptr[i] - mean) * rstd;
-            out_ptr[i] = norm_val * weight[i] + bias[i];
-        }
-
-#elif defined(__AVX2__)
-        // AVX2 path: 8 floats at a time, numerically stable two-pass algorithm
-        // Pass 1: compute mean
-        __m256 vsum = _mm256_setzero_ps();
-        int64_t i = 0;
-
-        for (; i + 8 <= norm_size; i += 8) {
-            _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 32), _MM_HINT_T0);
-            __m256 x = _mm256_loadu_ps(in_ptr + i);
-            vsum = _mm256_add_ps(vsum, x);
-        }
-
-        // Horizontal sum for AVX2
-        __m128 sum_lo = _mm256_castps256_ps128(vsum);
-        __m128 sum_hi = _mm256_extractf128_ps(vsum, 1);
-        __m128 sum128 = _mm_add_ps(sum_lo, sum_hi);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        float sum = _mm_cvtss_f32(sum128);
-
-        for (; i < norm_size; i++) {
-            sum += in_ptr[i];
-        }
-
-        float mean = sum * inv_n;
-
-        // Pass 2: compute variance = sum((x - mean)^2) / N
-        __m256 vmean = _mm256_set1_ps(mean);
-        __m256 vvar = _mm256_setzero_ps();
-        i = 0;
-
-        for (; i + 8 <= norm_size; i += 8) {
-            __m256 x = _mm256_loadu_ps(in_ptr + i);
-            __m256 diff = _mm256_sub_ps(x, vmean);
-            vvar = _mm256_fmadd_ps(diff, diff, vvar);
-        }
-
-        __m128 var_lo = _mm256_castps256_ps128(vvar);
-        __m128 var_hi = _mm256_extractf128_ps(vvar, 1);
-        __m128 var128 = _mm_add_ps(var_lo, var_hi);
-        var128 = _mm_hadd_ps(var128, var128);
-        var128 = _mm_hadd_ps(var128, var128);
-        float var = _mm_cvtss_f32(var128);
-
-        for (; i < norm_size; i++) {
-            float diff = in_ptr[i] - mean;
-            var += diff * diff;
-        }
-        var *= inv_n;
-        float rstd = 1.0f / std::sqrt(var + eps);
-
-        // Save for backward
-        mean_out[b] = mean;
-        rstd_out[b] = rstd;
-
-        // Pass 3: normalize and apply affine transform
-        __m256 vrstd = _mm256_set1_ps(rstd);
-        i = 0;
-
-        for (; i + 8 <= norm_size; i += 8) {
-            _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 32), _MM_HINT_T0);
-            _mm_prefetch(reinterpret_cast<const char*>(weight + i + 32), _MM_HINT_T0);
-            __m256 x = _mm256_loadu_ps(in_ptr + i);
-            __m256 w = _mm256_loadu_ps(weight + i);
-            __m256 bb = _mm256_loadu_ps(bias + i);
-            __m256 norm = _mm256_mul_ps(_mm256_sub_ps(x, vmean), vrstd);
-            __m256 result = _mm256_fmadd_ps(norm, w, bb);
-            _mm256_storeu_ps(out_ptr + i, result);
-        }
-
-        // Handle remainder
-        for (; i < norm_size; i++) {
-            float norm_val = (in_ptr[i] - mean) * rstd;
-            out_ptr[i] = norm_val * weight[i] + bias[i];
-        }
-
-#else
-        // Scalar fallback - numerically stable two-pass algorithm
-        // Pass 1: compute mean
-        float sum = 0.0f;
-        for (int64_t i = 0; i < norm_size; i++) {
-            sum += in_ptr[i];
-        }
-        float mean = sum * inv_n;
-
-        // Pass 2: compute variance = sum((x - mean)^2) / N
-        float var = 0.0f;
-        for (int64_t i = 0; i < norm_size; i++) {
-            float diff = in_ptr[i] - mean;
-            var += diff * diff;
-        }
-        var *= inv_n;
-        float rstd = 1.0f / std::sqrt(var + eps);
-
-        mean_out[b] = mean;
-        rstd_out[b] = rstd;
-
-        // Pass 3: normalize and apply affine transform
-        for (int64_t i = 0; i < norm_size; i++) {
-            float norm_val = (in_ptr[i] - mean) * rstd;
-            out_ptr[i] = norm_val * weight[i] + bias[i];
-        }
-#endif
-    }
-
-}
-
-// ============================================================================
 // SIMD-Optimized Fused RMSNorm (simpler than LayerNorm - no mean computation)
 // ============================================================================
 
+#if defined(__x86_64__) || defined(_M_X64)
 static void fused_rms_norm_f32(
     const float* __restrict__ input,
     const float* __restrict__ weight,
@@ -868,12 +659,6 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
         }
     }
 
-    // Calculate batch size (all dimensions before normalized dimensions)
-    int64_t batch_size = 1;
-    for (size_t i = 0; i < norm_start; i++) {
-        batch_size *= shape[i];
-    }
-
     int64_t N = num_features_;
 
     // ============================================================================
@@ -885,13 +670,17 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
     const bool needs_input_grad = is_grad_enabled() && input.requires_grad();
 
     // ============================================================================
-    // GPU INFERENCE FAST PATH: Use the registered FusedLayerNorm op for any
-    // non-CPU device. Previously only CUDA was routed here; CUDA / ROCm /
-    // OneAPI / Vulkan all register OpId::FusedLayerNorm, so a single
-    // dispatch covers all of them. Float32-only — narrower / wider dtypes
-    // either widen on the kernel side or fall through to the STANDARD PATH.
+    // INFERENCE FAST PATH: Use the registered FusedLayerNorm op on every
+    // device including CPU (cpu::layer_norm_kernel_with_stats's Float32
+    // branch is itself SIMD-optimized, matching the hand-rolled CPU-only
+    // "ultra-fast" path this replaced — see JIT-R046). CUDA / ROCm / OneAPI
+    // / Vulkan / CPU all register OpId::FusedLayerNorm, so a single dispatch
+    // covers all of them, and — critically for JIT — dispatch() is what
+    // makes this op visible to the tracer; the old CPU-only hand-rolled
+    // pointer loop was invisible to it. Float32-only — narrower / wider
+    // dtypes either widen on the kernel side or fall through to the
+    // dispatch-based training-fast-path below.
     if (!needs_input_grad &&
-        input.tensor().device().type != Device::Type::CPU &&
         input.tensor().dtype() == DType::Float32) {
         // Backend FusedLayerNorm kernels assume contiguous input — non-
         // contig views (transpose / narrow) read with the wrong stride.
@@ -921,92 +710,26 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
         return Variable(results[0], false);
     }
 
-    if (!needs_input_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
-        // Ultra-fast path: CPU Float32 inference with no gradient tracking
-        const Tensor& input_tensor = input.tensor();
-        const auto* input_data = input_tensor.data<float>();
-
-        // Get weight/bias from cached pointers (avoids hash map lookups)
-        const Tensor& weight_tensor = (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : weight_.tensor();
-        const Tensor& bias_tensor = (elementwise_affine_ && cached_bias_) ? cached_bias_->tensor() : bias_.tensor();
-        const auto* weight_data = weight_tensor.data<float>();
-        const auto* bias_data = bias_tensor.data<float>();
-
-        // Allocate only output tensor (no statistics tensors needed)
-        auto output = Tensor::empty_uninitialized(
-            {input_tensor.shape().begin(), input_tensor.shape().end()},
-            DType::Float32, Device::cpu());
-        auto* output_data = output.data<float>();
-
-        // Scratch buffers for per-row statistics. For small batches the buffers
-        // live on the stack; the stack arrays are only reserved inside the
-        // small-batch branch rather than on every call (including the heap
-        // path used for large batches). Threshold kept at 1024 so the two
-        // stack buffers total at most ~8KB (2 * 1024 * 4 bytes).
-        constexpr int64_t STACK_THRESHOLD = 1024;
-
-        auto run_layer_norm = [&](float* mean_scratch, float* rstd_scratch) {
-#if defined(__x86_64__) || defined(_M_X64)
-            fused_layer_norm_f32(
-                input_data, weight_data, bias_data,
-                output_data, mean_scratch, rstd_scratch,
-                batch_size, N, static_cast<float>(eps_)
-            );
-#else
-            const int nthreads = get_optimal_threads();
-            #pragma omp parallel for num_threads(nthreads)
-            for (int64_t b = 0; b < batch_size; b++) {
-                float sum = 0.0f;
-                for (int64_t i = 0; i < N; i++) {
-                    sum += input_data[b * N + i];
-                }
-                float mean = sum / N;
-                mean_scratch[b] = mean;
-
-                float sum_sq = 0.0f;
-                for (int64_t i = 0; i < N; i++) {
-                    float diff = input_data[b * N + i] - mean;
-                    sum_sq += diff * diff;
-                }
-                float rs = 1.0f / std::sqrt(sum_sq / N + static_cast<float>(eps_));
-                rstd_scratch[b] = rs;
-
-                for (int64_t i = 0; i < N; i++) {
-                    int64_t idx = b * N + i;
-                    output_data[idx] = (input_data[idx] - mean) * rs * weight_data[i] + bias_data[i];
-                }
-            }
-#endif
-        };
-
-        if (batch_size <= STACK_THRESHOLD) {
-            float stack_mean[STACK_THRESHOLD];
-            float stack_rstd[STACK_THRESHOLD];
-            run_layer_norm(stack_mean, stack_rstd);
-        } else {
-            std::unique_ptr<float[]> mean_scratch(new float[batch_size]);
-            std::unique_ptr<float[]> rstd_scratch(new float[batch_size]);
-            run_layer_norm(mean_scratch.get(), rstd_scratch.get());
-        }
-
-        return Variable(output, false);
-    }
-
     // ============================================================================
-    // GPU TRAINING FAST PATH: dispatch through OpId::FusedLayerNorm for any
-    // non-CPU device when autograd is enabled, building a LayerNormBackward
-    // grad_fn with the kernel-returned (mean, inv_std) tensors saved on the
-    // device. The previous STANDARD PATH downloaded the input to host and
-    // ran a pointer-based forward — a real CPU compute fallback for ROCm /
-    // OneAPI / Vulkan training. Backend kernels handle Float16/BFloat16
-    // internally (widening to Float32 for accumulators), and the existing
+    // DISPATCH PATH: dispatch through OpId::LayerNorm on every device
+    // (including CPU — see JIT-R046) when autograd is enabled, or for any
+    // dtype other than Float32 (which the INFERENCE FAST PATH above already
+    // handles for the no-grad case), building a LayerNormBackward grad_fn
+    // with the kernel-returned (mean, inv_std) tensors saved on the device.
+    // cpu::layer_norm_kernel_with_stats covers Float32 (SIMD)/Float64/
+    // Float16/BFloat16, matching what this path already required of every
+    // other backend, so this now subsumes the old CPU-only hand-rolled
+    // per-dtype "STANDARD PATH" pointer loops that followed this function
+    // (dead code, removed) — those bypassed dispatch() entirely, making
+    // CPU LayerNorm (in training, or in any non-Float32 dtype) invisible to
+    // the JIT tracer. Backend kernels handle Float16/BFloat16 internally
+    // (widening to Float32 for accumulators), and the existing
     // LayerNormBackward Function already upcasts Float16/BFloat16 saved
     // tensors before dispatching the backward. Covers F32/F64/F16/BF16.
-    if (input.tensor().device().type != Device::Type::CPU &&
-        (input.tensor().dtype() == DType::Float32 ||
-         input.tensor().dtype() == DType::Float64 ||
-         input.tensor().dtype() == DType::Float16 ||
-         input.tensor().dtype() == DType::BFloat16)) {
+    if (input.tensor().dtype() == DType::Float32 ||
+        input.tensor().dtype() == DType::Float64 ||
+        input.tensor().dtype() == DType::Float16 ||
+        input.tensor().dtype() == DType::BFloat16) {
         const Tensor& x = input.tensor();
         Device dev = x.device();
 
@@ -1078,534 +801,13 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
         return Variable(out_dev, false);
     }
 
-    // ============================================================================
-    // STANDARD PATH: Full autograd support with device transfers
-    // ============================================================================
-
-    // Save original device and move input to CPU for pointer-based computation
-    Device original_device = input.tensor().device();
-    Tensor input_cpu = (original_device == Device::cpu()) ? input.tensor() : input.tensor().to(Device::cpu());
-
-    // Get weight/bias from cached pointers (faster) or fallback to parameters_ for hooks
-    // Note: cached pointers point to same shared_ptr as parameters_["weight"]
-    Tensor weight_cpu = (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : weight_.tensor();
-    Tensor bias_cpu = (elementwise_affine_ && cached_bias_) ? cached_bias_->tensor() : bias_.tensor();
-    if (elementwise_affine_) {
-        if (weight_cpu.device() != Device::cpu()) {
-            weight_cpu = weight_cpu.to(Device::cpu());
-        }
-        if (weight_cpu.dtype() != input_cpu.dtype()) {
-            weight_cpu = weight_cpu.to(input_cpu.dtype());
-        }
-        if (bias_cpu.device() != Device::cpu()) {
-            bias_cpu = bias_cpu.to(Device::cpu());
-        }
-        if (bias_cpu.dtype() != input_cpu.dtype()) {
-            bias_cpu = bias_cpu.to(input_cpu.dtype());
-        }
-    }
-
-    // Dtype-aware computation
-    DType input_dtype = input_cpu.dtype();
-
-    if (input_dtype == DType::BFloat16) {
-        // BFloat16: convert to Float32, compute, convert back
-        // Uses same approach as Float16 - all computation in Float32 for precision
-        auto batch_mean = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto batch_var = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto* mean_data = batch_mean.data<float>();
-        auto* var_data = batch_var.data<float>();
-
-        auto* input_data = input_cpu.data<BFloat16>();
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum = 0.0;
-            for (int64_t i = 0; i < N; i++) {
-                sum += static_cast<float>(input_data[b * N + i]);
-            }
-            mean_data[b] = static_cast<float>(sum / N);
-        }
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum_sq = 0.0;
-            float mu = mean_data[b];
-            for (int64_t i = 0; i < N; i++) {
-                float diff = static_cast<float>(input_data[b * N + i]) - mu;
-                sum_sq += diff * diff;
-            }
-            var_data[b] = static_cast<float>(sum_sq / N);
-        }
-
-        auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto* rstd_data = rstd.data<float>();
-        for (int64_t b = 0; b < batch_size; b++) {
-            rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
-        }
-
-        auto output_cpu = zeros_like(input_cpu);
-        auto* output_data = output_cpu.data<BFloat16>();
-        // Weight/bias are already converted to input dtype (BFloat16) above
-        auto* weight_data = elementwise_affine_ ? weight_cpu.data<BFloat16>() : nullptr;
-        auto* bias_data = elementwise_affine_ ? bias_cpu.data<BFloat16>() : nullptr;
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            float mu = mean_data[b];
-            float inv_std = rstd_data[b];
-
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float normalized = (static_cast<float>(input_data[idx]) - mu) * inv_std;
-
-                if (elementwise_affine_) {
-                    output_data[idx] = BFloat16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
-                } else {
-                    output_data[idx] = BFloat16(normalized);
-                }
-            }
-        }
-
-        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-        if (is_grad_enabled() && (input.requires_grad() || (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()))) {
-            auto result = Variable(output, true);
-
-            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean : batch_mean.to(original_device);
-            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd : rstd.to(original_device);
-
-            std::vector<Tensor> tensors_to_save = {
-                input.tensor(),
-                saved_mean,
-                saved_rstd,
-                (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
-            };
-
-            auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, normalized_shape_,
-                std::move(tensors_to_save)
-            );
-
-            result.set_grad_fn(grad_fn);
-
-            std::vector<std::shared_ptr<Function>> next_funcs;
-            if (auto input_grad_fn = input.grad_fn()) {
-                next_funcs.push_back(input_grad_fn);
-            }
-            if (elementwise_affine_ && cached_weight_ && cached_weight_->grad_fn()) {
-                next_funcs.push_back(cached_weight_->grad_fn());
-            }
-            grad_fn->set_next_functions(std::move(next_funcs));
-
-            std::vector<Variable> input_vars;
-            if (input.requires_grad()) {
-                input_vars.push_back(input);
-            }
-            if (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()) {
-                input_vars.push_back(*cached_weight_);
-            }
-            if (elementwise_affine_ && cached_bias_ && cached_bias_->requires_grad()) {
-                input_vars.push_back(*cached_bias_);
-            }
-            grad_fn->set_input_variables(input_vars);
-
-            return result;
-        }
-
-        return Variable(output, false);
-
-    } else if (input_dtype == DType::Float16) {
-        // Float16 path: need batch_mean and batch_var for two-pass algorithm
-        auto batch_mean = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto batch_var = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto* mean_data = batch_mean.data<float>();
-        auto* var_data = batch_var.data<float>();
-
-        auto* input_data = input_cpu.data<Float16>();
-
-        // Compute mean for each batch element (use float accumulation)
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum = 0.0;
-            for (int64_t i = 0; i < N; i++) {
-                sum += static_cast<float>(input_data[b * N + i]);
-            }
-            mean_data[b] = static_cast<float>(sum / N);
-        }
-
-        // Compute variance for each batch element
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum_sq = 0.0;
-            float mu = mean_data[b];
-            for (int64_t i = 0; i < N; i++) {
-                float diff = static_cast<float>(input_data[b * N + i]) - mu;
-                sum_sq += diff * diff;
-            }
-            var_data[b] = static_cast<float>(sum_sq / N);
-        }
-
-        // Compute reciprocal std (1 / sqrt(var + eps))
-        auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto* rstd_data = rstd.data<float>();
-        for (int64_t b = 0; b < batch_size; b++) {
-            rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
-        }
-
-        // Normalize: (x - mean) * rstd on CPU
-        auto output_cpu = zeros_like(input_cpu);
-        auto* output_data = output_cpu.data<Float16>();
-        auto* weight_data = elementwise_affine_ ? weight_cpu.data<Float16>() : nullptr;
-        auto* bias_data = elementwise_affine_ ? bias_cpu.data<Float16>() : nullptr;
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            float mu = mean_data[b];
-            float inv_std = rstd_data[b];
-
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float normalized = (static_cast<float>(input_data[idx]) - mu) * inv_std;
-
-                if (elementwise_affine_) {
-                    output_data[idx] = Float16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
-                } else {
-                    output_data[idx] = Float16(normalized);
-                }
-            }
-        }
-
-        // Move output back to original device if needed
-        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-        // Set up autograd if needed - check is_grad_enabled() first for fast inference path
-        // Use cached pointers to avoid hash map lookups
-        if (is_grad_enabled() && (input.requires_grad() || (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()))) {
-            auto result = Variable(output, true);
-
-            // Prepare tensors to save for backward
-            // Move statistics to original device so backward dispatch finds all tensors on same device
-            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean : batch_mean.to(original_device);
-            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd : rstd.to(original_device);
-
-            std::vector<Tensor> tensors_to_save = {
-                input.tensor(),
-                saved_mean,
-                saved_rstd,
-                (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
-            };
-
-            auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, normalized_shape_,
-                std::move(tensors_to_save)
-            );
-
-            result.set_grad_fn(grad_fn);
-
-            // Set next functions to chain backward pass
-            std::vector<std::shared_ptr<Function>> next_funcs;
-            // Only add grad_fn if it exists (not null)
-            if (auto input_grad_fn = input.grad_fn()) {
-                next_funcs.push_back(input_grad_fn);
-            }
-            if (elementwise_affine_ && cached_weight_ && cached_weight_->grad_fn()) {
-                next_funcs.push_back(cached_weight_->grad_fn());
-            }
-
-            grad_fn->set_next_functions(std::move(next_funcs));
-
-            // Track input variables for gradient accumulation using cached pointers
-            std::vector<Variable> input_vars;
-            if (input.requires_grad()) {
-                input_vars.push_back(input);
-            }
-            if (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()) {
-                input_vars.push_back(*cached_weight_);
-            }
-            if (elementwise_affine_ && cached_bias_ && cached_bias_->requires_grad()) {
-                input_vars.push_back(*cached_bias_);
-            }
-            grad_fn->set_input_variables(input_vars);
-
-            return result;
-        }
-
-        return Variable(output, false);
-
-    } else if (input_dtype == DType::Float32) {
-        // Use fused SIMD-optimized LayerNorm that computes output + mean + rstd in single pass
-        // This eliminates the double computation where forward computes stats,
-        // then backward re-computes them again
-
-        // Create tensors - use empty_uninitialized since fused kernel writes all elements
-        auto output_cpu = Tensor::empty_uninitialized(
-            {input_cpu.shape().begin(), input_cpu.shape().end()},
-            DType::Float32, Device::cpu());
-        auto batch_mean = Tensor::empty_uninitialized({batch_size}, DType::Float32, Device::cpu());
-        auto rstd = Tensor::empty_uninitialized({batch_size}, DType::Float32, Device::cpu());
-
-        // Get pointers
-        const auto* input_data = input_cpu.data<float>();
-        const auto* weight_data = weight_cpu.data<float>();
-        const auto* bias_data = bias_cpu.data<float>();
-        auto* output_data = output_cpu.data<float>();
-        auto* mean_data = batch_mean.data<float>();
-        auto* rstd_data = rstd.data<float>();
-
-#if defined(__x86_64__) || defined(_M_X64)
-        // Use fused SIMD implementation - computes output, mean, and rstd in one pass
-        fused_layer_norm_f32(
-            input_data,
-            weight_data,
-            bias_data,
-            output_data,
-            mean_data,
-            rstd_data,
-            batch_size,
-            N,
-            static_cast<float>(eps_)
-        );
-#else
-        // Fallback for non-x86 platforms
-        const int nthreads = get_optimal_threads();
-        #pragma omp parallel for num_threads(nthreads)
-        for (int64_t b = 0; b < batch_size; b++) {
-            // Compute mean
-            float sum = 0.0f;
-            for (int64_t i = 0; i < N; i++) {
-                sum += input_data[b * N + i];
-            }
-            float mean = sum / N;
-            mean_data[b] = mean;
-
-            // Compute variance
-            float sum_sq = 0.0f;
-            for (int64_t i = 0; i < N; i++) {
-                float diff = input_data[b * N + i] - mean;
-                sum_sq += diff * diff;
-            }
-            float var = sum_sq / N;
-            float rs = 1.0f / std::sqrt(var + static_cast<float>(eps_));
-            rstd_data[b] = rs;
-
-            // Normalize with affine transform
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float norm = (input_data[idx] - mean) * rs;
-                output_data[idx] = norm * weight_data[i] + bias_data[i];
-            }
-        }
-#endif
-
-        // Move output back to original device if needed
-        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-        // Set up autograd if needed - check is_grad_enabled() first for fast inference path
-        // Use cached pointers to avoid hash map lookups
-        if (is_grad_enabled() && (input.requires_grad() || (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()))) {
-            auto result = Variable(output, true);
-
-            // Prepare tensors to save for backward
-            // Move statistics to original device so backward dispatch finds all tensors on same device
-            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean : batch_mean.to(original_device);
-            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd : rstd.to(original_device);
-
-            std::vector<Tensor> tensors_to_save = {
-                input.tensor(),
-                saved_mean,
-                saved_rstd,
-                (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
-            };
-
-            auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, normalized_shape_,
-                std::move(tensors_to_save)
-            );
-
-            result.set_grad_fn(grad_fn);
-
-            // Set next functions to chain backward pass using cached pointers
-            std::vector<std::shared_ptr<Function>> next_funcs;
-            if (auto input_grad_fn = input.grad_fn()) {
-                next_funcs.push_back(input_grad_fn);
-            }
-            if (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()) {
-                if (auto weight_grad_fn = cached_weight_->grad_fn()) {
-                    next_funcs.push_back(weight_grad_fn);
-                }
-            }
-            if (elementwise_affine_ && cached_bias_ && cached_bias_->requires_grad()) {
-                if (auto bias_grad_fn = cached_bias_->grad_fn()) {
-                    next_funcs.push_back(bias_grad_fn);
-                }
-            }
-            grad_fn->set_next_functions(next_funcs);
-
-            // Track input variables using cached pointers
-            std::vector<Variable> input_vars;
-            if (input.requires_grad()) {
-                input_vars.push_back(input);
-            }
-            if (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()) {
-                input_vars.push_back(*cached_weight_);
-            }
-            if (elementwise_affine_ && cached_bias_ && cached_bias_->requires_grad()) {
-                input_vars.push_back(*cached_bias_);
-            }
-            grad_fn->set_input_variables(input_vars);
-
-            return result;
-        }
-
-        return Variable(output, false);
-
-    } else if (input_dtype == DType::Float64) {
-        auto* input_data = input_cpu.data<double>();
-
-        // Use double precision for mean and variance computation
-        auto batch_mean_f64 = zeros({batch_size}, DType::Float64, Device::cpu());
-        auto batch_var_f64 = zeros({batch_size}, DType::Float64, Device::cpu());
-        auto* mean_data_f64 = batch_mean_f64.data<double>();
-        auto* var_data_f64 = batch_var_f64.data<double>();
-
-        // Compute mean for each batch element
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum = 0.0;
-            for (int64_t i = 0; i < N; i++) {
-                sum += input_data[b * N + i];
-            }
-            mean_data_f64[b] = sum / N;
-        }
-
-        // Compute variance for each batch element
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum_sq = 0.0;
-            double mu = mean_data_f64[b];
-            for (int64_t i = 0; i < N; i++) {
-                double diff = input_data[b * N + i] - mu;
-                sum_sq += diff * diff;
-            }
-            var_data_f64[b] = sum_sq / N;
-        }
-
-        // Compute reciprocal std (1 / sqrt(var + eps))
-        auto rstd_f64 = zeros({batch_size}, DType::Float64, Device::cpu());
-        auto* rstd_data_f64 = rstd_f64.data<double>();
-        for (int64_t b = 0; b < batch_size; b++) {
-            rstd_data_f64[b] = 1.0 / std::sqrt(var_data_f64[b] + eps_);
-        }
-
-        // Normalize: (x - mean) * rstd on CPU
-        auto output_cpu = zeros_like(input_cpu);
-        auto* output_data = output_cpu.data<double>();
-        auto* weight_data = elementwise_affine_ ? weight_cpu.data<double>() : nullptr;
-        auto* bias_data = elementwise_affine_ ? bias_cpu.data<double>() : nullptr;
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            double mu = mean_data_f64[b];
-            double inv_std = rstd_data_f64[b];
-
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                double normalized = (input_data[idx] - mu) * inv_std;
-
-                if (elementwise_affine_) {
-                    output_data[idx] = normalized * weight_data[i] + bias_data[i];
-                } else {
-                    output_data[idx] = normalized;
-                }
-            }
-        }
-
-        // Move output back to original device if needed
-        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-        // Set up autograd if needed - check is_grad_enabled() first for fast inference path
-        if (is_grad_enabled() && (input.requires_grad() || (elementwise_affine_ && cached_weight_->requires_grad()))) {
-            auto result = Variable(output, true);
-
-            // Save mean and rstd for backward pass
-            // GPU backward kernels expect stats to match input dtype (Float64).
-            // CPU backward converts to Float32 itself, so save as Float32 to avoid waste.
-            Tensor batch_mean_save, rstd_save;
-            if (original_device.type == Device::Type::CPU) {
-                // CPU backward converts to Float32 anyway, save as Float32
-                batch_mean_save = zeros({batch_size}, DType::Float32, Device::cpu());
-                rstd_save = zeros({batch_size}, DType::Float32, Device::cpu());
-                auto* mean_save_data = batch_mean_save.data<float>();
-                auto* rstd_save_data = rstd_save.data<float>();
-                for (int64_t b = 0; b < batch_size; b++) {
-                    mean_save_data[b] = static_cast<float>(mean_data_f64[b]);
-                    rstd_save_data[b] = static_cast<float>(rstd_data_f64[b]);
-                }
-            } else {
-                // GPU backends (CUDA, Vulkan, ROCm, etc.) read stats as-is in backward kernels
-                batch_mean_save = zeros({batch_size}, DType::Float64, Device::cpu());
-                rstd_save = zeros({batch_size}, DType::Float64, Device::cpu());
-                auto* mean_save_data = batch_mean_save.data<double>();
-                auto* rstd_save_data = rstd_save.data<double>();
-                for (int64_t b = 0; b < batch_size; b++) {
-                    mean_save_data[b] = mean_data_f64[b];
-                    rstd_save_data[b] = rstd_data_f64[b];
-                }
-            }
-
-            // Prepare tensors to save for backward
-            // Move statistics to original device so backward dispatch finds all tensors on same device
-            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean_save : batch_mean_save.to(original_device);
-            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd_save : rstd_save.to(original_device);
-
-            std::vector<Tensor> tensors_to_save = {
-                input.tensor(),
-                saved_mean,
-                saved_rstd,
-                elementwise_affine_ ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
-            };
-
-            auto grad_fn = std::make_shared<LayerNormBackward>(
-                elementwise_affine_, eps_, N, normalized_shape_,
-                std::move(tensors_to_save)
-            );
-
-            result.set_grad_fn(grad_fn);
-
-            // Set next functions to chain backward pass
-            std::vector<std::shared_ptr<Function>> next_funcs;
-            if (auto input_grad_fn = input.grad_fn()) {
-                next_funcs.push_back(input_grad_fn);
-            }
-            if (elementwise_affine_ && cached_weight_) {
-                if (cached_weight_->requires_grad()) {
-                    if (auto weight_grad_fn = cached_weight_->grad_fn()) {
-                        next_funcs.push_back(weight_grad_fn);
-                    }
-                }
-                if (cached_bias_ && cached_bias_->requires_grad()) {
-                    if (auto bias_grad_fn = cached_bias_->grad_fn()) {
-                        next_funcs.push_back(bias_grad_fn);
-                    }
-                }
-            }
-            grad_fn->set_next_functions(next_funcs);
-
-            // Track input variables for gradient accumulation
-            std::vector<Variable> input_vars;
-            if (input.requires_grad()) {
-                input_vars.push_back(input);
-            }
-            if (elementwise_affine_ && cached_weight_) {
-                if (cached_weight_->requires_grad()) {
-                    input_vars.push_back(*cached_weight_);
-                }
-                if (cached_bias_ && cached_bias_->requires_grad()) {
-                    input_vars.push_back(*cached_bias_);
-                }
-            }
-            grad_fn->set_input_variables(input_vars);
-
-            return result;
-        }
-
-        return Variable(output, false);
-
-    } else {
-        throw std::runtime_error("LayerNorm only supports Float16, Float32, and Float64 dtypes");
-    }
+    // Every valid LayerNorm dtype (Float32/Float64/Float16/BFloat16) is
+    // handled by the DISPATCH PATH above; this exists only to fail loudly
+    // for an actually-unsupported dtype (mirroring the pre-existing
+    // hand-rolled STANDARD PATH's own final `else` branch, removed above as
+    // dead code once the DISPATCH PATH started covering every device).
+    throw std::runtime_error(
+        "LayerNorm only supports Float16, Float32, BFloat16, and Float64 dtypes");
 
 }
 
@@ -1897,11 +1099,7 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
                                std::to_string(shape.size()) + "D)");
     }
 
-    int64_t N = shape[0];
     int64_t C = shape[1];
-    int64_t H = shape[2];
-    int64_t W = shape[3];
-    int64_t spatial_size = H * W;
 
     if (C != num_channels_) {
         throw std::runtime_error("Expected " + std::to_string(num_channels_) +
@@ -1914,238 +1112,51 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     auto original_device = input.tensor().device();
     auto original_dtype = input.tensor().dtype();
 
-    // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
-    if (original_device.type != Device::Type::CPU) {
-        // Float16: upcast to Float32 for precision in mean/variance computation.
-        // GroupNorm statistics (mean, variance) accumulate over group_size * spatial_size
-        // elements; Float16's limited mantissa causes significant rounding errors.
-        DType compute_dtype = original_dtype;
-        bool needs_upcast = (original_dtype == DType::Float16 || original_dtype == DType::BFloat16);
-        if (needs_upcast) compute_dtype = DType::Float32;
+    // Dispatch to the backend kernel on every device including CPU
+    // (cpu::group_norm_kernel_with_stats — see JIT-R047). The old CPU-only
+    // hand-rolled pointer-based path bypassed dispatch() entirely, making
+    // CPU GroupNorm invisible to the JIT tracer; removed as dead code now
+    // that this dispatch call covers every backend.
+    // Float16: upcast to Float32 for precision in mean/variance computation.
+    // GroupNorm statistics (mean, variance) accumulate over group_size * spatial_size
+    // elements; Float16's limited mantissa causes significant rounding errors.
+    DType compute_dtype = original_dtype;
+    bool needs_upcast = (original_dtype == DType::Float16 || original_dtype == DType::BFloat16);
+    if (needs_upcast) compute_dtype = DType::Float32;
 
-        Tensor input_compute = needs_upcast ? input.tensor().to(DType::Float32) : input.tensor();
+    Tensor input_compute = needs_upcast ? input.tensor().to(DType::Float32) : input.tensor();
 
-        Tensor weight_tensor = affine_
-            ? parameters_["weight"]->tensor().to(compute_dtype).to(original_device)
-            : ones({C}, compute_dtype, original_device);
-        Tensor bias_tensor = affine_
-            ? parameters_["bias"]->tensor().to(compute_dtype).to(original_device)
-            : zeros({C}, compute_dtype, original_device);
+    Tensor weight_tensor = affine_
+        ? parameters_["weight"]->tensor().to(compute_dtype).to(original_device)
+        : ones({C}, compute_dtype, original_device);
+    Tensor bias_tensor = affine_
+        ? parameters_["bias"]->tensor().to(compute_dtype).to(original_device)
+        : zeros({C}, compute_dtype, original_device);
 
-        OpAttributes attrs;
-        attrs.set(AttrKey::NumGroups, num_groups_);
-        attrs.set(AttrKey::Eps, eps_);
-        std::vector<Tensor> inputs_vec = {input_compute, weight_tensor, bias_tensor};
-        auto results = dispatch<OpId::GroupNorm>(inputs_vec, attrs);
-        // BB.16: shared helper (V.24/Y.20 contract guard). Reading
-        // results[1] / results[2] without checking size would SEGFAULT in
-        // this layer if a backend regresses to returning {output} only.
-        check_norm_outputs(results, "GroupNorm");
+    OpAttributes attrs;
+    attrs.set(AttrKey::NumGroups, num_groups_);
+    attrs.set(AttrKey::Eps, eps_);
+    std::vector<Tensor> inputs_vec = {input_compute, weight_tensor, bias_tensor};
+    auto results = dispatch<OpId::GroupNorm>(inputs_vec, attrs);
+    // BB.16: shared helper (V.24/Y.20 contract guard). Reading
+    // results[1] / results[2] without checking size would SEGFAULT in
+    // this layer if a backend regresses to returning {output} only.
+    check_norm_outputs(results, "GroupNorm");
 
-        Tensor output = results[0];
-        Tensor saved_mean = results[1];
-        Tensor saved_rstd = results[2];
+    Tensor output = results[0];
+    Tensor saved_mean = results[1];
+    Tensor saved_rstd = results[2];
 
-        // Downcast output back to original dtype if we upcast for computation
-        if (needs_upcast) {
-            output = output.to(original_dtype);
-        }
-
-        if (is_grad_enabled() && (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad()))) {
-            auto result = Variable(output, true);
-
-            std::vector<Tensor> tensors_to_save = {
-                input.tensor(), saved_mean, saved_rstd, weight_tensor
-            };
-
-            auto grad_fn = std::make_shared<GroupNormBackward>(
-                affine_, eps_, num_groups_, num_channels_, group_size,
-                std::move(tensors_to_save)
-            );
-
-            result.set_grad_fn(grad_fn);
-
-            std::vector<std::shared_ptr<Function>> next_funcs;
-            if (auto input_grad_fn = input.grad_fn()) {
-                next_funcs.push_back(input_grad_fn);
-            }
-            if (affine_) {
-                auto weight_it = parameters_.find("weight");
-                auto bias_it = parameters_.find("bias");
-                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
-                    if (auto weight_grad_fn = weight_it->second->grad_fn()) {
-                        next_funcs.push_back(weight_grad_fn);
-                    }
-                }
-                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
-                    if (auto bias_grad_fn = bias_it->second->grad_fn()) {
-                        next_funcs.push_back(bias_grad_fn);
-                    }
-                }
-            }
-            grad_fn->set_next_functions(next_funcs);
-
-            std::vector<Variable> input_vars;
-            if (input.requires_grad()) {
-                input_vars.push_back(input);
-            }
-            if (affine_) {
-                auto weight_it = parameters_.find("weight");
-                auto bias_it = parameters_.find("bias");
-                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
-                    input_vars.push_back(*weight_it->second);
-                }
-                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
-                    input_vars.push_back(*bias_it->second);
-                }
-            }
-            grad_fn->set_input_variables(input_vars);
-
-            return result;
-        }
-
-        return Variable(output, false);
+    // Downcast output back to original dtype if we upcast for computation
+    if (needs_upcast) {
+        output = output.to(original_dtype);
     }
 
-    // CPU path: pointer-based computation. Compute in the input's natural
-    // floating precision: Float64 stays Float64 (converting to Float32 here
-    // silently capped GroupNorm at single precision and diverged from the GPU
-    // path); Float16/BFloat16 widen to Float32.
-    const DType compute_dtype =
-        (original_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
-    Tensor input_tensor_cpu = input.tensor();
-    if (input_tensor_cpu.dtype() != compute_dtype) {
-        // .to() also yields contiguous storage for the manual NCHW indexing.
-        input_tensor_cpu = input_tensor_cpu.to(compute_dtype);
-    } else if (!input_tensor_cpu.is_contiguous()) {
-        input_tensor_cpu = input_tensor_cpu.contiguous();
-    }
-    Variable input_cpu = Variable(input_tensor_cpu, input.requires_grad());
-    // Get weight/bias from parameters_ to respect offload hooks
-    Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : weight_.tensor();
-    Tensor bias_tensor = affine_ ? parameters_["bias"]->tensor() : bias_.tensor();
-    bool weight_requires_grad = affine_ ? parameters_["weight"]->requires_grad() : weight_.requires_grad();
-    bool bias_requires_grad = affine_ ? parameters_["bias"]->requires_grad() : bias_.requires_grad();
-
-    // Move to CPU and convert Float16/Float64 to Float32 for computation
-    Tensor weight_tensor_cpu = weight_tensor;
-    Tensor bias_tensor_cpu = bias_tensor;
-    if (weight_tensor.device().type != Device::Type::CPU) {
-        weight_tensor_cpu = weight_tensor_cpu.cpu();
-        bias_tensor_cpu = bias_tensor_cpu.cpu();
-    }
-    if (weight_tensor_cpu.dtype() != compute_dtype) {
-        weight_tensor_cpu = weight_tensor_cpu.to(compute_dtype);
-        bias_tensor_cpu = bias_tensor_cpu.to(compute_dtype);
-    }
-    Variable weight_cpu = Variable(weight_tensor_cpu, weight_requires_grad);
-    Variable bias_cpu = Variable(bias_tensor_cpu, bias_requires_grad);
-
-    // Compute mean/variance/rstd/output in the chosen precision (T). The inner
-    // sums already accumulate in double; templating on T also removes the
-    // Float32 truncation of the inputs, stats and output for Float64.
-    auto group_mean = zeros({N * num_groups_}, compute_dtype, Device::cpu());
-    auto group_var = zeros({N * num_groups_}, compute_dtype, Device::cpu());
-    auto rstd = zeros({N * num_groups_}, compute_dtype, Device::cpu());
-    auto output = zeros_like(input_cpu.tensor());
-
-    int64_t group_numel = group_size * spatial_size;
-
-    auto compute = [&]<typename T>() {
-        const T* input_data = input_cpu.tensor().data<T>();
-        T* mean_data = group_mean.data<T>();
-        T* var_data = group_var.data<T>();
-        T* rstd_data = rstd.data<T>();
-        T* output_data = output.data<T>();
-        const T* weight_data = affine_ ? weight_cpu.tensor().data<T>() : nullptr;
-        const T* bias_data = affine_ ? bias_cpu.tensor().data<T>() : nullptr;
-
-        // Mean per group (manual NCHW indexing).
-        for (int64_t n = 0; n < N; n++) {
-            for (int64_t g = 0; g < num_groups_; g++) {
-                double sum = 0.0;
-                int64_t c_start = g * group_size;
-                int64_t c_end = c_start + group_size;
-                for (int64_t c = c_start; c < c_end; c++)
-                    for (int64_t h = 0; h < H; h++)
-                        for (int64_t w = 0; w < W; w++)
-                            sum += static_cast<double>(input_data[((n * C + c) * H + h) * W + w]);
-                mean_data[n * num_groups_ + g] = static_cast<T>(sum / group_numel);
-            }
-        }
-        // Variance per group.
-        for (int64_t n = 0; n < N; n++) {
-            for (int64_t g = 0; g < num_groups_; g++) {
-                double sum_sq = 0.0;
-                double mu = static_cast<double>(mean_data[n * num_groups_ + g]);
-                int64_t c_start = g * group_size;
-                int64_t c_end = c_start + group_size;
-                for (int64_t c = c_start; c < c_end; c++)
-                    for (int64_t h = 0; h < H; h++)
-                        for (int64_t w = 0; w < W; w++) {
-                            double diff = static_cast<double>(input_data[((n * C + c) * H + h) * W + w]) - mu;
-                            sum_sq += diff * diff;
-                        }
-                var_data[n * num_groups_ + g] = static_cast<T>(sum_sq / group_numel);
-            }
-        }
-        // Reciprocal std.
-        for (int64_t i = 0; i < N * num_groups_; i++)
-            rstd_data[i] = static_cast<T>(1.0 / std::sqrt(static_cast<double>(var_data[i]) + eps_));
-
-        // Normalize + affine.
-        for (int64_t n = 0; n < N; n++) {
-            for (int64_t g = 0; g < num_groups_; g++) {
-                double mu = static_cast<double>(mean_data[n * num_groups_ + g]);
-                double inv_std = static_cast<double>(rstd_data[n * num_groups_ + g]);
-                int64_t c_start = g * group_size;
-                int64_t c_end = c_start + group_size;
-                for (int64_t c = c_start; c < c_end; c++)
-                    for (int64_t h = 0; h < H; h++)
-                        for (int64_t w = 0; w < W; w++) {
-                            int64_t idx = ((n * C + c) * H + h) * W + w;
-                            double normalized = (static_cast<double>(input_data[idx]) - mu) * inv_std;
-                            if (affine_)
-                                output_data[idx] = static_cast<T>(normalized * static_cast<double>(weight_data[c]) + static_cast<double>(bias_data[c]));
-                            else
-                                output_data[idx] = static_cast<T>(normalized);
-                        }
-            }
-        }
-    };
-    if (compute_dtype == DType::Float64) compute.template operator()<double>();
-    else compute.template operator()<float>();
-
-    // Convert back to original dtype and move to original device if needed
-    Tensor output_final = output;
-    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16 || original_dtype == DType::Float64) {
-        output_final = output_final.to(original_dtype);
-    }
-    if (original_device.type != Device::Type::CPU) {
-        output_final = output_final.to(original_device);
-    }
-
-    // Set up autograd if needed (respect no_grad: gate on is_grad_enabled()).
     if (is_grad_enabled() && (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad()))) {
-        auto result = Variable(output_final, true);
-
-        // Move statistics to original device so backward dispatch finds all tensors on same device
-        // For Float64 on Vulkan, stats must match input dtype since the f64 backward shader
-        // declares double[] buffers. Convert Float32 stats to Float64 before uploading.
-        Tensor stats_mean = group_mean;
-        Tensor stats_rstd = rstd;
-        if (original_dtype == DType::Float64 && original_device.type == Device::Type::Vulkan) {
-            stats_mean = stats_mean.to(DType::Float64);
-            stats_rstd = stats_rstd.to(DType::Float64);
-        }
-        Tensor saved_mean = (original_device.type == Device::Type::CPU) ? stats_mean : stats_mean.to(original_device);
-        Tensor saved_rstd = (original_device.type == Device::Type::CPU) ? stats_rstd : stats_rstd.to(original_device);
+        auto result = Variable(output, true);
 
         std::vector<Tensor> tensors_to_save = {
-            input.tensor(),
-            saved_mean,
-            saved_rstd,
-            affine_ ? parameters_["weight"]->tensor() : ones({C}, input.tensor().dtype(), input.tensor().device())
+            input.tensor(), saved_mean, saved_rstd, weight_tensor
         };
 
         auto grad_fn = std::make_shared<GroupNormBackward>(
@@ -2155,9 +1166,7 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
         result.set_grad_fn(grad_fn);
 
-        // Set next functions to chain backward pass
         std::vector<std::shared_ptr<Function>> next_funcs;
-        // Only add grad_fn if it exists (not null)
         if (auto input_grad_fn = input.grad_fn()) {
             next_funcs.push_back(input_grad_fn);
         }
@@ -2177,7 +1186,6 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
         }
         grad_fn->set_next_functions(next_funcs);
 
-        // Track input variables
         std::vector<Variable> input_vars;
         if (input.requires_grad()) {
             input_vars.push_back(input);
@@ -2195,9 +1203,9 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
         grad_fn->set_input_variables(input_vars);
 
         return result;
-    } else {
-        return Variable(output_final, false);
     }
+
+    return Variable(output, false);
 }
 
 auto GroupNorm::reset_parameters() -> void {
@@ -3207,8 +2215,14 @@ auto RMSNorm::forward_impl(const Variable& input_orig) -> Variable {
 
     Device original_device = input.tensor().device();
 
-    // GPU training path: use fused kernel and set up autograd
-    if (original_device.type != Device::Type::CPU) {
+    // Dispatch through OpId::FusedRMSNorm on every device including CPU
+    // (cpu::fused_rms_norm_kernel-equivalent — registered in
+    // cpu_kernel_registry.cpp). The old CPU-only hand-rolled pointer-based
+    // "CPU path" that followed this block bypassed dispatch() entirely,
+    // making CPU RMSNorm (in training, or in any non-Float32 dtype)
+    // invisible to the JIT tracer — same bug class as JIT-R046/R047, fixed
+    // here for consistency even though RMSNorm wasn't separately flagged.
+    {
         const Tensor& x = input.tensor();
 
         Tensor weight_dev = cached_weight_ ? cached_weight_->tensor() : weight_.tensor();
@@ -3279,260 +2293,13 @@ auto RMSNorm::forward_impl(const Variable& input_orig) -> Variable {
         return Variable(output, false);
     }
 
-    // CPU path: pointer-based computation
-    Tensor input_cpu = input.tensor();
-
-    // Get weight from cached pointer (faster) or fallback to parameters_ for hooks
-    Tensor weight_cpu = cached_weight_ ? cached_weight_->tensor() : parameters_["weight"]->tensor();
-    if (weight_cpu.device() != Device::cpu()) {
-        weight_cpu = weight_cpu.to(Device::cpu());
-    }
-    if (weight_cpu.dtype() != input_cpu.dtype()) {
-        weight_cpu = weight_cpu.to(input_cpu.dtype());
-    }
-
-    DType input_dtype = input_cpu.dtype();
-
-    if (input_dtype == DType::Float32) {
-        auto* input_data = input_cpu.data<float>();
-        auto* weight_data = weight_cpu.data<float>();
-
-        // Allocate output and rrms tensors
-        auto output_cpu = zeros_like(input_cpu);
-        auto* output_data = output_cpu.data<float>();
-        auto rrms = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto* rrms_data = rrms.data<float>();
-
-#if defined(__x86_64__) || defined(_M_X64)
-        // Use SIMD-optimized fused kernel
-        fused_rms_norm_f32(
-            input_data, weight_data, output_data, rrms_data,
-            batch_size, N, static_cast<float>(eps_)
-        );
-#else
-        // Scalar fallback
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum_sq = 0.0;
-            for (int64_t i = 0; i < N; i++) {
-                float val = input_data[b * N + i];
-                sum_sq += val * val;
-            }
-            double rms = std::sqrt(sum_sq / N + eps_);
-            rrms_data[b] = static_cast<float>(1.0 / rms);
-
-            float inv_rms = rrms_data[b];
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                output_data[idx] = input_data[idx] * inv_rms * weight_data[i];
-            }
-        }
-#endif
-
-        // Move output back to original device if needed
-        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-        // Set up autograd if needed - check is_grad_enabled() first for fast inference path
-        // Use cached pointer for faster requires_grad check
-        if (is_grad_enabled() && (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()))) {
-            auto result = Variable(output, true);
-
-            // Move statistics to original device so backward dispatch finds all tensors on same device
-            Tensor saved_rrms = (original_device == Device::cpu()) ? rrms : rrms.to(original_device);
-
-            std::vector<Tensor> tensors_to_save = {
-                input.tensor(),
-                saved_rrms,
-                cached_weight_ ? cached_weight_->tensor() : weight_.tensor()
-            };
-
-            auto grad_fn = std::make_shared<RMSNormBackward>(
-                eps_, N, std::move(tensors_to_save)
-            );
-
-            result.set_grad_fn(grad_fn);
-
-            std::vector<std::shared_ptr<Function>> next_funcs;
-            if (auto input_grad_fn = input.grad_fn()) {
-                next_funcs.push_back(input_grad_fn);
-            }
-            if (cached_weight_ && cached_weight_->requires_grad()) {
-                if (auto weight_grad_fn = cached_weight_->grad_fn()) {
-                    next_funcs.push_back(weight_grad_fn);
-                }
-            }
-            grad_fn->set_next_functions(next_funcs);
-
-            // Track input variables for gradient accumulation
-            std::vector<Variable> input_vars;
-            if (input.requires_grad()) {
-                input_vars.push_back(input);
-            }
-            if (cached_weight_ && cached_weight_->requires_grad()) {
-                input_vars.push_back(*cached_weight_);
-            }
-            grad_fn->set_input_variables(input_vars);
-
-            return result;
-        }
-
-        return Variable(output, false);
-
-    } else if (input_dtype == DType::Float64) {
-        auto* input_data = input_cpu.data<double>();
-
-        // Compute root mean square for each batch element
-        auto rrms = zeros({batch_size}, DType::Float64, Device::cpu());
-        auto* rrms_data = rrms.data<double>();
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum_sq = 0.0;
-            for (int64_t i = 0; i < N; i++) {
-                double val = input_data[b * N + i];
-                sum_sq += val * val;
-            }
-            double rms = std::sqrt(sum_sq / N + eps_);
-            rrms_data[b] = 1.0 / rms;
-        }
-
-        // Normalize: x * rrms * weight
-        auto output_cpu = zeros_like(input_cpu);
-        auto* output_data = output_cpu.data<double>();
-        auto* weight_data = weight_cpu.data<double>();
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            double inv_rms = rrms_data[b];
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                output_data[idx] = input_data[idx] * inv_rms * weight_data[i];
-            }
-        }
-
-        // Move output back to original device if needed
-        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-        // Set up autograd if needed - check is_grad_enabled() first for fast inference path
-        // Use cached pointer for faster requires_grad check
-        if (is_grad_enabled() && (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()))) {
-            auto result = Variable(output, true);
-
-            // Save rrms for backward pass
-            // For Vulkan backward, stats must match input dtype (Float64) since the
-            // f64 shader reads them as double[]. CPU backward converts to Float32 itself.
-            Tensor rrms_save;
-            if (original_device.type == Device::Type::Vulkan) {
-                // Keep as Float64 to match the f64 backward shader's buffer declarations
-                rrms_save = rrms;
-            } else {
-                // CPU backward converts to Float32 anyway
-                rrms_save = zeros({batch_size}, DType::Float32, Device::cpu());
-                auto* rrms_save_data = rrms_save.data<float>();
-                for (int64_t b = 0; b < batch_size; b++) {
-                    rrms_save_data[b] = static_cast<float>(rrms_data[b]);
-                }
-            }
-
-            // Move statistics to original device so backward dispatch finds all tensors on same device
-            Tensor saved_rrms = (original_device == Device::cpu()) ? rrms_save : rrms_save.to(original_device);
-
-            std::vector<Tensor> tensors_to_save = {
-                input.tensor(),
-                saved_rrms,
-                cached_weight_ ? cached_weight_->tensor() : weight_.tensor()
-            };
-
-            auto grad_fn = std::make_shared<RMSNormBackward>(
-                eps_, N, std::move(tensors_to_save)
-            );
-
-            result.set_grad_fn(grad_fn);
-
-            std::vector<std::shared_ptr<Function>> next_funcs;
-            if (auto input_grad_fn = input.grad_fn()) {
-                next_funcs.push_back(input_grad_fn);
-            }
-            if (cached_weight_ && cached_weight_->requires_grad()) {
-                if (auto weight_grad_fn = cached_weight_->grad_fn()) {
-                    next_funcs.push_back(weight_grad_fn);
-                }
-            }
-            grad_fn->set_next_functions(next_funcs);
-
-            // Track input variables for gradient accumulation
-            std::vector<Variable> input_vars;
-            if (input.requires_grad()) {
-                input_vars.push_back(input);
-            }
-            if (cached_weight_ && cached_weight_->requires_grad()) {
-                input_vars.push_back(*cached_weight_);
-            }
-            grad_fn->set_input_variables(input_vars);
-
-            return result;
-        }
-
-        return Variable(output, false);
-
-    } else if (input_dtype == DType::Float16 || input_dtype == DType::BFloat16) {
-        // Half-precision path: accumulate RMS in float, store in the original
-        // half type. Shared by Float16 and BFloat16 (BFloat16 previously fell
-        // through to the unsupported-dtype throw).
-        auto run_half = [&]<typename H>() -> Variable {
-            auto* input_data = input_cpu.data<H>();
-
-            auto rrms = zeros({batch_size}, DType::Float32, Device::cpu());
-            auto* rrms_data = rrms.data<float>();
-            for (int64_t b = 0; b < batch_size; b++) {
-                double sum_sq = 0.0;
-                for (int64_t i = 0; i < N; i++) {
-                    float val = static_cast<float>(input_data[b * N + i]);
-                    sum_sq += val * val;
-                }
-                double rms = std::sqrt(sum_sq / N + eps_);
-                rrms_data[b] = static_cast<float>(1.0 / rms);
-            }
-
-            auto output_cpu = zeros_like(input_cpu);
-            auto* output_data = output_cpu.data<H>();
-            auto* weight_data = weight_cpu.data<H>();
-            for (int64_t b = 0; b < batch_size; b++) {
-                float inv_rms = rrms_data[b];
-                for (int64_t i = 0; i < N; i++) {
-                    int64_t idx = b * N + i;
-                    output_data[idx] = H(static_cast<float>(input_data[idx]) * inv_rms * static_cast<float>(weight_data[i]));
-                }
-            }
-
-            Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-            if (is_grad_enabled() && (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()))) {
-                auto result = Variable(output, true);
-                Tensor saved_rrms = (original_device == Device::cpu()) ? rrms : rrms.to(original_device);
-                std::vector<Tensor> tensors_to_save = {
-                    input.tensor(),
-                    saved_rrms,
-                    cached_weight_ ? cached_weight_->tensor() : weight_.tensor()
-                };
-                auto grad_fn = std::make_shared<RMSNormBackward>(eps_, N, std::move(tensors_to_save));
-                result.set_grad_fn(grad_fn);
-                std::vector<std::shared_ptr<Function>> next_funcs;
-                if (auto input_grad_fn = input.grad_fn()) next_funcs.push_back(input_grad_fn);
-                if (cached_weight_ && cached_weight_->requires_grad()) {
-                    if (auto weight_grad_fn = cached_weight_->grad_fn()) next_funcs.push_back(weight_grad_fn);
-                }
-                grad_fn->set_next_functions(next_funcs);
-                std::vector<Variable> input_vars;
-                if (input.requires_grad()) input_vars.push_back(input);
-                if (cached_weight_ && cached_weight_->requires_grad()) input_vars.push_back(*cached_weight_);
-                grad_fn->set_input_variables(input_vars);
-                return result;
-            }
-            return Variable(output, false);
-        };
-        return (input_dtype == DType::Float16) ? run_half.template operator()<Float16>()
-                                               : run_half.template operator()<BFloat16>();
-    } else {
-        throw std::runtime_error("RMSNorm only supports Float16, BFloat16, Float32, and Float64 dtypes");
-    }
+    // Every valid RMSNorm dtype (Float32/Float64/Float16/BFloat16) is
+    // handled by the dispatch block above; this exists only to fail loudly
+    // for an actually-unsupported dtype (mirroring the pre-existing
+    // hand-rolled CPU path's own final `else` branch, removed above as
+    // dead code once the dispatch block started covering every device).
+    throw std::runtime_error(
+        "RMSNorm only supports Float16, BFloat16, Float32, and Float64 dtypes");
 }
 
 auto RMSNorm::reset_parameters() -> void {

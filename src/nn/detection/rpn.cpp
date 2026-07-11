@@ -15,6 +15,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
@@ -127,6 +128,30 @@ auto RegionProposalNetwork::assign_anchors_to_gt(
     const Tensor& anchors,
     const Tensor& gt_boxes)
     -> std::pair<Tensor, Tensor> {
+
+    // JIT-R086/R089: below this point, label assignment reads the actual IoU
+    // VALUES host-side (.data<float>() over max_iou_per_anchor/iou_matrix) and
+    // writes the result into a fresh zeros() tensor via a raw pointer copy —
+    // the JIT-R085 "zeros() traced, real values written in after
+    // registration" mechanism. A trace would silently freeze whichever
+    // foreground/background assignment the trace-dummy's GT boxes happened
+    // to produce, replaying it unchanged for every real image's actual GT —
+    // a silent wrong-answer bug in a safety-relevant detection pipeline, not
+    // a crash. No general dynamic-value-dependent-output tracing primitive
+    // exists in this codebase for this shape of computation (matches JIT-
+    // R050/R051's ACT/routing precedent). Refuse loudly and unconditionally
+    // — NOT gated on num_gt, since a num_gt==0 trace-time warm-up would
+    // otherwise silently freeze to the "all background" path per this
+    // finding's own documented secondary failure mode. Run eagerly instead.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "RegionProposalNetwork::assign_anchors_to_gt cannot be traced by "
+            "@tz.jit — anchor-to-ground-truth label assignment reads IoU "
+            "values host-side and would be permanently frozen to this trace "
+            "call's ground-truth boxes, silently producing wrong labels for "
+            "every other image. Run training-mode RPN calls eagerly (outside "
+            "a traced region).");
+    }
 
     int64_t num_anchors = anchors.shape()[0];
     int64_t num_gt = gt_boxes.shape()[0];
@@ -277,6 +302,30 @@ auto RegionProposalNetwork::generate_proposals(
     const Tensor& box_deltas,
     const std::pair<int64_t, int64_t>& image_shape)
     -> Tensor {
+
+    // JIT-R088: below this point, several host-side C++ `if` branches key
+    // off runtime-computed, data-dependent tensor shapes/counts (keep.numel()
+    // ==0, score_keep.numel()==0, sorted_indices.shape()[0]>pre_nms_top_n_,
+    // keep_nms.shape()[0]>post_nms_top_n_) — a trace only ever records
+    // whichever branch the trace-dummy's proposal counts happened to take,
+    // and replay blindly re-executes that fixed set of recorded nodes
+    // regardless of a real image's actual surviving-proposal count (matches
+    // the JIT-R050/R051 MoE/HRM data-dependent-control-flow class exactly).
+    // No general dynamic-control-flow tracing primitive is safely applicable
+    // here without risking a silently-wrong compiled graph for the realistic
+    // case (pre/post_nms_top_n_ caps are exceeded on almost every real
+    // input). Refuse loudly rather than silently bake in one specific
+    // trace-time branch structure.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "RegionProposalNetwork::generate_proposals cannot be traced by "
+            "@tz.jit — proposal filtering (empty-box/score-threshold/top-N "
+            "branches) depends on runtime-computed box counts and would be "
+            "permanently frozen to this trace call's specific counts, "
+            "silently misprocessing any other image with a different "
+            "surviving-proposal count. Run RPN proposal generation eagerly "
+            "(outside a traced region).");
+    }
 
     // Decode boxes from deltas
     auto proposals = ops::decode_boxes(box_deltas, anchors);

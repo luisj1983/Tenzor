@@ -12,6 +12,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/layers/conv.hpp"
+#include "tenzor/nn/functional.hpp"
 #include "tenzor/nn/layers/rnn.hpp"
 #include "tenzor/nn/layers/sync_batchnorm.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -54,6 +55,175 @@ TEST_P(HigherOrderNNTest, Conv2d_DoubleBackward) {
     // through grad_norm touches input via the chain that backward_with_variables
     // built, so input ends up with a second-order gradient accumulated on it.
     EXPECT_GRAD_FLOWS(input);
+}
+
+// ============================================================================
+// JIT-R067: grad_weight double-backward (3rd-order gradient) across the
+// whole Conv family. Previously grad_weight was computed via a raw,
+// non-differentiable dispatch call with no grad_fn attached, so a loss
+// depending on grad_weight from a create_graph=true backward would silently
+// fail to propagate any gradient back to input/weight when differentiated
+// again. loss1 deliberately uses sum(output*output) rather than sum(output)
+// so grad_out_var = 2*output is a genuine function of both input and weight
+// (not a constant) — this exercises grad_weight's dependence on grad_out_var
+// in addition to its direct dependence on input, matching how MAML-style
+// inner-loop losses are rarely a plain sum.
+// ============================================================================
+
+TEST_P(HigherOrderNNTest, Conv2d_GradWeight_DoubleBackward) {
+    auto input = Variable(randn({1, 2, 5, 5}, DType::Float32, device), true);
+    auto weight = Variable(randn({3, 2, 3, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv2d(
+        input, weight, std::nullopt, {1, 1}, {1, 1}, {1, 1}, 1);
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value())
+        << "create_graph=true must populate grad_variable() for weight too";
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    // Before the JIT-R067 fix, grad_weight carried no grad_fn, so this
+    // third-order gradient would silently be absent on both input and weight.
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
+}
+
+TEST_P(HigherOrderNNTest, Conv2d_GradWeight_DoubleBackward_Grouped) {
+    auto input = Variable(randn({1, 4, 5, 5}, DType::Float32, device), true);
+    auto weight = Variable(randn({4, 2, 3, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv2d(
+        input, weight, std::nullopt, {1, 1}, {1, 1}, {1, 1}, /*groups=*/2);
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value());
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
+}
+
+TEST_P(HigherOrderNNTest, Conv1d_GradWeight_DoubleBackward) {
+    auto input = Variable(randn({1, 2, 8}, DType::Float32, device), true);
+    auto weight = Variable(randn({3, 2, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv1d(
+        input, weight, std::nullopt, /*stride=*/1, /*padding=*/1, /*dilation=*/1, /*groups=*/1);
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value());
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
+}
+
+TEST_P(HigherOrderNNTest, Conv3d_GradWeight_DoubleBackward) {
+    auto input = Variable(randn({1, 2, 5, 5, 5}, DType::Float32, device), true);
+    auto weight = Variable(randn({3, 2, 3, 3, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv3d(
+        input, weight, std::nullopt, {1, 1, 1}, {1, 1, 1}, {1, 1, 1}, /*groups=*/1);
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value());
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
+}
+
+TEST_P(HigherOrderNNTest, ConvTranspose1d_GradWeight_DoubleBackward) {
+    auto input = Variable(randn({1, 2, 8}, DType::Float32, device), true);
+    auto weight = Variable(randn({2, 3, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv_transpose1d(
+        input, weight, std::nullopt, /*stride=*/2, /*padding=*/1,
+        /*output_padding=*/1, /*groups=*/1, /*dilation=*/1);
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value());
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
+}
+
+TEST_P(HigherOrderNNTest, ConvTranspose2d_GradWeight_DoubleBackward) {
+    auto input = Variable(randn({1, 2, 5, 5}, DType::Float32, device), true);
+    auto weight = Variable(randn({2, 3, 3, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv_transpose2d(
+        input, weight, std::nullopt, {2, 2}, {1, 1}, {1, 1}, /*groups=*/1, {1, 1});
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value());
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
+}
+
+TEST_P(HigherOrderNNTest, ConvTranspose2d_GradWeight_DoubleBackward_Grouped) {
+    auto input = Variable(randn({1, 4, 5, 5}, DType::Float32, device), true);
+    auto weight = Variable(randn({4, 2, 3, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv_transpose2d(
+        input, weight, std::nullopt, {1, 1}, {1, 1}, {0, 0}, /*groups=*/2, {1, 1});
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value());
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
+}
+
+TEST_P(HigherOrderNNTest, ConvTranspose3d_GradWeight_DoubleBackward) {
+    auto input = Variable(randn({1, 2, 5, 5, 5}, DType::Float32, device), true);
+    auto weight = Variable(randn({2, 3, 3, 3, 3}, DType::Float32, device), true);
+
+    auto output = ::tenzor::nn::functional::conv_transpose3d(
+        input, weight, std::nullopt, {1, 1, 1}, {1, 1, 1}, {0, 0, 0}, /*groups=*/1, {1, 1, 1});
+    auto loss1 = tenzor::sum(output * output);
+    loss1.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(weight.grad_variable().has_value());
+    Variable grad_weight = weight.grad_variable().value();
+
+    auto loss2 = tenzor::sum(grad_weight * grad_weight);
+    loss2.backward();
+
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(weight);
 }
 
 // ============================================================================

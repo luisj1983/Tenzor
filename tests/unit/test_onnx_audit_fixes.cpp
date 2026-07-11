@@ -17,6 +17,8 @@
 #include <tenzor/onnx/exporter.hpp>
 #include <tenzor/onnx/importer.hpp>
 #include <tenzor/nn/layers/linear.hpp>
+#include <tenzor/nn/module.hpp>
+#include <tenzor/autograd/ops.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -560,6 +562,112 @@ TEST(ONNXAuditFixes, JitExportDoesNotDuplicateWeights) {
                 << "' after weight dedup";
         }
     }
+
+    std::filesystem::remove(tmp);
+}
+
+// =========================================================================
+// JIT-R031: Squeeze/Unsqueeze must export the axis as an opset-13+ INPUT
+// (int64 initializer tensor), not an attribute. jit_op_type_to_onnx maps
+// both to their ONNX names, but convert_jit_node_to_onnx's attribute switch
+// previously had no case for either, so both fell to the `default:` branch,
+// which forwarded the JIT node's raw "dim" int attribute verbatim as a
+// nonstandard ONNX "dim" ATTRIBUTE. No compliant ONNX reader recognizes
+// "dim" on Squeeze/Unsqueeze; ONNX's own no-axes-input default for Squeeze
+// is "remove ALL size-1 dims" (not the single intended axis), so a
+// round-tripped model silently squeezed/unsqueezed the wrong dimension.
+// =========================================================================
+namespace {
+class SqueezeDimModule : public nn::Module {
+public:
+    explicit SqueezeDimModule(int64_t dim) : dim_(dim) {}
+    auto forward_impl(const Variable& input) -> Variable override {
+        return ::tenzor::squeeze(input, dim_);
+    }
+private:
+    int64_t dim_;
+};
+class UnsqueezeDimModule : public nn::Module {
+public:
+    explicit UnsqueezeDimModule(int64_t dim) : dim_(dim) {}
+    auto forward_impl(const Variable& input) -> Variable override {
+        return ::tenzor::unsqueeze(input, dim_);
+    }
+private:
+    int64_t dim_;
+};
+
+// Find the initializer tensor an ONNX node's Nth input refers to, decode its
+// raw_data as int64, and return it.
+auto decode_int64_initializer(const ONNXGraph& g, const std::string& name)
+    -> std::vector<int64_t> {
+    for (const auto& init : g.initializers) {
+        if (init.name == name) {
+            std::vector<int64_t> out(init.raw_data.size() / sizeof(int64_t));
+            std::memcpy(out.data(), init.raw_data.data(), init.raw_data.size());
+            return out;
+        }
+    }
+    ADD_FAILURE() << "no initializer named '" << name << "' found";
+    return {};
+}
+}  // namespace
+
+TEST(ONNXAuditFixes, JitExportSqueezeEmitsAxesAsInput) {
+    // Shape has TWO size-1 dims (index 0 and 2); squeezing only dim=0 must
+    // leave dim 2 (still size 1) alone -- exactly what the old "dim"
+    // attribute (silently ignored by readers, ONNX default = squeeze ALL
+    // size-1 dims) would have gotten wrong.
+    SqueezeDimModule model(/*dim=*/0);
+    Tensor input = tenzor::randn({1, 3, 1, 4});
+    ONNXExporter exporter(/*opset=*/17);
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     "tenzor_jit_export_squeeze_axes.onnx";
+    exporter.export_module(model, input, tmp.string());
+
+    const auto& g = exporter.get_graph();
+    auto it = std::find_if(g.nodes.begin(), g.nodes.end(),
+        [](const ONNXExportNode& n) { return n.op_type == "Squeeze"; });
+    ASSERT_NE(it, g.nodes.end()) << "no Squeeze node emitted";
+
+    EXPECT_EQ(it->int_attrs.count("dim"), 0u)
+        << "Squeeze must not carry a nonstandard 'dim' attribute — no "
+           "compliant ONNX reader recognizes it";
+    ASSERT_EQ(it->inputs.size(), 2u)
+        << "opset 13+ Squeeze needs axes as a 2nd INPUT, not an attribute";
+    ASSERT_FALSE(it->inputs[1].empty());
+
+    auto axes = decode_int64_initializer(g, it->inputs[1]);
+    ASSERT_EQ(axes.size(), 1u);
+    EXPECT_EQ(axes[0], 0) << "wrong axis exported for Squeeze(dim=0)";
+
+    std::filesystem::remove(tmp);
+}
+
+TEST(ONNXAuditFixes, JitExportUnsqueezeEmitsAxesAsInput) {
+    UnsqueezeDimModule model(/*dim=*/2);
+    Tensor input = tenzor::randn({2, 3, 4});
+    ONNXExporter exporter(/*opset=*/17);
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     "tenzor_jit_export_unsqueeze_axes.onnx";
+    exporter.export_module(model, input, tmp.string());
+
+    const auto& g = exporter.get_graph();
+    auto it = std::find_if(g.nodes.begin(), g.nodes.end(),
+        [](const ONNXExportNode& n) { return n.op_type == "Unsqueeze"; });
+    ASSERT_NE(it, g.nodes.end()) << "no Unsqueeze node emitted";
+
+    EXPECT_EQ(it->int_attrs.count("dim"), 0u)
+        << "Unsqueeze must not carry a nonstandard 'dim' attribute — no "
+           "compliant ONNX reader recognizes it";
+    ASSERT_EQ(it->inputs.size(), 2u)
+        << "opset 13+ Unsqueeze needs axes as a mandatory 2nd INPUT, not an "
+           "attribute";
+    ASSERT_FALSE(it->inputs[1].empty());
+
+    auto axes = decode_int64_initializer(g, it->inputs[1]);
+    ASSERT_EQ(axes.size(), 1u);
+    EXPECT_EQ(axes[0], 2) << "wrong axis exported for Unsqueeze(dim=2)";
 
     std::filesystem::remove(tmp);
 }

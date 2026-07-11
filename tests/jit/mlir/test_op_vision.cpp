@@ -179,6 +179,28 @@ TEST(OpVision, DropoutIsIdentity) {
     assert_iree_compile_accepts(mlir);
 }
 
+// JIT-R013 regression: handle_dropout must refuse to lower a
+// training=true Dropout node (silent identity would drop the
+// regularization mask/scale with no error), mirroring handle_batch_norm2d's
+// established training-mode guard.
+TEST(OpVision, DropoutTrainingModeRefusesToLower) {
+    ensure_core_init();
+    tzj::Graph g;
+    auto x = g.create_value("x", {4}, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    g.set_inputs({x});
+    auto node = g.create_node(tzj::OpType::Dropout);
+    node->add_input(x);
+    node->set_bool_attr("training", true);
+    auto z = g.create_value("z", {4}, ::tenzor::DType::Float32,
+                            ::tenzor::Device::cpu());
+    node->add_output(z);
+    g.add_node(node);
+    g.set_outputs({z});
+    tzm::GraphToMLIR lowerer;
+    EXPECT_THROW(lowerer.lower(g), std::runtime_error);
+}
+
 TEST(OpVision, PaddingEmitsAndParses) {
     ensure_core_init();
     // (4,) → (8,) with pad_left=2, pad_right=2.

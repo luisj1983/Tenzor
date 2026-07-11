@@ -71,6 +71,51 @@ TEST(RoPECallback, MatchesHandComputed_Position1WithRotation) {
     EXPECT_NEAR(op[7],  7.0f, 1e-5f);
 }
 
+// JIT-R042 regression: dispatch_rope_apply (the plugin/custom-call path's
+// C++ reimplementation, distinct from JIT-R007's MLIR expand-path lowering)
+// was computing the rotation entirely in storage dtype instead of widening
+// F16/BF16 to F32 like eager's rope.cpp ("F121") does. Same hand-computed
+// case as MatchesHandComputed_Position1WithRotation above, run in Float16 —
+// asserts (a) the OUTPUT dtype is still Float16 (narrowed back, not left at
+// the widened F32), and (b) the widen/narrow round-trip doesn't drift beyond
+// F16 precision.
+TEST(RoPECallback, MatchesHandComputed_Position1WithRotation_Float16Widens) {
+    ensure_core_init();
+    const std::vector<int64_t> x_shape{1, 1, 2, 4};
+    const std::vector<int64_t> tab_shape{2, 4};
+    auto x = ::tenzor::full(x_shape, 0.0f, ::tenzor::DType::Float32);
+    {
+        auto* p = x.data<float>();
+        for (int64_t i = 0; i < 8; ++i) p[i] = static_cast<float>(i + 1);
+    }
+    auto cos = ::tenzor::full(tab_shape, 0.0f, ::tenzor::DType::Float32);
+    auto sin = ::tenzor::full(tab_shape, 0.0f, ::tenzor::DType::Float32);
+    {
+        auto* cp = cos.data<float>();
+        auto* sp = sin.data<float>();
+        for (int64_t i = 0; i < 4; ++i) { cp[i] = 1.0f; sp[i] = 0.0f; }
+        for (int64_t i = 0; i < 4; ++i) { cp[4 + i] = 0.5f; sp[4 + i] = 0.5f; }
+    }
+    auto x16   = x.to(::tenzor::DType::Float16);
+    auto cos16 = cos.to(::tenzor::DType::Float16);
+    auto sin16 = sin.to(::tenzor::DType::Float16);
+
+    auto out = cc::dispatch_rope_apply({x16, cos16, sin16}, "offset=0");
+    ASSERT_EQ(out.dtype(), ::tenzor::DType::Float16)
+        << "dispatch_rope_apply must narrow the widened F32 compute back to "
+           "the input's Float16 dtype";
+    auto out32 = out.to(::tenzor::DType::Float32);
+    const float* op = out32.data<float>();
+    EXPECT_NEAR(op[0],  1.0f, 1e-2f);
+    EXPECT_NEAR(op[1],  2.0f, 1e-2f);
+    EXPECT_NEAR(op[2],  3.0f, 1e-2f);
+    EXPECT_NEAR(op[3],  4.0f, 1e-2f);
+    EXPECT_NEAR(op[4], -1.0f, 1e-2f);
+    EXPECT_NEAR(op[5], -1.0f, 1e-2f);
+    EXPECT_NEAR(op[6],  6.0f, 1e-2f);
+    EXPECT_NEAR(op[7],  7.0f, 1e-2f);
+}
+
 TEST(RoPECallback, IdentityWhenCosOneSinZero) {
     ensure_core_init();
     // cos = ones, sin = zeros => out == x (RoPE no-op).

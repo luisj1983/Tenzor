@@ -306,7 +306,8 @@ auto scaled_dot_product_attention(
 auto max_pool2d(const Variable& input,
                 std::pair<int64_t, int64_t> kernel_size,
                 std::pair<int64_t, int64_t> stride = {-1, -1},
-                std::pair<int64_t, int64_t> padding = {0, 0}) -> Variable;
+                std::pair<int64_t, int64_t> padding = {0, 0},
+                bool ceil_mode = false) -> Variable;
 
 /**
  * @brief Functional 2D average pooling

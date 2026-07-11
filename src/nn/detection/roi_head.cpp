@@ -15,6 +15,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
@@ -145,6 +146,23 @@ auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
                                      const Tensor& gt_boxes,
                                      const Tensor& gt_labels)
     -> std::pair<Tensor, Tensor> {
+
+    // JIT-R086/R089: identical mechanism to RegionProposalNetwork::
+    // assign_anchors_to_gt (see its comment) — label assignment below reads
+    // actual IoU values host-side and writes the result via a raw pointer
+    // copy into a fresh zeros() tensor, which a trace would silently freeze
+    // to the trace-dummy's ground truth. Refuse unconditionally (not gated
+    // on num_gt, to close the "empty-GT warm-up silently freezes to
+    // all-background" loophole).
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "RoIHead::match_proposals_to_gt cannot be traced by @tz.jit — "
+            "proposal-to-ground-truth label assignment reads IoU values "
+            "host-side and would be permanently frozen to this trace call's "
+            "ground-truth boxes, silently producing wrong labels for every "
+            "other image. Run training-mode RoIHead calls eagerly (outside "
+            "a traced region).");
+    }
 
     int64_t num_proposals = proposals.shape()[0];
     int64_t num_gt = gt_boxes.shape()[0];
@@ -307,6 +325,23 @@ auto RoIHead::postprocess_detections(
     const Tensor& proposals,
     const std::pair<int64_t, int64_t>& image_shape)
     -> std::unordered_map<std::string, Tensor> {
+
+    // JIT-R088: below this point, several host-side C++ `if` branches key
+    // off runtime-computed, data-dependent box counts (num_rois==0,
+    // keep_indices.numel()==0, all_boxes.empty(), sorted_indices.shape()[0]>
+    // detections_per_img_) — same class as RegionProposalNetwork::
+    // generate_proposals (see its comment). Refuse loudly rather than
+    // silently bake in one specific trace-time branch structure.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "RoIHead::postprocess_detections cannot be traced by @tz.jit — "
+            "per-class score-threshold/NMS/top-N filtering depends on "
+            "runtime-computed detection counts and would be permanently "
+            "frozen to this trace call's specific counts, silently "
+            "misprocessing any other image with a different detection "
+            "count. Run RoIHead postprocessing eagerly (outside a traced "
+            "region).");
+    }
 
     std::unordered_map<std::string, Tensor> result;
 

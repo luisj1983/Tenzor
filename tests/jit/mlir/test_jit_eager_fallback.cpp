@@ -260,6 +260,70 @@ TEST(JitEagerFallback, UnmappableTargetDegradesToEager) {
     }
 }
 
+// JIT-R022: the test above stands in for the OneAPI/MPS scenario with a
+// bogus explicit target, which hits the generic C2 safety net (a lowering/
+// resolve_target failure caught around the whole compile section) — NOT the
+// dedicated C1 branch (compile.cpp's mlir_invoke, "C1: a device with no IREE
+// HAL target") that actually fires for target="auto" on a real OneAPI/MPS
+// device, including that branch's distinct message text and the
+// per-CompiledFunction warned_no_accel_ once-flag. This drives the real C1
+// branch directly on genuine OneAPI hardware instead of a stand-in.
+TEST(JitEagerFallback, UnmappableTargetDegradesToEager_RealOneapiC1) {
+    ensure_core_init();
+    if (!::tenzor::testing::has_oneapi()) {
+        GTEST_SKIP() << "no OneAPI backend";
+    }
+    auto add_fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return x + x;
+    };
+    auto x_tensor = ::tenzor::full({4}, 1.5F, ::tenzor::DType::Float32,
+                                    ::tenzor::Device::oneapi(0));
+    auto x = ::tenzor::Variable(x_tensor, /*requires_grad=*/false);
+    const auto eager = add_fn(x).tensor();
+
+    // Non-strict (target="auto", the @tz.jit default): C1 fires, warns once,
+    // and executes eagerly on the SAME (OneAPI) backend — never CPU.
+    {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = "auto";
+        cfg.strict  = false;
+        ::tenzor::jit::CompiledFunction compiled(
+            ::tenzor::jit::CompiledFunction::FnType(add_fn), cfg);
+        ::tenzor::Variable out;
+        ASSERT_NO_THROW({ out = compiled(x); });
+        EXPECT_EQ(out.tensor().device().type, ::tenzor::Device::Type::OneAPI)
+            << "C1 eager fallback must stay on the input's own backend, "
+               "never silently move to CPU";
+        const auto diff = ::tenzor::max(::tenzor::abs(
+            eager.to(::tenzor::Device::cpu()) -
+            out.tensor().to(::tenzor::Device::cpu()))).item<float>();
+        EXPECT_LT(diff, 1e-6F);
+    }
+    // Strict: C1 rethrows with its own distinct message (not the generic C2
+    // "iree-compile subprocess" text).
+    {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = "auto";
+        cfg.strict  = true;
+        ::tenzor::jit::CompiledFunction compiled(
+            ::tenzor::jit::CompiledFunction::FnType(add_fn), cfg);
+        EXPECT_THROW(
+            {
+                try {
+                    (void)compiled(x);
+                } catch (const std::exception& e) {
+                    EXPECT_NE(std::string(e.what()).find("no IREE target backend"),
+                              std::string::npos)
+                        << "expected the C1-specific message, got: " << e.what();
+                    throw;
+                }
+            },
+            std::exception);
+    }
+}
+
 // ── H6: "vulkan" is accepted and normalized to "vulkan-spirv" at the compile
 //    boundary; a bogus target gives a clear, listing error. ─────────────────
 

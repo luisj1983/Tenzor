@@ -58,21 +58,18 @@ void assert_iree_compile_accepts(const std::string& mlir_text,
 }
 
 tzj::Graph make_rope_graph(const std::vector<int64_t>& x_shape,
-                           const std::vector<int64_t>& tab_shape) {
+                           const std::vector<int64_t>& tab_shape,
+                           ::tenzor::DType dtype = ::tenzor::DType::Float32) {
     tzj::Graph g;
-    auto x   = g.create_value("x",   x_shape,   ::tenzor::DType::Float32,
-                              ::tenzor::Device::cpu());
-    auto cos = g.create_value("cos", tab_shape, ::tenzor::DType::Float32,
-                              ::tenzor::Device::cpu());
-    auto sin = g.create_value("sin", tab_shape, ::tenzor::DType::Float32,
-                              ::tenzor::Device::cpu());
+    auto x   = g.create_value("x",   x_shape,   dtype, ::tenzor::Device::cpu());
+    auto cos = g.create_value("cos", tab_shape, dtype, ::tenzor::Device::cpu());
+    auto sin = g.create_value("sin", tab_shape, dtype, ::tenzor::Device::cpu());
     g.set_inputs({x, cos, sin});
     auto node = g.create_node(tzj::OpType::RoPE);
     node->add_input(x);
     node->add_input(cos);
     node->add_input(sin);
-    auto out = g.create_value("y", x_shape, ::tenzor::DType::Float32,
-                              ::tenzor::Device::cpu());
+    auto out = g.create_value("y", x_shape, dtype, ::tenzor::Device::cpu());
     node->add_output(out);
     g.add_node(node);
     g.set_outputs({out});
@@ -114,6 +111,38 @@ TEST(OpRoPEExpand, ExpandPathIsIreeCompileClean) {
     lowerer.set_plugin_enabled(false);
     const std::string mlir = lowerer.lower(g);
     assert_iree_compile_accepts(mlir, "default");
+}
+
+// JIT-R007 regression: handle_rope_apply_expand was the sole numeric handler
+// in this file missing the F16/BF16 -> F32 widen every other handler has
+// (softmax/gelu/silu/pow/conv2d/pooling/layer_norm/batch_norm/
+// flash_attention_expand/gqa_expand all widen). Computing rotate-half
+// entirely in half precision loses angle precision (eager's "F121" fix).
+// Assert the emitted MLIR both (a) actually widens/narrows via
+// stablehlo.convert and (b) is real, iree-compile-clean MLIR — not just
+// string-matched, an actual external compile of the emitted text.
+TEST(OpRoPEExpand, ExpandPathWidensFloat16ForCompute) {
+    ensure_core_init();
+    auto g = make_rope_graph({2, 4, 16, 64}, {16, 64}, ::tenzor::DType::Float16);
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(false);
+    const std::string mlir = lowerer.lower(g);
+    EXPECT_NE(mlir.find("stablehlo.convert"), std::string::npos)
+        << "F16 RoPE expand must widen to F32 via stablehlo.convert before "
+           "the rotate-half compute pipeline:\n" << mlir;
+    assert_iree_compile_accepts(mlir, "f16");
+}
+
+TEST(OpRoPEExpand, ExpandPathWidensBFloat16ForCompute) {
+    ensure_core_init();
+    auto g = make_rope_graph({2, 4, 16, 64}, {16, 64}, ::tenzor::DType::BFloat16);
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(false);
+    const std::string mlir = lowerer.lower(g);
+    EXPECT_NE(mlir.find("stablehlo.convert"), std::string::npos)
+        << "BF16 RoPE expand must widen to F32 via stablehlo.convert before "
+           "the rotate-half compute pipeline:\n" << mlir;
+    assert_iree_compile_accepts(mlir, "bf16");
 }
 
 TEST(OpRoPEExpand, ExpandResultMatchesHandComputed) {

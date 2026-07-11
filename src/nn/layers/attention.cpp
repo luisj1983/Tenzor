@@ -280,11 +280,20 @@ auto MultiheadAttention::scaled_dot_product_attention(
             // it doesn't reinterpret shape[0]/shape[1] as B/H. Output reshaped
             // back to 4D after dispatch. Without this the kernel returns shape
             // [B, H, L] (E dropped), causing merge_heads permute to throw.
+            // JIT-R061: tenzor::reshape(Tensor,...) is a raw TensorImpl
+            // metadata call — zero dispatch() calls, invisible to the JIT
+            // tracer (which for view ops relies on the Variable-level
+            // autograd::reshape wrapper explicitly recording a graph node,
+            // not generic dispatch interception; matches the JIT-R058a
+            // mechanism found in QuantizedLSTM/GRU/LSTMCell's state
+            // management). q/k/v are LIVE, call-varying values, so an
+            // untraced reshape here would silently freeze this ROCm-only
+            // path's cuDNN-SDPA inputs at their trace-time shape/data.
             bool needs_3d_collapse = (query.device().type == Device::Type::ROCm);
             if (needs_3d_collapse) {
-                q_contig = tenzor::reshape(q_contig, {batch_size * num_heads, seq_len_q, head_dim});
-                k_contig = tenzor::reshape(k_contig, {batch_size * num_heads, seq_len_k, head_dim});
-                v_contig = tenzor::reshape(v_contig, {batch_size * num_heads, seq_len_k, head_dim});
+                q_contig = tenzor::reshape(Variable(q_contig, false), {batch_size * num_heads, seq_len_q, head_dim}).tensor();
+                k_contig = tenzor::reshape(Variable(k_contig, false), {batch_size * num_heads, seq_len_k, head_dim}).tensor();
+                v_contig = tenzor::reshape(Variable(v_contig, false), {batch_size * num_heads, seq_len_k, head_dim}).tensor();
             }
 
             // Use dispatch to call cuDNN SDPA - pass 4D tensors directly.
@@ -301,7 +310,11 @@ auto MultiheadAttention::scaled_dot_product_attention(
             Tensor output = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
 
             if (needs_3d_collapse) {
-                output = tenzor::reshape(output, {batch_size, num_heads, seq_len_q, head_dim});
+                // `output` is the dispatched FusedAttention op's live result
+                // (already correctly traced) — reshape it the same
+                // tracer-aware way so the final Variable stays connected to
+                // it instead of freezing at trace-time.
+                output = tenzor::reshape(Variable(output, false), {batch_size, num_heads, seq_len_q, head_dim}).tensor();
             }
 
             Variable attended(output, false);

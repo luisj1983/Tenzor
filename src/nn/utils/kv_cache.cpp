@@ -7,6 +7,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/autograd/ops.hpp"
+#include "tenzor/jit/tracer.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <algorithm>
@@ -56,6 +58,29 @@ auto KVCache::update(int64_t layer, const Tensor& new_k, const Tensor& new_v, in
         throw std::out_of_range(
             "KVCache::update: layer index " + std::to_string(layer) +
             " out of range [0, " + std::to_string(config_.num_layers) + ")");
+    }
+
+    // JIT-R090: `pos` is a host int64_t baked into the SliceScatter node's
+    // constant start/end attributes, and the persistent cache buffer
+    // (k_caches_[layer]/v_caches_[layer]) is not a declared nn::Module
+    // parameter, so end_trace() freezes it as an opaque trace-time constant
+    // rather than a live-rebound leaf. Empirically confirmed: tracing
+    // update() at pos=0 then replaying (same input shape) at pos=1 produces
+    // both the WRONG shape (total_len still computed from the trace-time
+    // pos) and WRONG content (the cache snapshot never advances past the
+    // trace-time state) — the exact silent-corruption scenario this finding
+    // describes for the standard autoregressive decode loop. As with RoPE
+    // (JIT-R083) there is no way to make this safe short of the graph IR
+    // supporting a genuinely dynamic/live-rebound cache buffer, so fail
+    // loudly and force eager fallback for every call made while tracing.
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "KVCache::update: cannot be JIT-traced — `pos` is baked into the "
+            "compiled graph as a constant and the cache buffer is frozen at "
+            "its trace-time snapshot, so a later call at a different "
+            "position (the standard autoregressive decode loop) would "
+            "silently replay stale/wrong-shaped cache content. Call outside "
+            "jit.compile()/jit.trace().");
     }
 
     // Validate input ranks/shapes against the cache configuration before
@@ -119,6 +144,9 @@ auto KVCache::update(int64_t layer, const Tensor& new_k, const Tensor& new_v, in
     Tensor new_k_contig = new_k.is_contiguous() ? new_k : new_k.contiguous();
     Tensor new_v_contig = new_v.is_contiguous() ? new_v : new_v.contiguous();
 
+    // The is_tracing() throw above already guarantees this raw std::memcpy
+    // path (which never touches dispatch(), not even dispatch_inplace()) is
+    // unreachable while tracing.
     const bool can_inplace =
         config_.device.type == Device::Type::CPU &&
         k_caches_[layer].is_contiguous() && v_caches_[layer].is_contiguous();
@@ -154,8 +182,13 @@ auto KVCache::update(int64_t layer, const Tensor& new_k, const Tensor& new_v, in
 
     // Return sliced views covering [0, pos + new_seq_len)
     int64_t total_len = pos + new_seq_len;
-    Tensor cached_k = tenzor::slice(k_caches_[layer], 2, 0, total_len);
-    Tensor cached_v = tenzor::slice(v_caches_[layer], 2, 0, total_len);
+    // JIT-R090: raw ops::slice(Tensor,...) (a thin `return input.slice(...)`
+    // wrapper, zero dispatch) is invisible to the JIT tracer, freezing the
+    // trace-time cache content permanently. Route through the dispatched
+    // Variable-level overload (requires_grad=false — the cache is
+    // non-trainable state, matches the existing no-gradient contract).
+    Tensor cached_k = tenzor::slice(Variable(k_caches_[layer], false), 2, 0, total_len).tensor();
+    Tensor cached_v = tenzor::slice(Variable(v_caches_[layer], false), 2, 0, total_len).tensor();
 
     return {cached_k, cached_v};
 }
@@ -166,7 +199,18 @@ auto KVCache::get_keys(int64_t layer, int64_t seq_len) const -> Tensor {
             "KVCache::get_keys: layer index " + std::to_string(layer) +
             " out of range [0, " + std::to_string(config_.num_layers) + ")");
     }
-    return tenzor::slice(k_caches_[layer], 2, 0, seq_len);
+    // JIT-R090: read-only, but the cache buffer is still frozen as a
+    // trace-time constant snapshot (see update()'s comment) — a replay would
+    // silently ignore any cache mutation made since the trace, ANY later
+    // eager update() included. Same fail-loudly guard as update().
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "KVCache::get_keys: cannot be JIT-traced — the cache buffer is "
+            "frozen at its trace-time snapshot, so a later call would "
+            "silently return stale content. Call outside "
+            "jit.compile()/jit.trace().");
+    }
+    return tenzor::slice(Variable(k_caches_[layer], false), 2, 0, seq_len).tensor();
 }
 
 auto KVCache::get_values(int64_t layer, int64_t seq_len) const -> Tensor {
@@ -175,7 +219,14 @@ auto KVCache::get_values(int64_t layer, int64_t seq_len) const -> Tensor {
             "KVCache::get_values: layer index " + std::to_string(layer) +
             " out of range [0, " + std::to_string(config_.num_layers) + ")");
     }
-    return tenzor::slice(v_caches_[layer], 2, 0, seq_len);
+    if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+        throw std::runtime_error(
+            "KVCache::get_values: cannot be JIT-traced — the cache buffer is "
+            "frozen at its trace-time snapshot, so a later call would "
+            "silently return stale content. Call outside "
+            "jit.compile()/jit.trace().");
+    }
+    return tenzor::slice(Variable(v_caches_[layer], false), 2, 0, seq_len).tensor();
 }
 
 auto KVCache::reset() -> void {

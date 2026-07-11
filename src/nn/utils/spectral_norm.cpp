@@ -23,6 +23,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/utils/safe_math.hpp"
+#include "tenzor/jit/tracer.hpp"
 
 #include <algorithm>
 
@@ -158,6 +159,35 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
         [weak_sn](Module* /*mod*/, const Variable& /*input*/) {
             auto sn_ptr = weak_sn.lock();
             if (!sn_ptr || !sn_ptr->weight_orig_ || !sn_ptr->param_) return;
+
+            // JIT-R096: jit::trace()/jit::compile() invoke Module::forward()
+            // (hence this pre-hook) exactly ONCE, at trace time. u_/v_/
+            // sigma_ are raw Tensor members (not module parameters/buffers
+            // the tracer treats as live-rebinding leaves), updated via a
+            // non-differentiable raw-Tensor chain power_iteration() runs
+            // below — entirely invisible to the tracer, with NO protective
+            // throw anywhere downstream (Div is universally supported, so
+            // a graph reaching this point compiles "successfully"). Replay
+            // never re-invokes forward()/hooks, so power_iteration() never
+            // runs again: the compiled graph's sigma_ freezes at its
+            // trace-time value forever, silently defeating the Lipschitz
+            // constraint as weight_orig_ continues training. Fail loudly
+            // instead — matching the established RoPE/KVCache/
+            // WindowAttention/QuantizedLinear/Autocast/NestedTensor "fail
+            // loudly instead of producing wrong numerics" pattern.
+            if (::tenzor::jit::Tracer::get_instance().is_tracing()) {
+                throw std::runtime_error(
+                    "SpectralNorm: cannot be JIT-traced — power_iteration()'s "
+                    "u_/v_/sigma_ state update is invisible to the tracer "
+                    "(raw-Tensor, non-differentiable, not a module parameter/"
+                    "buffer) and forward pre-hooks only run once at trace "
+                    "time, so a compiled graph would silently reuse the "
+                    "trace-time sigma_ forever instead of re-normalizing on "
+                    "each call. Keep SpectralNorm-wrapped modules outside "
+                    "jit.compile()/jit.trace(), or call module.eval() and "
+                    "trace only after power iteration has converged if a "
+                    "frozen (inference-only) sigma_ is acceptable.");
+            }
 
             Tensor w_orig_t = sn_ptr->weight_orig_->tensor();
             auto shape = w_orig_t.shape();
