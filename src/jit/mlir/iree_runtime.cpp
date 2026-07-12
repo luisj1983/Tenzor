@@ -611,6 +611,150 @@ auto status_to_string(iree_status_t status) -> std::string {
         }                                                                      \
     } while (0)
 
+// File-scope (not function-local) so cleanup_shared_iree_state() -- a plain
+// atexit callback, which cannot capture -- can reach them. See
+// shared_iree_runtime_instance()/shared_iree_hal_device()'s doc comments for
+// why these are shared/cached in the first place.
+std::mutex g_shared_iree_device_mu;
+std::unordered_map<std::string, iree_hal_device_t*> g_shared_iree_devices;
+iree_runtime_instance_t* g_shared_iree_instance = nullptr;
+
+// Releases the shared device cache and instance, in that order (devices
+// before the instance/driver-registry that created them -- matching IREE's
+// own hierarchical ownership). Registered via std::atexit() the first time
+// shared_iree_runtime_instance() runs (see there), so this runs during
+// normal process termination's atexit-handler phase, which the C/C++
+// standard guarantees happens BEFORE the dynamic loader unloads shared
+// libraries (__cxa_finalize / _dl_fini).
+//
+// This is required, not optional cleanliness: leaving these process-
+// lifetime objects unreleased (the original, simpler version of this fix)
+// leaves any background thread a device's HAL driver started for it --
+// e.g. IREE's Vulkan HAL driver starts a "completion watcher" thread per
+// device to poll GPU fence completions -- still running at process exit.
+// That thread keeps calling into its driver's shared library (here,
+// NVIDIA's libnvidia-glcore.so via libvulkan) with no coordination with the
+// dynamic loader's unload sequence, so once the loader starts unmapping
+// that library the thread's next call into it segfaults (observed
+// consistently as a SIGSEGV inside iree_hal_vulkan_completion_watcher_
+// thread_main, or a libc++abi "pure virtual function called" abort
+// depending on exactly which teardown step the race lands in). Explicitly
+// releasing here lets each device's HAL driver properly stop/join that
+// thread as part of its own iree_hal_device_release(), before the loader
+// ever begins unloading anything.
+auto cleanup_shared_iree_state() -> void {
+    std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
+    for (auto& [uri, device] : g_shared_iree_devices) {
+        if (device) iree_hal_device_release(device);
+    }
+    g_shared_iree_devices.clear();
+    if (g_shared_iree_instance) {
+        iree_runtime_instance_release(g_shared_iree_instance);
+        g_shared_iree_instance = nullptr;
+    }
+}
+
+// Returns a single, process-lifetime iree_runtime_instance_t, created lazily
+// on first use and released only at process exit (via cleanup_shared_iree_
+// state(), registered with std::atexit() below on first creation).
+//
+// TSAN-confirmed data race (JIT SIGSEGV investigation): IreeInvoker::load()
+// used to create a BRAND NEW iree_runtime_instance_t (via
+// iree_runtime_instance_create) on every call -- every JIT cache miss, i.e.
+// every distinct traced shape/dtype/device. Each instance registers/owns its
+// own HAL driver registry, and creating a device from a driver that uses
+// IREE's shared task-queue infrastructure (confirmed on both "local-task"
+// and "hip" HAL devices, not CPU-driver-specific) spins up background
+// worker thread(s) whose teardown (triggered by iree_hal_device_release,
+// itself triggered by the PREVIOUS invoker's destructor) is not fully
+// synchronous: the worker thread can still be writing internal queue-
+// bookkeeping state (iree_hal_task_queue_process_drain /
+// _drain_recording) after release() returns. The very next IreeInvoker::load
+// call -- the normal pattern immediately after a cache-miss retrace, with no
+// gap -- creates a NEW instance/device whose allocations
+// (iree_hal_task_queue_initialize, or invoke()'s buffer-marshalling malloc)
+// can land on the exact memory address the still-finishing old worker
+// thread is writing into: a genuine, if intermittent, heap-corruption bug
+// (observed as a SIGSEGV inside malloc's own consistency checks, not just a
+// benign TSAN report).
+//
+// iree_runtime_instance_create's own doc comment already prescribes the fix:
+// "Instances should be shared with as many sessions in an application as is
+// reasonable to ensure that resources are tracked properly and threads are
+// managed correctly." Sharing one instance across every IreeInvoker in the
+// process means driver registries/executors are created once and torn down
+// only at process exit (never mid-process, so this specific create-right-
+// after-destroy race can no longer occur), matching IREE's own intended
+// usage pattern rather than Tenzor's previous per-call-fresh-instance one.
+auto shared_iree_runtime_instance() -> iree_runtime_instance_t* {
+    static iree_runtime_instance_t* const instance = [] {
+        iree_runtime_instance_options_t opts;
+        iree_runtime_instance_options_initialize(&opts);
+        iree_runtime_instance_options_use_all_available_drivers(&opts);
+        iree_runtime_instance_t* inst = nullptr;
+        TENZOR_IREE_CHECK(
+            iree_runtime_instance_create(&opts, iree_allocator_system(),
+                                         &inst),
+            "iree_runtime_instance_create (shared)");
+        g_shared_iree_instance = inst;
+        std::atexit(cleanup_shared_iree_state);
+        return inst;
+    }();
+    return instance;
+}
+
+// Returns a single, process-lifetime iree_hal_device_t for the given
+// driver+ordinal ("device_uri", e.g. "local-sync", "hip://0"), created
+// lazily on first use per key and released only at process exit (see
+// cleanup_shared_iree_state()).
+//
+// Sharing the runtime instance alone (shared_iree_runtime_instance()) did
+// NOT eliminate the task-queue teardown race described there: TSAN kept
+// reporting the identical race afterward, confirming the racy worker
+// thread(s) belong to the iree_hal_device_t, not the instance/driver
+// registry. IREE creates a fresh executor/thread-pool per device for
+// drivers backed by its task-queue infrastructure (confirmed on both
+// "local-sync" and "hip" HAL devices -- not CPU-driver-specific), so
+// creating a fresh device per IreeInvoker::load() call recreates that
+// churn at the device level instead. Caching devices by URI, exactly
+// mirroring the instance-sharing rationale (and IREE's own guidance that
+// instances/devices should be shared "to ensure resources are tracked
+// properly and threads are managed correctly"), means a given driver+
+// ordinal's device (and its worker threads, if any) is created once and
+// torn down only at process exit.
+auto shared_iree_hal_device(iree_runtime_instance_t* instance,
+                            const std::string& driver,
+                            const std::string& device_uri,
+                            int device_index) -> iree_hal_device_t* {
+    std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
+    auto& cache = g_shared_iree_devices;
+    auto it = cache.find(device_uri);
+    if (it != cache.end()) return it->second;
+
+    iree_hal_device_t* device = nullptr;
+    if (device_index > 0 && driver != "local-task" && driver != "local-sync") {
+        iree_hal_driver_registry_t* registry =
+            iree_runtime_instance_driver_registry(instance);
+        iree_string_view_t uri_sv =
+            iree_make_string_view(device_uri.data(), device_uri.size());
+        TENZOR_IREE_CHECK(
+            iree_hal_create_device(registry, uri_sv,
+                                   iree_runtime_instance_host_allocator(instance),
+                                   &device),
+            std::string("iree_hal_create_device(") + device_uri + ")");
+    } else {
+        iree_string_view_t driver_sv =
+            iree_make_string_view(driver.data(), driver.size());
+        TENZOR_IREE_CHECK(
+            iree_runtime_instance_try_create_default_device(instance, driver_sv,
+                                                             &device),
+            std::string("iree_runtime_instance_try_create_default_device(") +
+                driver + ")");
+    }
+    cache.emplace(device_uri, device);
+    return device;
+}
+
 }  // namespace
 
 auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode,
@@ -637,43 +781,25 @@ auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode,
     }
 
     // ─── InProcess setup ─────────────────────────────────────────────────
-    // 1. Create the runtime instance with all available HAL drivers.
-    iree_runtime_instance_options_t opts;
-    iree_runtime_instance_options_initialize(&opts);
-    iree_runtime_instance_options_use_all_available_drivers(&opts);
-    iree_runtime_instance_t* instance = nullptr;
-    TENZOR_IREE_CHECK(
-        iree_runtime_instance_create(&opts, iree_allocator_system(),
-                                     &instance),
-        "iree_runtime_instance_create");
+    // 1. Acquire the shared, process-lifetime runtime instance (see
+    //    shared_iree_runtime_instance()'s doc comment for why this must not
+    //    be a fresh instance per invoker).
+    iree_runtime_instance_t* instance = shared_iree_runtime_instance();
+    iree_runtime_instance_retain(instance);
     inv->instance_ = instance;
 
-    // 2. Acquire the HAL device. For ordinal 0 (the common single-GPU / CPU
-    //    case) use the driver's default device, preserving the long-tested
-    //    path. For a non-zero ordinal (M3) select the specific device by URI
-    //    ("cuda://1", "hip://1", "vulkan://1") via the instance's driver
+    // 2. Acquire the shared, process-lifetime HAL device for this driver+
+    //    ordinal (see shared_iree_hal_device()'s doc comment: caching by URI
+    //    exactly as done for the instance above -- device-level, not just
+    //    instance-level, sharing is what actually eliminates the task-queue
+    //    teardown race). For ordinal 0 (the common single-GPU / CPU case)
+    //    this uses the driver's default device, preserving the long-tested
+    //    path. For a non-zero ordinal (M3) it selects the specific device by
+    //    URI ("cuda://1", "hip://1", "vulkan://1") via the instance's driver
     //    registry so a cuda:1 model actually runs on GPU 1.
-    iree_hal_device_t* device = nullptr;
-    if (inv->device_index_ > 0 &&
-        inv->device_ != "local-task" && inv->device_ != "local-sync") {
-        iree_hal_driver_registry_t* registry =
-            iree_runtime_instance_driver_registry(instance);
-        iree_string_view_t uri_sv = iree_make_string_view(
-            inv->device_uri_.data(), inv->device_uri_.size());
-        TENZOR_IREE_CHECK(
-            iree_hal_create_device(registry, uri_sv,
-                                   iree_runtime_instance_host_allocator(instance),
-                                   &device),
-            std::string("iree_hal_create_device(") + inv->device_uri_ + ")");
-    } else {
-        iree_string_view_t driver_sv =
-            iree_make_string_view(inv->device_.data(), inv->device_.size());
-        TENZOR_IREE_CHECK(
-            iree_runtime_instance_try_create_default_device(instance, driver_sv,
-                                                            &device),
-            std::string("iree_runtime_instance_try_create_default_device(") +
-                inv->device_ + ")");
-    }
+    iree_hal_device_t* device = shared_iree_hal_device(
+        instance, inv->device_, inv->device_uri_, inv->device_index_);
+    iree_hal_device_retain(device);
     inv->device_handle_ = device;
 
     // 3. Create the session bound to the device.
@@ -996,6 +1122,19 @@ auto invoke_subprocess(IreeInvoker& self,
         std::vector<std::string> argv;
         argv.reserve(inputs.size() + 6);
         argv.push_back(iree_run_module);
+        // driver_for_target("llvm-cpu") now always resolves to "local-sync"
+        // (see its doc comment: IREE's multithreaded "local-task" driver has
+        // a genuine, TSAN-confirmed data race in its own worker-thread
+        // teardown that a fresh IreeInvoker created shortly after a previous
+        // one's release can lose to -- observed as an intermittent heap-
+        // corruption SIGSEGV). This ternary is therefore currently a no-op
+        // for llvm-cpu specifically; kept as a defensive downgrade in case a
+        // future target ever maps to "local-task" here, since a short-lived
+        // `iree-run-module` subprocess (one call and exit) would pay full
+        // thread-pool spin-up/teardown cost with no amortization even if
+        // local-task were otherwise safe to use. Numeric agreement between
+        // InProcess and Subprocess is verified by
+        // JitRocmArch.InProcessSubprocessParity_ReductionOnLlvmCpu.
         argv.push_back("--device=" + (device == "local-task" ? "local-sync"
                                                              : device));
         argv.push_back("--module=" + vmfb_path);
@@ -1282,7 +1421,10 @@ auto find_rocm_arch_tool() -> std::string {
     }
     roots.push_back("/opt/rocm");
 
-    // amdgpu-arch prints exactly one gfx name per GPU (HIP ordinal order).
+    // amdgpu-arch prints exactly one gfx name per GPU, in HSA/KFD device
+    // order (i.e. honoring ROCR_VISIBLE_DEVICES/GPU_DEVICE_ORDINAL, but not
+    // HIP_VISIBLE_DEVICES). detect_rocm_gfx_arch() remaps the caller's HIP
+    // ordinal into this order before indexing.
     for (const auto& root : roots) {
         for (const char* sub : {"/llvm/bin/amdgpu-arch",
                                 "/lib/llvm/bin/amdgpu-arch",
@@ -1301,6 +1443,40 @@ auto find_rocm_arch_tool() -> std::string {
 }
 
 }  // namespace
+
+auto remap_hip_visible_device_index(int hip_index,
+                                     const char* hip_visible_devices) -> int {
+    if (hip_index < 0 || hip_visible_devices == nullptr ||
+        *hip_visible_devices == '\0') {
+        return hip_index;
+    }
+    std::vector<int> visible;
+    std::istringstream vs(hip_visible_devices);
+    std::string tok;
+    while (std::getline(vs, tok, ',')) {
+        const auto b = tok.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) continue;
+        const auto e = tok.find_last_not_of(" \t\r\n");
+        const std::string trimmed = tok.substr(b, e - b + 1);
+        try {
+            std::size_t pos = 0;
+            const int parsed = std::stoi(trimmed, &pos);
+            if (pos != trimmed.size() || parsed < 0) {
+                // HIP_VISIBLE_DEVICES parsing stops at the first invalid
+                // entry (matching HIP runtime behavior); anything already
+                // parsed before it remains valid.
+                break;
+            }
+            visible.push_back(parsed);
+        } catch (...) {
+            break;
+        }
+    }
+    if (hip_index >= static_cast<int>(visible.size())) {
+        return hip_index;
+    }
+    return visible[static_cast<std::size_t>(hip_index)];
+}
 
 auto detect_rocm_gfx_arch(int device_index) -> std::string {
     if (device_index < 0) return {};
@@ -1332,8 +1508,11 @@ auto detect_rocm_gfx_arch(int device_index) -> std::string {
                     archs.push_back(std::move(tok));
                 }
             }
-            if (device_index < static_cast<int>(archs.size())) {
-                result = archs[static_cast<std::size_t>(device_index)];
+            const int physical_index = remap_hip_visible_device_index(
+                device_index, std::getenv("HIP_VISIBLE_DEVICES"));
+            if (physical_index >= 0 &&
+                physical_index < static_cast<int>(archs.size())) {
+                result = archs[static_cast<std::size_t>(physical_index)];
             }
         }
     } catch (...) {
@@ -1372,29 +1551,32 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
 #endif
 
     // First try the in-process path (cheap when the driver is linked in).
-    iree_runtime_instance_options_t opts;
-    iree_runtime_instance_options_initialize(&opts);
-    iree_runtime_instance_options_use_all_available_drivers(&opts);
-    iree_runtime_instance_t* instance = nullptr;
-    iree_status_t s = iree_runtime_instance_create(
-        &opts, iree_allocator_system(), &instance);
+    //
+    // Acquire (and cache) the SAME shared, process-lifetime instance/device
+    // that a real IreeInvoker::load() would use for this driver at ordinal
+    // 0, rather than creating a throwaway instance+device and immediately
+    // releasing them. A probe-only device is created and torn down just as
+    // fast as a real one -- including spinning up whatever background
+    // thread(s) the driver's device constructor starts (e.g. Vulkan's HAL
+    // driver starts a completion-watcher thread per device) -- and
+    // immediately releasing it hits the exact same task-queue/completion-
+    // watcher teardown race documented on shared_iree_hal_device(), just
+    // with a probe-scoped device instead of an invoker-scoped one (observed
+    // as a "pure virtual function called" abort / SIGSEGV inside the
+    // Vulkan driver's completion-watcher thread at process exit, once the
+    // invoker-level race above was fixed and the process ran far enough to
+    // reach this probe's teardown). Sharing here both avoids a second,
+    // separate instance of the bug class and means a probe that succeeds is
+    // never wasted work -- the cached device is reused by the first real
+    // invocation for this driver.
     bool inproc_ok = false;
-    if (iree_status_is_ok(s)) {
-        iree_hal_device_t* device = nullptr;
-        iree_string_view_t driver_sv =
-            iree_make_string_view(driver_name.data(), driver_name.size());
-        iree_status_t ds = iree_runtime_instance_try_create_default_device(
-            instance, driver_sv, &device);
-        inproc_ok = iree_status_is_ok(ds);
-        if (!inproc_ok) {
-            iree_status_ignore(ds);
-        }
-        if (device) {
-            iree_hal_device_release(device);
-        }
-        iree_runtime_instance_release(instance);
-    } else {
-        iree_status_ignore(s);
+    try {
+        iree_runtime_instance_t* instance = shared_iree_runtime_instance();
+        iree_hal_device_t* device = shared_iree_hal_device(
+            instance, driver_name, hal_device_uri(driver_name, 0), 0);
+        inproc_ok = device != nullptr;
+    } catch (...) {
+        inproc_ok = false;
     }
 
     if (inproc_ok) {

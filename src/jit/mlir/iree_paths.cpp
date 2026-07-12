@@ -251,7 +251,26 @@ auto iree_compile_supports(const std::string& target) -> bool {
 }
 
 auto driver_for_target(const std::string& target) -> std::string {
-    if (target == "llvm-cpu")     return "local-task";
+    // llvm-cpu used to map to "local-task" (IREE's multithreaded task-system
+    // HAL driver). Switched to "local-sync" (a single-threaded inline queue)
+    // after TSAN found a genuine, reproducible data race in local-task's own
+    // internal task-queue teardown: releasing an IreeInvoker's HAL device
+    // (IreeInvoker::~IreeInvoker, iree_hal_device_release) does not fully
+    // quiesce local-task's background worker thread(s) first, so a NEW
+    // IreeInvoker created shortly after (a fresh iree_runtime_instance +
+    // device, the normal pattern on every cache-miss compile) can have its
+    // OWN allocations (iree_hal_task_queue_initialize / an invoke()'s buffer
+    // marshalling malloc) land on memory the OLD device's worker thread is
+    // still concurrently writing into via iree_hal_task_queue_process_drain /
+    // _drain_recording — a real, if intermittent, memory-corruption bug
+    // (observed as a heap-corruption SIGSEGV, not just a TSAN report).
+    // local-sync has no worker-thread pool at all, so this race class cannot
+    // occur; this trades local-task's intra-op multithreading for CPU-target
+    // JIT execution for correctness, which is not optional. (Subprocess mode
+    // separately downgraded local-task -> local-sync in its own argv for
+    // unrelated reasons — see invoke_subprocess's comment — so this makes
+    // both InProcess and Subprocess consistently use local-sync.)
+    if (target == "llvm-cpu")     return "local-sync";
     if (target == "cuda")         return "cuda";
     if (target == "rocm")         return "hip";
     if (target == "vulkan-spirv") return "vulkan";

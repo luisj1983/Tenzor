@@ -23,13 +23,15 @@ auto make_candidate(int64_t total_elements) -> FusionCandidate {
 }  // namespace
 
 // JIT-R026: is_gpu previously only recognized CUDA/ROCm, silently routing
-// Vulkan/OneAPI through the CPU cache-locality heuristic instead of the GPU
-// launch-overhead one. A small candidate (< 1024 elements) is the case where
-// the two heuristics disagree: GPU declines (0.8, < 1.0), CPU always accepts
-// (>= 1.1). Confirms Vulkan/OneAPI now get the GPU heuristic like CUDA/ROCm.
+// Vulkan/OneAPI (and, until this fix, MPS) through the CPU cache-locality
+// heuristic instead of the GPU launch-overhead one. A small candidate
+// (< 1024 elements) is the case where the two heuristics disagree: GPU
+// declines (0.8, < 1.0), CPU always accepts (>= 1.1). Confirms Vulkan/OneAPI/
+// MPS now get the GPU heuristic like CUDA/ROCm.
 TEST(FusionCostModel, SmallCandidateDeclinesOnEveryGpuDeviceType) {
     for (auto dev : {Device::Type::CUDA, Device::Type::ROCm,
-                     Device::Type::Vulkan, Device::Type::OneAPI}) {
+                     Device::Type::Vulkan, Device::Type::OneAPI,
+                     Device::Type::MPS}) {
         FusionCostModel model;
         model.set_device_type(dev);
         double speedup = model.estimate_speedup(make_candidate(512));
@@ -51,10 +53,11 @@ TEST(FusionCostModel, SmallCandidateAlwaysAcceptsOnCpu) {
 
 // Large candidates are profitable on every GPU device type too (the
 // launch-overhead heuristic's upper branch), confirming the fix didn't
-// accidentally make Vulkan/OneAPI always decline.
+// accidentally make Vulkan/OneAPI/MPS always decline.
 TEST(FusionCostModel, LargeCandidateAcceptsOnEveryGpuDeviceType) {
     for (auto dev : {Device::Type::CUDA, Device::Type::ROCm,
-                     Device::Type::Vulkan, Device::Type::OneAPI}) {
+                     Device::Type::Vulkan, Device::Type::OneAPI,
+                     Device::Type::MPS}) {
         FusionCostModel model;
         model.set_device_type(dev);
         double speedup = model.estimate_speedup(make_candidate(1024 * 1024));

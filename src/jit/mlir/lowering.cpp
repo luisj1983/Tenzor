@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <complex>
 #include <cstring>
 #include <functional>
@@ -2249,50 +2250,79 @@ auto emit_dynamic_symmetric_fake_quant(LoweringContext& ctx, std::ostream& body,
                                        const std::string& value_name,
                                        const std::vector<int64_t>& shape,
                                        ::tenzor::DType d) -> std::string {
-    auto abs_max = emit_reduce_max_abs_scalar(ctx, body, value_name, shape, d);
+    // JIT-R114: widen F16/BF16 to F32 for the divide/round_nearest_even/clamp/
+    // multiply pipeline, matching eager's quantize_per_tensor_symmetric/
+    // dequantize_tensor (src/nn/quantization/quantize.cpp), which always
+    // compute this exact round-trip in Float32 regardless of the tensor's
+    // storage dtype -- unlike every other numeric pipeline in this file
+    // (softmax, layer/RMS/batch norm, conv2d, pooling, pow, attention), this
+    // one ran entirely in F16/BF16 storage precision. round_nearest_even is a
+    // discrete rounding-BOUNDARY decision (which int8 level a value snaps
+    // to), not a smooth elementwise op, so F16-precision loss before
+    // rounding can flip the resulting quantization level versus the F32
+    // reference eager computes -- a more consequential divergence than
+    // typical ULP-scale drift.
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string v = value_name;
+    if (widen) {
+        auto vc = ctx.fresh_name();
+        emit_stablehlo_convert(body, vc, value_name, shape, d, cd);
+        body << '\n';
+        v = vc;
+    }
+
+    auto abs_max = emit_reduce_max_abs_scalar(ctx, body, v, shape, cd);
     // scale = max(abs_max, 1e-8) / 127
     auto eps_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, eps_name, scalar_literal(1e-8, d), {}, d);
+    emit_stablehlo_splat_constant(body, eps_name, scalar_literal(1e-8, cd), {}, cd);
     body << '\n';
     auto safe_max = ctx.fresh_name();
-    emit_stablehlo_binary(body, "maximum", safe_max, abs_max, eps_name, {}, d);
+    emit_stablehlo_binary(body, "maximum", safe_max, abs_max, eps_name, {}, cd);
     body << '\n';
     auto range_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, range_name, scalar_literal(127.0, d), {}, d);
+    emit_stablehlo_splat_constant(body, range_name, scalar_literal(127.0, cd), {}, cd);
     body << '\n';
     auto scale_scalar = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", scale_scalar, safe_max, range_name, {}, d);
+    emit_stablehlo_binary(body, "divide", scale_scalar, safe_max, range_name, {}, cd);
     body << '\n';
-    auto scale_b = maybe_broadcast(body, ctx, scale_scalar, {}, shape, d);
+    auto scale_b = maybe_broadcast(body, ctx, scale_scalar, {}, shape, cd);
 
     auto ratio = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", ratio, value_name, scale_b, shape, d);
+    emit_stablehlo_binary(body, "divide", ratio, v, scale_b, shape, cd);
     body << '\n';
     auto rounded = ctx.fresh_name();
-    emit_stablehlo_unary(body, "round_nearest_even", rounded, ratio, shape, d);
+    emit_stablehlo_unary(body, "round_nearest_even", rounded, ratio, shape, cd);
     body << '\n';
     auto lo_name = ctx.fresh_name();
     auto hi_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, lo_name, scalar_literal(-128.0, d), shape, d);
+    emit_stablehlo_splat_constant(body, lo_name, scalar_literal(-128.0, cd), shape, cd);
     body << '\n';
-    emit_stablehlo_splat_constant(body, hi_name, scalar_literal(127.0, d), shape, d);
+    emit_stablehlo_splat_constant(body, hi_name, scalar_literal(127.0, cd), shape, cd);
     body << '\n';
     auto clamped = ctx.fresh_name();
-    emit_stablehlo_ternary(body, "clamp", clamped, lo_name, rounded, hi_name, shape, d);
+    emit_stablehlo_ternary(body, "clamp", clamped, lo_name, rounded, hi_name, shape, cd);
     body << '\n';
     // Cast to Int8 and back: a true saturating round-trip through the same
     // storage dtype the eager kernel materializes, not just a float rounding
     // approximation.
     auto q_int8 = ctx.fresh_name();
-    emit_stablehlo_convert(body, q_int8, clamped, shape, d, ::tenzor::DType::Int8);
+    emit_stablehlo_convert(body, q_int8, clamped, shape, cd, ::tenzor::DType::Int8);
     body << '\n';
     auto dq_float = ctx.fresh_name();
-    emit_stablehlo_convert(body, dq_float, q_int8, shape, ::tenzor::DType::Int8, d);
+    emit_stablehlo_convert(body, dq_float, q_int8, shape, ::tenzor::DType::Int8, cd);
     body << '\n';
-    auto result = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", result, dq_float, scale_b, shape, d);
+    auto result_cd = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", result_cd, dq_float, scale_b, shape, cd);
     body << '\n';
-    return result;
+    if (widen) {
+        auto result_d = ctx.fresh_name();
+        emit_stablehlo_convert(body, result_d, result_cd, shape, cd, d);
+        body << '\n';
+        return result_d;
+    }
+    return result_cd;
 }
 
 // Static dequantize: (convert(value,out_dtype) - zero_point) * scale, with
@@ -2302,10 +2332,17 @@ auto emit_static_dequant(LoweringContext& ctx, std::ostream& body,
                          const std::vector<int64_t>& shape,
                          ::tenzor::DType in_dtype, double scale, int64_t zero_point,
                          ::tenzor::DType out_dtype) -> std::string {
+    // JIT-R114: see emit_dynamic_symmetric_fake_quant's identical rationale --
+    // widen an F16/BF16 out_dtype to F32 for the subtract/multiply, matching
+    // eager's dequantize_tensor (always Float32 scratch regardless of the
+    // tensor's original dtype), then narrow back at the end.
+    const bool widen = (out_dtype == ::tenzor::DType::Float16 ||
+                        out_dtype == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : out_dtype;
     std::string v = value_name;
-    if (in_dtype != out_dtype) {
+    if (in_dtype != cd) {
         auto c = ctx.fresh_name();
-        emit_stablehlo_convert(body, c, v, shape, in_dtype, out_dtype);
+        emit_stablehlo_convert(body, c, v, shape, in_dtype, cd);
         body << '\n';
         v = c;
     }
@@ -2313,22 +2350,28 @@ auto emit_static_dequant(LoweringContext& ctx, std::ostream& body,
     if (zero_point != 0) {
         auto zp_name = ctx.fresh_name();
         emit_stablehlo_splat_constant(
-            body, zp_name, scalar_literal(static_cast<double>(zero_point), out_dtype),
-            shape, out_dtype);
+            body, zp_name, scalar_literal(static_cast<double>(zero_point), cd),
+            shape, cd);
         body << '\n';
         auto sub_name = ctx.fresh_name();
-        emit_stablehlo_binary(body, "subtract", sub_name, v, zp_name, shape, out_dtype);
+        emit_stablehlo_binary(body, "subtract", sub_name, v, zp_name, shape, cd);
         body << '\n';
         shifted = sub_name;
     }
     auto scale_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, scale_name, scalar_literal(scale, out_dtype),
-                                  shape, out_dtype);
+    emit_stablehlo_splat_constant(body, scale_name, scalar_literal(scale, cd),
+                                  shape, cd);
     body << '\n';
-    auto result = ctx.fresh_name();
-    emit_stablehlo_binary(body, "multiply", result, shifted, scale_name, shape, out_dtype);
+    auto result_cd = ctx.fresh_name();
+    emit_stablehlo_binary(body, "multiply", result_cd, shifted, scale_name, shape, cd);
     body << '\n';
-    return result;
+    if (widen) {
+        auto result_out = ctx.fresh_name();
+        emit_stablehlo_convert(body, result_out, result_cd, shape, cd, out_dtype);
+        body << '\n';
+        return result_out;
+    }
+    return result_cd;
 }
 
 // Static quantize: clamp(round_nearest_even(value/scale)+zero_point,
@@ -2338,25 +2381,39 @@ auto emit_static_quantize(LoweringContext& ctx, std::ostream& body,
                           const std::vector<int64_t>& shape,
                           ::tenzor::DType in_dtype, double scale, int64_t zero_point,
                           ::tenzor::DType target_dtype) -> std::string {
+    // JIT-R114: see emit_dynamic_symmetric_fake_quant's identical rationale --
+    // widen an F16/BF16 in_dtype to F32 for the divide/round_nearest_even/
+    // clamp pipeline, matching eager's quantize_tensor/quantize_per_tensor_
+    // symmetric (always Float32 regardless of the tensor's original dtype).
+    const bool widen = (in_dtype == ::tenzor::DType::Float16 ||
+                        in_dtype == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : in_dtype;
+    std::string v = value_name;
+    if (widen) {
+        auto vc = ctx.fresh_name();
+        emit_stablehlo_convert(body, vc, value_name, shape, in_dtype, cd);
+        body << '\n';
+        v = vc;
+    }
     auto scale_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, scale_name, scalar_literal(scale, in_dtype),
-                                  shape, in_dtype);
+    emit_stablehlo_splat_constant(body, scale_name, scalar_literal(scale, cd),
+                                  shape, cd);
     body << '\n';
     auto ratio = ctx.fresh_name();
-    emit_stablehlo_binary(body, "divide", ratio, value_name, scale_name, shape, in_dtype);
+    emit_stablehlo_binary(body, "divide", ratio, v, scale_name, shape, cd);
     body << '\n';
     auto rounded = ctx.fresh_name();
-    emit_stablehlo_unary(body, "round_nearest_even", rounded, ratio, shape, in_dtype);
+    emit_stablehlo_unary(body, "round_nearest_even", rounded, ratio, shape, cd);
     body << '\n';
     std::string with_zp = rounded;
     if (zero_point != 0) {
         auto zp_name = ctx.fresh_name();
         emit_stablehlo_splat_constant(
-            body, zp_name, scalar_literal(static_cast<double>(zero_point), in_dtype),
-            shape, in_dtype);
+            body, zp_name, scalar_literal(static_cast<double>(zero_point), cd),
+            shape, cd);
         body << '\n';
         auto added = ctx.fresh_name();
-        emit_stablehlo_binary(body, "add", added, rounded, zp_name, shape, in_dtype);
+        emit_stablehlo_binary(body, "add", added, rounded, zp_name, shape, cd);
         body << '\n';
         with_zp = added;
     }
@@ -2370,17 +2427,17 @@ auto emit_static_quantize(LoweringContext& ctx, std::ostream& body,
     }
     auto lo_name = ctx.fresh_name();
     auto hi_name = ctx.fresh_name();
-    emit_stablehlo_splat_constant(body, lo_name, scalar_literal(static_cast<double>(qmin), in_dtype),
-                                  shape, in_dtype);
+    emit_stablehlo_splat_constant(body, lo_name, scalar_literal(static_cast<double>(qmin), cd),
+                                  shape, cd);
     body << '\n';
-    emit_stablehlo_splat_constant(body, hi_name, scalar_literal(static_cast<double>(qmax), in_dtype),
-                                  shape, in_dtype);
+    emit_stablehlo_splat_constant(body, hi_name, scalar_literal(static_cast<double>(qmax), cd),
+                                  shape, cd);
     body << '\n';
     auto clamped = ctx.fresh_name();
-    emit_stablehlo_ternary(body, "clamp", clamped, lo_name, with_zp, hi_name, shape, in_dtype);
+    emit_stablehlo_ternary(body, "clamp", clamped, lo_name, with_zp, hi_name, shape, cd);
     body << '\n';
     auto result = ctx.fresh_name();
-    emit_stablehlo_convert(body, result, clamped, shape, in_dtype, target_dtype);
+    emit_stablehlo_convert(body, result, clamped, shape, cd, target_dtype);
     body << '\n';
     return result;
 }
@@ -3124,22 +3181,29 @@ auto handle_layer_norm(LoweringContext& ctx,
     //  * cd — the elementwise/affine dtype. For F16/BF16 we widen to F32 and
     //         narrow the result at the end; else cd == d.
     //  * ad — the mean/variance ACCUMULATION dtype. The eager CPU LayerNorm
-    //         kernel accumulates the two-pass mean and variance in DOUBLE for an
-    //         F32 input (layer_norm_simd_sum_f64 / layer_norm_simd_sumsq_f64,
-    //         nn_kernels.cpp) to avoid mantissa loss over long normalized dims;
-    //         F16/BF16 accumulate in F32. Reducing an F32 LayerNorm in F32 (the
-    //         old behavior) diverged from eager by ~1e-5 rel for normalized dims
-    //         in the thousands — the exact JIT-F053 class fixed for RMSNorm but
-    //         missed here. Reduce mean/variance in `ad`, then narrow the float
-    //         mean and the RECIPROCAL inv_std to cd and normalize in cd, matching
-    //         eager (which centers the variance with the double mean, then
-    //         narrows mean and 1/sqrt to float for the output normalize).
+    //         kernel accumulates the two-pass mean and variance in DOUBLE
+    //         UNCONDITIONALLY, for every T including Float16/BFloat16
+    //         (layer_norm_scalar<T>'s `sum`/`var` are always `double`, fed via
+    //         the widen-to-double `ln_to_double()` helper regardless of T --
+    //         nn_kernels.cpp; F32 uses the SIMD double-accumulate path,
+    //         layer_norm_simd_sum_f64/layer_norm_simd_sumsq_f64). This
+    //         previously said "F16/BF16 accumulate in F32", which was true
+    //         when first written but went stale once the Float32-accumulator-
+    //         inside-template<T> class of bug (the same class fixed here for
+    //         F32 as JIT-F053/this comment's own history) was ALSO fixed for
+    //         the F16/BF16 scalar path -- leaving this MLIR lowering as the
+    //         only place still narrowing F16/BF16 accumulation to F32,
+    //         diverging from eager AND from extended_codegen's native-codegen
+    //         path (which already accumulates unconditionally in double).
+    //         Reduce mean/variance in `ad` (always F64), then narrow the
+    //         float mean and the RECIPROCAL inv_std to cd and normalize in
+    //         cd, matching eager (which centers the variance with the double
+    //         mean, then narrows mean and 1/sqrt to float for the output
+    //         normalize).
     const bool widen = (d == ::tenzor::DType::Float16 ||
                         d == ::tenzor::DType::BFloat16);
     const auto cd = widen ? ::tenzor::DType::Float32 : d;
-    const auto ad = (d == ::tenzor::DType::Float32) ? ::tenzor::DType::Float64
-                    : widen                         ? ::tenzor::DType::Float32
-                                                    : d;  // F64 stays F64
+    const auto ad = ::tenzor::DType::Float64;
 
     std::string x = ctx.name_for(x_val->id());
     if (widen) {
@@ -3154,7 +3218,20 @@ auto handle_layer_norm(LoweringContext& ctx,
         auto xa = ctx.fresh_name();
         emit_stablehlo_convert(body, xa, x, shape, cd, ad);
         body << '\n';
-        x_ad = xa;
+        // IREE's LLVMGPUVectorDistribute codegen (CUDA/ROCm) fails to
+        // distribute a stablehlo.reduce that gets fused -- even transitively,
+        // through elementwise ops -- with the stablehlo.convert that widened
+        // to this Float64 accumulation dtype (confirmed via minimal repro:
+        // reducing a *raw* f64 input compiles fine; reducing a value produced
+        // by convert-to-f64 does not, on either the mean or variance pass
+        // below). A barrier right after the widening convert blocks that
+        // fusion and is a semantic no-op on every other target -- the same
+        // fix pattern as JIT-R110's Vulkan dot_general barrier in
+        // emit_stablehlo_dot_general.
+        auto xab = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, xab, xa, shape, ad);
+        body << '\n';
+        x_ad = xab;
     }
 
     // n_const = N (accumulation dtype), reused for the mean and variance divides.
@@ -4752,18 +4829,24 @@ auto handle_rms_norm_expand(LoweringContext& ctx,
     //  * cd  — the normalize/elementwise dtype (x/rms and the affine scale). For
     //          F16/BF16 we widen to F32 and narrow at the end; else cd == d.
     //  * ad  — the sum-of-squares ACCUMULATION dtype. The eager RMSNorm kernel
-    //          accumulates sum_sq (and computes mean/rsqrt) in DOUBLE for an F32
-    //          input (fused_ln_sumsq_f64) to avoid mantissa loss over long hidden
-    //          dims; F16/BF16 accumulate in F32. Reducing an F32 RMSNorm in F32
-    //          (the old behavior) diverged from eager by ~1e-5 rel for hidden
-    //          dims in the thousands (JIT-F053). Reduce in `ad`, then narrow the
-    //          resulting rms to cd (eager narrows inv_rms before applying it).
+    //          accumulates sum_sq (and computes mean/rsqrt) in DOUBLE
+    //          UNCONDITIONALLY: fused_rms_norm_kernel widens an F16/BF16 input
+    //          to Float32 and delegates to the Float32 branch, which itself
+    //          accumulates sum_sq in double via fused_ln_sumsq_f64
+    //          (fused_ops.cpp) -- so F16/BF16 accumulates in double just like
+    //          F32/F64 do, not F32. This previously said "F16/BF16 accumulate
+    //          in F32" (stale once that path was fixed to match F32's
+    //          double-accumulate, the same JIT-F053 class this comment
+    //          documents), leaving this MLIR lowering as the only path still
+    //          narrowing F16/BF16 accumulation to F32 -- diverging from eager
+    //          AND from extended_codegen's native-codegen path (already
+    //          double, unconditionally). Reduce in `ad` (always F64), then
+    //          narrow the resulting rms to cd (eager narrows inv_rms before
+    //          applying it).
     const bool widen = (d == ::tenzor::DType::Float16 ||
                         d == ::tenzor::DType::BFloat16);
     const auto cd = widen ? ::tenzor::DType::Float32 : d;
-    const auto ad = (d == ::tenzor::DType::Float32) ? ::tenzor::DType::Float64
-                    : widen                         ? ::tenzor::DType::Float32
-                                                    : d;  // F64 stays F64
+    const auto ad = ::tenzor::DType::Float64;
 
     std::string x = ctx.name_for(x_val->id());
     if (widen) {
@@ -4778,7 +4861,19 @@ auto handle_rms_norm_expand(LoweringContext& ctx,
         auto xa = ctx.fresh_name();
         emit_stablehlo_convert(body, xa, x, shape, cd, ad);
         body << '\n';
-        x_ad = xa;
+        // IREE's LLVMGPUVectorDistribute codegen (CUDA/ROCm) fails to
+        // distribute a stablehlo.reduce that gets fused -- even transitively,
+        // through elementwise ops -- with the stablehlo.convert that widened
+        // to this Float64 accumulation dtype (confirmed via minimal repro:
+        // reducing a *raw* f64 input compiles fine; reducing a value produced
+        // by convert-to-f64 does not). A barrier right after the widening
+        // convert blocks that fusion and is a semantic no-op on every other
+        // target -- the same fix pattern as JIT-R110's Vulkan dot_general
+        // barrier in emit_stablehlo_dot_general.
+        auto xab = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, xab, xa, shape, ad);
+        body << '\n';
+        x_ad = xab;
     }
 
     // sq = x * x  (in the accumulation dtype)
@@ -4875,6 +4970,7 @@ GraphToMLIR::GraphToMLIR() = default;
 
 auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
     LoweringContext ctx;
+    leaf_args_.clear();
 
     // Build argument list and bind each graph input to %argN.
     std::vector<std::pair<std::vector<int64_t>, ::tenzor::DType>> inputs;
@@ -4886,6 +4982,47 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
         ctx.bind(in_val->id(), arg_name);
         inputs.emplace_back(in_val->shape(), in_val->dtype());
         input_ids.insert(in_val->id());
+    }
+
+    // JIT-R109: closure-captured parameter/buffer leaves (Graph::param_leaves()/
+    // buffer_leaves(), populated when the tracer had set_parameters()/
+    // set_buffers() declared before tracing) must NOT be baked as constants --
+    // that would freeze BatchNorm/InstanceNorm running stats and any other
+    // captured parameter/buffer at their trace-time value forever, since the
+    // compiled module is reused verbatim on every replay. Bind each as an
+    // EXTRA @main argument beyond the declared graph inputs, in a
+    // deterministic order (params first sorted by index, then buffers sorted
+    // by index -- independent of unordered_map iteration order, so the
+    // compile cache's content hash is stable). The caller (mlir_invoke_impl)
+    // must pass each leaf's CURRENT value, in this exact order, appended
+    // after the regular inputs on every invocation -- see leaf_args().
+    {
+        std::vector<std::pair<std::string, std::size_t>> param_ids(
+            g.param_leaves().begin(), g.param_leaves().end());
+        std::sort(param_ids.begin(), param_ids.end(),
+                 [](const auto& a, const auto& b) { return a.second < b.second; });
+        for (const auto& [id, param_index] : param_ids) {
+            const auto& param = *g.parameters().at(param_index);
+            auto arg_name = "arg" + std::to_string(inputs.size());
+            ctx.bind(id, arg_name);
+            const auto pshape = param.shape();
+            inputs.emplace_back(std::vector<int64_t>(pshape.begin(), pshape.end()),
+                                param.tensor().dtype());
+            leaf_args_.push_back({/*is_buffer=*/false, param_index});
+        }
+        std::vector<std::pair<std::string, std::size_t>> buffer_ids(
+            g.buffer_leaves().begin(), g.buffer_leaves().end());
+        std::sort(buffer_ids.begin(), buffer_ids.end(),
+                 [](const auto& a, const auto& b) { return a.second < b.second; });
+        for (const auto& [id, buffer_index] : buffer_ids) {
+            const auto& buf = *g.buffers().at(buffer_index);
+            auto arg_name = "arg" + std::to_string(inputs.size());
+            ctx.bind(id, arg_name);
+            const auto bshape = buf.shape();
+            inputs.emplace_back(std::vector<int64_t>(bshape.begin(), bshape.end()),
+                                buf.tensor().dtype());
+            leaf_args_.push_back({/*is_buffer=*/true, buffer_index});
+        }
     }
 
     // Emit the body.

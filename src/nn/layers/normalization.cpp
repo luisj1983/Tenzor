@@ -14,12 +14,22 @@
 
 namespace {
 
-/// Record an `RMSNorm` op into the active JIT trace, if any. The CPU and
-/// SIMD fast paths in `RMSNorm::forward_impl` bypass the kernel
-/// dispatcher entirely (they write straight into a pre-allocated output
-/// buffer), so the tracing interceptor never sees the op. Calling this
-/// from inside the forward gives the JIT lowering the (x, weight) ->
-/// output edge it needs to emit the StableHLO `rms_norm` expansion.
+/// Record an `RMSNorm` op into the active JIT trace, if any. Only the CPU
+/// Float32 no-grad pointer fast path in `RMSNorm::forward_impl` truly
+/// bypasses the kernel dispatcher (it writes straight into a pre-allocated
+/// output buffer, so the tracing interceptor never sees it); the CUDA/
+/// Vulkan inference fast paths and the standard (all-device, training-
+/// capable) path all call `dispatch<OpId::FusedRMSNorm>` first. That OpId is
+/// deliberately left unmapped in opid_to_optype and additionally special-
+/// cased as a "manually recorded" op in the tracing interceptor
+/// (is_manually_recorded_op, tracing_interceptor.cpp) so the interceptor
+/// defers to THIS call instead of either double-recording (if the OpId were
+/// mapped) or graph-breaking the whole trace (R2-T1 regression: it did
+/// exactly that before is_manually_recorded_op existed — every nn::RMSNorm
+/// forward on CUDA/Vulkan or via the standard path permanently broke the
+/// surrounding JIT trace on both the nvrtc and mlir backends). Calling this
+/// from inside the forward gives the JIT lowering the (x, weight) -> output
+/// edge it needs to emit the StableHLO `rms_norm` expansion.
 inline auto jit_record_rms_norm(const ::tenzor::Tensor& x,
                                 const ::tenzor::Tensor& weight,
                                 const ::tenzor::Tensor& output,

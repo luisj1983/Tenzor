@@ -740,10 +740,22 @@ public:
      *        GPU fusion nodes are executed via native codegen. In grad_mode a
      *        fusion node is a hard error — the differentiable graph variant is
      *        compiled WITHOUT fusion so no backward-less fused kernel is ever hit.
+     * @param out_all_values When non-null, appended with every Variable this
+     *        call materialized (inputs, constants, params/buffers, and every
+     *        intermediate node output) — i.e. the full internal value_map, not
+     *        just outputs_. Used by CUDA/HIP graph capture: every device buffer
+     *        this call allocates is a fixed address baked into the captured
+     *        graph's kernel-launch nodes, so the caller must keep all of them
+     *        alive for as long as the capture may still be replayed (letting
+     *        the CachingAllocator reclaim an intermediate buffer while a
+     *        captured graph still references it would let an unrelated later
+     *        allocation silently receive that same address).
      * @return Output tensors/variables
      */
     auto forward(const std::vector<Variable>& runtime_inputs,
-                 bool grad_mode = false) -> std::vector<Variable>;
+                 bool grad_mode = false,
+                 std::vector<Variable>* out_all_values = nullptr)
+        -> std::vector<Variable>;
 
     /**
      * @brief Save graph to file.

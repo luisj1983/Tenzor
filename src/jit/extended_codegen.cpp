@@ -761,10 +761,19 @@ extern "C" __global__ void fused_layer_norm_kernel(
 
     )" << ACC << R"( final_mean = s_mean[0];
     )" << ACC << R"( inv_std = ((double)1) / sqrt(s_m2[0] + eps);
+    // JIT-054c: narrow mean/inv_std to the compute dtype BEFORE the centering
+    // multiply, matching eager's SIMD LayerNorm (which narrows mean/inv_std to
+    // float before the normalize loop) and the already-fixed MLIR lowering
+    // path (handle_layer_norm narrows the same way). Using the double `mean`/
+    // `inv_std` directly here double-rounds instead of rounding once at the
+    // same point eager does -- a small (~1 ULP) but real divergence from both
+    // eager and the MLIR-compiled form of the identical graph.
+    )" << C << R"( final_mean_c = static_cast<)" << C << R"(>(final_mean);
+    )" << C << R"( inv_std_c = static_cast<)" << C << R"(>(inv_std);
 
     // Normalize + affine
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        )" << C << R"( val = (static_cast<)" << C << R"(>(x[i]) - final_mean) * inv_std;)";
+        )" << C << R"( val = (static_cast<)" << C << R"(>(x[i]) - final_mean_c) * inv_std_c;)";
 
     if (group.has_affine) {
         ss << R"(
@@ -851,10 +860,18 @@ extern "C" __global__ void fused_rms_norm_kernel(
     __syncthreads();
 
     )" << ACC << R"( rms_inv = ((double)1) / sqrt(shared[0] / norm_size + eps);
+    // JIT-054c: narrow rms_inv to the compute dtype BEFORE the multiply,
+    // matching eager's fused_rms_norm_kernel (which narrows inv_rms to float
+    // before multiplying) and the already-fixed MLIR lowering path
+    // (handle_rms_norm_expand narrows the same way). Using the double
+    // `rms_inv` directly here double-rounds instead of rounding once at the
+    // same point eager does -- a small (~1 ULP) but real divergence from both
+    // eager and the MLIR-compiled form of the identical graph.
+    )" << C << R"( rms_inv_c = static_cast<)" << C << R"(>(rms_inv);
 
     // Normalize
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        )" << C << R"( val = static_cast<)" << C << R"(>(x[i]) * rms_inv;)";
+        )" << C << R"( val = static_cast<)" << C << R"(>(x[i]) * rms_inv_c;)";
 
     if (group.has_affine) {
         ss << R"(

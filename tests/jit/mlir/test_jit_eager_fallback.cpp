@@ -19,9 +19,11 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/jit/compile.hpp"
+#include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/mlir/iree_runtime.hpp"
+#include "tenzor/jit/mlir/lowering.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -379,6 +381,34 @@ TEST(JitDeviceOrdinal, HalDeviceUriHonorsOrdinal) {
     EXPECT_EQ(tj::hal_device_uri("hip", -1), "hip://0");
 }
 
+// R1-02/JIT-055 regression: resolve_hal_ordinal must carry the input
+// tensor's device index over to the HAL ordinal ONLY when the device's
+// backend family matches the resolved compile target -- an explicit
+// cross-family target override (e.g. target="rocm" while the tensor lives
+// on cuda:1) must default to ordinal 0, not silently carry cuda:1's index
+// over to the ROCm HAL device (which would target the wrong physical GPU
+// with the arch correctly derived for ROCm device 0).
+TEST(JitDeviceOrdinal, ResolveHalOrdinalIsFamilyAware) {
+    namespace tjd = ::tenzor::jit::mlir_detail;
+
+    // Same-family: the device's own ordinal is honored.
+    EXPECT_EQ(tjd::resolve_hal_ordinal("cuda", ::tenzor::Device::cuda(0)), 0);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("cuda", ::tenzor::Device::cuda(1)), 1);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("rocm", ::tenzor::Device::rocm(2)), 2);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("vulkan-spirv", ::tenzor::Device::vulkan(3)), 3);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("llvm-cpu", ::tenzor::Device::cpu()), 0);
+
+    // Cross-family: the mismatched device's ordinal must NOT be carried over.
+    EXPECT_EQ(tjd::resolve_hal_ordinal("rocm", ::tenzor::Device::cuda(1)), 0);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("cuda", ::tenzor::Device::rocm(1)), 0);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("vulkan-spirv", ::tenzor::Device::cuda(1)), 0);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("cuda", ::tenzor::Device::vulkan(1)), 0);
+    EXPECT_EQ(tjd::resolve_hal_ordinal("llvm-cpu", ::tenzor::Device::cuda(1)), 0);
+
+    // Defensive: negative ordinal on a matching family clamps to 0.
+    EXPECT_EQ(tjd::resolve_hal_ordinal("cuda", ::tenzor::Device(::tenzor::Device::Type::CUDA, -1)), 0);
+}
+
 // ── M1: the ROCm arch is read from the actual device and the derived arch
 //    compiles. ──────────────────────────────────────────────────────────────
 
@@ -410,6 +440,46 @@ TEST(JitRocmArch, DetectedArchMatchesDeviceAndCompiles) {
     EXPECT_TRUE(fs::exists(artifact.vmfb_path));
     EXPECT_GT(fs::file_size(artifact.vmfb_path), 0U);
     fs::remove_all(tmp);
+}
+
+// ── R1-08: HIP_VISIBLE_DEVICES remap for ROCm arch detection ───────────────
+//
+// amdgpu-arch/rocm_agent_enumerator report devices in HSA/KFD order (honoring
+// ROCR_VISIBLE_DEVICES/GPU_DEVICE_ORDINAL) but do NOT honor HIP_VISIBLE_DEVICES,
+// a HIP-runtime-only env var. detect_rocm_gfx_arch() takes a HIP ordinal (the
+// same numbering IREE's hip://N HAL driver and Tenzor's own ROCm backend use),
+// so it must remap that ordinal into HSA order before indexing the
+// enumerator's output. This is pure env-var parsing, testable without ROCm
+// hardware.
+TEST(JitRocmArch, RemapHipVisibleDeviceIndex) {
+    // No HIP_VISIBLE_DEVICES set (or empty): identity mapping.
+    EXPECT_EQ(tj::remap_hip_visible_device_index(0, nullptr), 0);
+    EXPECT_EQ(tj::remap_hip_visible_device_index(2, nullptr), 2);
+    EXPECT_EQ(tj::remap_hip_visible_device_index(0, ""), 0);
+
+    // HIP_VISIBLE_DEVICES="1,0" reverses a 2-GPU system: HIP ordinal 0 is
+    // physical/HSA ordinal 1, HIP ordinal 1 is physical/HSA ordinal 0.
+    EXPECT_EQ(tj::remap_hip_visible_device_index(0, "1,0"), 1);
+    EXPECT_EQ(tj::remap_hip_visible_device_index(1, "1,0"), 0);
+
+    // HIP_VISIBLE_DEVICES="2" restricts to a single physical device: only
+    // HIP ordinal 0 is valid and maps to physical ordinal 2.
+    EXPECT_EQ(tj::remap_hip_visible_device_index(0, "2"), 2);
+
+    // Requesting a HIP ordinal beyond the visible-device list falls back to
+    // identity (out-of-range; caller's bounds check on `archs` catches it).
+    EXPECT_EQ(tj::remap_hip_visible_device_index(1, "2"), 1);
+
+    // Whitespace around entries is tolerated (matches HIP runtime leniency).
+    EXPECT_EQ(tj::remap_hip_visible_device_index(1, " 3, 1 , 0"), 1);
+
+    // Malformed entries stop parsing at the first bad token; ordinals parsed
+    // before it stay valid, matching HIP runtime behavior.
+    EXPECT_EQ(tj::remap_hip_visible_device_index(0, "1,garbage,0"), 1);
+    EXPECT_EQ(tj::remap_hip_visible_device_index(1, "1,garbage,0"), 1);
+
+    // Negative ordinal input is passed through unchanged (defensive).
+    EXPECT_EQ(tj::remap_hip_visible_device_index(-1, "1,0"), -1);
 }
 
 // ── Fix #3: a graph break / empty trace makes trace_and_compile() return
@@ -450,4 +520,81 @@ TEST(JitEagerFallback, EmptyTraceHonorsStrictNvrtc) {
             ::tenzor::max(::tenzor::abs(x.tensor() - out.tensor())).item<float>();
         EXPECT_LT(diff, 1e-6F);
     }
+}
+
+// ── R1-12: InProcess vs Subprocess HAL-driver parity for llvm-cpu ──────────
+//
+// InProcess mode drives llvm-cpu through the "local-task" HAL driver (IREE's
+// multithreaded task system, created once and reused for the runtime
+// instance's lifetime); invoke_subprocess() unconditionally rewrites
+// "local-task" to "local-sync" (a single-threaded inline queue) for the
+// `iree-run-module` CLI path. Both are real, independently-selectable IREE
+// HAL drivers (confirmed via `iree-run-module --list_drivers`); local-sync
+// is kept for the CLI specifically to avoid paying a full worker-thread-pool
+// spin-up/teardown on every short-lived one-shot subprocess invocation, and
+// to keep that path single-threaded and deterministic for debugging.
+// Because compile.cpp can silently fall back from InProcess to Subprocess
+// for a target whose HAL driver isn't statically linked into the runtime,
+// the SAME compiled artifact can execute through either path across
+// different runs -- so the two drivers must agree numerically. This test
+// compiles a genuine reduction (the operation class most sensitive to
+// worker-thread partitioning/combine order) over a tensor large enough for
+// IREE's llvm-cpu codegen to tile it, and asserts InProcess and Subprocess
+// produce the same result.
+TEST(JitRocmArch, InProcessSubprocessParity_ReductionOnLlvmCpu) {
+    ensure_core_init();
+
+    constexpr int64_t kRows = 256;
+    constexpr int64_t kCols = 512;
+    auto x_t = ::tenzor::full({kRows, kCols}, 0.0F, ::tenzor::DType::Float32);
+    {
+        auto* xp = x_t.data<float>();
+        std::mt19937_64 rng(12345);
+        std::uniform_real_distribution<float> dist(-2.0F, 2.0F);
+        for (int64_t i = 0; i < x_t.numel(); ++i) xp[i] = dist(rng);
+    }
+
+    ::tenzor::jit::Graph g;
+    auto x_v = g.create_value("x", {kRows, kCols}, ::tenzor::DType::Float32,
+                              ::tenzor::Device::cpu());
+    g.set_inputs({x_v});
+    auto node = g.create_node(::tenzor::jit::OpType::Sum);
+    node->add_input(x_v);
+    auto out_v = g.create_value("o", {kRows}, ::tenzor::DType::Float32,
+                                ::tenzor::Device::cpu());
+    node->add_output(out_v);
+    node->set_int_attr("dim", 1);
+    g.add_node(node);
+    g.set_outputs({out_v});
+
+    tj::GraphToMLIR lowerer;
+    const std::string mlir = lowerer.lower(g);
+    ASSERT_NE(mlir.find("stablehlo.reduce"), std::string::npos) << mlir;
+
+    tj::CompileOptions opts;
+    opts.target    = "llvm-cpu";
+    opts.cache_dir = make_tmp_dir();
+    tj::CompiledArtifact artifact;
+    ASSERT_NO_THROW({ artifact = tj::compile_mlir(mlir, opts); });
+
+    auto in_proc_invoker =
+        tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::InProcess);
+    const auto in_proc_out = in_proc_invoker->invoke({x_t});
+    ASSERT_EQ(in_proc_out.size(), 1u);
+
+    auto sub_proc_invoker =
+        tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::Subprocess);
+    const auto sub_proc_out = sub_proc_invoker->invoke({x_t});
+    ASSERT_EQ(sub_proc_out.size(), 1u);
+
+    const auto diff =
+        ::tenzor::max(::tenzor::abs(in_proc_out[0] - sub_proc_out[0]))
+            .item<float>();
+    EXPECT_LT(diff, 1e-6F)
+        << "InProcess (local-task, multithreaded) and Subprocess "
+           "(local-sync, single-threaded) diverged on the same compiled "
+           "llvm-cpu reduction; diff=" << diff;
+
+    std::error_code ec;
+    fs::remove_all(opts.cache_dir, ec);
 }

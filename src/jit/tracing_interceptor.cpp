@@ -341,6 +341,37 @@ static auto is_value_identity_op(OpId op) -> bool {
     }
 }
 
+// R2-T1 regression (found via the first real trace-through-CompiledFunction
+// numeric test for nn::RMSNorm — every prior RMSNorm MLIR/nvrtc test built
+// its Graph by hand, bypassing the tracer entirely, so this never fired):
+// RMSNorm::forward_impl's CUDA/Vulkan inference fast paths and its standard
+// (training-capable, all-device) path all call `dispatch<OpId::FusedRMSNorm>`
+// directly, then separately call `jit_record_rms_norm` (normalization.cpp) to
+// record the correctly-shaped (x, weight) -> output OpType::RMSNorm node —
+// unlike LayerNorm, which relies solely on OpId::FusedLayerNorm being mapped
+// in opid_to_optype. OpId::FusedRMSNorm is deliberately left UNMAPPED there
+// (mapping it would make the interceptor ALSO auto-record a node for the same
+// dispatch call, double-recording alongside jit_record_rms_norm's manual one).
+// But leaving it unmapped meant every one of those `dispatch<>` calls fell
+// through to the interceptor's "Graph break: unmappable operation" branch —
+// which fires unconditionally, before jit_record_rms_norm's call afterward
+// ever gets a chance to matter — so tracing ANY nn::RMSNorm forward on CUDA,
+// Vulkan, or via the standard/training path (i.e. every path except the CPU
+// Float32 no-grad pointer fast path, which never calls dispatch<>() at all)
+// permanently broke the entire surrounding JIT trace on both the nvrtc and
+// mlir backends, silently falling back to eager (or hard-failing in
+// strict/fullgraph mode). This predicate marks such "handled by a manual
+// jit_record_* call right after this dispatch returns" ops so the interceptor
+// can defer to that call instead of registering anything or breaking.
+static auto is_manually_recorded_op(OpId op) -> bool {
+    switch (op) {
+        case OpId::FusedRMSNorm:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // A pure view/shape op returns a tensor that shares its input's storage and,
 // when the target shape/strides match exactly, the SAME logical view — a
 // genuine no-op the tracer should drop. Any OTHER op whose output aliases an
@@ -429,6 +460,14 @@ auto make_tracing_interceptor(
                 for (auto& t : results) {
                     tracer.alias_tensor(t, in_id);
                 }
+                return results;
+            }
+            // A "manually recorded" op (e.g. FusedRMSNorm) is NOT a graph
+            // break either: its caller records the real (correctly-shaped,
+            // correctly-attributed) node itself immediately after this
+            // dispatch call returns (see jit_record_rms_norm). Register
+            // nothing and defer entirely to that call.
+            if (is_manually_recorded_op(op)) {
                 return results;
             }
             // Graph break: unmappable operation

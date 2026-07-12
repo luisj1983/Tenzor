@@ -378,6 +378,12 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     // defeating the same-axis check (JIT-F010). A non-last / non-contiguous /
     // unknown axis set would read the wrong (strided) elements — silently wrong
     // on GPU (JIT-F035) — so reject and let the eager path run.
+    // norm_size = the fused LayerNorm kernel's per-instance element count
+    // (product of the normalized trailing axes). Computed here (alongside the
+    // axis-contiguity check that already derives it) so the gamma/beta
+    // absorption loop below can validate an affine operand's shape against it
+    // (JIT-R111 -- mirrors match_gemm_epilogue's is_per_column_bias guard).
+    int64_t norm_size = 0;
     {
         const int64_t rank = static_cast<int64_t>(
             n0->inputs().empty() ? 0 : n0->inputs()[0]->shape().size());
@@ -407,12 +413,58 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
             !ax.empty() && ax.back() == last &&
             ax.front() == last - static_cast<int64_t>(ax.size()) + 1;
         if (!trailing_contiguous) return std::nullopt;
+        const auto& in_shape = n0->inputs()[0]->shape();
+        int64_t prod = 1;
+        bool overflowed = false;
+        for (auto a : ax) {
+            if (a < 0 || a >= static_cast<int64_t>(in_shape.size()) ||
+                __builtin_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
+                overflowed = true;
+                break;
+            }
+        }
+        if (overflowed) return std::nullopt;
+        norm_size = prod;
     }
 
     // Look for the remaining chain: could be Add(eps) -> Sqrt -> Div -> Mul(gamma) -> Add(beta)
     // or variations. Collect contiguous matching nodes.
     std::vector<std::shared_ptr<Node>> matched = {n0, n1, n2, n3};
     size_t idx = start_idx + 4;
+
+    // JIT-R111: an Add/Mul absorbed into the tail chain below may be the
+    // gamma/beta affine step, whose OTHER operand (not the running chain
+    // value) becomes an external input to the fused kernel -- indexed as
+    // gamma[i]/beta[i] for i in [0, norm_size) by extended_codegen's
+    // generate_layer_norm. Absorbing purely on op-type + data-edge
+    // connectivity (as this loop otherwise does) let a full-tensor operand
+    // (e.g. a residual Add after a bias-less LayerNorm, or a gating Mul) be
+    // silently misread as a per-channel affine parameter and truncated to
+    // its first norm_size elements, broadcast to every outer instance --
+    // wrong output, no error, on the CUDA/ROCm fused path. Mirrors match_
+    // gemm_epilogue's is_per_column_bias guard: require the other operand to
+    // be either scalar (numel==1 -- covers eps-style constants) or exactly
+    // norm_size elements; anything else stops absorption here instead of
+    // silently including it.
+    auto other_operand_is_valid_affine_shape =
+        [&](const std::shared_ptr<Node>& chain_tail,
+            const std::shared_ptr<Node>& nk) -> bool {
+        std::unordered_set<Value*> chain_outputs;
+        for (const auto& out : chain_tail->outputs()) {
+            if (out) chain_outputs.insert(out.get());
+        }
+        const Value* other = nullptr;
+        for (const auto& inp : nk->inputs()) {
+            if (inp && !chain_outputs.count(inp.get())) { other = inp.get(); break; }
+        }
+        if (!other) return true;  // no external operand to validate
+        const auto& oshape = other->shape();
+        int64_t onumel = 1;
+        for (auto d : oshape) {
+            if (__builtin_mul_overflow(onumel, d, &onumel)) return false;
+        }
+        return onumel == 1 || onumel == norm_size;
+    };
 
     // Consume remaining ops that form the normalization pattern
     while (idx < nodes.size() && matched.size() < 10) {
@@ -425,6 +477,10 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
         if (op == OpType::Add || op == OpType::Sqrt || op == OpType::Div ||
             op == OpType::Mul || op == OpType::Neg) {
             if (!consumes_output(matched.back(), nk)) break;
+            if ((op == OpType::Add || op == OpType::Mul) &&
+                !other_operand_is_valid_affine_shape(matched.back(), nk)) {
+                break;
+            }
             matched.push_back(nk);
             ++idx;
 
@@ -528,6 +584,11 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     // tracer emits for multi-axis — and reject a non-last / non-contiguous /
     // unknown axis set so the eager path runs instead of the mis-indexed kernel
     // (JIT-F035).
+    // norm_size = the fused RMSNorm kernel's per-instance element count
+    // (product of the normalized trailing axes) -- computed here so the
+    // eps/gamma absorption below can validate an operand's shape against it
+    // (JIT-R111 -- mirrors match_gemm_epilogue's is_per_column_bias guard).
+    int64_t norm_size = 0;
     {
         const int64_t rank = static_cast<int64_t>(
             n0->inputs().empty() ? 0 : n0->inputs()[0]->shape().size());
@@ -549,7 +610,44 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
             !axes.empty() && axes.back() == last &&
             axes.front() == last - static_cast<int64_t>(axes.size()) + 1;
         if (!trailing_contiguous) return std::nullopt;
+        const auto& in_shape = n0->inputs()[0]->shape();
+        int64_t prod = 1;
+        bool overflowed = false;
+        for (auto a : axes) {
+            if (a < 0 || a >= static_cast<int64_t>(in_shape.size()) ||
+                __builtin_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
+                overflowed = true;
+                break;
+            }
+        }
+        if (overflowed) return std::nullopt;
+        norm_size = prod;
     }
+
+    // JIT-R111: see match_layer_norm's identical guard for the full
+    // rationale -- an absorbed Add/Mul's non-chain operand must be either
+    // scalar (eps-style) or exactly norm_size elements (a genuine per-
+    // channel gamma), not a full-tensor residual/gate silently truncated to
+    // its first norm_size elements by generate_rms_norm.
+    auto other_operand_is_valid_affine_shape =
+        [&](const std::shared_ptr<Node>& chain_tail,
+            const std::shared_ptr<Node>& nk) -> bool {
+        std::unordered_set<Value*> chain_outputs;
+        for (const auto& out : chain_tail->outputs()) {
+            if (out) chain_outputs.insert(out.get());
+        }
+        const Value* other = nullptr;
+        for (const auto& inp : nk->inputs()) {
+            if (inp && !chain_outputs.count(inp.get())) { other = inp.get(); break; }
+        }
+        if (!other) return true;
+        const auto& oshape = other->shape();
+        int64_t onumel = 1;
+        for (auto d : oshape) {
+            if (__builtin_mul_overflow(onumel, d, &onumel)) return false;
+        }
+        return onumel == 1 || onumel == norm_size;
+    };
 
     // Add(eps) or directly Sqrt/Rsqrt
     size_t next = start_idx + 2;
@@ -557,7 +655,8 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
 
     if (next < nodes.size() && nodes[next]->op_type() == OpType::Add &&
         !used.count(nodes[next].get()) &&
-        consumes_output(matched.back(), nodes[next])) {
+        consumes_output(matched.back(), nodes[next]) &&
+        other_operand_is_valid_affine_shape(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
         ++next;
     }
@@ -582,7 +681,8 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     // Optional: Mul(gamma)
     if (next < nodes.size() && nodes[next]->op_type() == OpType::Mul &&
         !used.count(nodes[next].get()) &&
-        consumes_output(matched.back(), nodes[next])) {
+        consumes_output(matched.back(), nodes[next]) &&
+        other_operand_is_valid_affine_shape(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
     }
 

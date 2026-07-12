@@ -16,17 +16,31 @@
 #include "cuda_launch_utils.cuh"
 #include "cuda_common.cuh"
 #include "../cuda_stream_pool.hpp"
+#include "../cuda_stream.hpp"  // cuda::cuda_current_stream()
 
 namespace tenzor {
 namespace cuda {
 
 // Resolve a CUDA stream: if `stream` is non-null (caller-provided), use it
-// directly; otherwise acquire one from the per-device stream pool.
+// directly. Otherwise, if CUDA-graph capture has set the backend's
+// thread-local current stream, use that -- during capture ALL work must run
+// on the single capture stream, or it is not recorded into the captured
+// graph at all (and the pool stream below is a plain default-created stream
+// with no relation to the capture stream, so kernels dispatched onto it
+// during capture are simply invisible to the graph, or throw "operation
+// would make the legacy stream depend on a capturing blocking stream" if the
+// pool implementation itself performs any legacy-stream-implicated
+// bookkeeping). Only when neither applies (normal, non-capturing execution
+// with no caller-supplied stream) does this acquire one from the per-device
+// stream pool. Mirrors math.cu's get_dispatch_stream().
 // Returns the stream to use and an RAII guard that keeps the pool stream alive.
 static std::pair<cudaStream_t, StreamGuard> resolve_stream(
     cudaStream_t stream, const Tensor& ref_tensor) {
     if (stream != nullptr) {
         return {stream, StreamGuard{}};
+    }
+    if (cuda::cuda_current_stream() != nullptr) {
+        return {cuda::cuda_current_stream(), StreamGuard{}};
     }
     int device_id = ref_tensor.device().index;
     auto guard = CUDAStreamPool::instance().acquire_guard(device_id);

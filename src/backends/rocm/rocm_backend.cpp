@@ -174,7 +174,15 @@ auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
     }
 
     if (use_caching_allocator_) {
-        return backend::rocm::RocmCachingAllocator::get().allocate(bytes, device_id);
+        // Thread the current stream through so a cache-hit's cross-stream
+        // safety event is recorded/waited-on against the stream this
+        // allocation is actually used on (mirrors the CUDA backend fix for
+        // the same gap). Without this, every allocation is tagged with the
+        // legacy/default stream (nullptr) regardless of rocm_current_stream(),
+        // which is wrong the moment an allocation happens during active
+        // HIP-graph capture.
+        return backend::rocm::RocmCachingAllocator::get().allocate(
+            bytes, device_id, rocm::rocm_current_stream());
     }
 
     // Guard: a driver allocation issued while a stream is capturing faults on the

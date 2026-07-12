@@ -706,6 +706,54 @@ TEST(FusedExecIntegration, RMSNormAffineMatchesUnfusedReference) {
     run_fused_vs_reference(build, {x, gamma}, "RMSNorm", 1e-4, 1e-4);
 }
 
+// R2-01/JIT-R112 regression: a multi-axis LayerNorm (normalized_shape=(H,W),
+// e.g. nn.LayerNorm((H,W))) traces its Mean nodes with the axes under the
+// PLURAL "dims" vec attr, not the singular "dim" int attr. ExtendedFusionPass's
+// attribute-propagation switch used to read only "dim", leaving
+// fused_reduce_dim UNSET for this case -- execute_fused_gpu_node then defaulted
+// norm_axis to -1, collapsing generate_layer_norm's norm_size to just the LAST
+// axis's extent (W) instead of the product of all normalized axes (H*W).
+// Input shape [R, H, W], normalized over axes {1, 2} (H and W both), gamma of
+// H*W elements -- if norm_size were wrongly W instead of H*W, this would
+// either silently read garbage past gamma's bounds or compute per-row
+// statistics over only the last W elements instead of all H*W, diverging from
+// the CPU eager reference (which normalizes over the full H*W block).
+TEST(FusedExecIntegration, MultiAxisLayerNormMatchesUnfusedReference) {
+    initialize();
+    const int R = 4, H = 4, W = 8;
+    const int64_t norm_size = static_cast<int64_t>(H) * W;
+    auto xd = rnd_vec(static_cast<size_t>(R) * H * W, 0xE8);
+    auto gd = rnd_vec(static_cast<size_t>(norm_size), 0xE9);
+    auto bd = rnd_vec(static_cast<size_t>(norm_size), 0xEA);
+    Tensor x = from_data(xd.data(), {R, H, W});
+    Tensor gamma = from_data(gd.data(), {H, W});
+    Tensor beta = from_data(bd.data(), {H, W});
+
+    BuildFn build = [=](Graph& g, Device dev) {
+        auto in = g.create_value("x", {R, H, W}, DType::Float32, dev);
+        auto ga = g.create_value("gamma", {H, W}, DType::Float32, dev);
+        auto be = g.create_value("beta", {H, W}, DType::Float32, dev);
+        auto m1 = add_op(g, OpType::Mean, "mean1", {in}, {R, 1, 1}, dev);
+        m1->set_vec_attr("dims", {1, 2}); m1->set_bool_attr("keepdim", true);
+        auto sub = add_op(g, OpType::Sub, "sub", {in, m1->outputs()[0]}, {R, H, W}, dev);
+        auto sq = add_op(g, OpType::Mul, "sq",
+                         {sub->outputs()[0], sub->outputs()[0]}, {R, H, W}, dev);
+        auto m2 = add_op(g, OpType::Mean, "mean2", {sq->outputs()[0]}, {R, 1, 1}, dev);
+        m2->set_vec_attr("dims", {1, 2}); m2->set_bool_attr("keepdim", true);
+        auto sr = add_op(g, OpType::Sqrt, "sqrt", {m2->outputs()[0]}, {R, 1, 1}, dev);
+        sr->set_attr("eps", 1e-12f);
+        auto dv = add_op(g, OpType::Div, "div",
+                         {sub->outputs()[0], sr->outputs()[0]}, {R, H, W}, dev);
+        auto mg = add_op(g, OpType::Mul, "mulg",
+                         {dv->outputs()[0], ga}, {R, H, W}, dev);
+        auto ab = add_op(g, OpType::Add, "addb",
+                         {mg->outputs()[0], be}, {R, H, W}, dev);
+        g.set_inputs({in, ga, be});
+        g.set_outputs({ab->outputs()[0]});
+    };
+    run_fused_vs_reference(build, {x, gamma, beta}, "MultiAxisLayerNorm", 2e-4, 2e-4);
+}
+
 TEST(FusedExecIntegration, ReductionPrePostMatchesUnfusedReference) {
     initialize();
     // pre self-square + Sum + post Sqrt == per-row L2 norm. Eager collapse would

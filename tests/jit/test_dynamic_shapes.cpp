@@ -14,6 +14,7 @@
 #include <tenzor/jit/symbolic_shape_inference.hpp>
 #include <tenzor/core/dtype.hpp>
 #include <tenzor/core/device.hpp>
+#include <tenzor/nn/activations/activations.hpp>
 #include <tenzor/nn/layers/linear.hpp>
 #include <tenzor/ops/creation.hpp>
 #include "../backend_parity/parity_test_utils.hpp"
@@ -369,6 +370,84 @@ TEST(SymbolicShapeInferenceFixes, DynamicModuleRoundTripsAsDynamic) {
     ASSERT_NE(loaded, nullptr);
     EXPECT_TRUE(loaded->has_dynamic_shapes())
         << "dynamic module reloaded as STATIC — dynamic_dims not serialized (F031)";
+}
+
+// R3-03: ShapeGuardInsertionPass used to bake every input dimension's
+// trace-time concrete size into the guard's "expected_shape" attribute
+// unconditionally, with no check of Value::has_symbolic_dims() --
+// mark_dynamic_dims() had zero effect on what the guard actually checked at
+// runtime (it only touches the separate symbolic_shape_ field). For a
+// TRACED CompiledModule (source_module_ set) this was masked: forward()'s
+// own shape-key comparison force-retraces on any shape change before the
+// frozen guard could ever fire. But a LOADED module (this test's `loaded`,
+// built directly from a Graph/deserialized -- source_module_ is null) has
+// no such preemptive retrace, so the frozen guard was the only check that
+// ran, and it threw "...ShapeGuard...but no source module is available to
+// retrace with...Cannot safely continue" on the very first differently-
+// shaped input -- defeating the entire point of a dynamic-dim module
+// surviving a save()/load() round-trip (F031, tested above). This
+// combines mark_dynamic_dims() with optimize_for_inference() (which is
+// what actually runs ShapeGuardInsertionPass) and calls forward() on the
+// LOADED module with a different batch size, which DynamicModuleRoundTrips
+// AsDynamic above does not do.
+TEST(SymbolicShapeInferenceFixes, LoadedDynamicModuleAcceptsDifferentBatchSize) {
+    auto g = std::make_shared<Graph>();
+    auto x = g->create_value("x", {4, 8}, tenzor::DType::Float32,
+                             tenzor::Device::cpu());
+    auto y = g->create_value("y", {4, 8}, tenzor::DType::Float32,
+                             tenzor::Device::cpu());
+    auto relu = g->create_node(OpType::ReLU, "relu");
+    relu->add_input(x);
+    relu->add_output(y);
+    y->set_node(relu);
+    g->add_node(relu);
+    g->set_inputs({x});
+    g->set_outputs({y});
+
+    auto module = std::make_shared<CompiledModule>(g);
+    module->mark_dynamic_dims({{0, 0, "B"}});
+    // Runs the default pass pipeline, including ShapeGuardInsertionPass --
+    // the pass under test. Without mark_dynamic_dims() having been called
+    // first (order matters: SymbolicTracePass must annotate the graph's
+    // input Values with a symbolic dim BEFORE this pass reads them), the
+    // guard would bake batch=4 as concrete regardless of this fix.
+    module->optimize_for_inference();
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("tenzor_r303_" + std::to_string(::getpid()) + ".tzg");
+    module->save(path.string());
+    auto loaded = CompiledModule::load(path.string());
+    std::filesystem::remove(path);
+    ASSERT_NE(loaded, nullptr);
+    ASSERT_TRUE(loaded->has_dynamic_shapes());
+
+    // Same batch size (4) as trace time: must always have worked, even
+    // before the fix -- included as a sanity baseline.
+    auto raw4 = tenzor::randn({4, 8}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto input4 = tenzor::Variable(raw4, /*requires_grad=*/false);
+    ASSERT_NO_THROW({ (void)loaded->forward(input4); });
+
+    // Different batch size (7): before the fix, this threw instead of
+    // running, on every backend (the bug is in shape-guard bookkeeping, not
+    // any backend kernel).
+    auto raw7 = tenzor::randn({7, 8}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto input7 = tenzor::Variable(raw7, /*requires_grad=*/false);
+    tenzor::Variable out7;
+    ASSERT_NO_THROW({ out7 = loaded->forward(input7); })
+        << "loaded dynamic-dim module must accept a batch size other than "
+           "the one it was traced/saved with, without throwing";
+
+    auto out_shape = out7.tensor().shape();
+    ASSERT_EQ(out_shape.size(), 2u);
+    EXPECT_EQ(out_shape[0], 7);
+    EXPECT_EQ(out_shape[1], 8);
+
+    auto expected = tenzor::nn::relu(input7);
+    auto diff = tenzor::max(tenzor::abs(expected.tensor() - out7.tensor()))
+                    .item<float>();
+    EXPECT_LT(diff, 1e-6f)
+        << "loaded module's output at the new batch size must match eager "
+           "relu, not just avoid throwing";
 }
 
 // JIT-R015 regression: a device/dtype-mismatch retrace (CompiledModule::

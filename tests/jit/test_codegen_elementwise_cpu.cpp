@@ -282,10 +282,24 @@ TEST(CodegenElemOps, Binary_Pow) {
     a = tenzor::add(tenzor::abs(a), 0.1);  // positive base
     auto b = tenzor::randn({16}, DType::Float32, Device::cpu());
     auto out = execute_fused_cpu(binary_group(ElemOp::Pow), {a, b});
-    const Tensor in_arr[2] = {a, b};
-    auto expected = tenzor::dispatch(OpId::Pow,
-                                     std::span<const Tensor>{in_arr, 2}, {})[0];
-    EXPECT_TRUE(expect_close(out, expected, 1e-3f));
+    // execute_fused_cpu's ElemOp::Pow case computes tenzor::float_power(a, b)
+    // (see codegen.cpp's own comment on that case): genuine elementwise
+    // tensor-tensor pow, matching the generated device code's `pow(a, b)`.
+    // dispatch(OpId::Pow, {a, b}, {}) is NOT an equivalent reference -- that
+    // kernel's contract (cpu_kernel_registry.cpp) is a single tensor input
+    // plus a scalar AttrKey::Exponent attribute; it silently ignores the
+    // second tensor operand `b` and defaults to exponent=2.0, computing a^2
+    // instead of a^b. It also always returns Float64 regardless of input
+    // dtype (matching torch.float_power's documented double-precision
+    // semantics), so comparing it against the OpId::Pow reference's Float32
+    // output threw a dtype-mismatch exception rather than a numeric one.
+    auto expected = tenzor::float_power(a, b);
+    // expect_close reads both operands via .data<float>() unconditionally
+    // (see its definition above), so it cannot compare float_power's
+    // Float64 result directly -- narrow both to Float32 first, matching
+    // this test's existing 1e-3f tolerance.
+    EXPECT_TRUE(expect_close(out.to(DType::Float32), expected.to(DType::Float32),
+                             1e-3f));
 }
 
 // =========================================================================

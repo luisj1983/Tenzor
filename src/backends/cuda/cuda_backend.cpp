@@ -411,7 +411,18 @@ public:
         }
 
         if (use_caching_allocator_) {
-            void* ptr = backend::CachingAllocator::get().allocate(bytes, device_id);
+            // Thread the current stream through so a cache-hit's cross-stream
+            // safety event is recorded/waited-on against the stream this
+            // allocation is actually used on. Without this, every allocation
+            // is tagged with the legacy/default stream (nullptr) regardless of
+            // cuda_current_stream() -- fine outside capture, but during CUDA
+            // graph capture the legacy stream implicitly synchronizes with
+            // every other stream, so any allocator-internal event wait tagged
+            // with the legacy stream while the real current stream is
+            // actively capturing throws "operation would make the legacy
+            // stream depend on a capturing blocking stream".
+            void* ptr = backend::CachingAllocator::get().allocate(
+                bytes, device_id, cuda::cuda_current_stream());
             {
                 std::lock_guard<std::mutex> lock(ptr_device_mutex_);
                 ptr_device_map_[ptr] = device_id;

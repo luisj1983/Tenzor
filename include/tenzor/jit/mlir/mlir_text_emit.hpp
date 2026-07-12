@@ -144,6 +144,22 @@ auto emit_stablehlo_convert(std::ostream& os, const std::string& result,
                             ::tenzor::DType src_dtype,
                             ::tenzor::DType dst_dtype) -> void;
 
+/// Emits `%result = stablehlo.optimization_barrier %a : type` — an
+/// IREE/StableHLO semantic no-op that prevents the surrounding compiler from
+/// fusing `a`'s producer into whatever consumes `result`. Required after any
+/// stablehlo.convert that widens to Float64 and feeds (even transitively,
+/// through elementwise ops) a stablehlo.reduce: IREE's LLVMGPUVectorDistribute
+/// codegen pipeline fails to distribute such a fused dispatch on CUDA/ROCm
+/// (confirmed via minimal repro — a reduce over a *raw* f64 input compiles
+/// fine; a reduce over a value produced by convert-to-f64 does not). Mirrors
+/// the existing JIT-R110 barrier already used in emit_stablehlo_dot_general
+/// for an analogous Vulkan convert-fusion bug.
+auto emit_stablehlo_optimization_barrier(std::ostream& os,
+                                         const std::string& result,
+                                         const std::string& a,
+                                         const std::vector<int64_t>& shape,
+                                         ::tenzor::DType dtype) -> void;
+
 /// Emit `%result = stablehlo.concatenate %a, %b, ... dim = N
 ///   : (tensor<...>, ...) -> tensor<...>`.
 auto emit_stablehlo_concatenate(

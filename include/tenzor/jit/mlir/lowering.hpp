@@ -14,9 +14,21 @@
 
 #include "tenzor/jit/graph.hpp"
 
+#include <cstddef>
 #include <string>
+#include <vector>
 
 namespace tenzor::jit::mlir_jit {
+
+/// One closure-captured parameter/buffer leaf lowered as an extra @main
+/// function argument beyond the graph's declared inputs (JIT-R109). Order
+/// matches the extra `%argN`s lower() appended: `is_buffer=false` entries
+/// index into `Graph::parameters()`, `is_buffer=true` into
+/// `Graph::buffers()`.
+struct ParamBufferLeafArg {
+    bool is_buffer;
+    std::size_t index;
+};
 
 /// Visitor that walks a `tenzor::jit::Graph` in topological order and emits
 /// a complete StableHLO MLIR module text. Stateful (carries an SSA value-name
@@ -43,8 +55,19 @@ public:
     /// the unsupported `OpType` name so callers can route to the eager path.
     auto lower(const ::tenzor::jit::Graph& g) -> std::string;
 
+    /// Valid after lower() returns: the extra @main arguments appended after
+    /// `g.inputs()` for the graph's parameter/buffer leaves (JIT-R109), in
+    /// the exact order lower() bound them to `%argN`s. Callers invoking the
+    /// compiled module must append each leaf's CURRENT tensor value, in this
+    /// same order, after the regular inputs -- these are never baked as
+    /// constants, so the compiled module has no value for them otherwise.
+    auto leaf_args() const -> const std::vector<ParamBufferLeafArg>& {
+        return leaf_args_;
+    }
+
 private:
     bool plugin_enabled_ = true;
+    std::vector<ParamBufferLeafArg> leaf_args_;
 };
 
 }  // namespace tenzor::jit::mlir_jit

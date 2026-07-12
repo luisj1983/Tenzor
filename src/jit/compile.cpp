@@ -38,17 +38,76 @@ namespace jit {
 
 namespace mlir_detail {
 
+// M3/JIT-055: resolve the IREE HAL device ordinal for `target` given the
+// input tensor's device. Returns `in_dev.index` only when in_dev's backend
+// family actually matches `target` (cuda/rocm/vulkan-spirv/llvm-cpu); an
+// explicit cross-family target override (JIT-032, e.g. target="rocm" on a
+// cuda:1 input) must not carry the wrong family's device ordinal over to the
+// HAL device URI -- that would pair an arch correctly derived for e.g. ROCm
+// device 0 with HAL device index 1, silently targeting the wrong physical
+// GPU. Mirrors the family-aware fallback rocm_ordinal/cuda_dev already use
+// for arch derivation. Pure/host-only (no IREE headers needed) so it's
+// compiled and testable unconditionally, independent of TENZOR_HAS_MLIR_JIT.
+auto resolve_hal_ordinal(const std::string& target, const Device& in_dev) -> int {
+    const bool family_matches =
+        (target == "llvm-cpu" && in_dev.type == Device::Type::CPU) ||
+        (target == "cuda" && in_dev.type == Device::Type::CUDA) ||
+        (target == "rocm" && in_dev.type == Device::Type::ROCm) ||
+        (target == "vulkan-spirv" && in_dev.type == Device::Type::Vulkan);
+    if (!family_matches) return 0;
+    return in_dev.index < 0 ? 0 : in_dev.index;
+}
+
 #ifdef TENZOR_HAS_MLIR_JIT
+// JIT-R109: a cached invoker is paired with the leaf-argument layout the
+// compiled module actually expects (GraphToMLIR::leaf_args(), captured at
+// the trace that produced it) — parameter/buffer leaves are extra @main
+// arguments, not baked constants, so every invocation (cache hit or miss)
+// must gather their CURRENT values, in this exact order, and append them
+// after the regular inputs.
+struct MlirCacheEntry {
+    std::shared_ptr<::tenzor::jit::mlir_jit::IreeInvoker> invoker;
+    std::vector<::tenzor::jit::mlir_jit::ParamBufferLeafArg> leaf_args;
+};
+
 struct MlirInvokerCache {
     // JIT-R014: shared_ptr (not unique_ptr) so the cache-hit fast path can
     // copy a handle out under mutex_ and invoke it AFTER releasing the lock
     // — mirrors cache_'s (the nvrtc path's) identical shared_ptr<CompiledModule>
     // pattern, fixing the same "mutex_ held across the full invocation,
     // serializing every concurrent call" anti-pattern already fixed there.
-    std::unordered_map<std::string,
-                       std::shared_ptr<::tenzor::jit::mlir_jit::IreeInvoker>>
-        invokers;
+    std::unordered_map<std::string, MlirCacheEntry> invokers;
 };
+
+// Gather the CURRENT tensor value for each leaf argument, placed on
+// target_device, in leaf_args order (JIT-R109). Pure/host-only; called on
+// every mlir_invoke_impl invocation (cache hit AND miss) so a captured
+// parameter/buffer is never stale.
+auto gather_leaf_tensors(
+    const std::vector<::tenzor::jit::mlir_jit::ParamBufferLeafArg>& leaf_args,
+    const std::vector<std::shared_ptr<Variable>>& parameters,
+    const std::vector<std::shared_ptr<Variable>>& buffers,
+    const Device& target_device) -> std::vector<Tensor> {
+    std::vector<Tensor> out;
+    out.reserve(leaf_args.size());
+    for (const auto& leaf : leaf_args) {
+        const auto& src = leaf.is_buffer ? buffers : parameters;
+        if (leaf.index >= src.size() || !src[leaf.index]) {
+            throw std::runtime_error(
+                "JIT: MLIR-compiled module expects " +
+                std::string(leaf.is_buffer ? "buffer" : "parameter") +
+                " leaf index " + std::to_string(leaf.index) +
+                " but only " + std::to_string(src.size()) +
+                (leaf.is_buffer ? " buffers" : " parameters") +
+                " are currently declared -- with_parameters()/with_buffers() "
+                "must not shrink or reorder relative to the trace that "
+                "compiled this module.");
+        }
+        const Tensor& t = src[leaf.index]->tensor();
+        out.push_back(t.device() == target_device ? t : t.to(target_device));
+    }
+    return out;
+}
 #else
 struct MlirInvokerCache {};
 #endif
@@ -136,9 +195,10 @@ auto CompiledFunction::set_parameters(
     // parameter set (or none); drop them so the next call re-traces with the
     // new parameters bound.
     cache_.clear();
-    // The MLIR inference path freezes captured parameters as constants inside
-    // each IREE invoker, so those must be dropped too or an mlir-backend call
-    // would keep returning results computed with the old parameter values.
+    // JIT-R109: the compiled MLIR module's extra leaf @main arguments are
+    // bound by parameter INDEX (GraphToMLIR::leaf_args()), so a different
+    // parameter list (different count/shapes/order) invalidates the cached
+    // invoker's argument contract, not just its values -- drop it too.
     if (mlir_cache_) {
         mlir_cache_->invokers.clear();
     }
@@ -158,6 +218,8 @@ auto CompiledFunction::set_buffers(
     std::lock_guard<std::mutex> lock(mutex_);
     buffers_ = std::move(buffers);
     cache_.clear();
+    // JIT-R109: see set_parameters()'s identical comment -- a different
+    // buffer list invalidates the cached invoker's leaf-argument contract.
     if (mlir_cache_) {
         mlir_cache_->invokers.clear();
     }
@@ -168,6 +230,13 @@ auto CompiledFunction::with_buffers(
     std::vector<std::shared_ptr<Variable>> buffers) -> CompiledFunction& {
     set_buffers(std::move(buffers));
     return *this;
+}
+
+auto CompiledFunction::snapshot_params_buffers() const
+    -> std::pair<std::vector<std::shared_ptr<Variable>>,
+                std::vector<std::shared_ptr<Variable>>> {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {parameters_, buffers_};
 }
 
 auto CompiledFunction::any_parameter_requires_grad() const -> bool {
@@ -359,19 +428,24 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
     Variable result;
     bool fn_ran = false;
 
-    // JIT-033: the nvrtc backend has no native codegen for Vulkan/OneAPI, so the
-    // traced graph runs through the interpreter there — correct, but unaccelerated
-    // and previously silent (unlike the MLIR path). Warn once so it is visible.
+    // JIT-033: the nvrtc backend has no native codegen for CPU/Vulkan/OneAPI/MPS
+    // — extended/native codegen (codegen.cpp/extended_codegen.cpp) is gated to
+    // CUDA/ROCm only — so the traced graph runs through the interpreter on any
+    // of those four device types, correct but unaccelerated and previously
+    // silent for all but Vulkan/OneAPI (unlike the MLIR path, which already
+    // warns for OneAPI/MPS). Warn once so it is visible for every device type
+    // that actually takes this unaccelerated path, not just two of the four.
     if (config_.backend == "nvrtc" && !inputs.empty()) {
         const auto dt = inputs[0].tensor().device().type;
-        if (dt == Device::Type::Vulkan || dt == Device::Type::OneAPI) {
+        if (dt == Device::Type::CPU || dt == Device::Type::Vulkan ||
+            dt == Device::Type::OneAPI || dt == Device::Type::MPS) {
             // Per-compiled-function (JIT-F038): each such function warns once, not
             // just the first one in the process.
             if (!warned_no_accel_.exchange(true)) {
                 TENZOR_LOG_WARN(
-                    "JIT nvrtc backend has no GPU codegen on Vulkan/OneAPI; the "
-                    "traced graph runs via the interpreter (correct but not "
-                    "accelerated). Use backend=\"mlir\" for acceleration.");
+                    "JIT nvrtc backend has no GPU codegen on CPU/Vulkan/OneAPI/"
+                    "MPS; the traced graph runs via the interpreter (correct but "
+                    "not accelerated). Use backend=\"mlir\" for acceleration.");
             }
         }
     }
@@ -797,6 +871,8 @@ namespace {
 /// ops and `end_trace` returns an empty graph.
 auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
                               std::span<const Variable> inputs,
+                              const std::vector<std::shared_ptr<Variable>>& parameters,
+                              const std::vector<std::shared_ptr<Variable>>& buffers,
                               Variable* out_result = nullptr,
                               bool* out_fn_attempted = nullptr,
                               bool* out_fn_ok = nullptr,
@@ -804,6 +880,18 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
     -> std::shared_ptr<Graph> {
     auto& tracer = Tracer::get_instance();
     tracer.start_trace();
+    // JIT-R109: declare the closure-captured parameters/buffers BEFORE
+    // running the traced forward, mirroring trace_and_compile's (the nvrtc
+    // path's) identical declaration -- so end_trace() classifies each
+    // captured parameter/buffer as a live leaf (rebound to its current value
+    // on every replay) instead of freezing it as an opaque constant. Without
+    // this, every MLIR-backend invocation (mlir_invoke_impl, dump_graph,
+    // dump_mlir, dump_stablehlo) baked captured parameters/buffers -- e.g. a
+    // BatchNorm's running_mean_/running_var_, or even a Linear layer's
+    // weight/bias -- as literal constants in the compiled module, silently
+    // stale after the first trace no matter how the source Variable changed.
+    if (!parameters.empty()) tracer.set_parameters(parameters);
+    if (!buffers.empty()) tracer.set_buffers(buffers);
     bool had_break = false;
     // Install the in-place / graph-break side-channel hooks (JIT-F027) so
     // in-place mutations are recorded and .item() reads break the trace.
@@ -861,7 +949,8 @@ auto CompiledFunction::dump_graph(const Variable& input) -> std::string {
 }
 
 auto CompiledFunction::dump_graph(std::span<const Variable> inputs) -> std::string {
-    auto graph = trace_single_input_graph(fn_, inputs);
+    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
+    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph>\n";
     }
@@ -1103,11 +1192,13 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // invocation, serializing every concurrent call to this
     // backend="mlir" CompiledFunction, unlike the identical nvrtc path.
     std::shared_ptr<mj::IreeInvoker> hit_invoker;
+    std::vector<mj::ParamBufferLeafArg> hit_leaf_args;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = mlir_cache_->invokers.find(key);
         if (it != mlir_cache_->invokers.end()) {
-            hit_invoker = it->second;
+            hit_invoker = it->second.invoker;
+            hit_leaf_args = it->second.leaf_args;
         } else {
             // Miss. If we've already compiled something else for a different
             // shape, this counts as a retrace (a new shape forces a fresh trace).
@@ -1119,6 +1210,19 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     }
     if (hit_invoker) {
         mj::internal::record_cache_hit();
+        // JIT-R109: append the CURRENT value of each parameter/buffer leaf
+        // the compiled module expects, in the order it was compiled with --
+        // these are extra @main arguments, never baked as constants, so a
+        // cache hit must re-gather them on every call the same as a miss.
+        if (!hit_leaf_args.empty()) {
+            auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
+            const auto in_dev = inputs[0].tensor().device();
+            auto leaf_tensors = mlir_detail::gather_leaf_tensors(
+                hit_leaf_args, params_snapshot, buffers_snapshot, in_dev);
+            input_tensors.insert(input_tensors.end(),
+                                 std::make_move_iterator(leaf_tensors.begin()),
+                                 std::make_move_iterator(leaf_tensors.end()));
+        }
         auto outs = hit_invoker->invoke(input_tensors);
         if (outs.size() != 1) {
             throw std::runtime_error(
@@ -1138,8 +1242,9 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // out-params so the trace runs fn EXACTLY ONCE; every fallback below reuses
     // that result rather than re-invoking fn_ (JIT-008-class double-exec).
     bool had_break = false;
-    auto graph = trace_single_input_graph(fn_, inputs, out_result,
-                                          out_fn_attempted, out_fn_ok, &had_break);
+    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
+    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot,
+                                          out_result, out_fn_attempted, out_fn_ok, &had_break);
     had_graph_break_.store(had_break);  // JIT-F055: publish for the introspection accessor
     if (!graph || graph->num_nodes() == 0) {
         // Trace produced nothing (graph break in fullgraph mode, or the
@@ -1210,6 +1315,11 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // for them.)
     lowerer.set_plugin_enabled(false);
     const std::string mlir_text = lowerer.lower(*graph);
+    // JIT-R109: the graph's parameter/buffer leaves (if any) were bound as
+    // extra @main arguments by lower() above, in this order -- captured here
+    // so the invoke call below (and the cached entry) know to append their
+    // current values after the regular inputs on every call.
+    const std::vector<mj::ParamBufferLeafArg> leaf_args = lowerer.leaf_args();
 
     const ::tenzor::Device in_dev = inputs[0].tensor().device();
 
@@ -1264,9 +1374,10 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // the HAL driver (e.g. distributions without cuda/vulkan compiled in)
     // we fall back to the subprocess driver, which carries its own driver
     // set; this preserves the GPU end-to-end path without a CPU fallback.
-    // M3: thread the input's device ordinal so the IREE HAL device matches the
-    // requested ordinal (cuda:1 runs on GPU 1, not the driver default).
-    const int hal_ordinal = in_dev.index < 0 ? 0 : in_dev.index;
+    // M3/JIT-055: thread the input's device ordinal so the IREE HAL device
+    // matches the requested ordinal (cuda:1 runs on GPU 1, not the driver
+    // default) -- family-guarded, see resolve_hal_ordinal's doc comment.
+    const int hal_ordinal = mlir_detail::resolve_hal_ordinal(opts.target, in_dev);
     // Test/diagnostic hook: force the subprocess path (iree-run-module) even when
     // the in-process HAL driver is linked, so the subprocess I/O path can be
     // exercised on a CPU-only build. Does not affect default behavior.
@@ -1406,6 +1517,17 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
     // the in-process path), rather than only the first. Set before the invoker is
     // cached below so the cached instance keeps the value.
     invoker->set_expected_outputs(static_cast<int>(graph->outputs().size()));
+    // JIT-R109: append the current value of each parameter/buffer leaf lower()
+    // bound as an extra @main argument, in that exact order (params_snapshot/
+    // buffers_snapshot were captured before the trace above, so they reflect
+    // the same declaration the graph was traced against).
+    if (!leaf_args.empty()) {
+        auto leaf_tensors = mlir_detail::gather_leaf_tensors(
+            leaf_args, params_snapshot, buffers_snapshot, in_dev);
+        input_tensors.insert(input_tensors.end(),
+                             std::make_move_iterator(leaf_tensors.begin()),
+                             std::make_move_iterator(leaf_tensors.end()));
+    }
     auto outs = invoker->invoke(input_tensors);
     if (outs.size() != 1) {
         throw std::runtime_error(
@@ -1425,7 +1547,8 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
         std::lock_guard<std::mutex> lock(mutex_);
         if (mlir_cache_->invokers.size() <
             static_cast<size_t>(config_.max_retraces)) {
-            mlir_cache_->invokers.emplace(key, std::move(invoker));
+            mlir_cache_->invokers.emplace(
+                key, mlir_detail::MlirCacheEntry{std::move(invoker), leaf_args});
         } else {
             // Hit the per-function cache ceiling — count this insertion
             // attempt as an eviction (the new shape's invoker is dropped on
@@ -1447,7 +1570,8 @@ auto CompiledFunction::dump_mlir(const Variable& input) -> std::string {
 
 auto CompiledFunction::dump_mlir(std::span<const Variable> inputs) -> std::string {
     namespace mj = ::tenzor::jit::mlir_jit;
-    auto graph = trace_single_input_graph(fn_, inputs);
+    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
+    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph: nothing to lower>\n";
     }
@@ -1467,7 +1591,8 @@ auto CompiledFunction::dump_stablehlo(const Variable& input) -> std::string {
 
 auto CompiledFunction::dump_stablehlo(std::span<const Variable> inputs) -> std::string {
     namespace mj = ::tenzor::jit::mlir_jit;
-    auto graph = trace_single_input_graph(fn_, inputs);
+    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
+    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph: nothing to lower>\n";
     }

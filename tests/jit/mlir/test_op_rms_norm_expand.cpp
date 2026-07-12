@@ -202,3 +202,87 @@ TEST(OpRMSNormExpand, WithNonUnitWeight) {
     EXPECT_NEAR(op[2], (3.0f / rms) * 2.0f, 1e-5f);
     EXPECT_NEAR(op[3], (4.0f / rms) * 2.0f, 1e-5f);
 }
+
+// R1-04/JIT-R113 regression: handle_rms_norm_expand's sum-of-squares
+// accumulation dtype `ad` used to widen F16/BF16 inputs to Float32 for
+// accumulation, citing a comment that eager does the same -- stale, since
+// eager's RMSNorm kernel (fused_rms_norm_kernel -> fused_ln_sumsq_f64) now
+// accumulates in double UNCONDITIONALLY for every dtype including F16/BF16.
+// The expected numeric divergence from this gap is small (~1e-5 relative,
+// scaling with sqrt(norm_size)) and easy for a black-box numeric-tolerance
+// test to miss by coincidence, so verify directly and deterministically at
+// the MLIR TEXT level: a BF16 RMSNorm's expand lowering must contain an f64
+// accumulation step, not stay entirely in bf16/f32.
+TEST(OpRMSNormExpand, BFloat16AccumulatesInF64) {
+    ensure_core_init();
+    const std::vector<int64_t> x_shape{2, 64};
+    const std::vector<int64_t> w_shape{64};
+
+    ::tenzor::jit::Graph g;
+    auto x = g.create_value("x", x_shape, ::tenzor::DType::BFloat16,
+                            ::tenzor::Device::cpu());
+    auto w = g.create_value("w", w_shape, ::tenzor::DType::BFloat16,
+                            ::tenzor::Device::cpu());
+    g.set_inputs({x, w});
+    auto node = g.create_node(tzj::OpType::RMSNorm);
+    node->add_input(x);
+    node->add_input(w);
+    auto out = g.create_value("y", x_shape, ::tenzor::DType::BFloat16,
+                              ::tenzor::Device::cpu());
+    node->add_output(out);
+    node->set_attr("eps", 1e-6f);
+    g.add_node(node);
+    g.set_outputs({out});
+
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(false);
+    const std::string mlir = lowerer.lower(g);
+
+    EXPECT_NE(mlir.find("f64"), std::string::npos)
+        << "BF16 RMSNorm's sum-of-squares accumulation must widen to f64 "
+           "(matching eager's unconditional double accumulation), not stay "
+           "in bf16/f32 throughout:\n"
+        << mlir;
+}
+
+TEST(OpLayerNormExpand, Float16AccumulatesInF64) {
+    ensure_core_init();
+    // LayerNorm has no dedicated expand test file in this directory (its
+    // handler is exercised indirectly via test_jit_mlir_numeric_parity.cpp's
+    // tracer-reachable nn::functional::layer_norm path), but handle_layer_norm
+    // shares the exact same `ad` accumulation-dtype fix as handle_rms_norm_
+    // expand above, so verify it the same deterministic way, directly on a
+    // hand-built OpType::LayerNorm node.
+    const std::vector<int64_t> x_shape{2, 64};
+    const std::vector<int64_t> affine_shape{64};
+
+    ::tenzor::jit::Graph g;
+    auto x = g.create_value("x", x_shape, ::tenzor::DType::Float16,
+                            ::tenzor::Device::cpu());
+    auto gamma = g.create_value("gamma", affine_shape, ::tenzor::DType::Float16,
+                                ::tenzor::Device::cpu());
+    auto beta = g.create_value("beta", affine_shape, ::tenzor::DType::Float16,
+                               ::tenzor::Device::cpu());
+    g.set_inputs({x, gamma, beta});
+    auto node = g.create_node(tzj::OpType::LayerNorm);
+    node->add_input(x);
+    node->add_input(gamma);
+    node->add_input(beta);
+    auto out = g.create_value("y", x_shape, ::tenzor::DType::Float16,
+                              ::tenzor::Device::cpu());
+    node->add_output(out);
+    node->set_attr("eps", 1e-6f);
+    node->set_vec_attr("normalized_shape", {64});
+    g.add_node(node);
+    g.set_outputs({out});
+
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(false);
+    const std::string mlir = lowerer.lower(g);
+
+    EXPECT_NE(mlir.find("f64"), std::string::npos)
+        << "F16 LayerNorm's mean/variance accumulation must widen to f64 "
+           "(matching eager's unconditional double accumulation), not stay "
+           "in f16/f32 throughout:\n"
+        << mlir;
+}

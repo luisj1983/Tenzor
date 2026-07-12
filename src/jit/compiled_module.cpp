@@ -13,6 +13,7 @@
 #include "../../include/tenzor/backend/loader.hpp"   // backend_registry()/get_backend()
 #include "../../include/tenzor/backend/backend.hpp"  // Backend::copy / CopyKind
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 
 #ifdef TENZOR_HAS_ROCM
@@ -192,6 +193,12 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
     if (source_module_ && key != traced_shape_key_) {
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
+            // R3-02: a CUDA/HIP graph captured against the pre-retrace
+            // graph_ must not keep replaying once graph_ is swapped out from
+            // under it -- has_cuda_graph()/replay_cuda_graph() would
+            // otherwise keep reporting/replaying a graph that no longer
+            // matches the module's actual computation.
+            invalidate_cuda_graph();
             graph_ = it->second;
         } else {
             // Retrace on ANY shape/device/dtype change (compute_shape_key encodes
@@ -224,6 +231,7 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
                 shape_cache_[key] = retraced->graph_;
             }
+            invalidate_cuda_graph();  // R3-02: see comment above
             graph_ = retraced->graph_;
         }
         traced_device_ = input.tensor().device();
@@ -242,6 +250,7 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
         // Check shape cache first
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
+            invalidate_cuda_graph();  // R3-02: see comment above
             graph_ = it->second;
         } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
             // Re-trace with the new input shape and cache
@@ -265,6 +274,7 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
             retraced->metadata_ = metadata_;
             shape_cache_[key] = retraced->graph_;
+            invalidate_cuda_graph();  // R3-02: see comment above
             graph_ = retraced->graph_;
         }
         // else: too many distinct shapes, stay on current graph
@@ -367,6 +377,7 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     if ((source_module_ || retrace_fn_) && !inputs.empty() && key != traced_shape_key_) {
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
+            invalidate_cuda_graph();  // R3-02: see single-input overload's comment
             graph_ = it->second;
         } else {
             // Prefer the multi-input retrace closure when present (e.g. a
@@ -395,6 +406,7 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
             if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
                 shape_cache_[key] = retraced->graph_;
             }
+            invalidate_cuda_graph();  // R3-02: see single-input overload's comment
             graph_ = retraced->graph_;
         }
         traced_device_ = inputs[0].tensor().device();
@@ -412,6 +424,7 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
 
         auto it = shape_cache_.find(key);
         if (it != shape_cache_.end()) {
+            invalidate_cuda_graph();  // R3-02: see single-input overload's comment
             graph_ = it->second;
         } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
             auto retraced = retrace_fn_ ? retrace_fn_(inputs)
@@ -435,6 +448,7 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
             if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
             retraced->metadata_ = metadata_;
             shape_cache_[key] = retraced->graph_;
+            invalidate_cuda_graph();  // R3-02: see single-input overload's comment
             graph_ = retraced->graph_;
         }
 
@@ -693,6 +707,10 @@ public:
         }
     }
 
+    void prepare_capture_stream() override {
+        HIP_CHECK(hipSetDevice(device_id_));
+    }
+
     void begin_capture() override {
         HIP_CHECK(hipSetDevice(device_id_));
         hip_graph_.begin_capture(stream_);
@@ -811,31 +829,64 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
     // replay path usable (and verifiable) — without this the caller has no way
     // to read a replay's output.
     captured_outputs_.clear();
+    auto reset_capture_state = [&]() {
+        // Order matters: free captured tensors BEFORE destroying cuda_graph_.
+        // See invalidate_cuda_graph()'s comment -- captured_intermediates_ can
+        // hold buffers the CachingAllocator tagged with the capture stream;
+        // freeing them after cuda_graph_.reset() has cudaStreamDestroy()'d
+        // that stream is a use-after-free of the stream handle.
+        captured_shapes_.clear();
+        captured_inputs_.clear();
+        captured_outputs_.clear();
+        captured_intermediates_.clear();
+        cuda_graph_.reset();
+    };
     // Warm up: run the forward once OUTSIDE capture so the caching allocator has
     // every intermediate/output buffer cached. CUDA/HIP forbid cudaMalloc while a
     // stream is capturing, so allocations during capture must be served from the
     // cache (no driver allocation). The warmup populates that cache.
-    {
+    //
+    // Route the warmup onto the SAME dedicated stream begin_capture() will use
+    // (without actually starting capture) so every buffer the warmup allocates
+    // is tagged with that stream. Otherwise warmup runs on the default/legacy
+    // stream, and the real captured pass below reusing those cached blocks from
+    // a DIFFERENT (capture) stream is a cross-stream reuse: the allocator must
+    // insert a stream-to-stream wait to stay safe, which CUDA/HIP reject while
+    // the target stream is actively capturing ("operation would make the legacy
+    // stream depend on a capturing blocking stream"). Same-stream reuse needs no
+    // such wait.
+    cuda_graph_->prepare_capture_stream();
+    try {
         auto warm = graph_->forward(vars);
         (void)warm;
+    } catch (...) {
+        reset_capture_state();
+        throw;
     }
     // Drain the warmup and any prior async work so it is not swept into the
     // capture, and so the capture starts from a quiescent device.
     if (!captured_inputs_.empty()) {
         captured_inputs_.front().device().synchronize();
     }
-    auto reset_capture_state = [&]() {
-        cuda_graph_.reset();
-        captured_shapes_.clear();
-        captured_inputs_.clear();
-        captured_outputs_.clear();
-    };
     cuda_graph_->begin_capture();
     try {
-        auto out_vars = graph_->forward(vars);
+        // Collect every Variable this (capture-time) forward() call touches —
+        // not just the declared outputs_ — so every intermediate node result's
+        // device buffer can be pinned below. See captured_intermediates_'s doc
+        // comment: an intermediate whose Tensor is allowed to go out of scope
+        // here would be freed back to the shared allocator's free list even
+        // though the graph just captured is about to reference that exact
+        // address on every future replay.
+        std::vector<Variable> all_vars;
+        auto out_vars = graph_->forward(vars, /*grad_mode=*/false, &all_vars);
         captured_outputs_.reserve(out_vars.size());
         for (auto& ov : out_vars) {
             captured_outputs_.push_back(ov.tensor());
+        }
+        captured_intermediates_.clear();
+        captured_intermediates_.reserve(all_vars.size());
+        for (auto& v : all_vars) {
+            captured_intermediates_.push_back(v.tensor());
         }
     } catch (...) {
         // If forward fails during capture, we must still end capture to
@@ -981,10 +1032,20 @@ auto CompiledModule::replay_cuda_graph(std::vector<Tensor>& inputs) -> bool {
 
 auto CompiledModule::invalidate_cuda_graph() -> void {
     std::lock_guard<std::recursive_mutex> guard(forward_mutex_);
-    cuda_graph_.reset();
+    // Free the captured tensors BEFORE destroying cuda_graph_ (and with it the
+    // private capture stream). captured_intermediates_ holds buffers that were
+    // allocated DURING capture, so the CachingAllocator tagged their blocks
+    // with the capture stream; freeing one records a CUDA event against that
+    // same stream (CachingAllocator::free -> record_free_event ->
+    // cudaEventRecord) so a later cross-stream reuse can wait for it. Resetting
+    // cuda_graph_ first calls cudaStreamDestroy() on that stream, so the event
+    // record above would run against an already-destroyed stream handle --
+    // undefined behavior, observed as a SIGSEGV inside libcuda.so.
     captured_shapes_.clear();
     captured_inputs_.clear();
     captured_outputs_.clear();
+    captured_intermediates_.clear();
+    cuda_graph_.reset();
 }
 
 auto CompiledModule::has_cuda_graph() const -> bool {

@@ -44,6 +44,11 @@ public:
         cudaGetLastError();
     }
 
+    void prepare_capture_stream() override {
+        cudaSetDevice(device_id_);
+        cuda::cuda_current_stream() = stream_;
+    }
+
     void begin_capture() override {
         cudaSetDevice(device_id_);
         // Route all subsequent dispatch launches onto the capture stream so the

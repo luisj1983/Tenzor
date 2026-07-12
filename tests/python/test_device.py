@@ -104,6 +104,34 @@ def test_device_construction():
     print("  Device construction OK")
 
 
+def test_mps_device_type_registered():
+    """R2-02 regression: DeviceType.MPS and Device.mps() were missing from the
+    pybind11 bindings even though Device::Type::MPS is a real backend
+    everywhere else in the C++ API (to_string(), DLPack mapping, availability
+    checks). MPS hardware isn't available on this (Linux) host, so this only
+    exercises the host-side enum/construction surface, not actual placement.
+    """
+    print("Testing MPS DeviceType registration...")
+    assert tz.DeviceType.MPS is not None
+    mps_dev = tz.Device.mps(0)
+    assert mps_dev.type == tz.DeviceType.MPS
+    assert mps_dev.index == 0
+
+    mps_dev2 = tz.Device.mps(2)
+    assert mps_dev2.index == 2
+
+    # String-constructor path must agree with the static factory.
+    mps_from_str = tz.Device("mps:1")
+    assert mps_from_str.type == tz.DeviceType.MPS
+    assert mps_from_str.index == 1
+
+    # Explicit (Type, index) constructor must also agree.
+    mps_ctor = tz.Device(tz.DeviceType.MPS, 3)
+    assert mps_ctor.type == tz.DeviceType.MPS
+    assert mps_ctor.index == 3
+    print("  MPS DeviceType registration OK")
+
+
 def main():
     print("=" * 60)
     print("Testing Device Management Bindings")
@@ -119,6 +147,7 @@ def main():
         test_module_cpu()
         test_cuda_graceful_skip()
         test_device_construction()
+        test_mps_device_type_registered()
 
         print("\n" + "=" * 60)
         print("ALL DEVICE TESTS PASSED")

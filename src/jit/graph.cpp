@@ -2652,7 +2652,8 @@ auto Graph::infer_symbolic_types() -> void {
 }
 
 auto Graph::forward(const std::vector<Variable>& runtime_inputs,
-                    bool grad_mode) -> std::vector<Variable> {
+                    bool grad_mode,
+                    std::vector<Variable>* out_all_values) -> std::vector<Variable> {
     // Map values to runtime variables
     std::unordered_map<std::string, Variable> value_map;
 
@@ -2798,6 +2799,13 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
             break;
         } else {
             throw std::runtime_error("Output value not computed: " + output->id());
+        }
+    }
+
+    if (out_all_values != nullptr) {
+        out_all_values->reserve(out_all_values->size() + value_map.size());
+        for (auto& [id, var] : value_map) {
+            out_all_values->push_back(var);
         }
     }
 
@@ -3363,13 +3371,25 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::AdaptiveAvgPool2d:
             if (!input_vars.empty()) {
-                OpAttributes pool_attrs;
                 auto output_size = node->get_vec_attr("output_size");
-                if (output_size.size() >= 2) {
-                    pool_attrs.set(AttrKey::OutputSizeH, output_size[0]);
-                    pool_attrs.set(AttrKey::OutputSizeW, output_size[1]);
+                // A genuine trace always emits exactly 2 entries (tracing_
+                // interceptor.cpp's copy_hw_pair sets OutputSizeH/W together).
+                // Fewer than 2 can only come from a hand-built or corrupted
+                // deserialized graph; refuse to guess a 1x1 default (every
+                // backend kernel silently defaults an unset OutputSizeH/W to
+                // 1) and refuse to silently drop gradients under grad_mode --
+                // fail loudly like every other malformed-arity op below.
+                if (output_size.size() < 2) {
+                    throw std::runtime_error(
+                        "JIT graph replay: AdaptiveAvgPool2d node has a "
+                        "malformed 'output_size' attribute (expected 2 "
+                        "entries, got " + std::to_string(output_size.size()) +
+                        ")");
                 }
-                if (grad_mode && output_size.size() >= 2) {
+                OpAttributes pool_attrs;
+                pool_attrs.set(AttrKey::OutputSizeH, output_size[0]);
+                pool_attrs.set(AttrKey::OutputSizeW, output_size[1]);
+                if (grad_mode) {
                     outputs.push_back(nn::functional::adaptive_avg_pool2d(
                         input_vars[0], {output_size[0], output_size[1]}));
                     break;
@@ -4662,13 +4682,19 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // ====================================================================
         case OpType::ShapeGuard: {
             // Input: tensor to check
-            // Attribute: expected_shape (vec<int64_t>)
+            // Attribute: expected_shape (vec<int64_t>). R3-03: a -1 entry
+            // marks a dimension mark_dynamic_dims() declared symbolic
+            // (ShapeGuardInsertionPass never bakes a concrete value for one)
+            // -- any actual size is accepted there, so it is excluded from
+            // the comparison instead of always mismatching real input sizes
+            // against a frozen trace-time value.
             if (!input_vars.empty()) {
                 auto actual_shape = input_vars[0].tensor().shape();
                 auto expected = node->get_vec_attr("expected_shape");
                 bool match = (static_cast<int64_t>(actual_shape.size()) == static_cast<int64_t>(expected.size()));
                 if (match) {
                     for (size_t i = 0; i < expected.size(); ++i) {
+                        if (expected[i] == -1) continue;  // dynamic dim: any size matches
                         if (actual_shape[i] != expected[i]) {
                             match = false;
                             break;

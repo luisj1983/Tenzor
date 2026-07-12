@@ -280,6 +280,96 @@ TEST(OpQuantization, QuantizeHandBuiltGraph) {
     EXPECT_EQ(p[3], 126); // round(62/0.5)+2 = 124+2 = 126
 }
 
+// R1-09/JIT-R114 regression: emit_static_quantize/emit_static_dequant used to
+// run the divide/round_nearest_even/clamp/subtract/multiply pipeline entirely
+// in the tensor's raw storage dtype, unlike every other numeric pipeline in
+// this file -- and unlike eager's quantize_tensor/dequantize_tensor, which
+// always compute in Float32 regardless of the tensor's original dtype. These
+// mirror QuantizeHandBuiltGraph/DequantizeHandBuiltGraph exactly but with an
+// F16 in/out dtype and the SAME input values (all exactly representable in
+// F16, so the expected outputs are identical bit-for-bit -- a genuine
+// divergence would show up as a wrong-bucket int8 value, not just noise).
+TEST(OpQuantization, QuantizeHandBuiltGraphF16) {
+    ensure_core_init();
+
+    tzj::Graph g;
+    auto x = g.create_value("x", {1}, ::tenzor::DType::Float16, ::tenzor::Device::cpu());
+    g.set_inputs({x});
+
+    auto node = g.create_node(tzj::OpType::Quantize, "quant");
+    node->add_input(x);
+    node->set_attr("scale", 9.0);
+    // -30 keeps round(1157/9)+zero_point within int8 range for BOTH the
+    // buggy-old-behavior and fixed rounding (98 vs 99), so a genuine
+    // divergence surfaces as a wrong VALUE, not as clamp saturation masking
+    // it (clamping round(...) to [-128,127] would make 128 vs 129 collapse
+    // to the identical clamped 127 either way -- not a useful discriminator).
+    node->set_int_attr("zero_point", -30);
+    auto y = g.create_value("y", {1}, ::tenzor::DType::Int8, ::tenzor::Device::cpu());
+    node->add_output(y);
+    g.add_node(node);
+    g.set_outputs({y});
+
+    // 1157.0 is exactly representable in Float16 (integers up to 2047 have
+    // mantissa step 1 in F16's [1024,2048) binade) and scale=9.0 is exact
+    // too, but 1157/9 = 128.5555... -- computed in F16 arithmetic (the old,
+    // buggy behavior) this ROUNDS THE DIVISION ITSELF to the nearest F16
+    // value, which happens to be exactly 128.5, so round_nearest_even(128.5)
+    // ties and rounds to the EVEN neighbor 128. Computed in F32 (the fix,
+    // matching eager's always-F32 quantize_tensor), 128.5555... is not a
+    // tie and correctly rounds to 129. This is precisely the "discrete
+    // rounding-boundary flip" risk the fix addresses -- not just ULP noise.
+    ::tenzor::Tensor x_f32({1}, ::tenzor::DType::Float32, ::tenzor::Device::cpu());
+    x_f32.data<float>()[0] = 1157.0f;
+    ::tenzor::Tensor x_t = x_f32.to(::tenzor::DType::Float16);
+
+    auto outs = lower_compile_invoke(g, {x_t}, "quantize_f16");
+    ASSERT_EQ(outs.size(), 1u);
+    ASSERT_EQ(outs[0].dtype(), ::tenzor::DType::Int8);
+    const int8_t* p = outs[0].data<const int8_t>();
+    // round_nearest_even(1157/9) + (-30) = round_nearest_even(128.5556) - 30
+    //                                     = 129 - 30 = 99 (F32 arithmetic).
+    // The old F16-arithmetic behavior would instead compute 128 - 30 = 98.
+    EXPECT_EQ(p[0], 99)
+        << "F16 quantize computed the divide/round_nearest_even in F16 "
+           "storage precision instead of widening to F32 (eager's actual "
+           "computation dtype) -- the discrete rounding decision flipped "
+           "(got 98, the stale F16-arithmetic tie-to-even result).";
+}
+
+TEST(OpQuantization, DequantizeHandBuiltGraphF16) {
+    ensure_core_init();
+
+    tzj::Graph g;
+    auto x = g.create_value("x", {4}, ::tenzor::DType::Int8, ::tenzor::Device::cpu());
+    g.set_inputs({x});
+
+    auto node = g.create_node(tzj::OpType::Dequantize, "dequant");
+    node->add_input(x);
+    node->set_attr("scale", 0.5);
+    node->set_int_attr("zero_point", 2);
+    auto y = g.create_value("y", {4}, ::tenzor::DType::Float16, ::tenzor::Device::cpu());
+    node->add_output(y);
+    g.add_node(node);
+    g.set_outputs({y});
+
+    ::tenzor::Tensor x_t({4}, ::tenzor::DType::Int8, ::tenzor::Device::cpu());
+    {
+        auto* p = x_t.data<int8_t>();
+        p[0] = 2; p[1] = 4; p[2] = -3; p[3] = 127;
+    }
+
+    auto outs = lower_compile_invoke(g, {x_t}, "dequantize_f16");
+    ASSERT_EQ(outs.size(), 1u);
+    ASSERT_EQ(outs[0].dtype(), ::tenzor::DType::Float16);
+    ::tenzor::Tensor out_f32 = outs[0].to(::tenzor::DType::Float32);
+    const float* p = out_f32.data<const float>();
+    EXPECT_NEAR(p[0], (2 - 2) * 0.5f, 1e-3f);
+    EXPECT_NEAR(p[1], (4 - 2) * 0.5f, 1e-3f);
+    EXPECT_NEAR(p[2], (-3 - 2) * 0.5f, 1e-3f);
+    EXPECT_NEAR(p[3], (127 - 2) * 0.5f, 1e-3f);
+}
+
 TEST(OpQuantization, QuantizeDequantizeRoundTrip) {
     ensure_core_init();
 

@@ -803,7 +803,8 @@ void register_core(py::module_& m) {
         .value("CUDA", tenzor::Device::Type::CUDA)
         .value("ROCm", tenzor::Device::Type::ROCm)
         .value("OneAPI", tenzor::Device::Type::OneAPI)
-        .value("Vulkan", tenzor::Device::Type::Vulkan);
+        .value("Vulkan", tenzor::Device::Type::Vulkan)
+        .value("MPS", tenzor::Device::Type::MPS);
 
     // Device
     py::class_<tenzor::Device>(m, "Device")
@@ -826,6 +827,7 @@ void register_core(py::module_& m) {
         .def_static("rocm", &tenzor::Device::rocm, py::arg("index") = 0)
         .def_static("oneapi", &tenzor::Device::oneapi, py::arg("index") = 0)
         .def_static("vulkan", &tenzor::Device::vulkan, py::arg("index") = 0)
+        .def_static("mps", &tenzor::Device::mps, py::arg("index") = 0)
         .def_readonly("type", &tenzor::Device::type)
         .def_readonly("index", &tenzor::Device::index)
         .def("__repr__", [](const tenzor::Device& d) {

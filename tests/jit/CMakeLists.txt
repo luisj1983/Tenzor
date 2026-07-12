@@ -12,6 +12,11 @@ add_executable(test_fusion_passes test_fusion_passes.cpp)
 target_link_libraries(test_fusion_passes PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_fusion_passes LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+# PatternMatcher direct unit coverage (LayerNorm/RMSNorm affine shape guard, JIT-R111)
+add_executable(test_pattern_matcher test_pattern_matcher.cpp)
+target_link_libraries(test_pattern_matcher PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_pattern_matcher LABELS "jit" DISCOVERY_TIMEOUT 60)
+
 # Fusion cost model device-aware heuristic tests (JIT-R026)
 add_executable(test_fusion_cost_model test_fusion_cost_model.cpp)
 target_link_libraries(test_fusion_cost_model PRIVATE tenzor_core GTest::gtest_main)

@@ -516,9 +516,10 @@ auto GraphReader::read_nodes(Graph& graph) -> void {
         // Range-validate the OpType before casting, mirroring the DType guard in
         // read_values(): a corrupt/truncated file must fail loudly here rather
         // than store an out-of-range enum that surfaces as a confusing downstream
-        // error. Roll is the last OpType enumerator (keep in sync if extended).
+        // error. AnchorGenerate is the last OpType enumerator (keep in sync if
+        // extended -- see include/tenzor/jit/tracer.hpp's OpType definition).
         uint32_t raw_op = read_uint32();
-        if (raw_op > static_cast<uint32_t>(OpType::Roll)) {
+        if (raw_op > static_cast<uint32_t>(OpType::AnchorGenerate)) {
             throw std::runtime_error(
                 "GraphReader::read_nodes: invalid OpType value " +
                 std::to_string(raw_op));

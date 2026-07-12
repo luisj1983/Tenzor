@@ -1650,8 +1650,31 @@ auto ShapeGuardInsertionPass::run(Graph& graph) -> bool {
         auto guard_node = graph.create_node(OpType::ShapeGuard,
                                              "shape_guard_" + std::to_string(idx));
 
-        // Store expected shape
-        guard_node->set_vec_attr("expected_shape", input_value->shape());
+        // Store expected shape. R3-03: a dimension mark_dynamic_dims() marked
+        // symbolic must NOT be baked as a frozen concrete value here -- doing
+        // so made the guard trip on the very first call with a different size
+        // along that dimension, even though the module was explicitly
+        // configured to accept it. For a traced (source_module_ set)
+        // CompiledModule this was masked by forward()'s own shape-key
+        // comparison retracing before the guard could fire, but a LOADED
+        // module (source_module_ null) has no such preemptive retrace, so
+        // the guard's frozen shape was the only check that ran -- and threw
+        // "no source module is available to retrace with" on every
+        // dynamic-dim call, defeating the point of a dynamic-shape module.
+        // Encode a dynamic dimension as -1 (never a valid concrete size),
+        // matching the sentinel convention execute_node's ShapeGuard case
+        // now uses to skip that dimension in the runtime comparison.
+        std::vector<int64_t> expected_shape(input_value->shape().begin(),
+                                            input_value->shape().end());
+        if (input_value->has_symbolic_dims()) {
+            const auto& sym = input_value->symbolic_shape();
+            for (size_t d = 0; d < expected_shape.size() && d < sym.rank(); ++d) {
+                if (!sym[d].is_concrete()) {
+                    expected_shape[d] = -1;
+                }
+            }
+        }
+        guard_node->set_vec_attr("expected_shape", expected_shape);
         guard_node->set_int_attr("input_index", static_cast<int64_t>(idx));
 
         // Guard takes the input value and produces a new value with the same
@@ -2782,6 +2805,37 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
                         if (node->has_attr("dim")) {
                             fused_node->set_int_attr("fused_reduce_dim",
                                                      node->get_int_attr("dim"));
+                        } else if (node->has_vec_attr("dims") ||
+                                  node->has_vec_attr("dim")) {
+                            // JIT-R112: the tracer emits the PLURAL "dims" key
+                            // for a multi-axis reduction (JIT-F010's key
+                            // convention -- mirrored from pattern_matcher.cpp's
+                            // identical reduction_axes lambda, which is what
+                            // validated this LayerNorm/RMSNorm match's axes are
+                            // a trailing-contiguous block in the first place).
+                            // Reading only the singular "dim" left
+                            // fused_reduce_dim UNSET for a multi-axis norm,
+                            // defaulting norm_axis to -1 downstream
+                            // (execute_fused_gpu_node) and collapsing
+                            // norm_size to just the LAST axis's extent instead
+                            // of the product of all normalized axes -- silent
+                            // wrong statistics on the fused CUDA/ROCm kernel.
+                            // The trailing-contiguous block's START axis is
+                            // the correct fused_reduce_dim: extended_codegen
+                            // folds every dim from there to the end into one
+                            // instance length.
+                            auto axes = node->has_vec_attr("dims")
+                                            ? node->get_vec_attr("dims")
+                                            : node->get_vec_attr("dim");
+                            if (!axes.empty()) {
+                                const int64_t rank = static_cast<int64_t>(
+                                    node->inputs().empty()
+                                        ? 0
+                                        : node->inputs()[0]->shape().size());
+                                for (auto& a : axes) if (a < 0) a += rank;
+                                std::sort(axes.begin(), axes.end());
+                                fused_node->set_int_attr("fused_reduce_dim", axes.front());
+                            }
                         }
                         if (node->has_attr("keepdim")) {
                             fused_node->set_bool_attr("fused_keepdim",

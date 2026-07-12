@@ -1046,6 +1046,124 @@ TEST(JITBackendParity, Float16ElementwiseChainPerStepRounding) {
 }
 
 // ============================================================================
+// R2-T1: direct nvrtc-vs-mlir JIT backend parity (not each vs eager separately)
+// ============================================================================
+//
+// Every other test in this file (and every other JIT parity test in the
+// suite) compiles ONE backend and compares it against EAGER, with its own
+// tolerance. Two independently-passing (backend vs eager) comparisons do NOT
+// imply the two compile paths agree with EACH OTHER -- a divergence that
+// happens to fall within both backends' individual tolerance bands (relative
+// to eager) is invisible to that style of test. This is exactly the shape of
+// bug a prior JIT review found and fixed: the MLIR path's LayerNorm/RMSNorm
+// widened F16/BF16 accumulation to F32 while the native nvrtc codegen path
+// used the pre-narrowed value in a normalization multiply -- both diverged
+// from eager by only ULP-scale amounts individually (within tolerance) while
+// diverging from EACH OTHER more substantially, and neither vs-eager test
+// caught it. Compiles the SAME closure via backend="nvrtc" AND backend="mlir"
+// and diffs the two JIT outputs directly against each other.
+TEST(JITBackendParity, NvrtcVsMlirDirectParity_NormOpsF16) {
+    std::vector<Device> gpu_devices;
+    for (const auto& d : get_available_backends()) {
+        if (d.type == Device::Type::CUDA || d.type == Device::Type::ROCm) {
+            gpu_devices.push_back(d);
+        }
+    }
+    if (gpu_devices.empty()) {
+        if (golden::require_multi_backend()) {
+            FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1) "
+                    "for NvrtcVsMlirDirectParity_NormOpsF16: nvrtc backend "
+                    "requires a CUDA/ROCm device (no CPU codegen).";
+        }
+        GTEST_SKIP() << "No CUDA/ROCm device available; nvrtc backend "
+                        "requires GPU codegen.";
+    }
+
+    const std::vector<int64_t> shape = {4, 16, 64};
+    const int64_t norm_dim = 64;
+
+    for (const auto& dev : gpu_devices) {
+        SCOPED_TRACE("device: " + backend_name(dev));
+
+        auto x_f32 = randn(shape, DType::Float32, Device::cpu());
+        auto w_f32 = randn({norm_dim}, DType::Float32, Device::cpu());
+        auto b_f32 = randn({norm_dim}, DType::Float32, Device::cpu());
+        Variable x(x_f32.to(dev).to(DType::Float16), false);
+        Variable ln_w(w_f32.to(dev).to(DType::Float16), false);
+        Variable ln_b(b_f32.to(dev).to(DType::Float16), false);
+
+        auto ln_fn = [&ln_w, &ln_b](const Variable& in) -> Variable {
+            return nn::functional::layer_norm(in, {64}, ln_w, ln_b, 1e-5);
+        };
+
+        {
+            jit::CompileConfig nvrtc_cfg;
+            nvrtc_cfg.backend = "nvrtc";
+            nvrtc_cfg.strict  = true;
+            jit::CompiledFunction nvrtc_compiled(jit::CompiledFunction::FnType(ln_fn), nvrtc_cfg);
+            Tensor nvrtc_out;
+            ASSERT_NO_THROW({ nvrtc_out = nvrtc_compiled(x).tensor(); })
+                << "nvrtc LayerNorm F16 compile/run failed on " << backend_name(dev);
+            dev.synchronize();
+            ASSERT_GT(nvrtc_compiled.num_cached(), 0u)
+                << "nvrtc silently fell back to eager for LayerNorm F16 on "
+                << backend_name(dev);
+
+            jit::CompileConfig mlir_cfg;
+            mlir_cfg.backend = "mlir";
+            mlir_cfg.strict  = true;
+            jit::CompiledFunction mlir_compiled(jit::CompiledFunction::FnType(ln_fn), mlir_cfg);
+            Tensor mlir_out;
+            ASSERT_NO_THROW({ mlir_out = mlir_compiled(x).tensor(); })
+                << "mlir LayerNorm F16 compile/run failed on " << backend_name(dev);
+            dev.synchronize();
+
+            auto diff = max(abs(nvrtc_out.to(DType::Float32) -
+                                mlir_out.to(DType::Float32))).item<float>();
+            EXPECT_LT(diff, 1e-2f)
+                << "nvrtc and mlir JIT paths diverge for F16 LayerNorm on "
+                << backend_name(dev) << " (diff=" << diff << ")";
+        }
+
+        nn::RMSNorm rms(norm_dim, 1e-6);
+        rms.to(dev);
+        rms.to(DType::Float16);
+        auto rms_fn = [&rms](const Variable& in) -> Variable {
+            return rms.forward(in);
+        };
+
+        {
+            jit::CompileConfig nvrtc_cfg;
+            nvrtc_cfg.backend = "nvrtc";
+            nvrtc_cfg.strict  = true;
+            jit::CompiledFunction nvrtc_compiled(jit::CompiledFunction::FnType(rms_fn), nvrtc_cfg);
+            Tensor nvrtc_out;
+            ASSERT_NO_THROW({ nvrtc_out = nvrtc_compiled(x).tensor(); })
+                << "nvrtc RMSNorm F16 compile/run failed on " << backend_name(dev);
+            dev.synchronize();
+            ASSERT_GT(nvrtc_compiled.num_cached(), 0u)
+                << "nvrtc silently fell back to eager for RMSNorm F16 on "
+                << backend_name(dev);
+
+            jit::CompileConfig mlir_cfg;
+            mlir_cfg.backend = "mlir";
+            mlir_cfg.strict  = true;
+            jit::CompiledFunction mlir_compiled(jit::CompiledFunction::FnType(rms_fn), mlir_cfg);
+            Tensor mlir_out;
+            ASSERT_NO_THROW({ mlir_out = mlir_compiled(x).tensor(); })
+                << "mlir RMSNorm F16 compile/run failed on " << backend_name(dev);
+            dev.synchronize();
+
+            auto diff = max(abs(nvrtc_out.to(DType::Float32) -
+                                mlir_out.to(DType::Float32))).item<float>();
+            EXPECT_LT(diff, 1e-2f)
+                << "nvrtc and mlir JIT paths diverge for F16 RMSNorm on "
+                << backend_name(dev) << " (diff=" << diff << ")";
+        }
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

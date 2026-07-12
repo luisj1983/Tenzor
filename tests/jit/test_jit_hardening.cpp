@@ -21,8 +21,10 @@
 #include <string>
 #include <vector>
 
+#include <tenzor/jit/graph.hpp>
 #include <tenzor/jit/script.hpp>
 #include <tenzor/jit/serialization.hpp>
+#include <tenzor/jit/tracer.hpp>
 #include <tenzor/tenzor.hpp>
 
 using namespace tenzor;
@@ -207,4 +209,95 @@ TEST(JitHardening, EmptyGraphRoundTrips) {
     auto loaded = jit::load_graph(path);
     ASSERT_NE(loaded, nullptr);
     std::remove(path.c_str());
+}
+
+// R1-07 regression: GraphReader::read_nodes previously validated the
+// deserialized OpType against a stale upper bound (OpType::Roll), rejecting
+// every enumerator added afterward (Triu..AnchorGenerate, including Trace and
+// the sparse structural-conversion / detection ops) with "invalid OpType
+// value" even though the file was well-formed. A node using any such op must
+// round-trip through save/load.
+TEST(JitHardening, PostRollOpTypeRoundTrips) {
+    auto g = std::make_shared<jit::Graph>();
+    auto x = g->create_value("x", {3, 3}, DType::Float32, Device::cpu());
+    auto out = g->create_value("trace_out", {}, DType::Float32, Device::cpu());
+    auto node = g->create_node(jit::OpType::Trace, "trace");
+    node->add_input(x);
+    out->set_node(node);
+    node->add_output(out);
+    g->add_node(node);
+    g->set_inputs({x});
+    g->set_outputs({out});
+
+    auto path = temp_graph_path("post_roll_optype");
+    jit::save_graph(*g, path);
+    auto loaded = jit::load_graph(path);
+    ASSERT_NE(loaded, nullptr);
+    ASSERT_EQ(loaded->nodes().size(), 1u);
+    EXPECT_EQ(loaded->nodes()[0]->op_type(), jit::OpType::Trace);
+
+    // AnchorGenerate is the current true last enumerator -- also round-trip it
+    // specifically, since it's the exact value the fixed bound must accept.
+    auto g2 = std::make_shared<jit::Graph>();
+    auto anchor_out =
+        g2->create_value("anchor_out", {1, 4}, DType::Float32, Device::cpu());
+    auto anchor_node = g2->create_node(jit::OpType::AnchorGenerate, "anchors");
+    anchor_out->set_node(anchor_node);
+    anchor_node->add_output(anchor_out);
+    g2->add_node(anchor_node);
+    g2->set_inputs({});
+    g2->set_outputs({anchor_out});
+
+    auto path2 = temp_graph_path("post_roll_optype_last");
+    jit::save_graph(*g2, path2);
+    auto loaded2 = jit::load_graph(path2);
+    ASSERT_NE(loaded2, nullptr);
+    ASSERT_EQ(loaded2->nodes().size(), 1u);
+    EXPECT_EQ(loaded2->nodes()[0]->op_type(), jit::OpType::AnchorGenerate);
+
+    std::remove(path.c_str());
+    std::remove(path2.c_str());
+}
+
+// R1-10 regression: a malformed/hand-built AdaptiveAvgPool2d node whose
+// "output_size" vec attr has fewer than 2 entries used to silently dispatch
+// with unset OutputSizeH/OutputSizeW (defaulting to 1x1 in every backend
+// kernel) and, under grad_mode, silently drop the node's gradient instead of
+// failing loudly like every other malformed-arity op. It must now throw.
+TEST(JitHardening, AdaptiveAvgPool2dMalformedOutputSizeThrows) {
+    tenzor::initialize();  // forward() dispatches to the CPU backend kernel
+    auto build = [](std::vector<int64_t> output_size) {
+        auto g = std::make_shared<jit::Graph>();
+        auto x = g->create_value("x", {1, 3, 8, 8}, DType::Float32, Device::cpu());
+        auto out = g->create_value("out", {1, 3, 1, 1}, DType::Float32, Device::cpu());
+        auto node = g->create_node(jit::OpType::AdaptiveAvgPool2d, "pool");
+        node->add_input(x);
+        node->set_vec_attr("output_size", output_size);
+        out->set_node(node);
+        node->add_output(out);
+        g->add_node(node);
+        g->set_inputs({x});
+        g->set_outputs({out});
+        return g;
+    };
+    auto make_input = [] {
+        return Variable(zeros({1, 3, 8, 8}, DType::Float32, Device::cpu()),
+                         /*requires_grad=*/false);
+    };
+
+    for (auto output_size : {std::vector<int64_t>{}, std::vector<int64_t>{1}}) {
+        auto g_eager = build(output_size);
+        EXPECT_THROW(g_eager->forward({make_input()}, /*grad_mode=*/false),
+                     std::runtime_error);
+
+        auto g_grad = build(output_size);
+        EXPECT_THROW(g_grad->forward({make_input()}, /*grad_mode=*/true),
+                     std::runtime_error);
+    }
+
+    // The well-formed (2-entry) case must still work, on both replay modes.
+    auto g_ok = build({1, 1});
+    EXPECT_NO_THROW(g_ok->forward({make_input()}, /*grad_mode=*/false));
+    auto g_ok_grad = build({1, 1});
+    EXPECT_NO_THROW(g_ok_grad->forward({make_input()}, /*grad_mode=*/true));
 }

@@ -22,6 +22,7 @@
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/nn/functional.hpp"
+#include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -608,6 +609,139 @@ TEST(MlirNumericParity, PowNegativeBaseFloatPowerEndToEnd) {
                   1e-2)
             << "target=" << target << " diverges from eager float_power";
     }
+}
+
+// R1-01/JIT-R109 regression: the MLIR backend's trace_single_input_graph
+// never declared closure-captured parameters/buffers to the tracer, so
+// mlir_invoke_impl baked them as opaque constants inside the compiled
+// module instead of treating them as live leaves -- a BatchNorm2d's
+// running_mean_/running_var_ (or any with_buffers()/with_parameters()
+// capture) went stale after the first compile, unlike backend="nvrtc"
+// (already covered by JitTraceOps.BatchNorm2dRunningStatsLiveViaWithBuffers,
+// the nvrtc-path sibling of this test). No prior test exercised
+// backend="mlir" + with_buffers() + a no-grad inference call.
+TEST(MlirNumericParity, BatchNorm2dRunningStatsLiveViaWithBuffers_MlirBackend) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    nn::BatchNorm2d bn(4);
+    bn.eval();
+    NoGradGuard no_grad;
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [&bn](const Variable& x) { return bn.forward(x); });
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+    compiled.set_buffers(bn.buffers());
+
+    auto x = randn({2, 4, 3, 3}, DType::Float32, Device::cpu()) + 1.0f;
+    auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+
+    EXPECT_GE(compiled.num_cached(), 1u)
+        << "nn::BatchNorm2d(with_buffers, backend=mlir) did not compile/"
+           "cache a module -- the op likely graph-broke and silently fell "
+           "back to eager, so replay correctness was never exercised";
+
+    // Simulate an eager EMA update happening OUTSIDE the compiled module
+    // (e.g. a training step), the same way BatchNorm2dRunningStatsLive-
+    // ViaWithBuffers (the nvrtc-path sibling test) does.
+    auto rm = bn.get_buffer("running_mean");
+    ASSERT_TRUE(rm != nullptr) << "nn::BatchNorm2d has no 'running_mean' buffer";
+    rm->tensor() = rm->tensor() + 5.0;
+
+    auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+    auto eager_after = fn(Variable(x, false)).tensor();
+
+    EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)
+        << "nn::BatchNorm2d MLIR-backend replay did not react to a "
+           "running_mean_ mutation -- running stats are still frozen as "
+           "trace-time constants despite with_buffers()";
+    EXPECT_LT(max_abs_diff_f64(eager_after, after), 1e-4)
+        << "nn::BatchNorm2d MLIR-backend replay after mutation != eager "
+           "after mutation";
+}
+
+// Same fix, exercised via with_parameters() instead of with_buffers(): a
+// captured Linear weight must reflect its CURRENT value on every
+// backend="mlir" call, not the value at first trace.
+TEST(MlirNumericParity, LinearWeightLiveViaWithParameters_MlirBackend) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    auto weight = std::make_shared<Variable>(
+        ::tenzor::full({3, 3}, 1.0f, DType::Float32, Device::cpu()), false);
+    NoGradGuard no_grad;
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [weight](const Variable& x) -> Variable {
+            return matmul(x, *weight);
+        });
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+    compiled.set_parameters({weight});
+
+    auto x = ::tenzor::full({3, 3}, 2.0f, DType::Float32, Device::cpu());
+    auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+
+    EXPECT_GE(compiled.num_cached(), 1u)
+        << "Linear-weight closure (with_parameters, backend=mlir) did not "
+           "compile/cache a module";
+
+    // Mutate the weight in place (e.g. an optimizer step) OUTSIDE the
+    // compiled module.
+    weight->tensor() = weight->tensor() + 10.0f;
+
+    auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+    auto eager_after = fn(Variable(x, false)).tensor();
+
+    EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)
+        << "Linear weight MLIR-backend replay did not react to a weight "
+           "mutation -- still frozen as a trace-time constant despite "
+           "with_parameters()";
+    EXPECT_LT(max_abs_diff_f64(eager_after, after), 1e-4)
+        << "Linear weight MLIR-backend replay after mutation != eager "
+           "after mutation";
+}
+
+// R1-04/JIT-R113 regression: handle_layer_norm/handle_rms_norm_expand's
+// mean/variance (resp. sum-of-squares) accumulation dtype `ad` used to widen
+// F16/BF16 inputs to Float32 for accumulation, citing a comment that eager
+// does the same -- stale, since eager's layer_norm_scalar<T>/RMSNorm kernels
+// now accumulate in double UNCONDITIONALLY for every T (the Float32-
+// accumulator-inside-template<T> bug class fixed elsewhere in this project).
+// The expected numeric divergence from this gap is small (~1e-5 relative,
+// scaling with sqrt(norm_size)) and easy for a black-box numeric-tolerance
+// test to miss by coincidence, so verify directly and deterministically at
+// the MLIR TEXT level instead: an F16 LayerNorm/RMSNorm's dumped StableHLO
+// must contain an f64 accumulation step, not stay entirely in f16/f32.
+TEST(MlirNumericParity, Float16LayerNormAccumulatesInF64) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    const int64_t D = 64;
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [D](const Variable& x) -> Variable {
+            return nn::functional::layer_norm(x, {D});
+        });
+    Tensor x_t = ::tenzor::randn({2, D}, DType::Float32, Device::cpu())
+                     .to(DType::Float16);
+    Variable x(x_t, /*requires_grad=*/false);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+    const std::string mlir_text = compiled.dump_stablehlo(x);
+
+    EXPECT_NE(mlir_text.find("f64"), std::string::npos)
+        << "F16 LayerNorm's mean/variance accumulation must widen to f64 "
+           "(matching eager's unconditional double accumulation), not stay "
+           "in f16/f32 throughout:\n"
+        << mlir_text;
 }
 
 }  // namespace

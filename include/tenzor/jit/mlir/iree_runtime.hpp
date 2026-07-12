@@ -158,7 +158,30 @@ auto hal_device_uri(const std::string& driver, int device_index)
 /// the code will run on. Returns an empty string if no enumerator is found or
 /// the ordinal is out of range — callers then fall back to the build default.
 /// Results are cached per ordinal.
+///
+/// `device_index` is a HIP ordinal (the same numbering IREE's `hip://N` HAL
+/// driver and Tenzor's own ROCm backend use, both resolved through the real
+/// HIP runtime). The enumerator tools instead report devices in HSA/KFD
+/// order, honoring `ROCR_VISIBLE_DEVICES`/`GPU_DEVICE_ORDINAL` but *not*
+/// `HIP_VISIBLE_DEVICES` (a HIP-runtime-only env var). When
+/// `HIP_VISIBLE_DEVICES` reorders or restricts devices relative to that HSA
+/// order, this function remaps `device_index` via
+/// `remap_hip_visible_device_index` before indexing the enumerator's list,
+/// so the returned arch matches the physical device HIP ordinal
+/// `device_index` actually refers to.
 auto detect_rocm_gfx_arch(int device_index) -> std::string;
+
+/// Remap a HIP ordinal to the ordinal it corresponds to in the HSA/KFD
+/// device order (i.e. the order `amdgpu-arch`/`rocm_agent_enumerator` and
+/// `ROCR_VISIBLE_DEVICES` use), by parsing `hip_visible_devices` the same
+/// way the HIP runtime parses `HIP_VISIBLE_DEVICES`: a comma-separated list
+/// of ordinals, where HIP ordinal `i` refers to physical ordinal
+/// `list[i]`. If `hip_visible_devices` is null/empty, or `hip_index` is out
+/// of range of the parsed list, or the list fails to parse, returns
+/// `hip_index` unchanged (no remap). Exposed for direct unit testing without
+/// requiring ROCm hardware.
+auto remap_hip_visible_device_index(int hip_index,
+                                     const char* hip_visible_devices) -> int;
 
 /// Thrown when iree-run-module reports a runtime failure. Carries the full
 /// stderr text for debugging.

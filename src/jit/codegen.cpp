@@ -79,6 +79,56 @@
 
 namespace tenzor::jit {
 
+#if defined(TENZOR_USE_CUDA)
+namespace {
+// Process-lifetime cache of each CUDA device's retained primary context,
+// shared by compile(), launch(), launch_raw(), and ~CompiledKernel() so the
+// driver's "current context" (thread-local process state) can always be
+// rebound to a kernel's OWN device before it is touched -- mirrors HIP's
+// unconditional hipSetDevice(device_index) on every launch. Without this,
+// a thread that compiles for cuda:0 then cuda:1 then reuses the cached
+// cuda:0 kernel (a cache hit -- compile() not re-invoked) launches against a
+// CUfunction bound to device 0's context while device 1's context is
+// current: an invalid-context/invalid-handle driver error, or on some
+// driver/hardware combinations, silent execution against the wrong device.
+// cuDevicePrimaryCtxRetain is itself refcounted by the driver (repeat calls
+// for the same device return the identical context handle), so caching here
+// is purely to avoid a cuDeviceGet+cuDevicePrimaryCtxRetain round trip on
+// every launch, not required for correctness of the retain itself -- but
+// deliberately never released (process-lifetime), matching compile()'s
+// original intent for its own now-shared cache.
+std::mutex g_cuda_ctx_mutex;
+std::unordered_map<int, CUcontext> g_cuda_primary_ctxs;
+
+auto cuda_primary_context_for(int device_id) -> CUcontext {
+    std::lock_guard<std::mutex> lock(g_cuda_ctx_mutex);
+    auto it = g_cuda_primary_ctxs.find(device_id);
+    if (it != g_cuda_primary_ctxs.end()) return it->second;
+    CUdevice cu_device;
+    CU_CHECK(cuDeviceGet(&cu_device, device_id));
+    CUcontext cu_context = nullptr;
+    CU_CHECK(cuDevicePrimaryCtxRetain(&cu_context, cu_device));
+    g_cuda_primary_ctxs.emplace(device_id, cu_context);
+    return cu_context;
+}
+
+// Destructor-safe variant: destructors must not throw, so this swallows any
+// driver error (leaving the current context whatever it was) instead of
+// using the throwing CU_CHECK macro. Best-effort, mirroring this file's
+// existing "ignore cuModuleUnload's return" destructor pattern.
+auto cuda_try_set_current_context_for(int device_id) noexcept -> void {
+    try {
+        CUresult res = cuCtxSetCurrent(cuda_primary_context_for(device_id));
+        (void)res;
+    } catch (...) {
+        // Best-effort; a failed rebind here just risks the subsequent
+        // cuModuleUnload targeting the wrong (but still valid) context,
+        // which is what happened unconditionally before this fix.
+    }
+}
+}  // namespace
+#endif
+
 // ============================================================================
 // FusionGroup
 // ============================================================================
@@ -301,11 +351,28 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         case ElemOp::Sub:  return vp + "val = " + a + " - " + b + ";";
         case ElemOp::Mul:  return vp + "val = " + a + " * " + b + ";";
         case ElemOp::Div:  return vp + "val = " + a + " / " + b + ";";
-        // Match eager maximum_typed/minimum_typed ((float)a>(float)b ? a : b),
-        // which propagate a NaN second operand; fmax/fmin drop NaN and diverge
-        // from CPU/eager (see math.cpp maximum_typed/minimum_typed).
-        case ElemOp::Max:  return vp + "val = (" + a + " > " + b + ") ? " + a + " : " + b + ";";
-        case ElemOp::Min:  return vp + "val = (" + a + " < " + b + ") ? " + a + " : " + b + ";";
+        // JIT-054b: match eager maximum_typed/minimum_typed's sel() EXACTLY --
+        // check the first operand for NaN, then the second, only THEN compare
+        // (see math.cpp maximum_typed/minimum_typed's `sel` lambda: `if (fx !=
+        // fx) return x; if (fy != fy) return y; return fx < fy ? x : y;`).
+        // The previous plain `(a > b) ? a : b` / `(a < b) ? a : b` only
+        // propagated a NaN SECOND operand (comparison-with-NaN is always
+        // false, so a NaN in the THEN-branch operand `a` fell through to the
+        // ELSE-branch `b`, silently dropping it) -- confirmed reproducible on
+        // ROCm/HIPRTC for Min with a NaN first operand (ExecuteFusedNaN-
+        // PropagationAllBackends). `x != x` is the portable, IEEE-754-defined
+        // NaN test (true iff NaN) and does not rely on isnan()/fmax()/fmin(),
+        // which this project's own history already flagged as unreliable
+        // under ROCm/HIP. fmax/fmin drop NaN entirely and would diverge from
+        // CPU/eager regardless.
+        case ElemOp::Max:
+            return vp + "val = (" + a + " != " + a + ") ? " + a + " : (" + b +
+                   " != " + b + ") ? " + b + " : ((" + a + " > " + b + ") ? " +
+                   a + " : " + b + ");";
+        case ElemOp::Min:
+            return vp + "val = (" + a + " != " + a + ") ? " + a + " : (" + b +
+                   " != " + b + ") ? " + b + " : ((" + a + " < " + b + ") ? " +
+                   a + " : " + b + ");";
         case ElemOp::Fmod: return vp + "val = " + fn("fmod") + "(" + a + ", " + b + ");";
 
         // Scalar ops
@@ -417,12 +484,20 @@ auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
 CompiledKernel::~CompiledKernel() {
 #if CODEGEN_HIP_AVAILABLE
     if (is_hip) {
+        // hipSetDevice's return isn't checked either (best-effort, mirrors
+        // hipModuleUnload immediately below) -- a destructor must not throw.
+        std::ignore = hipSetDevice(device_index);
         if (module) std::ignore = hipModuleUnload(static_cast<hipModule_t>(module));
         return;
     }
 #endif
 #if defined(TENZOR_USE_CUDA)
-    if (module) cuModuleUnload(static_cast<CUmodule>(module));
+    // JIT-054: rebind before unload, same rationale as launch()/launch_raw()
+    // -- best-effort/non-throwing since destructors must not throw.
+    if (module) {
+        cuda_try_set_current_context_for(device_index);
+        cuModuleUnload(static_cast<CUmodule>(module));
+    }
 #endif
 }
 
@@ -477,6 +552,13 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
     }
 #endif
 #if defined(TENZOR_USE_CUDA)
+    // JIT-054: rebind the CUDA driver's current context to this kernel's OWN
+    // device before every launch, mirroring the HIP branch's unconditional
+    // hipSetDevice(device_index) above. Without this, a cache-hit launch of
+    // a kernel compiled for a different device than whatever context is
+    // currently active on this thread fails (or on some drivers, silently
+    // targets the wrong GPU) -- see cuda_primary_context_for's doc comment.
+    CU_CHECK(cuCtxSetCurrent(cuda_primary_context_for(device_index)));
     CU_CHECK(cuLaunchKernel(
         static_cast<CUfunction>(function),
         grid_size, 1, 1,    // grid
@@ -521,6 +603,8 @@ auto CompiledKernel::launch_raw(const std::vector<void*>& kernel_args,
     }
 #endif
 #if defined(TENZOR_USE_CUDA)
+    // JIT-054: see launch()'s identical rebind for the rationale.
+    CU_CHECK(cuCtxSetCurrent(cuda_primary_context_for(device_index)));
     CU_CHECK(cuLaunchKernel(
         static_cast<CUfunction>(function),
         grid_size, 1, 1,
@@ -691,19 +775,10 @@ auto KernelCache::compile(const std::string& source, const std::string& kernel_n
     // device. Retain each device's primary context EXACTLY ONCE per process
     // (reference-counted, process-lived) keyed by ordinal — a single global
     // once-retain would pin every device to whichever GPU compiled first.
-    CUcontext cu_context = nullptr;
-    {
-        static std::mutex ctx_mutex;
-        static std::unordered_map<int, CUcontext> primary_ctxs;
-        std::lock_guard<std::mutex> ctx_lock(ctx_mutex);
-        auto it = primary_ctxs.find(device_id);
-        if (it != primary_ctxs.end()) {
-            cu_context = it->second;
-        } else {
-            CU_CHECK(cuDevicePrimaryCtxRetain(&cu_context, cu_device));
-            primary_ctxs.emplace(device_id, cu_context);
-        }
-    }
+    // Shared with launch()/launch_raw()/~CompiledKernel() via
+    // cuda_primary_context_for() so every driver-API touch point (not just
+    // compile) rebinds to its kernel's own device (JIT-054).
+    CUcontext cu_context = cuda_primary_context_for(device_id);
     CU_CHECK(cuCtxSetCurrent(cu_context));
 
     // Detect GPU compute capability via driver API

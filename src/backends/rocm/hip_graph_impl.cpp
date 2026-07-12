@@ -52,6 +52,11 @@ public:
         std::ignore = hipGetLastError();  // drain any sticky error (dtor must not throw)
     }
 
+    void prepare_capture_stream() override {
+        HIP_CHECK(hipSetDevice(device_id_));
+        rocm::rocm_current_stream() = stream_;
+    }
+
     void begin_capture() override {
         HIP_CHECK(hipSetDevice(device_id_));
         // Route all subsequent dispatch launches onto the capture stream.

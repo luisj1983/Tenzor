@@ -265,7 +265,15 @@ void register_jit(py::module_& m) {
         .def("nodes", &tenzor::jit::Graph::nodes,
              py::return_value_policy::reference_internal,
              "Topologically sorted list of all nodes in the graph")
-        .def("forward", &tenzor::jit::Graph::forward,
+        .def("forward",
+             [](tenzor::jit::Graph& self,
+                const std::vector<tenzor::Variable>& inputs,
+                bool grad_mode) {
+                 // out_all_values (CUDA-graph-capture-only introspection, see
+                 // Graph::forward's doc comment) is a C++-internal parameter
+                 // with no Python use case; omit it from the exposed signature.
+                 return self.forward(inputs, grad_mode);
+             },
              py::arg("inputs"),
              py::arg("grad_mode") = false,
              "Execute graph with runtime inputs. grad_mode=True replays the "

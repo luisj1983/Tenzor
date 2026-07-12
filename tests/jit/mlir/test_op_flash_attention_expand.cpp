@@ -31,6 +31,8 @@
 #include <fstream>
 #include <string>
 
+#include "mlir_target_util.hpp"
+
 namespace tzj = ::tenzor::jit;
 namespace tzm = ::tenzor::jit::mlir_jit;
 
@@ -190,16 +192,40 @@ TEST(OpFlashAttentionExpand, ExpandResultMatchesEager_NonCausal) {
     lowerer.set_plugin_enabled(false);
     const std::string mlir = lowerer.lower(g);
 
-    tzm::CompileOptions opts;
-    opts.target         = "llvm-cpu";
-    opts.plugin_enabled = false;
-    auto artifact = tzm::compile_mlir(mlir, opts);
-    auto invoker  = tzm::IreeInvoker::load(artifact);
-    auto outs     = invoker->invoke({q_t, k_t, v_t});
-    ASSERT_EQ(outs.size(), 1u);
+    // Fan out over every available IREE target (R2-T2): FlashAttention's
+    // expand path emits generic StableHLO with no per-backend branch point,
+    // but was previously only ever exercised numerically on llvm-cpu here,
+    // leaving CUDA/ROCm/Vulkan lowering bugs undetectable by this suite.
+    namespace mt = ::tenzor::testing::mlir;
+    for (const auto& target : mt::available_iree_targets()) {
+        tzm::CompileOptions opts;
+        opts.target         = target;
+        opts.plugin_enabled = false;
+        if (target == "vulkan-spirv" || target == "vulkan") {
+            opts.vulkan_arch = "ampere";
+        }
+        auto artifact = tzm::compile_mlir(mlir, opts);
+        std::unique_ptr<tzm::IreeInvoker> invoker;
+        try {
+            invoker = tzm::IreeInvoker::load(artifact);
+        } catch (const std::exception& e) {
+            // Some targets compile but their in-process HAL runtime driver is
+            // not registered in this IREE dist -- a runtime-availability fact
+            // of this host, not a lowering defect (mirrors
+            // OpRMSNormExpand.ExpandResultMatchesHandComputed's identical gate).
+            if (std::string(e.what()).find("no driver") != std::string::npos ||
+                std::string(e.what()).find("NOT_FOUND") != std::string::npos) {
+                continue;
+            }
+            throw;
+        }
+        auto outs = invoker->invoke({q_t, k_t, v_t});
+        ASSERT_EQ(outs.size(), 1u) << "target=" << target;
 
-    auto diff = ::tenzor::max(::tenzor::abs(eager_out.tensor() - outs[0]))
-                    .item<float>();
-    EXPECT_LT(diff, 1e-3f)
-        << "FlashAttention expand path diverged from eager by " << diff;
+        auto diff = ::tenzor::max(::tenzor::abs(eager_out.tensor() - outs[0]))
+                        .item<float>();
+        EXPECT_LT(diff, 1e-3f)
+            << "FlashAttention expand path diverged from eager by " << diff
+            << " target=" << target;
+    }
 }

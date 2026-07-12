@@ -60,6 +60,31 @@ TEST(MlirTextEmit, UnaryNegate) {
     EXPECT_EQ(os.str(), "%y = stablehlo.negate %x : tensor<8xf32>");
 }
 
+// JIT-R110 regression: IREE's Vulkan/SPIR-V backend miscomputes a
+// dot_general whose operand comes directly from a fused stablehlo.convert
+// (verified standalone: a trivial F16->F32-converted 32x32 matmul returned
+// 49.0 instead of 8.0 for a uniform 0.5 input on Vulkan; llvm-cpu/cuda/rocm
+// computed it correctly). stablehlo.optimization_barrier between each
+// operand and the dot_general prevents that harmful fusion and is a
+// semantic no-op elsewhere, so emit_stablehlo_dot_general must always emit
+// it for both operands, unconditionally of dtype/target.
+TEST(MlirTextEmit, DotGeneral_WrapsOperandsInOptimizationBarrier) {
+    std::ostringstream os;
+    tj::emit_stablehlo_dot_general(os, "c", "a", "b",
+                                   /*lhs_batch=*/{0}, /*rhs_batch=*/{0},
+                                   /*lhs_contracting=*/{2}, /*rhs_contracting=*/{1},
+                                   /*lhs_shape=*/{4, 32, 32},
+                                   /*rhs_shape=*/{4, 32, 32},
+                                   /*result_shape=*/{4, 32, 32}, DType::Float32);
+    EXPECT_EQ(os.str(),
+              "%cba = stablehlo.optimization_barrier %a : tensor<4x32x32xf32>\n"
+              "%cbb = stablehlo.optimization_barrier %b : tensor<4x32x32xf32>\n"
+              "%c = stablehlo.dot_general %cba, %cbb, batching_dims = [0] x "
+              "[0], contracting_dims = [2] x [1], precision = [HIGHEST, "
+              "HIGHEST] : (tensor<4x32x32xf32>, tensor<4x32x32xf32>) -> "
+              "tensor<4x32x32xf32>");
+}
+
 TEST(MlirTextEmit, CustomCall_SingleOperand) {
     std::ostringstream os;
     tj::emit_custom_call(os, "tenzor_rms_norm", "y", {"x"}, {{4, 16}},

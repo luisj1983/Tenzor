@@ -18,6 +18,7 @@
 #include <charconv>  // For std::from_chars (dispatch wrappers)
 #include <span>      // For std::span (dispatch wrappers)
 #include "tenzor/ops/creation.hpp"  // For tenzor::get_global_seed (manual_seed reproducibility)
+#include "../cuda_stream.hpp"  // cuda::cuda_current_stream()
 
 namespace tenzor {
 namespace cuda {
@@ -3624,12 +3625,25 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 // for direct registration with register_single_output_kernel()
 
 namespace {
-// Helper to extract stream from attrs (inlined for performance)
+// Helper to extract stream from attrs (inlined for performance).
+//
+// Must fall back to cuda::cuda_current_stream() when AttrKey::Stream isn't
+// set (the common case -- nothing in the codebase ever sets that attr), not
+// hardcode nullptr: CUDA-graph capture routes dispatch onto a dedicated
+// capture stream via cuda_current_stream(), and hardcoding nullptr here
+// silently ran every activation dispatched through this helper (ReLU,
+// Sigmoid, Tanh, GELU, and ~20 others in this file) on the legacy/default
+// stream instead -- invisible outside capture (the legacy stream is the
+// implicit default anyway), but illegal the moment one of these ops runs
+// during active graph capture on a non-default capture stream ("operation
+// would make the legacy stream depend on a capturing blocking stream").
+// Mirrors cuda_kernel_registry.cpp's get_cuda_stream().
 inline cudaStream_t get_stream(const OpAttributes& attrs) {
-    if (attrs.empty()) return nullptr;
-    if (!attrs.has(AttrKey::Stream)) return nullptr;
-    auto val = static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0));
-    return reinterpret_cast<cudaStream_t>(val);
+    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
+        auto val = static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0));
+        return reinterpret_cast<cudaStream_t>(val);
+    }
+    return cuda::cuda_current_stream();
 }
 } // anonymous namespace
 

@@ -1386,6 +1386,17 @@ private:
     /// the terminal nodes write into, so after a replay() they hold the fresh
     /// results. Exposed via replay_cuda_graph_outputs() so a replay is readable.
     std::vector<Tensor> captured_outputs_;
+    /// Every OTHER (non-input, non-output) device buffer the capture-time
+    /// forward() call allocated — i.e. every intermediate node result.
+    /// Neither the CUDA/CachingAllocator nor the ROCm allocator has a
+    /// "graph memory pool" concept: an intermediate Tensor that goes out of
+    /// scope is returned to the shared, process-wide allocator's free list
+    /// like any other buffer, even though the captured graph's kernel-launch
+    /// nodes have that exact device address permanently baked in. Retaining
+    /// every intermediate here for the lifetime of cuda_graph_ keeps those
+    /// addresses from ever being handed to an unrelated allocation while a
+    /// replay could still execute against them.
+    std::vector<Tensor> captured_intermediates_;
     std::shared_ptr<nn::Module> source_module_;                      ///< Source module for re-tracing
     std::unordered_map<std::string, std::shared_ptr<Graph>> shape_cache_;  ///< Cached graphs by shape key
     int retrace_count_{0};                                           ///< Number of retraces performed

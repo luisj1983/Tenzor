@@ -207,6 +207,16 @@ auto emit_stablehlo_convert(std::ostream& os, const std::string& result,
     write_tensor_type(os, shape, dst_dtype);
 }
 
+auto emit_stablehlo_optimization_barrier(std::ostream& os,
+                                         const std::string& result,
+                                         const std::string& a,
+                                         const std::vector<int64_t>& shape,
+                                         ::tenzor::DType dtype) -> void {
+    os << '%' << result << " = stablehlo.optimization_barrier %" << a
+       << " : ";
+    write_tensor_type(os, shape, dtype);
+}
+
 auto emit_stablehlo_concatenate(
     std::ostream& os, const std::string& result,
     const std::vector<std::string>& operand_names,
@@ -284,8 +294,32 @@ auto emit_stablehlo_dot_general(std::ostream& os, const std::string& result,
                                 const std::vector<int64_t>& rhs_shape,
                                 const std::vector<int64_t>& result_shape,
                                 ::tenzor::DType d) -> void {
-    os << '%' << result << " = stablehlo.dot_general %" << a << ", %" << b
-       << ", batching_dims = [";
+    // JIT-R110: IREE's Vulkan/SPIR-V backend has a confirmed codegen bug where
+    // fusing a `stablehlo.convert` directly into a `stablehlo.dot_general`
+    // operand miscomputes the result (verified standalone: a trivial 32x32
+    // F16->F32 convert feeding a dot_general returns 49.0 instead of the
+    // correct 8.0 for a uniform 0.5 input -- reproduces with plain F32
+    // operands too, i.e. it is not F16/BF16-specific, but every real call
+    // site here reaches dot_general via a widening convert for F16/BF16, so
+    // that's where it was first observed, e.g. via SDPA). llvm-cpu/cuda/rocm
+    // compute the identical StableHLO correctly; only vulkan-spirv is wrong.
+    // `stablehlo.optimization_barrier` between the operand and the
+    // dot_general prevents IREE from fusing the two and empirically fixes
+    // this on Vulkan while remaining a semantic no-op (and no measurable
+    // effect) on every other target -- so both operands are routed through
+    // it unconditionally rather than special-cased per target.
+    const std::string a_barrier = result + "ba";
+    const std::string b_barrier = result + "bb";
+    os << '%' << a_barrier << " = stablehlo.optimization_barrier %" << a
+       << " : ";
+    write_tensor_type(os, lhs_shape, d);
+    os << '\n';
+    os << '%' << b_barrier << " = stablehlo.optimization_barrier %" << b
+       << " : ";
+    write_tensor_type(os, rhs_shape, d);
+    os << '\n';
+    os << '%' << result << " = stablehlo.dot_general %" << a_barrier << ", %"
+       << b_barrier << ", batching_dims = [";
     for (std::size_t i = 0; i < lhs_batch.size(); ++i) {
         if (i != 0) os << ", ";
         os << lhs_batch[i];

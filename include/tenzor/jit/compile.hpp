@@ -52,6 +52,15 @@ namespace mlir_detail {
 /// instances. Defined in compile.cpp so that compile.hpp does not pull
 /// in `iree_runtime.hpp` (which transitively requires the IREE headers).
 struct MlirInvokerCache;
+
+/// Resolve the IREE HAL device ordinal for `target` given the input tensor's
+/// device: `in_dev.index` when in_dev's backend family matches `target`
+/// (one of "llvm-cpu"/"cuda"/"rocm"/"vulkan-spirv"), else 0. An explicit
+/// cross-family target override must not carry the wrong family's device
+/// ordinal over to the HAL device URI (JIT-055). Exposed here (rather than
+/// kept inline in compile.cpp) purely so it can be unit tested directly with
+/// synthetic Device values, without needing multi-GPU cross-family hardware.
+auto resolve_hal_ordinal(const std::string& target, const Device& in_dev) -> int;
 }  // namespace mlir_detail
 
 
@@ -299,8 +308,9 @@ private:
 
     /// Warn at most once PER compiled function (not once per process) when this
     /// function runs unaccelerated on a device with no JIT path (OneAPI/MPS on
-    /// the mlir backend; Vulkan/OneAPI on nvrtc). A process-global once-flag hid
-    /// the lack of acceleration for every function after the first (JIT-F038).
+    /// the mlir backend; CPU/Vulkan/OneAPI/MPS on nvrtc, since native codegen
+    /// there is gated to CUDA/ROCm only). A process-global once-flag hid the
+    /// lack of acceleration for every function after the first (JIT-F038).
     std::atomic<bool> warned_no_accel_{false};
 
     /// Trainable parameters this function closes over (empty for functional-
@@ -392,6 +402,13 @@ private:
                           Variable* out_result = nullptr,
                           bool* out_fn_attempted = nullptr,
                           bool* out_fn_ok = nullptr) -> Variable;
+
+    /// Copy parameters_/buffers_ under mutex_ (JIT-R109) so a caller can pass
+    /// them to trace_single_input_graph() without holding the lock across the
+    /// traced function's actual execution.
+    auto snapshot_params_buffers() const
+        -> std::pair<std::vector<std::shared_ptr<Variable>>,
+                     std::vector<std::shared_ptr<Variable>>>;
 };
 
 /**
