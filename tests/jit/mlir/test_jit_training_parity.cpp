@@ -50,6 +50,7 @@
 #include <vector>
 
 #include "mlir_target_util.hpp"
+#include "../../backend_parity/parity_test_utils.hpp"
 
 namespace {
 
@@ -294,15 +295,11 @@ TEST(MlirTrainingParity, InferenceMatchesEager_Cpu) {
     run_inference(Device::cpu(), "cpu");
 }
 TEST(MlirTrainingParity, InferenceMatchesEager_Cuda) {
-    if (!mt::backend_present("cuda")) {
-        GTEST_SKIP() << "no CUDA backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("cuda");
     run_inference(Device::cuda(0), "cuda");
 }
 TEST(MlirTrainingParity, InferenceMatchesEager_Rocm) {
-    if (!mt::backend_present("rocm")) {
-        GTEST_SKIP() << "no ROCm backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("rocm");
     run_inference(Device::rocm(0), "rocm");
 }
 // JIT-F036: Vulkan was omitted from the MLIR training-parity coverage. Vulkan has
@@ -310,9 +307,7 @@ TEST(MlirTrainingParity, InferenceMatchesEager_Rocm) {
 // exercised here. (OneAPI has no IREE HAL — see JIT-F030/F038 — so its JIT path
 // runs eagerly and is covered by the inference-vs-eager equivalence there.)
 TEST(MlirTrainingParity, InferenceMatchesEager_Vulkan) {
-    if (!mt::backend_present("vulkan")) {
-        GTEST_SKIP() << "no Vulkan backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("vulkan");
     run_inference(Device::vulkan(0), "vulkan");
 }
 // JIT-R022: the comment above claims OneAPI's eager-fallback JIT path "is
@@ -323,9 +318,7 @@ TEST(MlirTrainingParity, InferenceMatchesEager_Vulkan) {
 // assertion is skipped and only output-matches-eager is checked — exactly
 // the real strict=false/target="auto" C1 eager-fallback contract.
 TEST(MlirTrainingParity, InferenceMatchesEager_Oneapi) {
-    if (!mt::backend_present("oneapi")) {
-        GTEST_SKIP() << "no OneAPI backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("oneapi");
     run_inference(Device::oneapi(0), "oneapi");
 }
 
@@ -334,21 +327,15 @@ TEST(MlirTrainingParity, TrainingThroughJIT_Cpu) {
     run_training(Device::cpu(), "cpu");
 }
 TEST(MlirTrainingParity, TrainingThroughJIT_Cuda) {
-    if (!mt::backend_present("cuda")) {
-        GTEST_SKIP() << "no CUDA backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("cuda");
     run_training(Device::cuda(0), "cuda");
 }
 TEST(MlirTrainingParity, TrainingThroughJIT_Rocm) {
-    if (!mt::backend_present("rocm")) {
-        GTEST_SKIP() << "no ROCm backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("rocm");
     run_training(Device::rocm(0), "rocm");
 }
 TEST(MlirTrainingParity, TrainingThroughJIT_Vulkan) {
-    if (!mt::backend_present("vulkan")) {
-        GTEST_SKIP() << "no Vulkan backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("vulkan");
     run_training(Device::vulkan(0), "vulkan");  // JIT-F036
 }
 // JIT-R021: TRAINING (grad_invoke) never touches IREE — it always replays
@@ -360,9 +347,7 @@ TEST(MlirTrainingParity, TrainingThroughJIT_Vulkan) {
 // an mlir-configured CompiledFunction — a bug in the OneAPI interpreter-replay
 // path would have gone undetected. This exercises it on real OneAPI hardware.
 TEST(MlirTrainingParity, TrainingThroughJIT_Oneapi) {
-    if (!mt::backend_present("oneapi")) {
-        GTEST_SKIP() << "no OneAPI backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("oneapi");
     run_training(Device::oneapi(0), "oneapi");
 }
 

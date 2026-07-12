@@ -217,6 +217,26 @@ target_link_libraries(gradient_checkpointing PRIVATE
 target_include_directories(gradient_checkpointing PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
+# R2-02: first example exercising the JIT subsystem end-to-end (trace ->
+# compile -> execute -> verify vs eager), wired the same way as every other
+# training example so the regression test can drive the same code path.
+add_library(example_jit_mlp_training_runner OBJECT
+    cpp/training/jit_mlp_training_runner.cpp)
+target_link_libraries(example_jit_mlp_training_runner PUBLIC tenzor_core)
+target_include_directories(example_jit_mlp_training_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${PROJECT_SOURCE_DIR}/include)
+set_target_properties(example_jit_mlp_training_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
+add_executable(jit_mlp_training cpp/training/jit_mlp_training.cpp)
+target_link_libraries(jit_mlp_training PRIVATE
+    tenzor_core example_jit_mlp_training_runner)
+target_include_directories(jit_mlp_training PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
+
 # ============================================================================
 # ZeRO Optimizer and Offloading Examples
 # ============================================================================

@@ -348,10 +348,17 @@ auto ModelRepository::load_model(const std::string& name, const std::string& pat
     entry->state.store(ModelState::LOADING, std::memory_order_release);
 
     try {
-        // Load the compiled module
-        auto graph = jit::load_graph(path);
-        auto module = std::make_shared<jit::CompiledModule>();
-        module->set_graph(graph);
+        // Load the compiled module via CompiledModule::load() rather than the
+        // raw jit::load_graph()+set_graph() pair (R1-03): set_graph() is a bare
+        // `graph_ = std::move(g)` with no other bookkeeping, so a model loaded
+        // that way never gets loaded_=true, never re-applies a dynamic-dims
+        // configuration serialized via mark_dynamic_dims() (F031 — silently
+        // reverting a dynamic-batch model to its trace-time concrete shape),
+        // and — since throw_if_loaded_shape_mismatch short-circuits on
+        // !loaded_ — never gets the ordinary shape/dtype/device compatibility
+        // guard either (R1-02). CompiledModule::load() gives this serving path
+        // the same safety net the documented save()/load() API already has.
+        auto module = jit::CompiledModule::load(path);
         module->optimize_for_inference();
 
         entry->module = std::move(module);

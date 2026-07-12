@@ -6,12 +6,14 @@
  */
 
 #include "tenzor/jit/codegen.hpp"
+#include "tenzor/jit/autotune.hpp"  // R1-11: AutotuneCache + autotune_mode_active()
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"  // CPU fallback below uses tenzor::{exp,sin,add,...}
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"  // CPU fallback dispatches activations via OpId
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include <array>
 #include <sstream>
 #include <stdexcept>
 #include <mutex>
@@ -501,30 +503,88 @@ CompiledKernel::~CompiledKernel() {
 #endif
 }
 
+#if CODEGEN_AVAILABLE
+namespace {
+
+// R1-11: candidate block sizes considered by real kernel-launch autotuning.
+// 1024 is a safe upper bound on both CUDA and ROCm (max threads/block).
+constexpr std::array<int, 6> kAutotuneBlockSizes = {32, 64, 128, 256, 512, 1024};
+
+// Grid size for `numel` elements at `block_size` threads/block, clamped to
+// the driver's per-dimension grid limit. Computed in int64 and clamped
+// BEFORE narrowing to int: casting the raw (numel + block - 1)/block to int
+// first overflows for numel > ~2^31*block (possibly negative), and a
+// negative value slips past the 65535 clamp. The kernel uses a grid-stride
+// loop, so clamping the grid is safe.
+auto autotune_grid_size(int64_t numel, int block_size) -> int {
+    int64_t grid_blocks = (numel + block_size - 1) / block_size;
+    if (grid_blocks > 65535) grid_blocks = 65535;
+    if (grid_blocks < 1) grid_blocks = 1;
+    return static_cast<int>(grid_blocks);
+}
+
+// Original static numel-threshold heuristic. Used when there is no
+// AutotuneCache entry for this kernel/shape AND the caller is not running in
+// max-autotune mode (so no benchmarking is performed). Small tensors benefit
+// from fewer threads (less launch overhead); large tensors need more threads
+// for full GPU occupancy.
+auto autotune_static_heuristic_block_size(int64_t numel) -> int {
+    if (numel <= 256) return 64;
+    if (numel <= 4096) return 128;
+    if (numel <= 65536) return 256;
+    return 512;
+}
+
+// Memoized device-architecture identifier for AutotuneCache keys. Computed
+// once per (device_index, is_hip) pair -- hipGetDeviceProperties /
+// cuDeviceGetAttribute are cheap but not free, and launch() runs on every
+// kernel invocation. See AutotuneCache::make_key's doc comment for why the
+// key must be arch-qualified, not just backend+ordinal.
+auto autotune_device_arch(int device_index, bool is_hip) -> std::string {
+    static std::mutex mtx;
+    static std::unordered_map<std::string, std::string> cache;
+    const std::string map_key = (is_hip ? "rocm#" : "cuda#") + std::to_string(device_index);
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = cache.find(map_key);
+        if (it != cache.end()) return it->second;
+    }
+    std::string arch = "unknown";
+#if CODEGEN_HIP_AVAILABLE
+    if (is_hip) {
+        hipDeviceProp_t prop{};
+        arch = (hipGetDeviceProperties(&prop, device_index) == hipSuccess)
+                   ? (std::string("rocm:") + prop.gcnArchName)
+                   : "rocm:unknown";
+    }
+#endif
+#if defined(TENZOR_USE_CUDA)
+    if (!is_hip) {
+        CUdevice cu_device;
+        if (cuDeviceGet(&cu_device, device_index) == CUDA_SUCCESS) {
+            int major = 0, minor = 0;
+            cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, cu_device);
+            cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, cu_device);
+            arch = "cuda:sm_" + std::to_string(major) + std::to_string(minor);
+        } else {
+            arch = "cuda:unknown";
+        }
+    }
+#endif
+    std::lock_guard<std::mutex> lock(mtx);
+    cache[map_key] = arch;
+    return arch;
+}
+
+} // namespace
+#endif // CODEGEN_AVAILABLE
+
 auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
                             void* output_ptr, int64_t numel, void* stream) -> void {
 #if CODEGEN_AVAILABLE
     if (!function) {
         throw std::runtime_error("CompiledKernel::launch: kernel not compiled");
     }
-
-    // Adaptive block size selection based on problem size.
-    // Small tensors benefit from fewer threads (less launch overhead),
-    // while large tensors need more threads for full GPU occupancy.
-    int block_size;
-    if (numel <= 256) block_size = 64;
-    else if (numel <= 4096) block_size = 128;
-    else if (numel <= 65536) block_size = 256;
-    else block_size = 512;
-
-    // Compute in int64 and clamp BEFORE narrowing to int. Casting the raw
-    // (numel + block - 1)/block to int first overflows for numel > ~2^31*block
-    // (possibly negative), and a negative value slips past the 65535 clamp.
-    // The kernel uses a grid-stride loop, so clamping the grid is safe.
-    int64_t grid_blocks = (numel + block_size - 1) / block_size;
-    if (grid_blocks > 65535) grid_blocks = 65535;
-    if (grid_blocks < 1) grid_blocks = 1;
-    int grid_size = static_cast<int>(grid_blocks);
 
     // Build kernel arguments: input pointers + output pointer + numel
     std::vector<void*> args;
@@ -537,40 +597,144 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
     args.push_back(&output_ptr);
     args.push_back(&numel);
 
+    // Issues ONE launch at the given geometry. Shared by the real launch
+    // below and by the R1-11 autotune benchmarking loop further down --
+    // every candidate computes the exact same result (the generated kernel
+    // loops over numel with a grid-stride loop, per autotune_grid_size's
+    // comment), so timing candidates is a pure performance exercise with
+    // zero correctness risk: whichever candidate ran LAST left the
+    // bit-identical correct result in output_ptr.
+    auto do_launch = [&](int grid_size, int block_size) {
 #if CODEGEN_HIP_AVAILABLE
-    if (is_hip) {
-        HIP_CHECK(hipSetDevice(device_index));
-        HIP_CHECK(hipModuleLaunchKernel(
-            static_cast<hipFunction_t>(function),
-            grid_size, 1, 1,
-            block_size, 1, 1,
-            0,
-            static_cast<hipStream_t>(stream),
-            args.data(),
-            nullptr));
-        return;
-    }
+        if (is_hip) {
+            HIP_CHECK(hipSetDevice(device_index));
+            HIP_CHECK(hipModuleLaunchKernel(
+                static_cast<hipFunction_t>(function),
+                grid_size, 1, 1,
+                block_size, 1, 1,
+                0,
+                static_cast<hipStream_t>(stream),
+                args.data(),
+                nullptr));
+            return;
+        }
 #endif
 #if defined(TENZOR_USE_CUDA)
-    // JIT-054: rebind the CUDA driver's current context to this kernel's OWN
-    // device before every launch, mirroring the HIP branch's unconditional
-    // hipSetDevice(device_index) above. Without this, a cache-hit launch of
-    // a kernel compiled for a different device than whatever context is
-    // currently active on this thread fails (or on some drivers, silently
-    // targets the wrong GPU) -- see cuda_primary_context_for's doc comment.
-    CU_CHECK(cuCtxSetCurrent(cuda_primary_context_for(device_index)));
-    CU_CHECK(cuLaunchKernel(
-        static_cast<CUfunction>(function),
-        grid_size, 1, 1,    // grid
-        block_size, 1, 1,    // block
-        0,                    // shared mem
-        static_cast<CUstream>(stream),
-        args.data(),
-        nullptr
-    ));
+        // JIT-054: rebind the CUDA driver's current context to this kernel's
+        // OWN device before every launch, mirroring the HIP branch's
+        // unconditional hipSetDevice(device_index) above. Without this, a
+        // cache-hit launch of a kernel compiled for a different device than
+        // whatever context is currently active on this thread fails (or on
+        // some drivers, silently targets the wrong GPU) -- see
+        // cuda_primary_context_for's doc comment.
+        CU_CHECK(cuCtxSetCurrent(cuda_primary_context_for(device_index)));
+        CU_CHECK(cuLaunchKernel(
+            static_cast<CUfunction>(function),
+            grid_size, 1, 1,    // grid
+            block_size, 1, 1,    // block
+            0,                    // shared mem
+            static_cast<CUstream>(stream),
+            args.data(),
+            nullptr
+        ));
 #else
-    throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
+        (void)grid_size; (void)block_size;
+        throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
 #endif
+    };
+
+    // Times ONE candidate launch in milliseconds using the backend's own
+    // event API (GPU-side timing -- launches are asynchronous, so a CPU wall
+    // clock around do_launch would mostly measure launch-queue overhead, not
+    // kernel execution time).
+    auto time_launch_ms = [&](int grid_size, int block_size) -> double {
+#if CODEGEN_HIP_AVAILABLE
+        if (is_hip) {
+            hipEvent_t start = nullptr, stop = nullptr;
+            HIP_CHECK(hipEventCreate(&start));
+            HIP_CHECK(hipEventCreate(&stop));
+            HIP_CHECK(hipEventRecord(start, static_cast<hipStream_t>(stream)));
+            do_launch(grid_size, block_size);
+            HIP_CHECK(hipEventRecord(stop, static_cast<hipStream_t>(stream)));
+            HIP_CHECK(hipEventSynchronize(stop));
+            float ms = 0.0f;
+            HIP_CHECK(hipEventElapsedTime(&ms, start, stop));
+            HIP_CHECK(hipEventDestroy(start));
+            HIP_CHECK(hipEventDestroy(stop));
+            return static_cast<double>(ms);
+        }
+#endif
+#if defined(TENZOR_USE_CUDA)
+        CU_CHECK(cuCtxSetCurrent(cuda_primary_context_for(device_index)));
+        CUevent start = nullptr, stop = nullptr;
+        CU_CHECK(cuEventCreate(&start, CU_EVENT_DEFAULT));
+        CU_CHECK(cuEventCreate(&stop, CU_EVENT_DEFAULT));
+        CU_CHECK(cuEventRecord(start, static_cast<CUstream>(stream)));
+        do_launch(grid_size, block_size);
+        CU_CHECK(cuEventRecord(stop, static_cast<CUstream>(stream)));
+        CU_CHECK(cuEventSynchronize(stop));
+        float ms = 0.0f;
+        CU_CHECK(cuEventElapsedTime(&ms, start, stop));
+        CU_CHECK(cuEventDestroy(start));
+        CU_CHECK(cuEventDestroy(stop));
+        return static_cast<double>(ms);
+#else
+        (void)grid_size; (void)block_size;
+        throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
+#endif
+    };
+
+    // R1-11: adaptive block-size selection, cheapest tier first.
+    //   1. AutotuneCache hit for this (kernel, dtype, arch, numel) -> reuse
+    //      it. Loaded lazily (once per process) from disk so tuning from a
+    //      prior run is picked up even when this call is not itself running
+    //      in max-autotune mode.
+    //   2. Cache miss AND the calling CompiledFunction is running in
+    //      max-autotune mode (AutotuneModeGuard, set by
+    //      CompiledFunction::operator()) -> benchmark every candidate with
+    //      REAL GPU-timed launches (see do_launch's correctness note above),
+    //      record every result, persist the winner to disk.
+    //   3. Otherwise -> the original static numel-threshold heuristic.
+    static std::once_flag autotune_cache_loaded;
+    std::call_once(autotune_cache_loaded, [] {
+        AutotuneCache::instance().load_default();
+    });
+
+    const std::string autotune_key = AutotuneCache::make_key(
+        name, std::string(dtype_name(dtype)),
+        autotune_device_arch(device_index, is_hip), {{numel}});
+
+    auto cached_id = AutotuneCache::instance().lookup(
+        autotune_key, static_cast<int>(kAutotuneBlockSizes.size()));
+
+    if (cached_id) {
+        int block_size = kAutotuneBlockSizes[static_cast<size_t>(*cached_id)];
+        do_launch(autotune_grid_size(numel, block_size), block_size);
+        return;
+    }
+
+    if (autotune_mode_active()) {
+        double best_time = std::numeric_limits<double>::max();
+        int best_id = -1;
+        for (size_t i = 0; i < kAutotuneBlockSizes.size(); ++i) {
+            int cand_block = kAutotuneBlockSizes[i];
+            double t = time_launch_ms(autotune_grid_size(numel, cand_block), cand_block);
+            AutotuneCache::instance().record(autotune_key, static_cast<int>(i), t);
+            if (t < best_time) { best_time = t; best_id = static_cast<int>(i); }
+        }
+        if (best_id >= 0) {
+            AutotuneCache::instance().save_default();
+            return;
+        }
+        // All candidate timings were degenerate (e.g. NaN elapsed time from
+        // the driver) -- fall through to the static heuristic below rather
+        // than leaving the kernel unlaunched.
+    }
+
+    {
+        int block_size = autotune_static_heuristic_block_size(numel);
+        do_launch(autotune_grid_size(numel, block_size), block_size);
+    }
 #else
     throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
 #endif
@@ -648,7 +812,7 @@ auto KernelCache::get_or_compile(const FusionGroup& group) -> std::shared_ptr<Co
     // Compile for the group's target GPU (its context + compute arch), not a
     // hardcoded device 0. Select CUDA vs ROCm runtime by the group's device type.
     auto kernel = compile(source, kernel_name, group.device.index,
-                          group.device.type == Device::Type::ROCm);
+                          group.device.type == Device::Type::ROCm, group.dtype);
     kernel->source = source;
     kernel->num_inputs = group.num_inputs;
     cache_[group.signature] = kernel;
@@ -685,12 +849,13 @@ auto KernelCache::get_or_compile_source(const std::string& signature,
 }
 
 auto KernelCache::compile(const std::string& source, const std::string& kernel_name,
-                          int device_index, bool is_rocm)
+                          int device_index, bool is_rocm, DType dtype)
     -> std::shared_ptr<CompiledKernel> {
 #if CODEGEN_AVAILABLE
     auto kernel = std::make_shared<CompiledKernel>();
     kernel->name = kernel_name;
     kernel->device_index = device_index;
+    kernel->dtype = dtype;
 
     // ---- ROCm target: compile with HIPRTC and load via the HIP driver. ----
 #if CODEGEN_HIP_AVAILABLE

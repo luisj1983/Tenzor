@@ -35,7 +35,15 @@ static void copy_params(nn::Module& src, nn::Module& dst) {
 // Test 1: LinearChain — x -> linear -> relu -> linear -> sum
 // ============================================================================
 
-TEST(JITBackendParity, LinearChain) {
+// R2-03: split from a single combined "LinearChain" test. The eager
+// cross-backend loop is a GENUINE cross-backend comparison with no fallback
+// signal on a single-backend host — it used to run silently ZERO iterations
+// in that case (no GTEST_SKIP(), no failure, no log line at all), unlike
+// every other gated test in this file. GTEST_SKIP()/FAIL() return from the
+// whole test body, so gating just this loop (and not the JIT-vs-eager loop
+// below, which still has real signal CPU-only) requires two separate tests.
+TEST(JITBackendParity, LinearChain_EagerCrossBackend) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("LinearChain eager cross-backend parity");
     auto backends = get_available_backends();
 
     nn::Linear l1(32, 16);
@@ -45,7 +53,8 @@ TEST(JITBackendParity, LinearChain) {
     auto x = nn::relu(l1.forward(Variable(input, false)));
     auto ref = l2.forward(x).tensor();
 
-    // Eager cross-backend parity (starts at index 1; a no-op on a CPU-only build).
+    // Eager cross-backend parity (starts at index 1; REQUIRE_MULTI_BACKEND_OR_SKIP
+    // above guarantees backends.size() >= 2 here).
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
             nn::Linear l1_dev(32, 16);
@@ -65,11 +74,24 @@ TEST(JITBackendParity, LinearChain) {
                           << backend_name(backends[i]) << ": " << e.what();
         }
     }
+}
 
-    // F018: the loop above runs EAGER .forward() only — despite the "JIT" name.
-    // Also drive the JIT COMPILER on the same Linear->ReLU->Linear chain, on every
-    // backend INCLUDING CPU (index 0), so a JIT trace/lower/fuse divergence is
-    // caught here too. num_cached>0 proves the compiled path was actually taken.
+TEST(JITBackendParity, LinearChain_JitVsEagerAllBackends) {
+    auto backends = get_available_backends();
+
+    nn::Linear l1(32, 16);
+    nn::Linear l2(16, 8);
+    auto input = randn({4, 32}, DType::Float32, Device::cpu());
+
+    auto x = nn::relu(l1.forward(Variable(input, false)));
+    auto ref = l2.forward(x).tensor();
+
+    // F018: drive the JIT COMPILER on the same Linear->ReLU->Linear chain, on
+    // every backend INCLUDING CPU (index 0), so a JIT trace/lower/fuse
+    // divergence is caught here too. Not gated on multi-backend availability
+    // (F019-style rationale): this is a same-backend JIT-vs-eager comparison,
+    // so it still has real signal on a CPU-only build. num_cached>0 proves the
+    // compiled path was actually taken.
     for (size_t i = 0; i < backends.size(); ++i) {
         try {
             nn::Linear l1_dev(32, 16);

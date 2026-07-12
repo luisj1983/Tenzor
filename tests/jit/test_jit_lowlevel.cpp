@@ -16,6 +16,8 @@
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/tracer.hpp"
 #include "tenzor/jit/autotune.hpp"
+#include <atomic>
+#include <thread>
 
 using namespace tenzor;
 using namespace tenzor::jit;
@@ -321,4 +323,51 @@ TEST(AutotuneCacheValidation, LookupRejectsOutOfRangeAlgorithmId) {
     EXPECT_EQ(cache.lookup(key, /*num_candidates=*/3), std::nullopt);
     // id 5 is valid when there are >= 6 candidates.
     EXPECT_EQ(cache.lookup(key, /*num_candidates=*/6), std::optional<int>(5));
+}
+
+// R1-11: AutotuneModeGuard is the thread-local propagation mechanism that lets
+// CompiledFunction::operator() (compile.cpp) tell CompiledKernel::launch()
+// (codegen.cpp) it is running under CompileConfig::mode == "max-autotune",
+// without threading a parameter through Graph/Node/FusionGroup. These tests
+// exercise the guard's semantics directly (no GPU needed): default-off,
+// enables for its scope, restores the PREVIOUS value (not unconditionally
+// false) on destruction, and is thread-local.
+TEST(AutotuneModeGuardTest, DefaultsToInactive) {
+    EXPECT_FALSE(autotune_mode_active());
+}
+
+TEST(AutotuneModeGuardTest, EnablesForScopeAndRestoresOnDestruction) {
+    ASSERT_FALSE(autotune_mode_active());
+    {
+        AutotuneModeGuard guard(true);
+        EXPECT_TRUE(autotune_mode_active());
+    }
+    EXPECT_FALSE(autotune_mode_active());
+}
+
+TEST(AutotuneModeGuardTest, NestedGuardRestoresOuterValueNotUnconditionallyFalse) {
+    ASSERT_FALSE(autotune_mode_active());
+    AutotuneModeGuard outer(true);
+    EXPECT_TRUE(autotune_mode_active());
+    {
+        // A nested guard that disables autotuning for an inner scope must
+        // restore the OUTER "true", not stomp it to a hardcoded false.
+        AutotuneModeGuard inner(false);
+        EXPECT_FALSE(autotune_mode_active());
+    }
+    EXPECT_TRUE(autotune_mode_active());
+}
+
+TEST(AutotuneModeGuardTest, IsThreadLocal) {
+    ASSERT_FALSE(autotune_mode_active());
+    std::atomic<bool> saw_active_on_other_thread{true};
+    AutotuneModeGuard guard(true);
+    ASSERT_TRUE(autotune_mode_active());
+    std::thread t([&] {
+        // A different thread must NOT observe this thread's guard.
+        saw_active_on_other_thread.store(autotune_mode_active());
+    });
+    t.join();
+    EXPECT_FALSE(saw_active_on_other_thread.load());
+    EXPECT_TRUE(autotune_mode_active());  // unaffected by the other thread
 }

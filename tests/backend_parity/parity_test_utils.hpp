@@ -360,6 +360,29 @@ inline std::vector<std::string> get_available_backend_names_all_devices() {
     if (!tenzor::testing::is_backend_name_available(name)) \
         GTEST_SKIP() << name << " backend not available"
 
+/**
+ * @brief Gate on a SPECIFIC named backend being available (R2-03).
+ *
+ * Unlike SKIP_IF_NO_BACKEND, this escalates to FAIL() under
+ * TENZOR_REQUIRE_MULTI_BACKEND=1 instead of always silently skipping — for a
+ * test that specifically needs e.g. CUDA (not just "any 2nd backend"), a
+ * plain skip gives zero signal that the required hardware went missing in an
+ * environment that's supposed to have it.
+ *
+ * Usage:
+ *   REQUIRE_BACKEND_OR_SKIP("cuda");
+ */
+#define REQUIRE_BACKEND_OR_SKIP(name)                                          \
+    do {                                                                      \
+        if (!::tenzor::testing::is_backend_name_available(name)) {            \
+            if (::tenzor::testing::golden::require_multi_backend()) {         \
+                FAIL() << (name) << " required by TENZOR_REQUIRE_MULTI_BACKEND" \
+                          " but unavailable";                                 \
+            }                                                                 \
+            GTEST_SKIP() << (name) << " backend not available";               \
+        }                                                                     \
+    } while (0)
+
 // ============================================================================
 // Tensor Comparison Utilities
 // ============================================================================

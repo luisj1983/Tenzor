@@ -305,8 +305,21 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
     // (producing a wrong result), and hardcoded ElemOp::Mul to `v*v` even for a
     // genuine binary Mul(x, y). This helper instead emits every representable op
     // and, on an unrepresentable one, sets ok=false so generate_reduction refuses
-    // to emit the fused kernel (returns "") — the caller then runs the ops via
-    // normal, correct op dispatch rather than getting a silently-wrong kernel.
+    // to emit the fused kernel (returns ""), which makes execute_extended_fused
+    // throw std::runtime_error (extended_codegen.cpp) rather than silently
+    // emitting a wrong kernel.
+    //
+    // R1-09: this `ok=false` path does NOT fall back to normal op dispatch --
+    // there is no exception handling anywhere between here and
+    // CompiledFunction::operator()'s cache-hit path (compile.cpp), so if ever
+    // reached it is an uncaught, unhandled error, not a graceful eager
+    // fallback. It should be unreachable in practice: PatternMatcher::
+    // match_reduction_chain (pattern_matcher.cpp) now structurally rejects any
+    // pre/post op this function can't lower via is_reduction_representable_elem
+    // (the exact same unary+self-square-Mul allowlist as this switch), and
+    // ExtendedFusionPass::run (compiler.cpp)'s own to_elem check independently
+    // re-verifies the same thing before committing a fusion rewrite -- two
+    // layers of defense in depth ahead of this function, not one.
     const std::string indent = "        ";
     auto emit_elem = [&](std::ostringstream& out, const std::string& v,
                          const ElemStep& op, bool& ok) {
@@ -974,12 +987,9 @@ auto extended_kernel_name(FusionKind kind) -> std::string {
         case FusionKind::LayerNorm:    return "fused_layer_norm_kernel";
         case FusionKind::RMSNorm:      return "fused_rms_norm_kernel";
         case FusionKind::SmallMLP:     return "fused_small_mlp_kernel";
-        // Not extended-codegen kinds; these are emitted by the basic
-        // element-wise codegen path, which has no extended entry-point symbol.
+        // Not an extended-codegen kind; emitted by the basic element-wise
+        // codegen path, which has no extended entry-point symbol.
         case FusionKind::ElementWise:
-        case FusionKind::GeluVariant:
-        case FusionKind::RotaryEmbedding:
-        case FusionKind::SwiGLU:
             return "";
     }
     return "";

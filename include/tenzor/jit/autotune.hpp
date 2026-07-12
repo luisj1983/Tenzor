@@ -195,5 +195,49 @@ private:
     std::unordered_map<std::string, CacheEntry> cache_;       ///< Key -> best entry
 };
 
+// ============================================================================
+// Autotune-mode propagation (R1-11)
+// ============================================================================
+
+/**
+ * @brief Returns true while the CURRENT thread is executing inside a call
+ * compiled with `CompileConfig::mode == "max-autotune"`.
+ *
+ * `CompiledKernel::launch()` (src/jit/codegen.cpp) consults this to decide
+ * whether a cache-miss on `AutotuneCache` is worth benchmarking: benchmarking
+ * launch-geometry candidates costs several real kernel launches, so it must
+ * only happen when the caller explicitly opted into `max-autotune`. Once a
+ * winning candidate is recorded, every later call (any mode) reuses it via a
+ * plain cache lookup — only the FIRST autotune-mode call for a given kernel/
+ * dtype/arch/shape pays the benchmarking cost.
+ *
+ * A thread-local flag (rather than threading a parameter through
+ * Graph/Node/FusionGroup down to the kernel launch) is used because the
+ * autotune decision is a cross-cutting execution-mode signal, not part of any
+ * op's data-dependent state.
+ */
+auto autotune_mode_active() -> bool;
+
+/**
+ * @brief RAII guard that sets (and restores) the thread-local autotune-mode
+ * flag for its scope.
+ *
+ * `CompiledFunction::operator()` holds one of these for the duration of
+ * executing a compiled graph, enabled when `config_.mode == "max-autotune"`.
+ * Restores the PREVIOUS value on destruction (not unconditionally `false`) so
+ * nested compiled calls on the same thread behave correctly.
+ */
+class AutotuneModeGuard {
+public:
+    explicit AutotuneModeGuard(bool enable);
+    ~AutotuneModeGuard();
+
+    AutotuneModeGuard(const AutotuneModeGuard&) = delete;
+    auto operator=(const AutotuneModeGuard&) -> AutotuneModeGuard& = delete;
+
+private:
+    bool previous_;
+};
+
 } // namespace jit
 } // namespace tenzor

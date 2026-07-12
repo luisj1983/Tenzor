@@ -606,7 +606,13 @@ void register_jit(py::module_& m) {
     "Compile a Python-subset script into a CompiledModule.\n"
     "MVP grammar: single `def forward(x): return EXPR` with arithmetic on x,\n"
     "float/int literals, +, -, *, /, and parentheses. Throws on parse error.\n"
-    "Uses a default CPU+Float32 {1}-element dummy for tracing.");
+    "Uses a default CPU+Float32 {1}-element dummy for tracing. The returned\n"
+    "module's forward() correctly retraces (via its registered source module)\n"
+    "on the first call with a different device/dtype/shape, so calling it on\n"
+    "e.g. a CUDA or Float64 tensor is fully correct -- passing an explicit\n"
+    "dummy via the other overload is a performance optimization only (skips\n"
+    "that one wasted initial CPU+Float32 trace), not a correctness\n"
+    "requirement (R1-08).");
 
     jit.def("compile_script", [](const std::string& source, const tenzor::Tensor& dummy) {
         if (source.find('\0') != std::string::npos) {
@@ -618,8 +624,12 @@ void register_jit(py::module_& m) {
     },
     py::arg("source"), py::arg("dummy"),
     "Overload that specialises the compiled module for the supplied dummy\n"
-    "input's dtype, device, and shape. Use this when compiling for non-CPU\n"
-    "or non-Float32 inputs.");
+    "input's dtype, device, and shape. Prefer this for non-CPU or\n"
+    "non-Float32 inputs to skip the no-dummy overload's initial CPU+Float32\n"
+    "trace and immediate retrace -- both overloads are equally CORRECT for\n"
+    "any input, since forward() always retraces on a device/dtype/shape\n"
+    "change either way (R1-08); this one is just more efficient when you\n"
+    "already know the target input's specification upfront.");
 
     // =========================================================================
     // Group F — Debug UX: show_graph / show_mlir / show_stablehlo / show_iree

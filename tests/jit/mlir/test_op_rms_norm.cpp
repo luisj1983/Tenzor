@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <string>
 
 namespace tzj = ::tenzor::jit;
@@ -56,10 +57,55 @@ TEST(OpRMSNorm, EmitsCustomCallText) {
 
     EXPECT_NE(mlir.find("call @tenzor_plugin.rms_norm"),
               std::string::npos) << mlir;
-    // Eps travels as an i32 bit-pattern of f32, not a backend_config string.
-    EXPECT_NE(mlir.find("i32"),                   std::string::npos) << mlir;
+    // Eps always travels as a bit-exact i64 bit-pattern of the full double
+    // value (not a backend_config string, and not truncated to f32/i32 even
+    // when the tensor dtype itself is f32) so a Float64 RMSNorm graph never
+    // silently loses precision through this plugin path.
+    EXPECT_NE(mlir.find(" : i64"),                std::string::npos) << mlir;
+    EXPECT_EQ(mlir.find(" : i32"),                std::string::npos) << mlir;
     EXPECT_NE(mlir.find("tensor<2x16x768xf32>"),  std::string::npos) << mlir;
     EXPECT_NE(mlir.find("tensor<768xf32>"),       std::string::npos) << mlir;
+}
+
+TEST(OpRMSNorm, EpsSurvivesFullDoublePrecisionBitExact) {
+    ensure_core_init();
+    // Regression test for the eps-narrowed-to-float32 bug: pick a value with
+    // more significant digits than float32 can represent, and confirm the
+    // emitted "arith.constant <bits> : i64" carries the *exact* double bit
+    // pattern of `eps`, not the bit pattern of `static_cast<float>(eps)`
+    // widened back to i64.
+    const double eps = 0.100000001234567;
+    tzj::Graph g;
+    const std::vector<int64_t> x_shape{1, 1, 4};
+    auto x = g.create_value("x", x_shape, ::tenzor::DType::Float64,
+                            ::tenzor::Device::cpu());
+    g.set_inputs({x});
+    auto node = g.create_node(tzj::OpType::RMSNorm);
+    node->add_input(x);
+    auto out = g.create_value("y", x_shape, ::tenzor::DType::Float64,
+                              ::tenzor::Device::cpu());
+    node->add_output(out);
+    node->set_attr("eps", eps);
+    g.add_node(node);
+    g.set_outputs({out});
+
+    tzm::GraphToMLIR lowerer;
+    const std::string mlir = lowerer.lower(g);
+
+    const auto pos = mlir.find("arith.constant ");
+    ASSERT_NE(pos, std::string::npos) << mlir;
+    const auto num_start = pos + std::string("arith.constant ").size();
+    const auto num_end = mlir.find(' ', num_start);
+    ASSERT_NE(num_end, std::string::npos) << mlir;
+    const int64_t bits = std::stoll(mlir.substr(num_start, num_end - num_start));
+
+    double decoded;
+    std::memcpy(&decoded, &bits, sizeof(decoded));
+    EXPECT_EQ(decoded, eps) << "eps must survive the i64 bit-cast round trip "
+                                "bit-exact, got " << decoded << " vs " << eps;
+    EXPECT_NE(decoded, static_cast<double>(static_cast<float>(eps)))
+        << "test's eps value must actually distinguish float32 from float64 "
+           "precision, else this test can't detect the regression";
 }
 
 TEST(OpRMSNorm, NoWeightInputAllowed) {

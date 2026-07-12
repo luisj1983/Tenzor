@@ -4100,13 +4100,19 @@ auto handle_rms_norm_custom_call(LoweringContext& ctx,
     const auto& x_val   = node.inputs()[0];
     const auto& out_val = node.outputs()[0];
 
-    const float eps = get_attr_float(node, {"eps"}, 1e-6f);
-    int32_t eps_bits;
+    // eps must preserve full double precision (matching handle_rms_norm_expand
+    // and handle_layer_norm, which both use get_attr_double) so Float64 RMSNorm
+    // graphs don't silently lose precision when routed through this plugin
+    // path -- travels as a bit-exact i64 double bit pattern, not i32/float32
+    // (see the ABI note above `handle_flash_attention_custom_call`/
+    // tenzor_plugin.rms_norm's declaration in iree_customcalls.cpp).
+    const double eps = get_attr_double(node, {"eps"}, 1e-6);
+    int64_t eps_bits;
     std::memcpy(&eps_bits, &eps, sizeof(eps_bits));
 
     auto eps_name = ctx.fresh_name();
     body << "    %" << eps_name << " = arith.constant "
-         << static_cast<int64_t>(eps_bits) << " : i32\n";
+         << eps_bits << " : i64\n";
 
     // Resolve / synthesize the weight tensor name. The dispatcher mirror in
     // iree_customcalls.cpp expects (x, weight); when no weight is provided,
@@ -4148,7 +4154,7 @@ auto handle_rms_norm_custom_call(LoweringContext& ctx,
     std::ostringstream decl;
     decl << "func.func private @tenzor_plugin.rms_norm("
          << type_str(x_val->shape(), x_val->dtype()) << ", "
-         << type_str(weight_shape,   weight_dtype)   << ", i32) -> "
+         << type_str(weight_shape,   weight_dtype)   << ", i64) -> "
          << type_str(out_val->shape(), out_val->dtype());
     ctx.add_extern_decl(decl.str(), decl.str());
 
@@ -4159,7 +4165,7 @@ auto handle_rms_norm_custom_call(LoweringContext& ctx,
                      {ctx.name_for(x_val->id()), weight_name},
                      {x_val->shape(), weight_shape},
                      {x_val->dtype(), weight_dtype},
-                     {{eps_name, "i32"}},
+                     {{eps_name, "i64"}},
                      out_val->shape(), out_val->dtype());
     body << '\n';
 }

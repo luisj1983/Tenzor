@@ -2526,6 +2526,25 @@ auto MemoryPlanningPass::run(Graph& graph) -> bool {
 }
 
 // ============================================================================
+// Rematerialization Pass (R1-12)
+// ============================================================================
+
+auto RematerializationPass::run(Graph& graph) -> bool {
+    RematerializationPlanner planner;
+    planner.set_memory_budget(memory_budget_);
+    planner.set_min_cost_ratio(min_cost_ratio_);
+    auto candidates = planner.find_candidates(graph);
+    num_rematerialized_ = planner.apply(graph, candidates);
+
+    // apply() already re-sorts the graph topologically when it inserts at
+    // least one recompute node (see RematerializationPlanner::apply). A
+    // non-zero count is a real structural change -- new nodes/values were
+    // added and one consumer edge was rewired per candidate -- so later
+    // passes (in particular MemoryPlanningPass) must see it.
+    return num_rematerialized_ > 0;
+}
+
+// ============================================================================
 // Extended Fusion Pass
 // ============================================================================
 
@@ -2900,11 +2919,25 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
                 const auto& lin1 = match.nodes[0];
                 const auto& act = match.nodes[1];
                 const auto& lin2 = match.nodes[2];
-                int64_t hidden = 0;
-                if (!lin1->outputs().empty() &&
-                    !lin1->outputs()[0]->shape().empty()) {
-                    hidden = lin1->outputs()[0]->shape().back();
+                // match_small_mlp (pattern_matcher.cpp) already rejects any
+                // hidden<=0 before producing a SmallMLP FusionMatch, so this
+                // should be unreachable; throwing instead of silently
+                // defaulting to 0 turns a would-be silent-wrong-result /
+                // huge-shared-mem-alloc GPU divergence (extended_codegen.cpp
+                // uses this value directly for shared-mem sizing and a
+                // kernel loop bound) into a loud, attributable internal-
+                // invariant failure if that invariant is ever violated by a
+                // future caller.
+                if (lin1->outputs().empty() ||
+                    lin1->outputs()[0]->shape().empty() ||
+                    lin1->outputs()[0]->shape().back() <= 0) {
+                    throw std::runtime_error(
+                        "ExtendedFusionPass: SmallMLP match has an invalid "
+                        "hidden dim (Linear1 output shape missing or <= 0); "
+                        "this should have been rejected by "
+                        "PatternMatcher::match_small_mlp");
                 }
+                const int64_t hidden = lin1->outputs()[0]->shape().back();
                 fused_node->set_int_attr("fused_hidden_dim", hidden);
                 fused_node->set_int_attr("fused_mlp_activation",
                                          static_cast<int64_t>(act->op_type()));
@@ -3521,6 +3554,29 @@ auto Compiler::optimize(Graph& graph, int max_iterations) -> int {
     // producer could run after its consumer. Re-sort once here after all passes.
     graph.topological_sort();
 
+    // Rematerialization (R1-12), opt-in only (see set_rematerialization): runs
+    // BEFORE memory planning so MemoryPlanningPass's live-range analysis sees
+    // the post-rematerialization graph (shortened live ranges for values whose
+    // sole consumer was redirected to a recomputed duplicate, plus the new
+    // duplicate nodes/values themselves). RematerializationPass::run already
+    // re-sorts the graph internally when it structurally changes it, so no
+    // extra topological_sort() call is needed here.
+    num_rematerialized_ = 0;
+    if (enable_rematerialization_) {
+        RematerializationPass remat_pass;
+        remat_pass.set_memory_budget(rematerialization_budget_);
+        remat_pass.set_min_cost_ratio(rematerialization_min_cost_ratio_);
+        bool changed = remat_pass.run(graph);
+        num_rematerialized_ = remat_pass.num_rematerialized();
+        if (changed) {
+            total_changes += static_cast<int>(num_rematerialized_);
+        }
+        if (verbose_ && num_rematerialized_ > 0) {
+            std::cout << "Rematerialization: " << num_rematerialized_
+                      << " values rematerialized\n";
+        }
+    }
+
     // Determine whether to run memory planning:
     // - If the user explicitly set it via set_memory_planning(), use that setting.
     // - Otherwise, auto-enable when the graph has enough nodes to benefit.
@@ -3550,8 +3606,18 @@ auto Compiler::optimize(Graph& graph, int max_iterations) -> int {
 }
 
 auto Compiler::plan_memory(Graph& graph) -> MemoryPlan {
-    MemoryPlanner planner;
-    return planner.plan(graph);
+    // R1-12: route through MemoryPlanningPass -- the class this method used
+    // to bypass entirely (it was defined but never instantiated anywhere,
+    // duplicating the same MemoryPlanner::plan() call inline instead). This
+    // is exactly the usage shown in MemoryPlanningPass's own doc comment
+    // ("MemoryPlanningPass pass; pass.run(graph); ... pass.memory_plan()"),
+    // with IDENTICAL behavior/output to the previous direct call (same
+    // default alignment, same MemoryPlanner::plan() underneath) but through
+    // the pass abstraction so the pass genuinely runs instead of sitting
+    // dead in the codebase.
+    MemoryPlanningPass pass;
+    pass.run(graph);
+    return pass.memory_plan();
 }
 
 auto Compiler::run_passes(Graph& graph) -> int {

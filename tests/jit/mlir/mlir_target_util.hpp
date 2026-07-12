@@ -90,12 +90,33 @@ inline auto all_iree_targets() -> std::vector<std::string> {
     return {"llvm-cpu", "cuda", "rocm", "vulkan-spirv"};
 }
 
+// R2-03: if TENZOR_REQUIRE_MULTI_BACKEND=1 is set (an environment that is
+// SUPPOSED to have GPU hardware for the IREE targets), available_iree_targets()
+// silently shrinking to just {"llvm-cpu"} used to have no signal at all — no
+// skip marker, no warning, no failure — strictly worse than the project's
+// established REQUIRE_MULTI_BACKEND_OR_SKIP convention (parity_test_utils.hpp),
+// under which a "should have multiple backends but doesn't" environment always
+// gets a visible, attributable failure instead of quietly running reduced
+// coverage. Every caller of available_iree_targets() gets this check for free.
+inline auto require_multi_backend_for_iree_targets() -> bool {
+    const char* v = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
+    return v && *v && *v != '0';
+}
+
 // Targets that are actually usable on THIS host (hardware + iree-compile
 // support). Always contains at least "llvm-cpu".
 inline auto available_iree_targets() -> std::vector<std::string> {
     std::vector<std::string> out;
     for (const auto& t : all_iree_targets()) {
         if (target_hw_present(t) && iree_target_supported(t)) out.push_back(t);
+    }
+    if (out.size() <= 1 && require_multi_backend_for_iree_targets()) {
+        ADD_FAILURE() << "TENZOR_REQUIRE_MULTI_BACKEND=1 but available_iree_targets() "
+                         "found no usable GPU IREE target (only "
+                      << (out.empty() ? "none" : out.front())
+                      << ") -- this environment is supposed to have GPU hardware; "
+                         "a silent shrink to CPU-only coverage here would hide a "
+                         "broken environment instead of failing loudly.";
     }
     return out;
 }

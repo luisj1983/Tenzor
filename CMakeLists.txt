@@ -352,24 +352,38 @@ if(TENZOR_USE_MLIR_JIT)
     set(TENZOR_DEFAULT_ROCM_TARGET "${_tenzor_default_rocm_target}"
         CACHE STRING "Default --iree-rocm-target chip for iree-compile." FORCE)
     message(STATUS "  Default IREE rocm target chip: ${TENZOR_DEFAULT_ROCM_TARGET}")
-endif()
 
-# JIT-R043: extends the TENZOR_DEFAULT_ROCM_TARGET block above — IREE's
-# iree-compile cuda target requires an explicit `--iree-cuda-target=<smXX>`
-# flag, just like rocm requires `--iree-rocm-target=<gfxXXX>`. Only ROCm had
-# a build-time default macro wired up; CUDA fell all the way through to
-# iree_compile.cpp's hardcoded "sm_80" literal even though this repo already
-# auto-detects the build machine's real compute capability for the EAGER
-# CUDA backend (src/backends/cuda/CMakeLists.txt) — that detection just
-# never got threaded into a JIT-side default. Query nvidia-smi directly here
-# (independent of src/backends/cuda/CMakeLists.txt's CMAKE_CUDA_ARCHITECTURES,
-# which on CMake 3.24+ is the literal string "native" — not a usable IREE
-# target string) so this block works regardless of CMake version or
-# subdirectory processing order. Detection failure (no nvidia-smi, no GPU
-# present at build time, parse failure) leaves TENZOR_DEFAULT_CUDA_TARGET
-# undefined entirely — strictly additive, never worse than the pre-existing
-# "sm_80" runtime fallback in iree_compile.cpp.
-if(TENZOR_BUILD_CUDA)
+    # JIT-R043 (R2-01 follow-up): extends the TENZOR_DEFAULT_ROCM_TARGET block
+    # above — IREE's iree-compile cuda target requires an explicit
+    # `--iree-cuda-target=<smXX>` flag, just like rocm requires
+    # `--iree-rocm-target=<gfxXXX>`. Only ROCm had a build-time default macro
+    # wired up; CUDA fell all the way through to iree_compile.cpp's hardcoded
+    # "sm_80" literal even though this repo already auto-detects the build
+    # machine's real compute capability for the EAGER CUDA backend
+    # (src/backends/cuda/CMakeLists.txt) — that detection just never got
+    # threaded into a JIT-side default. Query nvidia-smi directly here
+    # (independent of src/backends/cuda/CMakeLists.txt's
+    # CMAKE_CUDA_ARCHITECTURES, which on CMake 3.24+ is the literal string
+    # "native" — not a usable IREE target string) so this block works
+    # regardless of CMake version or subdirectory processing order. Detection
+    # failure (no nvidia-smi, no GPU present at build time, parse failure)
+    # leaves TENZOR_DEFAULT_CUDA_TARGET undefined entirely — strictly
+    # additive, never worse than the pre-existing "sm_80" runtime fallback in
+    # iree_compile.cpp.
+    #
+    # R2-01: this block used to be wrapped in its own `if(TENZOR_BUILD_CUDA)`
+    # AFTER this scope's endif(), so — unlike the ROCm block immediately
+    # above, which the "Path C.2" design note explicitly decouples from
+    # TENZOR_BUILD_ROCM — configuring -DTENZOR_BUILD_CUDA=OFF
+    # -DTENZOR_USE_MLIR_JIT=ON (e.g. a ROCm-only or CPU-only CI leg that still
+    # wants to sanity-check the CUDA IREE target string) left
+    # TENZOR_DEFAULT_CUDA_TARGET undefined and iree_compile.cpp silently fell
+    # back to a hardcoded sm_80 instead of querying the actual GPU, despite
+    # the "JIT-R043 mirrors the ROCm block above" comment claiming parity.
+    # Moved inside this if(TENZOR_USE_MLIR_JIT) scope and un-gated from
+    # TENZOR_BUILD_CUDA to actually match the ROCm block's decoupling —
+    # nvidia-smi probing already works independently of whether the Tenzor
+    # CUDA backend itself is being built.
     set(_tenzor_default_cuda_target "")
     find_program(_TENZOR_NVIDIA_SMI nvidia-smi)
     if(_TENZOR_NVIDIA_SMI)

@@ -5,6 +5,7 @@
 
 #include "tenzor/jit/compile.hpp"
 #include "tenzor/jit/compiler.hpp"
+#include "tenzor/jit/autotune.hpp"  // R1-11: AutotuneModeGuard
 #include "tenzor/backend/dispatch_interceptor.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
@@ -319,6 +320,28 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
     }
 
     auto key = shape_key(inputs, /*grad_variant=*/false);
+
+    // R1-11: enable autotuned kernel-launch selection (CompiledKernel::launch,
+    // src/jit/codegen.cpp) for the duration of this call when the user
+    // requested max-autotune mode. Scoped via RAII so every return path below
+    // (the cache-hit fast path, incl. its reduce-overhead/CUDA-graph
+    // branches, and the cache-miss path further down) is covered without
+    // threading a flag through Graph/Node/FusionGroup down to the kernel
+    // launch. Two notes on current reach: (1) it is a no-op on the cache-miss
+    // path below, which only ever returns the eager trace result (see the
+    // JIT-008 comment further down), never invoking a compiled kernel launch;
+    // (2) today's ExtendedFusionPass-driven replay executes fused GPU nodes
+    // via execute_extended_fused/launch_raw (fixed launch geometry driven by
+    // the per-kind cost model in extended_codegen.cpp), not the plain
+    // FusionGroup/execute_fused/CompiledKernel::launch path this guard feeds
+    // -- launch_raw's geometry is tied to each kernel's generated shared-
+    // memory layout and is intentionally NOT autotuned here (that would need
+    // per-kind kernel-source verification, not just a launch-geometry
+    // change). This guard is still the correct, forward-compatible hook: any
+    // direct caller of execute_fused/CompiledKernel::launch (and any future
+    // plain-elementwise fusion pass built on FusionGroup) gets real
+    // autotuning for free the moment it runs under this scope.
+    AutotuneModeGuard autotune_guard(config_.mode == "max-autotune");
 
     // Fast path: look up the compiled module under the lock, copy the handle
     // out, then RELEASE the lock before executing. Previously mutex_ was held

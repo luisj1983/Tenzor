@@ -169,16 +169,18 @@ auto PatternMatcher::find_all(const Graph& graph) -> std::vector<FusionMatch> {
             for (auto& n : m->nodes) used.insert(n.get());
             matches.push_back(std::move(*m));
         // NOTE: SwiGLU / RotaryEmbedding / GeluVariant are intentionally NOT
-        // matched here. The extended-fusion executor (execute_extended_fused /
-        // ExtendedKernelCodegen::generate) has no generator or launch geometry
-        // for those FusionKinds — the ExtendedFusionGroup ABI carries none of
-        // the required structure (slice offsets, the second Linear's weights, or
-        // the cos/sin rotation tensors). A matched-but-ungeneratable kind is a
-        // hard runtime throw ("unsupported fusion kind") once codegen is the real
-        // execution path, and the SwiGLU cost model even actively selected it.
-        // Removing them from the matcher (and the cost model) makes their
-        // constituent ops run via normal, correct op dispatch instead. Element-
-        // wise GELU is still fused by the separate element-wise codegen path.
+        // matched here — those FusionKind values were removed entirely (R1-10,
+        // 2026-07-12; previously they existed but nothing ever matched or
+        // generated them). The extended-fusion executor (execute_extended_fused /
+        // ExtendedKernelCodegen::generate) never had a generator or launch
+        // geometry for them — the ExtendedFusionGroup ABI carries none of the
+        // required structure (slice offsets, the second Linear's weights, or
+        // the cos/sin rotation tensors). A matched-but-ungeneratable kind would
+        // have been a hard runtime throw ("unsupported fusion kind") once
+        // codegen is the real execution path, and the SwiGLU cost model even
+        // actively selected it. Their constituent ops run via normal, correct
+        // op dispatch instead. Element-wise GELU is still fused by the
+        // separate element-wise codegen path.
         } else if (auto m = match_small_mlp(graph, i, used)) {
             for (auto& n : m->nodes) used.insert(n.get());
             matches.push_back(std::move(*m));
@@ -833,13 +835,23 @@ auto PatternMatcher::match_small_mlp(const Graph& graph, size_t start_idx,
     if (n2->op_type() != OpType::Linear || used.count(n2.get())) return std::nullopt;
     if (!consumes_output(n1, n2)) return std::nullopt;
 
-    // Check hidden dimension constraint
-    if (!n0->outputs().empty()) {
+    // Check hidden dimension constraint. Must reject a non-positive `hidden`
+    // (this file's sentinel for a dynamic/unknown/invalid dim, see
+    // estimate_elements above) the same way match_gemm_epilogue's analogous
+    // per-column-bias check does (`cols > 0 && ...`) -- extended_codegen.cpp
+    // uses this value directly for CUDA/ROCm dynamic shared-memory sizing
+    // (`hidden_dim * dtype_size`, cast to unsigned) and as a kernel loop
+    // bound. hidden==0 would silently skip the hidden-layer computation
+    // (wrong result, output collapses to just bias2, no error); a negative
+    // value cast to unsigned would request a huge shared-mem allocation,
+    // failing the kernel launch -- either way, a GPU-only divergence from
+    // the correct (never-fused) CPU eager path for a degenerate MLP.
+    if (n0->outputs().empty()) return std::nullopt;
+    {
         auto& shape = n0->outputs()[0]->shape();
-        if (!shape.empty()) {
-            int64_t hidden = shape.back();
-            if (hidden > max_mlp_hidden_) return std::nullopt;
-        }
+        if (shape.empty()) return std::nullopt;
+        int64_t hidden = shape.back();
+        if (hidden <= 0 || hidden > max_mlp_hidden_) return std::nullopt;
     }
 
     FusionMatch match;
@@ -856,6 +868,36 @@ auto PatternMatcher::match_small_mlp(const Graph& graph, size_t start_idx,
 // Reduction chain: element-wise* -> reduction -> element-wise*
 // ============================================================================
 
+namespace {
+// R1-09: extended_codegen's generate_reduction (and its mirror,
+// ExtendedFusionPass::to_elem in compiler.cpp) can only lower a pre/post
+// element-wise step that is either a genuine UNARY op, or a Mul that is a
+// same-operand self-square (x*x) — a Mul/Add/Sub/Div with two DISTINCT
+// operands has no second data stream in the fused kernel's single-input
+// contract. match_reduction_chain used to accept anything is_elementwise()
+// allowed (including arbitrary binary ops), relying entirely on compiler.cpp
+// re-deriving and re-checking this same allowlist before committing the
+// fusion. That is a correct safety net today (a non-representable match is
+// discarded there, not mis-fused), but it means correctness for this matcher
+// rests on a second file staying in sync rather than being enforced at the
+// point of the match itself. Mirror match_layer_norm's self-square guard here
+// so an unrepresentable step is structurally rejected at match time too.
+auto is_reduction_representable_elem(const std::shared_ptr<Node>& n) -> bool {
+    switch (n->op_type()) {
+        case OpType::Exp: case OpType::Log: case OpType::Sqrt:
+        case OpType::Abs: case OpType::Neg:
+        case OpType::ReLU: case OpType::Sigmoid: case OpType::Tanh:
+        case OpType::GELU:
+            return true;
+        case OpType::Mul:
+            return n->inputs().size() == 2 &&
+                   n->inputs()[0].get() == n->inputs()[1].get();
+        default:
+            return false;
+    }
+}
+}  // namespace
+
 auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
                                             const std::unordered_set<Node*>& used)
     -> std::optional<FusionMatch> {
@@ -863,7 +905,7 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
 
     // Start must be an element-wise op followed eventually by a reduction
     auto& n0 = nodes[start_idx];
-    if (!is_elementwise(n0->op_type()) || used.count(n0.get())) return std::nullopt;
+    if (!is_reduction_representable_elem(n0) || used.count(n0.get())) return std::nullopt;
 
     std::vector<std::shared_ptr<Node>> matched = {n0};
     size_t idx = start_idx + 1;
@@ -883,10 +925,15 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
         if (!consumes_output(matched.back(), nk)) break;
 
         if (is_reduction(nk->op_type())) {
+            // The fused kernel reduces exactly ONE explicit axis (mirrors
+            // compiler.cpp's ExtendedFusionPass::run has_int_attr("dim")
+            // check) -- a full reduction (no "dim") or multi-axis ("dims")
+            // would silently reduce only the last axis if matched here.
+            if (!nk->has_int_attr("dim")) break;
             matched.push_back(nk);
             found_reduction = true;
             ++idx;
-        } else if (is_elementwise(nk->op_type()) && has_single_use(matched.back())) {
+        } else if (is_reduction_representable_elem(nk) && has_single_use(matched.back())) {
             matched.push_back(nk);
             ++idx;
         } else {
@@ -899,7 +946,7 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
     // Collect post-reduction element-wise ops
     while (idx < nodes.size() && matched.size() < 8) {
         auto& nk = nodes[idx];
-        if (used.count(nk.get()) || !is_elementwise(nk->op_type())) break;
+        if (used.count(nk.get()) || !is_reduction_representable_elem(nk)) break;
         if (!has_single_use(matched.back())) break;
         if (!consumes_output(matched.back(), nk)) break;
         matched.push_back(nk);

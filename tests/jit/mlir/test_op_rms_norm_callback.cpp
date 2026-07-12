@@ -4,6 +4,8 @@
 // all-ones weight when caller omitted it, and dispatches to
 // OpId::RMSNorm. Validated against hand-computed references.
 
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/jit/graph.hpp"
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/jit/mlir/iree_customcalls.hpp"
@@ -12,6 +14,7 @@
 #include "tenzor/jit/tracer.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/tenzor.hpp"
 
@@ -187,6 +190,85 @@ TEST(OpRMSNormCallback, EndToEndPluginPathMatchesEager) {
                     .item<float>();
     EXPECT_LT(diff, 1e-5f)
         << "plugin-path RMSNorm diverged from eager-dispatcher by " << diff;
+
+    std::error_code _ec;
+    std::filesystem::remove_all(opts.cache_dir, _ec);
+}
+
+TEST(OpRMSNormCallback, EndToEndPluginPathFloat64Coverage) {
+    ensure_core_init();
+    // Float64 coverage for the plugin (custom_call) path end-to-end:
+    // lower -> compile -> invoke in-process, compared against the raw op
+    // dispatch. The bit-exact eps-precision regression itself is covered
+    // deterministically by OpRMSNorm.EpsSurvivesFullDoublePrecisionBitExact
+    // (tests/jit/mlir/test_op_rms_norm.cpp), which decodes the emitted MLIR
+    // constant directly -- a full compile+execute round trip has its own
+    // numerical noise floor that makes it a poor tool for detecting a
+    // ULP-level precision regression, so this test's job is just to confirm
+    // the whole pipeline still produces a numerically correct Float64
+    // result end-to-end (test_jit_mlir_numeric_parity.cpp had no Float64
+    // RMSNorm coverage at all prior to this).
+    const std::vector<int64_t> x_shape{2, 4, 16};
+    const std::vector<int64_t> w_shape{16};
+    const double eps = 1e-6;
+
+    auto x_t = ::tenzor::full(x_shape, 0.0, ::tenzor::DType::Float64);
+    auto w_t = ::tenzor::full(w_shape, 0.0, ::tenzor::DType::Float64);
+    {
+        auto* xp = x_t.data<double>();
+        auto* wp = w_t.data<double>();
+        for (int64_t i = 0; i < x_t.numel(); ++i)
+            xp[i] = 0.05 * static_cast<double>(i % 13) - 0.2;
+        for (int64_t i = 0; i < w_t.numel(); ++i)
+            wp[i] = 0.7 + 0.01 * static_cast<double>(i);
+    }
+
+    // Reference computed via the raw op dispatch with `eps` set directly as a
+    // double attribute -- deliberately NOT going through
+    // cc::dispatch_rms_norm's backend_config string parsing, which this test
+    // is also exercising indirectly through the compiled path below.
+    ::tenzor::OpAttributes ref_attrs;
+    ref_attrs.set(::tenzor::AttrKey::Eps, eps);
+    const std::vector<::tenzor::Tensor> ref_inputs{x_t, w_t};
+    auto eager_out =
+        ::tenzor::dispatch<::tenzor::OpId::RMSNorm>(ref_inputs, ref_attrs)[0];
+
+    tzj::Graph g;
+    auto x_v = g.create_value("x", x_shape, ::tenzor::DType::Float64,
+                              ::tenzor::Device::cpu());
+    auto w_v = g.create_value("w", w_shape, ::tenzor::DType::Float64,
+                              ::tenzor::Device::cpu());
+    g.set_inputs({x_v, w_v});
+    auto node = g.create_node(tzj::OpType::RMSNorm);
+    node->add_input(x_v); node->add_input(w_v);
+    auto out = g.create_value("o", x_shape, ::tenzor::DType::Float64,
+                              ::tenzor::Device::cpu());
+    node->add_output(out);
+    node->set_attr("eps", eps);
+    g.add_node(node);
+    g.set_outputs({out});
+
+    tzm::GraphToMLIR lowerer;
+    lowerer.set_plugin_enabled(true);
+    const std::string mlir = lowerer.lower(g);
+    ASSERT_NE(mlir.find("call @tenzor_plugin.rms_norm"),
+              std::string::npos) << mlir;
+
+    tzm::CompileOptions opts;
+    opts.target         = "llvm-cpu";
+    opts.plugin_enabled = true;
+    opts.cache_dir      = make_tmp_cache_dir_rms();
+    auto artifact = tzm::compile_mlir(mlir, opts);
+    auto invoker  = tzm::IreeInvoker::load(
+        artifact, tzm::IreeInvoker::Mode::InProcess);
+
+    auto outs = invoker->invoke({x_t, w_t});
+    ASSERT_EQ(outs.size(), 1u);
+    auto diff = ::tenzor::max(::tenzor::abs(eager_out - outs[0]))
+                    .item<double>();
+    EXPECT_LT(diff, 1e-9)
+        << "plugin-path Float64 RMSNorm diverged from the double-precision "
+           "reference by " << diff;
 
     std::error_code _ec;
     std::filesystem::remove_all(opts.cache_dir, _ec);

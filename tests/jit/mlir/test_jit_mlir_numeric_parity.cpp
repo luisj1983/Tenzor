@@ -23,6 +23,7 @@
 #include "tenzor/jit/mlir/iree_compile.hpp"
 #include "tenzor/nn/functional.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
+#include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -253,6 +254,78 @@ TEST(MlirNumericParity, Float64SoftmaxWideAxisAccumulates) {
     const Variable eager = nn::softmax(x, -1);
     assert_parity_over_targets("F64 softmax wide-axis", fn, x, eager.tensor(),
                                1e-9);
+}
+
+// R1-13 coverage gap (the exact gap that hid R1-04): this file had NO RMSNorm
+// test at all, so the eps-narrowed-to-float32 bug in the MLIR plugin path
+// went undetected here. test_op_rms_norm.cpp/test_op_rms_norm_callback.cpp
+// added targeted llvm-cpu-only coverage for the fix itself; this test
+// extends that to every REAL IREE target available on this host (via
+// assert_parity_over_targets/available_iree_targets — cuda/rocm/vulkan-spirv
+// in addition to llvm-cpu), confirming the fix holds on actual GPU hardware,
+// not just the CPU target.
+TEST(MlirNumericParity, Float64RMSNormAccumulatesFullPrecision) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    const int64_t D = 16;
+    auto rms = std::make_shared<nn::RMSNorm>(D);
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [rms](const Variable& x) -> Variable { return rms->forward(x); });
+
+    Tensor x_t = ::tenzor::randn({4, D}, DType::Float32, Device::cpu())
+                     .to(DType::Float64);
+    Variable x(x_t, /*requires_grad=*/false);
+
+    const Variable eager = rms->forward(x);
+    // See OpRMSNorm.EpsSurvivesFullDoublePrecisionBitExact (test_op_rms_norm.cpp)
+    // for the deterministic bit-exact version of the eps-precision regression
+    // check; this test additionally exercises the full lower->compile->invoke
+    // pipeline on every REAL IREE target available on this host (cuda/rocm/
+    // vulkan-spirv in addition to llvm-cpu).
+    assert_parity_over_targets("F64 RMSNorm full-precision eps", fn, x,
+                               eager.tensor(), 1e-9);
+}
+
+// R1-13 coverage gap: no Complex64/Complex128 numeric-parity test existed
+// despite dedicated complex-literal emission code in lowering.cpp
+// (emit_complex_literal/complex_component_dtype). A simple elementwise
+// Complex64 op through the MLIR path, compared to eager, exercises that
+// emission path end-to-end.
+TEST(MlirNumericParity, Complex64ElementwiseMatchesEager) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [](const Variable& x) -> Variable { return (x * x) + x; });
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+    Tensor x_t({4}, DType::Complex64, Device::cpu());
+    {
+        auto* p = x_t.data<std::complex<float>>();
+        p[0] = {1.5f, -2.25f};
+        p[1] = {-0.75f, 3.125f};
+        p[2] = {2.0f, 0.0f};
+        p[3] = {0.0f, -1.0f};
+    }
+    Variable x(x_t, /*requires_grad=*/false);
+
+    const Variable eager = (x * x) + x;
+    mj::reset_cache_stats();
+    Variable out;
+    ASSERT_NO_THROW({ out = compiled(x); })
+        << "Complex64 elementwise inference must not throw";
+    ASSERT_GE(mj::cache_stats().misses, 1u)
+        << "Complex64 elementwise did NOT run through IREE (silent eager "
+           "fallback makes the check below vacuous)";
+
+    const auto diff =
+        ::tenzor::max(::tenzor::abs(eager.tensor() - out.tensor())).item<float>();
+    EXPECT_LT(diff, 1e-4f)
+        << "compiled Complex64 result diverged from eager by " << diff;
 }
 
 // M3 — F16 LayerNorm over a long axis: mean/variance must accumulate in F32.

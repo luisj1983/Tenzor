@@ -526,6 +526,201 @@ TEST_F(FusionPassesTest, GemmEpilogue_PerColumnBiasStillFuses) {
 }
 
 // ============================================================================
+// SmallMLP matcher — hidden<=0 must NOT fuse (R1-01 regression).
+//
+// match_small_mlp's hidden-dim bound check used to only reject
+// `hidden > max_mlp_hidden_`, not `hidden <= 0`. ExtendedFusionPass::run
+// inherits whatever hidden value comes through, and extended_codegen.cpp
+// uses it directly for CUDA/ROCm dynamic shared-memory sizing and a kernel
+// loop bound: hidden==0 silently drops the hidden-layer computation (wrong
+// result), a negative value cast to unsigned requests a huge allocation
+// (kernel launch failure) -- either way, a GPU-only divergence from the
+// (never-fused) CPU eager path for a degenerate/corrupted model. A positive
+// hidden dim must still fuse correctly (guard must not over-reject).
+// ============================================================================
+namespace {
+// Build: Linear1(x[4,16], w1[hidden,16], b1[hidden]) -> GELU ->
+// Linear2(w2[8,hidden], b2[8]). Returns the Linear1 node.
+auto build_small_mlp(Graph& g, const Device& dev, int64_t hidden)
+    -> std::shared_ptr<Node> {
+    auto x  = g.create_value("x",  {4, 16}, DType::Float32, dev);
+    auto w1 = g.create_value("w1", {hidden, 16}, DType::Float32, dev);
+    auto b1 = g.create_value("b1", {hidden}, DType::Float32, dev);
+    auto lin1 = g.create_node(OpType::Linear, "linear1");
+    auto lin1_out = g.create_value("lin1_out", {4, hidden}, DType::Float32, dev);
+    lin1->add_input(x); lin1->add_input(w1); lin1->add_input(b1);
+    lin1->add_output(lin1_out); lin1_out->set_node(lin1);
+    g.add_node(lin1);
+
+    auto act_node = g.create_node(OpType::GELU, "act");
+    auto act = g.create_value("act_out", {4, hidden}, DType::Float32, dev);
+    act_node->add_input(lin1_out); act_node->add_output(act);
+    act->set_node(act_node); g.add_node(act_node);
+
+    auto w2 = g.create_value("w2", {8, hidden}, DType::Float32, dev);
+    auto b2 = g.create_value("b2", {8}, DType::Float32, dev);
+    auto lin2 = g.create_node(OpType::Linear, "linear2");
+    auto lin2_out = g.create_value("lin2_out", {4, 8}, DType::Float32, dev);
+    lin2->add_input(act); lin2->add_input(w2); lin2->add_input(b2);
+    lin2->add_output(lin2_out); lin2_out->set_node(lin2);
+    g.add_node(lin2);
+
+    g.set_inputs({x});
+    g.set_outputs({lin2_out});
+    return lin1;
+}
+}  // namespace
+
+TEST_F(FusionPassesTest, SmallMLP_ZeroHiddenDimNotFused) {
+    Graph graph;
+    auto lin1 = build_small_mlp(graph, device_, /*hidden=*/0);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    for (const auto& m : matches) {
+        EXPECT_FALSE(m.kind == FusionKind::SmallMLP &&
+                     !m.nodes.empty() && m.nodes[0].get() == lin1.get())
+            << "a Linear->GELU->Linear MLP with hidden==0 was wrongly fused "
+               "into SmallMLP";
+    }
+}
+
+TEST_F(FusionPassesTest, SmallMLP_NegativeHiddenDimNotFused) {
+    Graph graph;
+    auto lin1 = build_small_mlp(graph, device_, /*hidden=*/-1);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    for (const auto& m : matches) {
+        EXPECT_FALSE(m.kind == FusionKind::SmallMLP &&
+                     !m.nodes.empty() && m.nodes[0].get() == lin1.get())
+            << "a Linear->GELU->Linear MLP with hidden==-1 was wrongly fused "
+               "into SmallMLP";
+    }
+}
+
+TEST_F(FusionPassesTest, SmallMLP_PositiveHiddenDimStillFuses) {
+    Graph graph;
+    auto lin1 = build_small_mlp(graph, device_, /*hidden=*/32);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    bool found = false;
+    for (const auto& m : matches) {
+        if (m.kind == FusionKind::SmallMLP && !m.nodes.empty() &&
+            m.nodes[0].get() == lin1.get()) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found)
+        << "a genuine Linear->GELU->Linear MLP with a valid hidden dim must "
+           "still fuse into SmallMLP (guard over-rejected a real match)";
+}
+
+// ============================================================================
+// ReductionChain matcher — must only match pre/post element-wise steps
+// extended_codegen's generate_reduction can actually lower (R1-09 regression).
+//
+// generate_reduction (and compiler.cpp's ExtendedFusionPass::to_elem, which
+// independently re-derives the same allowlist before committing a fusion) can
+// only lower a genuine UNARY op or a same-operand self-square Mul(x,x) — a
+// binary op with a DISTINCT second operand has no second data stream in the
+// fused kernel's single-input contract. match_reduction_chain used to accept
+// any is_elementwise() op (including arbitrary binary ops) and any reduction
+// op type regardless of its axis attribute, relying entirely on compiler.cpp
+// staying in sync to catch what it structurally shouldn't have matched.
+// ============================================================================
+namespace {
+// Build: Mul(x,x)[optional self-square] -> Sum(dim=-1) -> Sqrt[optional unary
+// post-op]. `pre_distinct` swaps the pre-op for Add(x, y) with a genuine
+// distinct second operand; `reduction_has_dim` controls whether the Sum node
+// carries the required single-axis "dim" attribute.
+auto build_reduction_chain(Graph& g, const Device& dev, bool pre_distinct,
+                          bool reduction_has_dim) -> std::shared_ptr<Node> {
+    const std::vector<int64_t> shape{4, 8};
+    const std::vector<int64_t> red_shape{4, 1};
+    auto x = g.create_value("x", shape, DType::Float32, dev);
+
+    std::shared_ptr<Node> pre_node;
+    std::shared_ptr<Value> pre_out;
+    if (pre_distinct) {
+        auto y = g.create_value("y", shape, DType::Float32, dev);
+        pre_node = g.create_node(OpType::Add, "pre_add");
+        pre_out = g.create_value("pre_out", shape, DType::Float32, dev);
+        pre_node->add_input(x); pre_node->add_input(y);
+    } else {
+        pre_node = g.create_node(OpType::Mul, "pre_selfsquare");
+        pre_out = g.create_value("pre_out", shape, DType::Float32, dev);
+        pre_node->add_input(x); pre_node->add_input(x);  // genuine self-square
+    }
+    pre_node->add_output(pre_out); pre_out->set_node(pre_node); g.add_node(pre_node);
+
+    auto sum_node = g.create_node(OpType::Sum, "sum");
+    auto sum_out = g.create_value("sum_out", red_shape, DType::Float32, dev);
+    sum_node->add_input(pre_out); sum_node->add_output(sum_out);
+    sum_out->set_node(sum_node);
+    if (reduction_has_dim) sum_node->set_int_attr("dim", -1);
+    g.add_node(sum_node);
+
+    auto post_node = g.create_node(OpType::Sqrt, "post_sqrt");
+    auto post_out = g.create_value("post_out", red_shape, DType::Float32, dev);
+    post_node->add_input(sum_out); post_node->add_output(post_out);
+    post_out->set_node(post_node); g.add_node(post_node);
+
+    g.set_inputs(pre_distinct ? std::vector<std::shared_ptr<Value>>{x, pre_node->inputs()[1]}
+                              : std::vector<std::shared_ptr<Value>>{x});
+    g.set_outputs({post_out});
+    return pre_node;
+}
+}  // namespace
+
+TEST_F(FusionPassesTest, ReductionChain_DistinctOperandPreOpNotFused) {
+    Graph graph;
+    auto pre_node = build_reduction_chain(graph, device_, /*pre_distinct=*/true,
+                                          /*reduction_has_dim=*/true);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    for (const auto& m : matches) {
+        EXPECT_FALSE(m.kind == FusionKind::Reduction && !m.nodes.empty() &&
+                     m.nodes[0].get() == pre_node.get())
+            << "Add(x,y) with a distinct second operand was wrongly fused as "
+               "a Reduction pre-op — generate_reduction cannot lower this";
+    }
+}
+
+TEST_F(FusionPassesTest, ReductionChain_NoAxisAttrNotFused) {
+    Graph graph;
+    auto pre_node = build_reduction_chain(graph, device_, /*pre_distinct=*/false,
+                                          /*reduction_has_dim=*/false);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    for (const auto& m : matches) {
+        EXPECT_FALSE(m.kind == FusionKind::Reduction && !m.nodes.empty() &&
+                     m.nodes[0].get() == pre_node.get())
+            << "a Sum with no \"dim\" attribute (full/unknown-axis reduction) "
+               "was wrongly fused as a Reduction — the fused kernel reduces "
+               "exactly one explicit axis";
+    }
+}
+
+TEST_F(FusionPassesTest, ReductionChain_SelfSquareWithAxisStillFuses) {
+    Graph graph;
+    auto pre_node = build_reduction_chain(graph, device_, /*pre_distinct=*/false,
+                                          /*reduction_has_dim=*/true);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    bool found = false;
+    for (const auto& m : matches) {
+        if (m.kind == FusionKind::Reduction && !m.nodes.empty() &&
+            m.nodes[0].get() == pre_node.get()) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found)
+        << "a genuine self-square Mul(x,x) -> Sum(dim) -> Sqrt chain must "
+           "still fuse into Reduction (guard over-rejected a real match)";
+}
+
+// ============================================================================
 // Matcher guards: non-last-axis softmax/norm must NOT fuse (the fused kernels
 // only support the last axis and would crash / read wrong strided elements with
 // no fallback — F034/F035), and a plain std/variance subgraph must NOT be

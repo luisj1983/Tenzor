@@ -124,6 +124,16 @@ add_executable(test_graph_viz_schema test_graph_viz_schema.cpp)
 target_link_libraries(test_graph_viz_schema PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_graph_viz_schema LABELS "jit" DISCOVERY_TIMEOUT 60)
 
+# R1-12: MemoryPlanner::compute_live_ranges/greedy_assign (buffer-aliasing/
+# slot-assignment logic, previously untested in isolation) plus
+# MemoryPlanningPass/RematerializationPass Compiler-level wiring. Named
+# test_jit_memory_planner (not test_memory_planner) to avoid colliding with
+# the unrelated tests/lite/test_memory_planner.cpp target (tflite-style lite
+# memory planner, a completely different subsystem).
+add_executable(test_jit_memory_planner test_jit_memory_planner.cpp)
+target_link_libraries(test_jit_memory_planner PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_memory_planner LABELS "jit" DISCOVERY_TIMEOUT 60)
+
 # JIT-R016/JIT-R017: MemorySwapPlanner consumer-redirect consistency
 # (subgraph-aware node search) and device-gated swap candidacy. Planner is
 # currently unwired (no Compiler/codegen path invokes it), so this is its

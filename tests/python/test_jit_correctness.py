@@ -209,6 +209,51 @@ def test_jit_show_graph_after_temp_input():
     assert isinstance(s, str)
 
 
+def test_jit_show_graph_single_specialization_accepts_new_example():
+    """R1-07: a function with static args but only ONE real-call
+    specialization so far has no ambiguity — show_graph must accept a brand
+    new tensor example for it without raising, and _tz_variants must not be
+    inflated by the initial (never-called) seed variant."""
+    @tz.jit
+    def f(x, n):
+        return x * n
+
+    x1 = tz.randn([4])
+    f(x1, 3)
+    assert len(f._tz_variants) == 1, (
+        "the seed (pre-first-call) variant must not count toward the "
+        "real specialization count")
+
+    x2 = tz.randn([4])
+    s = tz.jit.show_graph(f, x2)   # must NOT raise
+    assert isinstance(s, str)
+
+
+def test_jit_show_graph_multi_specialization_explicit_example_raises():
+    """R1-07 regression: once a static-argument function has been called
+    with TWO OR MORE distinct static-value combinations, show_graph's
+    example arguments (tensor-only) cannot express which specialization the
+    caller wants — passing an explicit example must raise a clear error
+    instead of silently pairing it with whichever specialization happened to
+    run most recently."""
+    @tz.jit
+    def f(x, n):
+        return x * n
+
+    x = tz.randn([4])
+    f(x, 3)
+    f(x, 5)
+    assert len(f._tz_variants) == 2
+
+    with pytest.raises(ValueError, match="different variants"):
+        tz.jit.show_graph(f, x)
+
+    # No examples (reusing the last real call's stash) must still work —
+    # the ambiguity only applies to NEW explicit examples.
+    s = tz.jit.show_graph(f)
+    assert isinstance(s, str)
+
+
 def test_jit_static_arg_value_key_and_rejects_nonprimitive():
     """Scalar static args are keyed by value (not id-based repr); a
     non-primitive static arg raises a clear TypeError rather than mis-keying."""

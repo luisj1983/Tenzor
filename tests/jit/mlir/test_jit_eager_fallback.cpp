@@ -102,7 +102,14 @@ auto device_for_target(const std::string& target) -> ::tenzor::Device {
 
 void run_c2_unlowered_op(const std::string& target) {
     ensure_core_init();
+    // R2-03: escalate to FAIL() under TENZOR_REQUIRE_MULTI_BACKEND=1 instead
+    // of a bare skip with no signal — this project's convention for an
+    // environment that's supposed to have GPU hardware but doesn't.
     if (!target_runnable(target)) {
+        if (::tenzor::testing::golden::require_multi_backend() && target != "llvm-cpu") {
+            FAIL() << "target " << target << " required by "
+                      "TENZOR_REQUIRE_MULTI_BACKEND but not runnable here";
+        }
         GTEST_SKIP() << "target not runnable here: " << target;
     }
 
@@ -119,6 +126,11 @@ void run_c2_unlowered_op(const std::string& target) {
             backends.begin(), backends.end(),
             [&](const ::tenzor::Device& d) { return d.type == dev.type; });
         if (!have_backend) {
+            if (::tenzor::testing::golden::require_multi_backend()) {
+                FAIL() << "Tenzor backend for target " << target
+                       << " required by TENZOR_REQUIRE_MULTI_BACKEND but not "
+                          "registered";
+            }
             GTEST_SKIP() << "no Tenzor backend registered for target: " << target;
         }
     }
@@ -272,9 +284,7 @@ TEST(JitEagerFallback, UnmappableTargetDegradesToEager) {
 // branch directly on genuine OneAPI hardware instead of a stand-in.
 TEST(JitEagerFallback, UnmappableTargetDegradesToEager_RealOneapiC1) {
     ensure_core_init();
-    if (!::tenzor::testing::has_oneapi()) {
-        GTEST_SKIP() << "no OneAPI backend";
-    }
+    REQUIRE_BACKEND_OR_SKIP("oneapi");
     auto add_fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return x + x;
     };
@@ -332,6 +342,10 @@ TEST(JitEagerFallback, UnmappableTargetDegradesToEager_RealOneapiC1) {
 TEST(JitVulkanAlias, CompileMlirNormalizesVulkanAlias) {
     ensure_core_init();
     if (!tj::iree_compile_supports("vulkan-spirv")) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "vulkan-spirv iree-compile support required by "
+                      "TENZOR_REQUIRE_MULTI_BACKEND but unavailable";
+        }
         GTEST_SKIP() << "iree-compile dist lacks vulkan-spirv";
     }
     const fs::path tmp = make_tmp_dir();
@@ -415,6 +429,10 @@ TEST(JitDeviceOrdinal, ResolveHalOrdinalIsFamilyAware) {
 TEST(JitRocmArch, DetectedArchMatchesDeviceAndCompiles) {
     ensure_core_init();
     if (!tj::iree_can_initialize_default_device("hip")) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "ROCm/HIP device required by TENZOR_REQUIRE_MULTI_BACKEND "
+                      "but unavailable";
+        }
         GTEST_SKIP() << "no ROCm/HIP device";
     }
     const std::string arch = tj::detect_rocm_gfx_arch(0);
@@ -425,6 +443,11 @@ TEST(JitRocmArch, DetectedArchMatchesDeviceAndCompiles) {
         << "expected a gfx ISA name, got: " << arch;
 
     if (!tj::iree_compile_supports("rocm")) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "rocm iree-compile support required by "
+                      "TENZOR_REQUIRE_MULTI_BACKEND but unavailable (arch "
+                      "derivation still verified above)";
+        }
         GTEST_SKIP() << "iree-compile dist lacks rocm (arch derivation still "
                         "verified above)";
     }
@@ -594,6 +617,62 @@ TEST(JitRocmArch, InProcessSubprocessParity_ReductionOnLlvmCpu) {
         << "InProcess (local-task, multithreaded) and Subprocess "
            "(local-sync, single-threaded) diverged on the same compiled "
            "llvm-cpu reduction; diff=" << diff;
+
+    std::error_code ec;
+    fs::remove_all(opts.cache_dir, ec);
+}
+
+// R1-06 regression: a multi-output subprocess invocation where one output is
+// BFloat16 (which has no numpy encoding in iree-run-module) used to silently
+// fall back to lossy ~6-significant-figure ASCII parsing for ALL outputs,
+// including a co-produced Float64 output that needs full precision. This is
+// currently unreachable via CompiledFunction (which enforces exactly one
+// @main output), so this test drives IreeInvoker directly with
+// set_expected_outputs(2) to exercise the guard added in invoke_subprocess.
+TEST(JitEagerFallback, MultiOutputSubprocessBf16WithFloat64ThrowsInsteadOfSilentlyDegrading) {
+    ensure_core_init();
+
+    ::tenzor::jit::Graph g;
+    auto x_v = g.create_value("x", {4}, ::tenzor::DType::Float64,
+                              ::tenzor::Device::cpu());
+    g.set_inputs({x_v});
+
+    auto cast_node = g.create_node(::tenzor::jit::OpType::Cast);
+    cast_node->add_input(x_v);
+    auto bf16_out = g.create_value("bf16_out", {4}, ::tenzor::DType::BFloat16,
+                                   ::tenzor::Device::cpu());
+    cast_node->add_output(bf16_out);
+    g.add_node(cast_node);
+
+    auto add_node_ = g.create_node(::tenzor::jit::OpType::Add);
+    add_node_->add_input(x_v);
+    add_node_->add_input(x_v);
+    auto f64_out = g.create_value("f64_out", {4}, ::tenzor::DType::Float64,
+                                  ::tenzor::Device::cpu());
+    add_node_->add_output(f64_out);
+    g.add_node(add_node_);
+
+    g.set_outputs({bf16_out, f64_out});
+
+    tj::GraphToMLIR lowerer;
+    const std::string mlir = lowerer.lower(g);
+    ASSERT_NE(mlir.find("func.func @main"), std::string::npos) << mlir;
+
+    tj::CompileOptions opts;
+    opts.target    = "llvm-cpu";
+    opts.cache_dir = make_tmp_dir();
+    tj::CompiledArtifact artifact;
+    ASSERT_NO_THROW({ artifact = tj::compile_mlir(mlir, opts); });
+
+    auto invoker =
+        tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::Subprocess);
+    invoker->set_expected_outputs(2);
+
+    auto x_t = ::tenzor::full({4}, 0.1, ::tenzor::DType::Float64);
+    EXPECT_THROW({ (void)invoker->invoke({x_t}); }, std::exception)
+        << "a multi-output subprocess invocation with a co-produced BFloat16 "
+           "output must not silently return a precision-degraded Float64 "
+           "result";
 
     std::error_code ec;
     fs::remove_all(opts.cache_dir, ec);

@@ -7,7 +7,9 @@
 #include <cstdlib>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/codegen.hpp>
+#include <tenzor/jit/autotune.hpp>
 #include <cmath>
+#include <filesystem>
 #include <vector>
 
 using namespace tenzor;
@@ -42,6 +44,23 @@ auto available_gpu_devices() -> std::vector<Device> {
                       "present for GPU codegen test";                          \
         GTEST_SKIP() << "no GPU backend present";                             \
     } while (0)
+
+// R1-11: AutotuneCache::save_default()/load_default() persist to a REAL file
+// under the user's home directory (~/.tenzor/autotune_cache.json), and
+// CompiledKernel::launch() loads it lazily (once per process). A stale entry
+// left there by an earlier process (a prior test binary invocation, or real
+// use of this library) would let a "cache miss" test silently turn into a
+// cache HIT via disk, never exercising the benchmarking loop this test wants
+// to prove works. This guard removes the file before AND after the test so
+// each run deterministically starts from (and leaves behind) a clean slate.
+struct ScopedAutotuneDiskCache {
+    ScopedAutotuneDiskCache() { remove_file(); }
+    ~ScopedAutotuneDiskCache() { remove_file(); }
+    static void remove_file() {
+        std::error_code ec;
+        std::filesystem::remove(AutotuneCache::default_path(), ec);
+    }
+};
 }  // namespace
 
 class CodegenTestEnv : public ::testing::Environment {
@@ -309,6 +328,94 @@ TEST(Codegen, ExecuteFusedNaNPropagationAllBackends) {
         check("ClampMax", ref_cmax, g_cmax, {cpu.to(dev)}, dev);
         check("Max", ref_max, g_max, {cpu.to(dev), bt.to(dev)}, dev);
         check("Min", ref_min, g_min, {cpu.to(dev), bt.to(dev)}, dev);
+    }
+}
+
+// =========================================================================
+// R1-11: autotune wiring tests
+// =========================================================================
+
+// With AutotuneModeGuard active, a cache-miss launch benchmarks every
+// candidate block size (real GPU-timed launches, see CompiledKernel::launch's
+// do_launch comment) and records a valid entry in AutotuneCache -- and the
+// computed result is unaffected: every candidate computes the identical
+// grid-stride-loop result, only launch geometry differs.
+TEST(Codegen, AutotuneModePopulatesCacheAndMatchesEager) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    ScopedAutotuneDiskCache scoped_disk_cache;
+    AutotuneCache::instance().clear();
+
+    auto group = build_fusion({
+        {ElemOp::Relu, 0, -1, 0.0},
+        {ElemOp::MulScalar, -1, -1, 2.0},
+    }, 1, DType::Float32);
+
+    std::vector<float> in(4096);
+    for (size_t i = 0; i < in.size(); ++i) in[i] = -2.0f + 4.0f * (i / 4096.0f);
+    Tensor cpu = from_data(in.data(), {4096});
+
+    for (const auto& dev : devs) {
+        Tensor gpu = cpu.to(dev);
+        Tensor out;
+        {
+            ASSERT_FALSE(autotune_mode_active());
+            AutotuneModeGuard guard(true);
+            ASSERT_TRUE(autotune_mode_active());
+            out = execute_fused(group, {gpu}).to(Device::cpu()).contiguous();
+        }
+        ASSERT_FALSE(autotune_mode_active());
+        const float* o = out.data<float>();
+        for (size_t i = 0; i < in.size(); ++i) {
+            float relu = in[i] < 0.0f ? 0.0f : in[i];
+            float ref = relu * 2.0f;
+            EXPECT_NEAR(o[i], ref, 1e-5f) << dev.to_string() << " i=" << i;
+        }
+        EXPECT_GT(AutotuneCache::instance().size(), 0u)
+            << "max-autotune benchmarking did not record any cache entry for "
+            << dev.to_string();
+    }
+}
+
+// A cache entry recorded under autotune mode is REUSED by a later call that is
+// NOT itself running under max-autotune -- proving the AutotuneCache lookup
+// (not just the mode flag) drives the block-size choice, and that reuse
+// still produces a correct result without re-benchmarking (cache size is
+// unchanged after the second call).
+TEST(Codegen, AutotuneCacheEntryReusedWithoutModeActive) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    ScopedAutotuneDiskCache scoped_disk_cache;
+    AutotuneCache::instance().clear();
+
+    auto group = build_fusion({
+        {ElemOp::Neg, 0, -1, 0.0},
+    }, 1, DType::Float32);
+
+    std::vector<float> in(2048, 1.0f);
+    Tensor cpu = from_data(in.data(), {2048});
+
+    for (const auto& dev : devs) {
+        Tensor gpu = cpu.to(dev);
+        {
+            AutotuneModeGuard guard(true);
+            (void)execute_fused(group, {gpu});
+        }
+        size_t size_after_autotune = AutotuneCache::instance().size();
+        ASSERT_GT(size_after_autotune, 0u);
+
+        // Second call: autotune mode NOT active. Must reuse the cached
+        // choice rather than re-benchmarking (cache size stays the same) and
+        // must still produce a correct result.
+        ASSERT_FALSE(autotune_mode_active());
+        auto out = execute_fused(group, {gpu}).to(Device::cpu()).contiguous();
+        EXPECT_EQ(AutotuneCache::instance().size(), size_after_autotune);
+        const float* o = out.data<float>();
+        for (int i = 0; i < 2048; ++i) EXPECT_NEAR(o[i], -1.0f, 1e-6f);
     }
 }
 

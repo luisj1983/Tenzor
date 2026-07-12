@@ -101,7 +101,8 @@ auto CompiledModule::compute_shape_key(const std::vector<Variable>& inputs) -> s
 
 auto CompiledModule::throw_if_loaded_shape_mismatch(
     const std::vector<std::vector<int64_t>>& call_shapes,
-    const std::vector<int>& call_dtypes) const -> void {
+    const std::vector<int>& call_dtypes,
+    const std::vector<Device>& call_devices) const -> void {
     // Only loaded modules that cannot retrace are guarded. If dynamic dims were
     // configured (via mark_dynamic_dims after load) or a retrace path exists, the
     // module can adapt and this guard does not apply.
@@ -109,21 +110,26 @@ auto CompiledModule::throw_if_loaded_shape_mismatch(
         return;
     }
     if (call_shapes == loaded_input_shapes_ &&
-        call_dtypes == loaded_input_dtypes_) {
+        call_dtypes == loaded_input_dtypes_ &&
+        call_devices == loaded_input_devices_) {
         return;
     }
     // A loaded module bakes its constants (weights, folded biases) at the
-    // trace-time DTYPE; the loaded path never consults compute_shape_key's dtype
-    // component, so a same-shape/different-dtype call would replay e.g. Float32
-    // constants against Float64 activations — a confusing downstream dispatch
-    // error or silently-wrong precision. Guard shape AND dtype (JIT-F030).
+    // trace-time DEVICE and DTYPE; the loaded path never consults
+    // compute_shape_key's device/dtype components, so a same-shape call from a
+    // different device or dtype would replay e.g. CUDA-resident/Float32
+    // constants against a CPU/Float64 input — a confusing downstream dispatch
+    // error, or (for an unfused graph, whose nodes/constants get silently
+    // relocated to the caller's device by Graph::forward's device-portability
+    // path) a loaded module quietly ignoring which device it was specialized
+    // for. Guard shape, dtype, AND device (JIT-F030, R1-02).
     throw std::runtime_error(
-        "CompiledModule: input shape or dtype differs from the serialized trace "
-        "and this module was loaded from disk, which cannot retrace (the source "
-        "module is not serialized). Replaying would silently use the baked "
-        "trace-time shapes/dtypes. Re-trace/re-export the module for the new "
-        "shape/dtype, or call mark_dynamic_dims() on the loaded module before "
-        "forwarding.");
+        "CompiledModule: input shape, dtype, or device differs from the "
+        "serialized trace and this module was loaded from disk, which cannot "
+        "retrace (the source module is not serialized). Replaying would "
+        "silently use the baked trace-time shapes/dtypes/device. Re-trace/"
+        "re-export the module for the new shape/dtype/device, or call "
+        "mark_dynamic_dims() on the loaded module before forwarding.");
 }
 
 auto CompiledModule::set_traced_signature(const std::vector<Variable>& example_inputs)
@@ -177,13 +183,14 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
         graph_->bind_symbolic_shapes(env);
     }
 
-    // A loaded (non-retraceable) module must fail loudly on a shape change
-    // rather than replay a graph baked at the serialized trace shape.
+    // A loaded (non-retraceable) module must fail loudly on a shape, dtype, or
+    // device change rather than replay a graph baked at the serialized trace.
     {
         auto s = input.tensor().shape();
         throw_if_loaded_shape_mismatch(
             {std::vector<int64_t>(s.begin(), s.end())},
-            {static_cast<int>(input.tensor().dtype())});
+            {static_cast<int>(input.tensor().dtype())},
+            {input.tensor().device()});
     }
 
     // Device/dtype mismatch retrace: if the current graph was traced with a
@@ -363,14 +370,17 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     {
         std::vector<std::vector<int64_t>> call_shapes;
         std::vector<int> call_dtypes;
+        std::vector<Device> call_devices;
         call_shapes.reserve(inputs.size());
         call_dtypes.reserve(inputs.size());
+        call_devices.reserve(inputs.size());
         for (const auto& v : inputs) {
             auto s = v.tensor().shape();
             call_shapes.emplace_back(s.begin(), s.end());
             call_dtypes.push_back(static_cast<int>(v.tensor().dtype()));
+            call_devices.push_back(v.tensor().device());
         }
-        throw_if_loaded_shape_mismatch(call_shapes, call_dtypes);
+        throw_if_loaded_shape_mismatch(call_shapes, call_dtypes, call_devices);
     }
 
     auto key = compute_shape_key(inputs);
@@ -595,6 +605,23 @@ auto CompiledModule::save(const std::string& path) const -> void {
         }
         graph_->set_string_metadata("__tenzor_dynamic_dims__", encoded);
     }
+    // R1-02: serialize each input's trace-time device the same side-channel way
+    // F031 preserves dynamic dims, since GraphWriter::write_values always emits
+    // Device::Type::CPU for portability (a deliberate, separate design choice —
+    // it lets a graph traced on one backend replay on another) and so drops the
+    // device this in-memory graph_ was actually traced/frozen on. Without this,
+    // a loaded module has no record of its original device, and the loaded-
+    // module compatibility guard (throw_if_loaded_shape_mismatch) cannot detect
+    // a same-shape/same-dtype call arriving on a different device than the one
+    // this module's frozen constants were specialized for.
+    {
+        std::string encoded;
+        for (const auto& in : graph_->inputs()) {
+            if (!encoded.empty()) encoded += ';';
+            if (in) encoded += in->device().to_string();
+        }
+        graph_->set_string_metadata("__tenzor_input_devices__", encoded);
+    }
     // Save the graph using existing serialization
     save_graph(*graph_, path);
 }
@@ -606,10 +633,35 @@ auto CompiledModule::load(const std::string& path) -> std::shared_ptr<CompiledMo
     }
     auto module = std::make_shared<CompiledModule>(graph);
     // Restore user KV metadata that was serialized with the graph (skipping the
-    // internal dynamic-dims key, which is not user metadata).
+    // internal dynamic-dims / input-devices keys, which are not user metadata).
     for (const auto& [key, value] : graph->string_metadata()) {
-        if (key == "__tenzor_dynamic_dims__") continue;
+        if (key == "__tenzor_dynamic_dims__" || key == "__tenzor_input_devices__") {
+            continue;
+        }
         module->add_metadata(key, value);
+    }
+    // R1-02: parse back the per-input trace-time devices saved as a side-channel
+    // (see the matching comment in save()). Falls back to an empty list (later
+    // defaulted to CPU per input) for a file saved before this fix existed, or on
+    // a malformed entry -- CPU matches the only device such an older file could
+    // have been meaningfully used from anyway, since nothing preserved the real
+    // device before this change.
+    std::vector<Device> saved_input_devices;
+    {
+        const auto& md = graph->string_metadata();
+        auto it = md.find("__tenzor_input_devices__");
+        if (it != md.end() && !it->second.empty()) {
+            std::stringstream ss(it->second);
+            std::string entry;
+            while (std::getline(ss, entry, ';')) {
+                try {
+                    saved_input_devices.push_back(
+                        entry.empty() ? Device::cpu() : Device::from_string(entry));
+                } catch (const std::exception&) {
+                    saved_input_devices.push_back(Device::cpu());
+                }
+            }
+        }
     }
     // F031: re-apply the serialized dynamic-dim configuration so the module loads
     // back DYNAMIC (matching what mark_dynamic_dims() configured before save),
@@ -646,7 +698,9 @@ auto CompiledModule::load(const std::string& path) -> std::shared_ptr<CompiledMo
     // input shapes so forward() fails loudly on a shape change instead of
     // silently replaying the trace-time-baked graph (JIT-F011).
     module->loaded_ = true;
-    for (const auto& in : module->graph_->inputs()) {
+    const auto& inputs = module->graph_->inputs();
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        const auto& in = inputs[i];
         if (in) {
             auto s = in->shape();
             module->loaded_input_shapes_.emplace_back(s.begin(), s.end());
@@ -655,6 +709,8 @@ auto CompiledModule::load(const std::string& path) -> std::shared_ptr<CompiledMo
             module->loaded_input_shapes_.emplace_back();
             module->loaded_input_dtypes_.push_back(-1);
         }
+        module->loaded_input_devices_.push_back(
+            i < saved_input_devices.size() ? saved_input_devices[i] : Device::cpu());
     }
     return module;
 }

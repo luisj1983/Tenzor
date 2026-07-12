@@ -1251,6 +1251,34 @@ auto invoke_subprocess(IreeInvoker& self,
             "iree-run-module produced no parseable outputs.\nstdout:\n" +
             res.stdout_text);
     }
+    // R1-06: this ASCII-stdout fallback (only reached because at least one
+    // output's dtype has no numpy encoding in iree-run-module -- currently
+    // only BFloat16 -- or a temp file couldn't be created) rounds every
+    // value to ~6 significant figures. That's lossless for BFloat16
+    // (~3-digit mantissa) and for integer/bool dtypes (printed exactly), but
+    // would SILENTLY discard real precision for Float32 (~7 digits needed),
+    // Float64 (~15-17 digits), or Complex64/128 (wrapping those). With a
+    // single output this can't currently happen in production (@main is
+    // enforced to have exactly one output, and that one output is whatever
+    // triggered this fallback), but guard multi-output explicitly rather
+    // than silently return a precision-degraded tensor if that invariant is
+    // ever loosened.
+    if (outs.size() > 1) {
+        for (std::size_t i = 0; i < outs.size(); ++i) {
+            const auto dt = outs[i].dtype();
+            if (dt == ::tenzor::DType::Float32 || dt == ::tenzor::DType::Float64 ||
+                dt == ::tenzor::DType::Complex64 || dt == ::tenzor::DType::Complex128) {
+                throw JitInvokeError(
+                    "iree-run-module: multi-output subprocess invocation fell "
+                    "back to lossy ~6-significant-figure ASCII parsing (likely "
+                    "because a co-produced BFloat16 output has no numpy "
+                    "encoding in iree-run-module), which would silently "
+                    "discard real precision for output[" + std::to_string(i) +
+                    "] (dtype requires full precision). Refusing to return a "
+                    "silently precision-degraded result.");
+            }
+        }
+    }
     return outs;
 }
 

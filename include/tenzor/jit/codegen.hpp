@@ -48,9 +48,12 @@ enum class FusionKind : uint8_t {
     LayerNorm,        ///< mean -> sub -> var -> rsqrt -> mul -> add
     RMSNorm,          ///< square -> mean -> rsqrt -> mul
     SmallMLP,         ///< Linear -> activation -> Linear (hidden <= 4096)
-    SwiGLU,           ///< Linear -> Slice (split) -> Sigmoid -> Mul (gate) -> Linear
-    GeluVariant,      ///< GELU approximation: tanh-based (Pow->Mul->Add->Tanh) or erf-based
-    RotaryEmbedding,  ///< cos/sin rotation: Slice -> Mul(cos) -> Slice -> Mul(sin) -> Sub/Add
+    // R1-10: SwiGLU, GeluVariant, and RotaryEmbedding were removed (2026-07-12).
+    // The extended-fusion executor never had a generator or launch geometry for
+    // them (ExtendedKernelCodegen::generate's switch fell through to its
+    // `default: return ""` for all three, and PatternMatcher never matched them
+    // either — see the historical note in pattern_matcher.cpp's find_all()).
+    // Dead enum values serve no purpose once nothing produces or consumes them.
 };
 
 // ============================================================================
@@ -162,6 +165,12 @@ struct CompiledKernel {
     bool is_hip{false};
     /// GPU ordinal the module is bound to; the HIP launch path re-selects it.
     int device_index{0};
+    /// Data type this kernel computes in. Set by KernelCache::compile() from
+    /// the owning FusionGroup's dtype (get_or_compile_source callers that do
+    /// not pass one leave the Float32 default). Used only to build the
+    /// AutotuneCache key in launch() (R1-11) — it does not affect codegen or
+    /// launch mechanics, which are dtype-agnostic at this level.
+    DType dtype{DType::Float32};
 
     ~CompiledKernel();
 
@@ -258,7 +267,8 @@ private:
     KernelCache() = default;
 
     auto compile(const std::string& source, const std::string& kernel_name,
-                 int device_index = 0, bool is_rocm = false)
+                 int device_index = 0, bool is_rocm = false,
+                 DType dtype = DType::Float32)
         -> std::shared_ptr<CompiledKernel>;
 
     std::unordered_map<std::string, std::shared_ptr<CompiledKernel>> cache_;

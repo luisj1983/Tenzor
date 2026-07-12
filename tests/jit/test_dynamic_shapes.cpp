@@ -450,6 +450,52 @@ TEST(SymbolicShapeInferenceFixes, LoadedDynamicModuleAcceptsDifferentBatchSize) 
            "relu, not just avoid throwing";
 }
 
+// R1-02 regression: throw_if_loaded_shape_mismatch used to compare only shape
+// and dtype, never device, for a module reconstructed via CompiledModule::
+// load(). Since GraphWriter::write_values always normalizes serialized Values
+// to Device::Type::CPU (a deliberate, separate portability design), a loaded
+// module has no record of its trace-time device unless save()/load() encode
+// it as a side-channel (see the "__tenzor_input_devices__" metadata in
+// save()/load()) -- without that, ANY device would silently pass the guard.
+// This traces/saves/loads a module on CPU, then calls forward() with a
+// same-shape/same-dtype input on a genuinely different backend: the loaded
+// module must reject it with a clear error rather than silently letting
+// Graph::forward's device-portability path re-specialize with no diagnostic.
+TEST(SymbolicShapeInferenceFixes, LoadedModuleRejectsDeviceMismatch) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("LoadedModuleRejectsDeviceMismatch");
+    auto other_device = tenzor::Device::cpu();
+    for (const auto& d : tenzor::testing::get_available_backends()) {
+        if (!(d == tenzor::Device::cpu())) { other_device = d; break; }
+    }
+    ASSERT_FALSE(other_device == tenzor::Device::cpu())
+        << "REQUIRE_MULTI_BACKEND_OR_SKIP should guarantee a non-CPU backend "
+           "is available here";
+
+    auto lin = std::make_shared<tenzor::nn::Linear>(4, 4);
+    auto cpu_input = tenzor::Variable(
+        tenzor::randn({2, 4}, tenzor::DType::Float32, tenzor::Device::cpu()),
+        false);
+    auto module = CompiledModule::trace(lin, cpu_input);
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("tenzor_r1_02_" + std::to_string(::getpid()) + ".tzg");
+    module->save(path.string());
+    auto loaded = CompiledModule::load(path.string());
+    std::filesystem::remove(path);
+    ASSERT_NE(loaded, nullptr);
+
+    // Same device (CPU) as trace time: must still work.
+    ASSERT_NO_THROW({ (void)loaded->forward(cpu_input); });
+
+    // Same shape/dtype, but a DIFFERENT device: must throw a clear error
+    // rather than silently accept it.
+    auto other_input = tenzor::Variable(
+        tenzor::randn({2, 4}, tenzor::DType::Float32, other_device), false);
+    EXPECT_THROW({ (void)loaded->forward(other_input); }, std::runtime_error)
+        << "a loaded module must reject a call on a different device than "
+           "the one its frozen constants were serialized/specialized for";
+}
+
 // JIT-R015 regression: a device/dtype-mismatch retrace (CompiledModule::
 // forward's shape/device/dtype cache miss path) must propagate the
 // mark_dynamic_dims() configuration and add_metadata() key/values onto the

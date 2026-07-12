@@ -92,6 +92,15 @@ auto parse_float(const std::string& s, float dflt) -> float {
     }
 }
 
+auto parse_double(const std::string& s, double dflt) -> double {
+    if (s.empty()) return dflt;
+    try {
+        return std::stod(s);
+    } catch (...) {
+        return dflt;
+    }
+}
+
 auto parse_int(const std::string& s, int64_t dflt) -> int64_t {
     if (s.empty()) return dflt;
     try {
@@ -306,7 +315,7 @@ auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& inputs,
             "tenzor_rms_norm: expected 1+ inputs (x[, weight])");
     }
     const auto kv  = parse_backend_config(backend_config);
-    const float eps = parse_float(kv.count("eps") ? kv.at("eps") : "", 1e-6f);
+    const double eps = parse_double(kv.count("eps") ? kv.at("eps") : "", 1e-6);
 
     std::vector<::tenzor::Tensor> in_with_weight;
     in_with_weight.reserve(2);
@@ -325,7 +334,7 @@ auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& inputs,
     }
 
     ::tenzor::OpAttributes attrs;
-    attrs.set(::tenzor::AttrKey::Eps, static_cast<double>(eps));
+    attrs.set(::tenzor::AttrKey::Eps, eps);
 
     auto outs = ::tenzor::dispatch<::tenzor::OpId::RMSNorm>(in_with_weight,
                                                             attrs);
@@ -345,12 +354,17 @@ auto dispatch_rms_norm(const std::vector<::tenzor::Tensor>& inputs,
 //   - flash_attention(Q, K, V, scale_bits: i32, causal: i32) -> Out
 //   - gqa            (Q, K, V, scale_bits: i32, causal: i32) -> Out
 //   - rope_apply    (x, cos, sin) -> Out
-//   - rms_norm      (x, weight, eps_bits: i32) -> Out
+//   - rms_norm      (x, weight, eps_bits: i64) -> Out
 //
-// The IREE VM calling convention chars only support i/I/r — there's no
-// 'f' for float — so scalar f32 attrs travel as i32 bit-pattern args
-// (reinterpret_cast<float>(bits)). The lowering side encodes the constants
-// the same way.
+// The native module registration path here only marshals via the i/I/r
+// calling-convention chars (bit-pattern integers and refs) — scalar float
+// attrs travel as integer bit-pattern args reinterpreted back to their
+// original float type on this side. Most attrs (scale, causal) are
+// conventionally float32 and travel as an i32 bit pattern; RMSNorm's eps
+// must preserve full double precision to match eager/the non-plugin
+// "expand" lowering for Float64 graphs, so it travels as a bit-exact i64
+// (double) bit pattern instead. The lowering side encodes the constants the
+// same way in both cases.
 
 namespace tenzor::jit::mlir_jit {
 
@@ -614,12 +628,12 @@ static iree_status_t IREE_API_PTR call_shim_rope_apply(
     return iree_ok_status();
 }
 
-// rms_norm(x, weight, eps_bits: i32) -> Out
-// CC: "0rri_r"
+// rms_norm(x, weight, eps_bits: i64) -> Out
+// CC: "0rrI_r"
 struct RmsNormArgs {
     iree_vm_ref_t x;
     iree_vm_ref_t weight;
-    int32_t       eps_bits;
+    int64_t       eps_bits;
 };
 
 static iree_status_t IREE_API_PTR call_shim_rms_norm(
@@ -643,13 +657,13 @@ static iree_status_t IREE_API_PTR call_shim_rms_norm(
         auto xt = marshal::buffer_view_to_tensor(x_bv);
         auto wt = marshal::buffer_view_to_tensor(w_bv);
 
-        float eps;
+        double eps;
         std::memcpy(&eps, &args->eps_bits, sizeof(eps));
 
         std::ostringstream cfg;
-        // float32 round-trip needs 9 significant digits; default ostream
-        // precision (6) would truncate the bit-exact i32-transported eps.
-        cfg.precision(9);
+        // float64 round-trip needs 17 significant digits; default ostream
+        // precision (6) would truncate the bit-exact i64-transported eps.
+        cfg.precision(17);
         cfg << "eps=" << eps;
         auto out = cc::dispatch_rms_norm({xt, wt}, cfg.str());
 
@@ -669,7 +683,7 @@ static iree_status_t IREE_API_PTR call_shim_rms_norm(
 static const iree_vm_native_export_descriptor_t kExports[] = {
     {IREE_SV("flash_attention"), IREE_SV("0rrrii_r"), 0, nullptr},
     {IREE_SV("gqa"),             IREE_SV("0rrrii_r"), 0, nullptr},
-    {IREE_SV("rms_norm"),        IREE_SV("0rri_r"),   0, nullptr},
+    {IREE_SV("rms_norm"),        IREE_SV("0rrI_r"),   0, nullptr},
     {IREE_SV("rope_apply"),      IREE_SV("0rrr_r"),   0, nullptr},
 };
 

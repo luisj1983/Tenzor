@@ -749,6 +749,52 @@ private:
 };
 
 /**
+ * @brief Rematerialization pass (R1-12).
+ *
+ * Wraps RematerializationPlanner::find_candidates + apply(): identifies
+ * intermediate values that are cheap to recompute (elementwise/activation
+ * ops, per RematerializationPlanner::is_cheap_to_recompute -- deterministic,
+ * side-effect-free ops only, so recomputing is always bit-exact) with long
+ * live ranges and a SINGLE consumer, and inserts a duplicate of the
+ * producer node immediately before that consumer, rewiring the consumer to
+ * read the duplicate instead. This lets the original value's memory become
+ * dead earlier (its one consumer no longer references it) at the cost of
+ * recomputing it once. The duplicate is executed through the exact same
+ * OpType dispatch as any other node -- no new execution-time capability is
+ * required, unlike physical buffer-pool placement (see MemoryPlanningPass's
+ * doc comment for why THAT is not wired to a runtime consumer yet).
+ *
+ * Unlike MemoryPlanningPass (pure annotation), this pass DOES structurally
+ * modify the graph -- it returns true whenever it rematerializes at least
+ * one value, so it should run BEFORE MemoryPlanningPass (whose live-range
+ * analysis should see the post-rematerialization graph) and its `true`
+ * return is meaningful for the iterative pass loop.
+ *
+ * Off by default (see Compiler::set_rematerialization): unlike memory
+ * planning, this trades extra compute for reduced peak memory, a tradeoff
+ * only the caller can judge -- it must be explicitly enabled.
+ */
+class RematerializationPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "Rematerialization"; }
+
+    /// See RematerializationPlanner::set_memory_budget.
+    auto set_memory_budget(size_t bytes) -> void { memory_budget_ = bytes; }
+
+    /// See RematerializationPlanner::set_min_cost_ratio.
+    auto set_min_cost_ratio(double ratio) -> void { min_cost_ratio_ = ratio; }
+
+    /// Number of values rematerialized by the last run() call.
+    auto num_rematerialized() const -> size_t { return num_rematerialized_; }
+
+private:
+    size_t memory_budget_{0};
+    double min_cost_ratio_{1.0};
+    size_t num_rematerialized_{0};
+};
+
+/**
  * @brief Extended fusion pass for complex kernel patterns.
  *
  * Uses PatternMatcher to identify multi-node fusion opportunities
@@ -1019,6 +1065,36 @@ public:
         memory_planning_threshold_ = threshold;
     }
 
+    /**
+     * @brief Enable or disable rematerialization during optimize() (R1-12).
+     *
+     * When enabled, RematerializationPass runs once, right before memory
+     * planning, so memory planning's live-range analysis sees the
+     * post-rematerialization graph. Unlike memory planning there is no
+     * "auto" node-count threshold: rematerialization trades extra compute
+     * for reduced peak memory, a tradeoff only the caller can judge, so it
+     * defaults to OFF and must be explicitly enabled.
+     *
+     * @param enable If true, run rematerialization during optimize()
+     */
+    auto set_rematerialization(bool enable) -> void { enable_rematerialization_ = enable; }
+
+    /// See RematerializationPlanner::set_memory_budget (bytes to reclaim, 0 = no cap).
+    auto set_rematerialization_budget(size_t bytes) -> void { rematerialization_budget_ = bytes; }
+
+    /// See RematerializationPlanner::set_min_cost_ratio.
+    auto set_rematerialization_min_cost_ratio(double ratio) -> void {
+        rematerialization_min_cost_ratio_ = ratio;
+    }
+
+    /**
+     * @brief Number of values rematerialized by the last optimize() call.
+     *
+     * Zero if rematerialization is disabled (the default) or no candidate
+     * met the cost-ratio/budget criteria.
+     */
+    auto num_rematerialized() const -> size_t { return num_rematerialized_; }
+
 private:
     std::vector<std::unique_ptr<Pass>> passes_;               ///< Optimization passes
     std::unordered_map<std::string, int> pass_stats_;         ///< Pass execution stats
@@ -1027,6 +1103,10 @@ private:
     bool memory_planning_explicit_{false};                    ///< True if user explicitly set memory planning
     size_t memory_planning_threshold_{50};                    ///< Auto-enable threshold (node count)
     MemoryPlan memory_plan_;                                  ///< Cached memory plan
+    bool enable_rematerialization_{false};                    ///< Rematerialization flag (R1-12, opt-in)
+    size_t rematerialization_budget_{0};                      ///< Bytes to reclaim (0 = no cap)
+    double rematerialization_min_cost_ratio_{1.0};            ///< Min memory_saved/flops ratio
+    size_t num_rematerialized_{0};                            ///< Count from the last optimize() call
 
     /**
      * @brief Run single pass iteration.
@@ -1434,11 +1514,23 @@ private:
     /// dtype and cannot retrace, so a same-shape but different-dtype call would
     /// replay Float32 constants against Float64 activations (JIT-F030).
     std::vector<int> loaded_input_dtypes_;
+    /// Input devices the loaded graph was serialized at, parallel to
+    /// loaded_input_shapes_/loaded_input_dtypes_ (R1-02). A loaded module's frozen
+    /// constants (weights, folded biases) live on the trace-time device and cannot
+    /// retrace, so a same-shape/same-dtype call from a DIFFERENT device would
+    /// otherwise pass the shape/dtype guard and reach graph_->forward() -- which
+    /// silently re-specializes an unfused graph to the caller's device (losing the
+    /// loaded module's original device intent with no diagnostic) or throws a
+    /// generic device-mismatch error deep in execute_fused_gpu_node for a fused
+    /// graph, instead of a clear, attributable error at the call boundary.
+    std::vector<Device> loaded_input_devices_;
     /// Throw a clear error if this is a loaded (non-retraceable) module being
-    /// called with input shapes OR dtypes different from the serialized trace.
+    /// called with input shapes, dtypes, OR devices different from the serialized
+    /// trace.
     auto throw_if_loaded_shape_mismatch(
         const std::vector<std::vector<int64_t>>& call_shapes,
-        const std::vector<int>& call_dtypes) const -> void;
+        const std::vector<int>& call_dtypes,
+        const std::vector<Device>& call_devices) const -> void;
 
     /// Serialises the mutating paths of forward()/replay/capture so a single
     /// CompiledModule shared across inference threads (the natural server

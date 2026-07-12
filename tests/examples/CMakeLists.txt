@@ -26,6 +26,27 @@ set_target_properties(test_hrm_example PROPERTIES
 tenzor_discover_tests(test_hrm_example LABELS "examples;regression" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # -----------------------------------------------------------------------------
+# Example regression: JIT-compiled MLP training/inference (R2-02).
+# First example exercising the JIT subsystem end-to-end (trace -> compile ->
+# execute -> verify vs eager); every other example in this suite only
+# exercises eager autograd. Drives the actual example runner from
+# examples/cpp/training/jit_mlp_training_runner.cpp via the
+# example_jit_mlp_training_runner OBJECT target (defined in
+# examples/CMakeLists.txt).
+# -----------------------------------------------------------------------------
+add_executable(test_jit_mlp_example test_jit_mlp_example.cpp)
+target_link_libraries(test_jit_mlp_example PRIVATE
+    tenzor_core
+    GTest::gtest_main
+    example_jit_mlp_training_runner)
+target_include_directories(test_jit_mlp_example PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cpp/training)
+set_target_properties(test_jit_mlp_example PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON)
+tenzor_discover_tests(test_jit_mlp_example LABELS "examples;regression;jit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# -----------------------------------------------------------------------------
 # Example regression: every other autograd showcase example must converge.
 # Links against every OBJECT-library runner created in
 # examples/cpp/showcase/CMakeLists.txt. Target names are listed here

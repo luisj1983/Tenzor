@@ -158,7 +158,7 @@ def jit(fn: Callable[..., Any] | None = None, *,
         except (ValueError, TypeError):
             _sig = None
 
-        def _variant_for(call_args: tuple):
+        def _variant_for(call_args: tuple, *, cache: bool = True):
             static_items = [(i, a) for i, a in enumerate(call_args)
                             if not _is_tensor_arg(a)]
             tensor_args = [a for a in call_args if _is_tensor_arg(a)]
@@ -180,7 +180,7 @@ def jit(fn: Callable[..., Any] | None = None, *,
                     "be scalars (int/float/bool/str/bytes/None) or tuples of those; "
                     "pass tensors for all other operands.")
             key = (len(call_args),) + tuple(_key_part(i, v) for i, v in static_items)
-            variant = _variants.get(key)
+            variant = _variants.get(key) if cache else None
             if variant is None:
                 # JIT-R075: the get-check-set above is an unprotected race —
                 # two threads hitting the same NEW static-arg key can both
@@ -191,7 +191,7 @@ def jit(fn: Callable[..., Any] | None = None, *,
                 # thread that loses the race reuses the winner's variant
                 # instead of compiling again.
                 with _lock:
-                    variant = _variants.get(key)
+                    variant = _variants.get(key) if cache else None
                     if variant is None:
                         if not static_items:
                             target_fn: Callable = f
@@ -213,7 +213,17 @@ def jit(fn: Callable[..., Any] | None = None, *,
                         variant = _compile_function(
                             target_fn, backend="mlir", target=target,
                             fallback_to_eager=fallback_to_eager)
-                        _variants[key] = variant
+                        # R1-07: the initial seed call (empty call_args, before
+                        # any real invocation) must NOT be memoized into
+                        # _variants -- doing so would inflate len(_variants)
+                        # to 2 after just the FIRST real call (seed key +
+                        # real key, since the seed's arity-0 key essentially
+                        # never matches a real call with >=1 argument),
+                        # producing a false-positive "multiple specializations"
+                        # ambiguity signal for show_*() even when only one
+                        # real static-argument combination has ever been used.
+                        if cache:
+                            _variants[key] = variant
             return variant, tuple(tensor_args)
 
         @functools.wraps(f)
@@ -291,11 +301,17 @@ def jit(fn: Callable[..., Any] | None = None, *,
         # with the no-static variant so show_* works before the first call.
         # Seeding happens before `_call` is returned to any caller, so no
         # concurrent reader can observe it yet — the lock isn't needed here.
-        _call._tz_compiled = _variant_for(())[0]  # type: ignore[attr-defined]
+        _call._tz_compiled = _variant_for((), cache=False)[0]  # type: ignore[attr-defined]
         _call._tz_last_examples = ()  # type: ignore[attr-defined]
         # Exposed so the show_* helpers can read the pair above atomically
         # too (JIT-R018) — a torn read is just as bad as a torn write.
         _call._tz_lock = _lock  # type: ignore[attr-defined]
+        # Exposed (R1-07) so the show_* helpers can detect whether MULTIPLE
+        # static-argument specializations have been compiled — in which case
+        # `_tz_compiled` (the most recent one) may not be the one the caller
+        # of show_*() actually wants, and a new explicit tensor example alone
+        # cannot disambiguate which specialization it belongs to.
+        _call._tz_variants = _variants  # type: ignore[attr-defined]
         return _call
 
     if fn is not None:
@@ -340,6 +356,48 @@ def _resolve_examples(last: tuple, examples: tuple) -> tuple:
             "function once first, or pass explicit examples: e.g. "
             "tz.jit.show_graph(f, x, y).")
     return tuple(last)
+
+
+def _resolve_variant_and_tensors(fn: Any, examples: tuple) -> tuple:
+    """Return (compiled_variant, tensor_args) for a show_*() call.
+
+    R1-07: the show_*() C++ bindings only accept Variable/Tensor examples
+    (each argument is `.cast<Variable>()`'d), so a caller can never pass NEW
+    static (non-tensor) argument values through show_graph/show_mlir/etc. —
+    only new TENSOR examples. For a function with zero or one compiled
+    static-argument specialization so far, that's unambiguous: there's only
+    one variant, so `fn._tz_compiled` (paired atomically with the last call's
+    tensors by `_snapshot_compiled_and_examples`) is always the right one to
+    pass new tensor examples to.
+    
+    But once a function has been called with TWO OR MORE distinct static-arg
+    combinations, `fn._tz_compiled` only reflects whichever one was called
+    MOST RECENTLY — the old code silently paired a caller's brand-new tensor
+    examples with that possibly-unrelated last variant (e.g. `f(x, 5)` then
+    `f(y, 7)` then `tz.jit.show_graph(f, x2)` would silently show the graph
+    for `n=7`, which the caller may have had no reason to expect, since
+    show_graph's arguments cannot express "n=5"). Detect that genuine
+    ambiguity via `fn._tz_variants` (set by the @tz.jit decorator) and raise a
+    clear, actionable error instead of silently guessing which specialization
+    the caller meant.
+    """
+    variants = getattr(fn, "_tz_variants", None)
+    compiled, last = _snapshot_compiled_and_examples(fn)
+    if examples and variants is not None and len(variants) > 1:
+        raise ValueError(
+            "@tz.jit: this function has been compiled into "
+            f"{len(variants)} different variants (it takes static, "
+            "non-tensor arguments and has been called with more than one "
+            "distinct combination of them). show_*() can only show the "
+            "variant from the MOST RECENT real call, and its example "
+            "arguments cannot express which static-argument combination you "
+            "want — so passing new tensor examples here would silently pair "
+            "them with whichever specialization happened to run last. Call "
+            "the function normally with the desired static arguments first, "
+            "then call show_*(f) with NO examples to reuse that call's "
+            "inputs (optionally after also calling with new tensor inputs "
+            "for that SAME static combination).")
+    return compiled, _resolve_examples(last, examples)
 
 
 def _jit_show_fn(name: str):
@@ -400,37 +458,37 @@ def show_graph(fn: Any, *examples: Any) -> str:
     """Dump the tenzor::jit::Graph IR after tracing. Pass one example per
     argument of the decorated function (or none to reuse the last call)."""
     show = _jit_show_fn("show_graph")
-    compiled, last = _snapshot_compiled_and_examples(fn)
+    compiled, examples = _resolve_variant_and_tensors(fn, examples)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return _call_show(show, compiled, _resolve_examples(last, examples))
+    return _call_show(show, compiled, examples)
 
 
 def show_mlir(fn: Any, *examples: Any) -> str:
     """Dump the Tenzor MLIR dialect module before lowering to StableHLO."""
     show = _jit_show_fn("show_mlir")
-    compiled, last = _snapshot_compiled_and_examples(fn)
+    compiled, examples = _resolve_variant_and_tensors(fn, examples)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return _call_show(show, compiled, _resolve_examples(last, examples))
+    return _call_show(show, compiled, examples)
 
 
 def show_stablehlo(fn: Any, *examples: Any) -> str:
     """Dump the final StableHLO module (textual)."""
     show = _jit_show_fn("show_stablehlo")
-    compiled, last = _snapshot_compiled_and_examples(fn)
+    compiled, examples = _resolve_variant_and_tensors(fn, examples)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return _call_show(show, compiled, _resolve_examples(last, examples))
+    return _call_show(show, compiled, examples)
 
 
 def show_iree(fn: Any, *examples: Any) -> str:
     """Run iree-compile --dump-ir-after-all and return the trace."""
     show = _jit_show_fn("show_iree")
-    compiled, last = _snapshot_compiled_and_examples(fn)
+    compiled, examples = _resolve_variant_and_tensors(fn, examples)
     if isinstance(compiled, _JitDisabledStub):
         raise JitNotEnabledError(compiled._msg)
-    return _call_show(show, compiled, _resolve_examples(last, examples))
+    return _call_show(show, compiled, examples)
 
 
 def cache_stats() -> dict:

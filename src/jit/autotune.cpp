@@ -324,5 +324,25 @@ auto AutotuneCache::make_key(const std::string& op_name,
     return oss.str();
 }
 
+// ============================================================================
+// Autotune-mode propagation (R1-11)
+// ============================================================================
+
+namespace {
+thread_local bool g_autotune_mode_active = false;
+}
+
+auto autotune_mode_active() -> bool {
+    return g_autotune_mode_active;
+}
+
+AutotuneModeGuard::AutotuneModeGuard(bool enable) : previous_(g_autotune_mode_active) {
+    g_autotune_mode_active = enable;
+}
+
+AutotuneModeGuard::~AutotuneModeGuard() {
+    g_autotune_mode_active = previous_;
+}
+
 } // namespace jit
 } // namespace tenzor
