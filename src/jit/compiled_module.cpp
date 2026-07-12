@@ -9,6 +9,7 @@
 #include "../../include/tenzor/jit/compiler.hpp"
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/jit/serialization.hpp"
+#include "../../include/tenzor/jit/autotune.hpp"  // JIT-R123: AutotuneModeGuard for capture warmup
 #include "../../include/tenzor/core/device.hpp"
 #include "../../include/tenzor/backend/loader.hpp"   // backend_registry()/get_backend()
 #include "../../include/tenzor/backend/backend.hpp"  // Backend::copy / CopyKind
@@ -554,6 +555,18 @@ auto CompiledModule::optimize_for_inference() -> int {
         throw std::runtime_error("CompiledModule has no graph to optimize");
     }
 
+    // findings.txt JIT-R126: this mutates *graph_ IN PLACE (fusion/DCE/CSE/
+    // constant-folding) -- no graph_ pointer reassignment, so none of
+    // forward()'s retrace-site invalidate_cuda_graph() calls fire. A CUDA
+    // graph capture is a snapshot of literal kernel launches on the GPU
+    // driver side; mutating the C++ Graph afterward has zero effect on an
+    // already-captured cuda_graph_, so replay_cuda_graph() would silently
+    // keep replaying the PRE-optimization kernel sequence forever while
+    // forward() executes the newly-optimized (non-numerically-neutral, per
+    // JIT-R008) graph -- a correctness divergence between the two APIs on
+    // the same module. Invalidate any existing capture before optimizing.
+    invalidate_cuda_graph();
+
     // Use Compiler directly so we can capture the memory plan
     Compiler compiler(true);
     int result = compiler.optimize(*graph_);
@@ -566,6 +579,12 @@ auto CompiledModule::mark_dynamic_dims(const std::vector<DynamicDimSpec>& dynami
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
     }
+
+    // findings.txt JIT-R126: same in-place-mutation hazard as
+    // optimize_for_inference() above -- SymbolicTracePass::run() mutates
+    // *graph_'s Value shape metadata in place, with no invalidation of a
+    // previously-captured CUDA graph.
+    invalidate_cuda_graph();
 
     dynamic_dims_ = dynamic_dims;
 
@@ -732,67 +751,15 @@ auto CompiledModule::all_metadata() const -> const std::unordered_map<std::strin
     return metadata_;
 }
 
-// ============================================================================
-// ROCm Graph Adapter (wraps HIPGraph behind the CUDAGraph interface)
-// ============================================================================
-
-#ifdef TENZOR_HAS_ROCM
-namespace {
-
-class ROCmGraphAdapter : public CUDAGraph {
-public:
-    explicit ROCmGraphAdapter(int32_t device_id) : device_id_(device_id) {
-        HIP_CHECK(hipSetDevice(device_id_));
-        auto err = hipStreamCreate(&stream_);
-        if (err != hipSuccess) {
-            throw std::runtime_error(
-                std::string("ROCmGraphAdapter: failed to create stream: ") +
-                hipGetErrorString(err));
-        }
-    }
-
-    ~ROCmGraphAdapter() override {
-        if (hip_graph_.is_capturing()) {
-            // Abort capture to leave stream in valid state
-            hipGraph_t dummy = nullptr;
-            (void)hipStreamEndCapture(stream_, &dummy);
-            if (dummy) (void)hipGraphDestroy(dummy);
-        }
-        if (stream_) {
-            (void)hipStreamDestroy(stream_);
-        }
-    }
-
-    void prepare_capture_stream() override {
-        HIP_CHECK(hipSetDevice(device_id_));
-    }
-
-    void begin_capture() override {
-        HIP_CHECK(hipSetDevice(device_id_));
-        hip_graph_.begin_capture(stream_);
-    }
-
-    void end_capture() override {
-        hip_graph_.end_capture(stream_);
-    }
-
-    void replay() override {
-        HIP_CHECK(hipSetDevice(device_id_));
-        hip_graph_.replay(stream_);
-    }
-
-    bool is_ready() const override {
-        return hip_graph_.is_compiled();
-    }
-
-private:
-    int32_t device_id_;
-    hipStream_t stream_ = nullptr;
-    rocm::HIPGraph hip_graph_;
-};
-
-} // anonymous namespace
-#endif // TENZOR_HAS_ROCM
+// findings.txt JIT-R121: ROCmGraphAdapter (an orphaned, never-instantiated
+// duplicate of the real, registered ROCm CUDAGraph implementation --
+// src/backends/rocm/hip_graph_impl.cpp's HIPGraphImpl, reached via
+// CUDAGraph::create_for()'s backend-factory system) was deleted here as dead
+// code. It predated the factory system, was missing a stream-routing fix
+// applied everywhere else (a748650c's rocm::rocm_current_stream() = stream_
+// assignment), and risked being mistaken for the live implementation by a
+// future ROCm-graph-capture change made in this file instead of
+// hip_graph_impl.cpp.
 
 // ============================================================================
 // CUDA / ROCm Graph Capture/Replay
@@ -911,8 +878,25 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
     // the target stream is actively capturing ("operation would make the legacy
     // stream depend on a capturing blocking stream"). Same-stream reuse needs no
     // such wait.
+    // JIT-R123: enable autotune probing for the warmup forward specifically
+    // (never for the capture-time forward below). This is the ONLY safe
+    // place to autotune a CUDA-graph-captured kernel: CompiledKernel::launch
+    // benchmarks every candidate block size with REAL timed kernel launches
+    // when autotune_mode_active() is true (codegen.cpp) -- fine here, since
+    // warmup runs outside capture and cudaMalloc/extra launches are
+    // unrestricted, but would corrupt the graph if it happened during
+    // capture itself (CUDA/HIP record every kernel launch issued on the
+    // capture stream, so benchmarking launches would get baked in
+    // permanently alongside the real one). A graph captured for replay is by
+    // definition invoked many times (that is the whole point of
+    // reduce-overhead mode), so paying autotune's one-time warmup cost for
+    // better steady-state launch geometry is worth it regardless of whether
+    // the caller separately requested CompileConfig::mode == "max-autotune"
+    // (mutually exclusive with "reduce-overhead" in a single mode string, so
+    // that combination could otherwise never be requested at all).
     cuda_graph_->prepare_capture_stream();
     try {
+        AutotuneModeGuard autotune_guard(/*enable=*/true);
         auto warm = graph_->forward(vars);
         (void)warm;
     } catch (...) {

@@ -140,6 +140,35 @@ TEST(PatternMatcherAffineShapeGuard, RmsNormRejectsFullTensorAsGamma) {
     }
 }
 
+// findings.txt JIT-R117 regression: a same-NUMEL-different-SHAPE operand
+// (e.g. [norm_size, 1] -- total element count equals norm_size, but that
+// count sits in a LEADING axis, not the trailing one) must NOT be absorbed
+// as gamma either. This is the exact gap the old `onumel == norm_size`-only
+// check missed: it happens to equal norm_size in total count while being a
+// legitimate per-ROW (not per-channel) broadcast operand in eager semantics
+// (e.g. a per-token gate/keepdim=True reduction result), which
+// extended_codegen would silently misread as gamma[i] and broadcast
+// per-channel instead of per-row.
+TEST(PatternMatcherAffineShapeGuard, RmsNormRejectsSameNumelDifferentShapeAsGamma) {
+    Graph g;
+    build_decomposed_rms_norm(g, /*affine_shape=*/{kC, 1});  // numel==kC but back()==1, not kC
+
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(g);
+    ASSERT_EQ(matches.size(), 1u)
+        << "the RMS core (Pow/Mean/Add/Sqrt/Div) must still match";
+    EXPECT_EQ(matches[0].kind, FusionKind::RMSNorm);
+    EXPECT_EQ(matches[0].nodes.size(), 5u)
+        << "a [norm_size, 1]-shaped operand (same numel as norm_size, but "
+           "wrong axis) must NOT be absorbed as gamma -- match should stop "
+           "at Div (5 nodes), leaving the Mul unfused for the correct eager "
+           "path";
+    for (const auto& n : matches[0].nodes) {
+        EXPECT_NE(n->op_type(), OpType::Mul)
+            << "the affine Mul must not be part of the fused match";
+    }
+}
+
 // A scalar (numel==1) operand is legitimate (mirrors how eps is a scalar);
 // must still be absorbed, not rejected as "not per-channel".
 TEST(PatternMatcherAffineShapeGuard, RmsNormAbsorbsScalarGamma) {

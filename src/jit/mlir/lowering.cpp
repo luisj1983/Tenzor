@@ -1199,8 +1199,36 @@ auto emit_reduce_with_keepdim(LoweringContext& ctx, std::ostream& body,
         }
     }
 
+    // findings.txt JIT-R119: IREE's LLVMGPUVectorDistribute codegen
+    // (CUDA/ROCm) fails to distribute a stablehlo.reduce that gets fused --
+    // even transitively, through elementwise ops -- with a stablehlo.convert
+    // that widened its operand to Float64 (confirmed via minimal repro:
+    // reducing a raw f64 input compiles fine; reducing a value produced by
+    // convert-to-f64 does not). This was previously worked around ad hoc at
+    // exactly 2 call sites (handle_layer_norm/handle_rms_norm_expand, which
+    // call emit_stablehlo_reduce directly and insert their own barrier right
+    // after their own widening convert) rather than in this shared helper,
+    // so every OTHER caller (handle_sum, handle_mean, the new dynamic
+    // fake-quant reduce, handle_avg_pool2d, etc.) would silently reproduce
+    // the same IREE miscompile the moment any of them widens to Float64 --
+    // structurally easy to miss since none of those call sites had any
+    // reason to know about this MLIR-target-specific codegen limitation.
+    // Insert the barrier here, unconditionally whenever the reduce's own
+    // working dtype is Float64, so protection is automatic rather than
+    // remembered per call site. A stablehlo.optimization_barrier is a
+    // documented semantic no-op on every target (including llvm-cpu, where
+    // this bug does not reproduce), so this is safe to apply unconditionally.
+    std::string reduce_operand = operand_name;
+    if (d == ::tenzor::DType::Float64) {
+        auto barriered_name = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, barriered_name, operand_name,
+                                            operand_shape, d);
+        body << '\n';
+        reduce_operand = barriered_name;
+    }
+
     auto reduced_name = ctx.fresh_name();
-    emit_stablehlo_reduce(body, reduced_name, operand_name, init_name,
+    emit_stablehlo_reduce(body, reduced_name, reduce_operand, init_name,
                           reducer, dims, operand_shape, reduced_shape, d);
     body << '\n';
 
@@ -1736,6 +1764,35 @@ auto infer_permutation(const std::vector<int64_t>& src_shape,
     return perm;
 }
 
+// JIT-R120 follow-up: emits a stablehlo.transpose followed unconditionally by
+// a stablehlo.optimization_barrier on its result. Confirmed via minimal
+// standalone iree-compile repro: a transpose whose result flows (through a
+// reshape) into a stablehlo.convert(f16->f32) that is bufferized alongside a
+// SIBLING convert from a non-transposed source feeding the same dot_general
+// (exactly attention's Q/K^T pattern) fails with "failed to bufferize op" on
+// the cuda target specifically (rocm/vulkan-spirv/llvm-cpu all bufferize the
+// identical IR fine) -- an IREE CUDA-backend bufferization-pass limitation,
+// not a Tenzor emission bug (the IR is valid, unbarriered StableHLO). Removing
+// just the transpose from the repro (feeding the same untransposed value
+// twice) or inserting a barrier immediately after the transpose both avoid
+// the failure; the R110/R119 precedent already established that
+// stablehlo.optimization_barrier is a documented semantic no-op on every
+// target, so applying it unconditionally here (not gated to attention or to
+// cuda) is safe and avoids remembering this per call site.
+auto emit_transpose_barriered(LoweringContext& ctx, std::ostream& body,
+                              const std::string& out_name,
+                              const std::string& in_name,
+                              const std::vector<int64_t>& perm,
+                              const std::vector<int64_t>& in_shape,
+                              const std::vector<int64_t>& out_shape,
+                              ::tenzor::DType d) -> void {
+    auto raw_name = ctx.fresh_name();
+    emit_stablehlo_transpose(body, raw_name, in_name, perm, in_shape, out_shape, d);
+    body << '\n';
+    emit_stablehlo_optimization_barrier(body, out_name, raw_name, out_shape, d);
+    body << '\n';
+}
+
 auto handle_permute(LoweringContext& ctx,
                     const ::tenzor::jit::Node& node,
                     std::ostream& body) -> void {
@@ -1755,10 +1812,9 @@ auto handle_permute(LoweringContext& ctx,
     }
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
-    emit_stablehlo_transpose(body, out_name, ctx.name_for(in_val->id()),
+    emit_transpose_barriered(ctx, body, out_name, ctx.name_for(in_val->id()),
                              perm, in_val->shape(), out_val->shape(),
                              out_val->dtype());
-    body << '\n';
 }
 
 auto handle_transpose(LoweringContext& ctx,
@@ -1784,10 +1840,9 @@ auto handle_transpose(LoweringContext& ctx,
 
     auto out_name = ctx.fresh_name();
     ctx.bind(out_val->id(), out_name);
-    emit_stablehlo_transpose(body, out_name, ctx.name_for(in_val->id()),
+    emit_transpose_barriered(ctx, body, out_name, ctx.name_for(in_val->id()),
                              perm, in_val->shape(), out_val->shape(),
                              out_val->dtype());
-    body << '\n';
 }
 
 auto handle_slice(LoweringContext& ctx,

@@ -98,6 +98,9 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         // JIT-R010: Fmod broadcasts like every other binary elementwise op
         // (mirrors graph.cpp's infer_symbolic_types Fmod case).
         case OpType::Fmod:
+        // findings.txt JIT-R118: Minimum broadcasts identically (mirrors
+        // graph.cpp's infer_symbolic_types Minimum case, JIT-R064).
+        case OpType::Minimum:
             return infer_elementwise(node);
 
         // Unary elementwise / shape-preserving: preserve input[0] shape.
@@ -149,6 +152,23 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::Quantize:
         case OpType::DenseToSparse:
         case OpType::ResidualAdd:
+        // findings.txt JIT-R118: all of the following are shape-preserving
+        // (mirrors graph.cpp's infer_symbolic_types, which groups each of
+        // these as a plain "output shape == input[0]" case) but were
+        // missing here, silently freezing any dynamic dim downstream of one
+        // of these ops to its trace-time size (the same JIT-F040 class the
+        // rest of this group was already fixed for).
+        case OpType::Swish:          // JIT-R084: x*sigmoid(x)
+        case OpType::RReLU:          // JIT-R084
+        case OpType::LogSigmoid:     // JIT-R084
+        case OpType::IndexCopy:      // JIT-R064: writes rows into self at index
+        case OpType::ScatterAdd:     // accumulates into self at index
+        case OpType::GQA:            // Grouped-Query Attention: Q's shape
+        case OpType::ShapeGuard:
+        case OpType::GuardNode:
+        case OpType::SwapOut:
+        case OpType::SwapIn:
+        case OpType::LayoutConvert:
         case OpType::LayerNorm: {
             auto input_shapes = gather_input_shapes(node);
             if (!input_shapes.empty()) {
@@ -208,6 +228,10 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         // graph.cpp's infer_symbolic_types, JIT-026).
         case OpType::QuantizedLinear:
         case OpType::QuantizedLinearStatic:
+        // findings.txt JIT-R118: SparseMatMul shares the identical
+        // [x, weight(, bias)] -> (*, out_features) rule (mirrors graph.cpp's
+        // infer_symbolic_types, which groups it with QuantizedLinearStatic).
+        case OpType::SparseMatMul:
             return infer_linear(node);
 
         // Rank-changing / select ops that previously fell to `default -> {}` and
@@ -390,6 +414,335 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
                 }
                 return {std::move(out_shape)};
             }
+            if (!input_shapes.empty()) {
+                return {input_shapes[0]};
+            }
+            return {};
+        }
+
+        // ====================================================================
+        // findings.txt JIT-R118: the following cases were entirely absent
+        // from this switch (silently freezing any dynamic dim downstream of
+        // one of these ops, per the JIT-F040 class documented throughout
+        // this file) despite graph.cpp's infer_symbolic_types() -- the
+        // OTHER, non-production symbolic-shape implementation -- already
+        // handling every one of them. Ported directly from there, adapted
+        // to this function's gather_input_shapes()+return convention.
+        // ====================================================================
+
+        case OpType::Gather: {
+            // torch.gather / take_along_dim: output shape == indices shape.
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2) {
+                return {input_shapes[1]};
+            }
+            return {};
+        }
+
+        case OpType::OneHot: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                auto sym_shape = input_shapes[0];
+                sym_shape.push_back(SymbolicDim::concrete(node->get_int_attr("num_classes")));
+                return {std::move(sym_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Slice: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                auto sym_shape = input_shapes[0];
+                int64_t rank = static_cast<int64_t>(sym_shape.rank());
+                int64_t dim = node->get_int_attr("dim");
+                int64_t start = node->get_int_attr("start");
+                int64_t end = node->get_int_attr("end");
+                int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
+                if (dim < 0) dim += rank;
+                if (dim >= 0 && dim < rank) {
+                    if (step <= 0) step = 1;
+                    const SymbolicDim& cur = sym_shape[static_cast<size_t>(dim)];
+                    if (cur.is_concrete()) {
+                        const int64_t dim_size = cur.value();
+                        if (start < 0) start += dim_size;
+                        if (end   < 0) end   += dim_size;
+                        if (start < 0) start = 0;
+                        if (start > dim_size) start = dim_size;
+                        if (end   < start) end = start;
+                        if (end   > dim_size) end = dim_size;
+                        int64_t len = (end - start + step - 1) / step;
+                        sym_shape[static_cast<size_t>(dim)] = SymbolicDim::concrete(len);
+                    } else if (start >= 0 && end >= start) {
+                        int64_t len = (end - start + step - 1) / step;
+                        sym_shape[static_cast<size_t>(dim)] = SymbolicDim::concrete(len);
+                    }
+                }
+                return {std::move(sym_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Cat: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                auto out_shape = input_shapes[0];
+                int64_t rank = static_cast<int64_t>(out_shape.rank());
+                if (dim < 0) dim += rank;
+                if (dim >= 0 && dim < rank) {
+                    SymbolicDim total = SymbolicDim::concrete(0);
+                    for (auto& s : input_shapes) {
+                        if (dim < static_cast<int64_t>(s.rank())) {
+                            total = total + s[static_cast<size_t>(dim)];
+                        }
+                    }
+                    out_shape[static_cast<size_t>(dim)] = total;
+                }
+                return {std::move(out_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Stack: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                auto sym_shape = input_shapes[0];
+                int64_t rank = static_cast<int64_t>(sym_shape.rank());
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                const int64_t limit = rank + 1;
+                if (dim < 0) dim += limit;
+                if (dim < 0) dim = 0;
+                if (dim > rank) dim = rank;
+                sym_shape.insert(static_cast<size_t>(dim),
+                                  SymbolicDim::concrete(static_cast<int64_t>(input_shapes.size())));
+                return {std::move(sym_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Broadcast: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                auto target = node->get_vec_attr("shape");
+                if (target.empty()) return {input_shapes[0]};
+                return {SymbolicShape::from_concrete(target)};
+            }
+            return {};
+        }
+
+        case OpType::IndexSelect: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2) {
+                auto out_shape = input_shapes[0];
+                int64_t rank = static_cast<int64_t>(out_shape.rank());
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                if (dim < 0) dim += rank;
+                if (dim < 0) dim = 0;
+                if (rank > 0 && dim >= rank) dim = rank - 1;
+                SymbolicDim selected = SymbolicDim::concrete(1);
+                for (size_t i = 0; i < input_shapes[1].rank(); ++i) {
+                    selected = selected * input_shapes[1][i];
+                }
+                if (rank > 0) out_shape[static_cast<size_t>(dim)] = selected;
+                return {std::move(out_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Interpolate: {
+            // JIT-R018 (see graph.cpp's identical case): only push a shape
+            // when an explicit output_size is present; the scale_factor-only
+            // form deliberately leaves the trace-time symbolic shape intact
+            // rather than overwrite it with the unscaled input shape.
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                auto size = node->get_vec_attr("output_size");
+                if (!size.empty()) {
+                    auto out_shape = input_shapes[0];
+                    if (out_shape.rank() >= size.size() + 2) {
+                        const auto offset = out_shape.rank() - size.size();
+                        for (size_t i = 0; i < size.size(); ++i) {
+                            out_shape[offset + i] = SymbolicDim::concrete(size[i]);
+                        }
+                    }
+                    return {std::move(out_shape)};
+                }
+            }
+            return {};
+        }
+
+        case OpType::Padding: {
+            // Padding ENLARGES dims; must not be treated as shape-preserving
+            // (mirrors graph.cpp's infer_symbolic_types Padding case, JIT-044).
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                auto out_shape = input_shapes[0];
+                const size_t rank = out_shape.rank();
+                if (node->has_attr("padding")) {
+                    auto v = node->get_vec_attr("padding");
+                    std::vector<int64_t> low(rank, 0), high(rank, 0);
+                    if (v.size() == 2 * rank) {
+                        for (size_t i = 0; i < rank; ++i) {
+                            low[i] = v[2 * i];
+                            high[i] = v[2 * i + 1];
+                        }
+                    } else if (v.size() % 2 == 0) {
+                        const size_t pairs = v.size() / 2;
+                        for (size_t i = 0; i < pairs && i < rank; ++i) {
+                            const size_t dim = rank - 1 - i;
+                            low[dim] = v[2 * i];
+                            high[dim] = v[2 * i + 1];
+                        }
+                    }
+                    for (size_t i = 0; i < rank; ++i) {
+                        out_shape[i] = out_shape[i] + SymbolicDim::concrete(low[i] + high[i]);
+                    }
+                }
+                return {std::move(out_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Det: {
+            // (..., N, N) -> (...)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto sym_shape = input_shapes[0];
+                sym_shape.erase(sym_shape.rank() - 1);
+                sym_shape.erase(sym_shape.rank() - 1);
+                return {std::move(sym_shape)};
+            }
+            return {};
+        }
+
+        case OpType::Inv:
+        case OpType::Cholesky: {
+            // (..., N, N) -> (..., N, N)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                return {input_shapes[0]};
+            }
+            return {};
+        }
+
+        case OpType::Solve: {
+            // A: (..., N, N), B: (..., N, K) -> (..., N, K)
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2) {
+                return {input_shapes[1]};
+            }
+            return {};
+        }
+
+        case OpType::Svd: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto& s = input_shapes[0];
+                auto M = s[s.rank() - 2];
+                auto N_dim = s[s.rank() - 1];
+                auto min_dim = [](const SymbolicDim& a, const SymbolicDim& b) -> SymbolicDim {
+                    if (a.is_concrete() && b.is_concrete())
+                        return SymbolicDim(std::min(a.value(), b.value()));
+                    return a.is_concrete() ? a : b;
+                };
+                SymbolicDim K = min_dim(M, N_dim);
+                bool full = node->has_attr("full_matrices")
+                                ? node->get_bool_attr("full_matrices") : true;
+                std::vector<SymbolicDim> batch_dims;
+                for (size_t d = 0; d + 2 < s.rank(); ++d) batch_dims.push_back(s[d]);
+                auto u_dims = batch_dims;
+                u_dims.push_back(M);
+                u_dims.push_back(full ? M : K);
+                auto s_dims = batch_dims;
+                s_dims.push_back(K);
+                auto vt_dims = batch_dims;
+                vt_dims.push_back(full ? N_dim : K);
+                vt_dims.push_back(N_dim);
+                return {SymbolicShape(std::move(u_dims)), SymbolicShape(std::move(s_dims)),
+                        SymbolicShape(std::move(vt_dims))};
+            }
+            return {};
+        }
+
+        case OpType::Qr: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto& s = input_shapes[0];
+                auto M = s[s.rank() - 2];
+                auto N_dim = s[s.rank() - 1];
+                auto min_dim = [](const SymbolicDim& a, const SymbolicDim& b) -> SymbolicDim {
+                    if (a.is_concrete() && b.is_concrete())
+                        return SymbolicDim(std::min(a.value(), b.value()));
+                    return a.is_concrete() ? a : b;
+                };
+                SymbolicDim K = min_dim(M, N_dim);
+                std::vector<SymbolicDim> batch_dims;
+                for (size_t d = 0; d + 2 < s.rank(); ++d) batch_dims.push_back(s[d]);
+                auto q_dims = batch_dims;
+                q_dims.push_back(M);
+                q_dims.push_back(K);
+                auto r_dims = batch_dims;
+                r_dims.push_back(K);
+                r_dims.push_back(N_dim);
+                return {SymbolicShape(std::move(q_dims)), SymbolicShape(std::move(r_dims))};
+            }
+            return {};
+        }
+
+        case OpType::Eigh: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto& s = input_shapes[0];
+                auto N_dim = s[s.rank() - 1];
+                std::vector<SymbolicDim> batch_dims;
+                for (size_t d = 0; d + 2 < s.rank(); ++d) batch_dims.push_back(s[d]);
+                auto w_dims = batch_dims;
+                w_dims.push_back(N_dim);
+                return {SymbolicShape(std::move(w_dims)), input_shapes[0]};
+            }
+            return {};
+        }
+
+        case OpType::SparseSpMM: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 4 && node->has_int_attr("m")) {
+                std::vector<SymbolicDim> dims = {SymbolicDim::concrete(node->get_int_attr("m"))};
+                auto& dense_sym = input_shapes[3];
+                for (size_t i = 1; i < dense_sym.rank(); ++i) dims.push_back(dense_sym[i]);
+                return {SymbolicShape(std::move(dims))};
+            }
+            return {};
+        }
+
+        case OpType::SparseSpMV: {
+            if (node->has_int_attr("m")) {
+                return {SymbolicShape({SymbolicDim::concrete(node->get_int_attr("m"))})};
+            }
+            return {};
+        }
+
+        case OpType::SparseAdd:
+        case OpType::SparseTrsv:
+        case OpType::SparseTrsm: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 4) {
+                return {input_shapes[3]};
+            }
+            return {};
+        }
+
+        case OpType::Constant: {
+            if (node->has_attr("value")) {
+                auto& t = node->get_tensor_attr("value");
+                return {SymbolicShape::from_concrete(
+                    std::vector<int64_t>(t.shape().begin(), t.shape().end()))};
+            }
+            return {};
+        }
+
+        case OpType::Input:
+        case OpType::Output: {
+            auto input_shapes = gather_input_shapes(node);
             if (!input_shapes.empty()) {
                 return {input_shapes[0]};
             }

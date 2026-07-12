@@ -7,6 +7,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/jit/tracer.hpp"
 #ifdef TENZOR_USE_MKL
 #include <mkl.h>
 #include <mkl_lapacke.h>
@@ -179,13 +180,86 @@ auto batch_size(const Tensor& A) -> int64_t {
 
 } // anonymous namespace
 
-auto det(const Tensor& A) -> Tensor {
-    // Try GPU dispatch first
-    {
-        Tensor result;
-        std::array<Tensor, 1> inputs = {A};
-        if (try_gpu_dispatch(OpId::LinalgDet, inputs, {}, result)) return result;
-    }
+// ============================================================================
+// JIT tracer visibility for CPU LAPACK-backed linalg ops (findings.txt JIT-R133)
+// ============================================================================
+// The GPU/complex path already reaches the interceptor via try_gpu_dispatch's
+// dispatch_single()/dispatch() call, so once the corresponding OpId::Linalg*
+// is mapped in tracing_interceptor.cpp's opid_to_optype, that path is traced
+// automatically. The real-dtype CPU path below never calls dispatch() at all
+// (try_gpu_dispatch returns false for CPU tensors and execution falls straight
+// through to the hand-written LAPACKE code), so it is completely invisible to
+// the tracer: a traced call silently bakes its real, input-dependent result as
+// a trace-time constant (severing the graph's dependence on the runtime
+// input), exactly the mechanism already fixed elsewhere for RMSNorm/Embedding/
+// detection ops. These helpers record the correct (input -> output) node right
+// after that CPU computation completes, mirroring jit_record_rms_norm
+// (src/nn/layers/normalization.cpp) and detection.cpp's manual recorders.
+namespace {
+
+inline auto jit_record_linalg1(::tenzor::jit::OpType type, const Tensor& a,
+                                const Tensor& out) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto o_id = tracer.register_new_tensor(out);
+    ::tenzor::jit::TracedOp op(type, {a_id}, {o_id});
+    tracer.record_op(std::move(op));
+}
+
+inline auto jit_record_linalg1_bool_attr(::tenzor::jit::OpType type, const Tensor& a,
+                                          const Tensor& out, const char* attr_name,
+                                          bool attr_val) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto o_id = tracer.register_new_tensor(out);
+    ::tenzor::jit::TracedOp op(type, {a_id}, {o_id});
+    op.bool_attrs[attr_name] = attr_val;
+    tracer.record_op(std::move(op));
+}
+
+inline auto jit_record_linalg2to1(::tenzor::jit::OpType type, const Tensor& a,
+                                   const Tensor& b, const Tensor& out) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto b_id = tracer.register_tensor(b);
+    auto o_id = tracer.register_new_tensor(out);
+    ::tenzor::jit::TracedOp op(type, {a_id, b_id}, {o_id});
+    tracer.record_op(std::move(op));
+}
+
+inline auto jit_record_linalg1to2(::tenzor::jit::OpType type, const Tensor& a,
+                                   const Tensor& out0, const Tensor& out1) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto o0_id = tracer.register_new_tensor(out0);
+    auto o1_id = tracer.register_new_tensor(out1);
+    ::tenzor::jit::TracedOp op(type, {a_id}, {o0_id, o1_id});
+    tracer.record_op(std::move(op));
+}
+
+inline auto jit_record_linalg1to3_bool_attr(::tenzor::jit::OpType type, const Tensor& a,
+                                             const Tensor& out0, const Tensor& out1,
+                                             const Tensor& out2, const char* attr_name,
+                                             bool attr_val) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto o0_id = tracer.register_new_tensor(out0);
+    auto o1_id = tracer.register_new_tensor(out1);
+    auto o2_id = tracer.register_new_tensor(out2);
+    ::tenzor::jit::TracedOp op(type, {a_id}, {o0_id, o1_id, o2_id});
+    op.bool_attrs[attr_name] = attr_val;
+    tracer.record_op(std::move(op));
+}
+
+} // namespace
+
+namespace {
+auto det_cpu_impl(const Tensor& A) -> Tensor {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("det");
 #else
@@ -291,15 +365,22 @@ auto det(const Tensor& A) -> Tensor {
     return maybe_downcast(result, original_dtype);
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
+} // namespace
 
-auto inv(const Tensor& A) -> Tensor {
+auto det(const Tensor& A) -> Tensor {
     // Try GPU dispatch first
     {
         Tensor result;
         std::array<Tensor, 1> inputs = {A};
-        if (try_gpu_dispatch(OpId::LinalgInv, inputs, {}, result)) return result;
+        if (try_gpu_dispatch(OpId::LinalgDet, inputs, {}, result)) return result;
     }
+    Tensor result = det_cpu_impl(A);
+    jit_record_linalg1(::tenzor::jit::OpType::Det, A, result);
+    return result;
+}
 
+namespace {
+auto inv_cpu_impl(const Tensor& A) -> Tensor {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("inv");
 #else
@@ -359,21 +440,22 @@ auto inv(const Tensor& A) -> Tensor {
     return maybe_downcast(work, original_dtype);
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
+} // namespace
 
-auto solve(const Tensor& A, const Tensor& B) -> Tensor {
-    // Try GPU dispatch first. The GPU solve kernels expect a 2D RHS (they
-    // transpose B for the column-major cuSOLVER call, which fails on a 1D
-    // vector); promote a 1D B to (n, 1) and squeeze the solution back.
+auto inv(const Tensor& A) -> Tensor {
+    // Try GPU dispatch first
     {
-        const bool b_was_1d = (B.shape().size() == 1);
-        Tensor B2 = b_was_1d ? tenzor::reshape(B, {B.shape()[0], 1}) : B;
         Tensor result;
-        std::array<Tensor, 2> inputs = {A, B2};
-        if (try_gpu_dispatch(OpId::LinalgSolve, inputs, {}, result)) {
-            return b_was_1d ? tenzor::reshape(result, {B.shape()[0]}) : result;
-        }
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch(OpId::LinalgInv, inputs, {}, result)) return result;
     }
+    Tensor result = inv_cpu_impl(A);
+    jit_record_linalg1(::tenzor::jit::OpType::Inv, A, result);
+    return result;
+}
 
+namespace {
+auto solve_cpu_impl(const Tensor& A, const Tensor& B) -> Tensor {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("solve");
 #else
@@ -465,6 +547,25 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
 
     return maybe_downcast(work_b, original_dtype);
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+} // namespace
+
+auto solve(const Tensor& A, const Tensor& B) -> Tensor {
+    // Try GPU dispatch first. The GPU solve kernels expect a 2D RHS (they
+    // transpose B for the column-major cuSOLVER call, which fails on a 1D
+    // vector); promote a 1D B to (n, 1) and squeeze the solution back.
+    {
+        const bool b_was_1d = (B.shape().size() == 1);
+        Tensor B2 = b_was_1d ? tenzor::reshape(B, {B.shape()[0], 1}) : B;
+        Tensor result;
+        std::array<Tensor, 2> inputs = {A, B2};
+        if (try_gpu_dispatch(OpId::LinalgSolve, inputs, {}, result)) {
+            return b_was_1d ? tenzor::reshape(result, {B.shape()[0]}) : result;
+        }
+    }
+    Tensor result = solve_cpu_impl(A, B);
+    jit_record_linalg2to1(::tenzor::jit::OpType::Solve, A, B, result);
+    return result;
 }
 
 auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitriangular) -> Tensor {
@@ -689,16 +790,8 @@ auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitria
 #endif
 }
 
-auto cholesky(const Tensor& A, bool upper) -> Tensor {
-    // Try GPU dispatch first
-    {
-        Tensor result;
-        std::array<Tensor, 1> inputs = {A};
-        OpAttributes attrs;
-        attrs.set(AttrKey::Upper, upper);
-        if (try_gpu_dispatch(OpId::LinalgCholesky, inputs, attrs, result)) return result;
-    }
-
+namespace {
+auto cholesky_cpu_impl(const Tensor& A, bool upper) -> Tensor {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("cholesky");
 #else
@@ -775,6 +868,21 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
 
     return maybe_downcast(work, original_dtype);
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+} // namespace
+
+auto cholesky(const Tensor& A, bool upper) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 1> inputs = {A};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Upper, upper);
+        if (try_gpu_dispatch(OpId::LinalgCholesky, inputs, attrs, result)) return result;
+    }
+    Tensor result = cholesky_cpu_impl(A, upper);
+    jit_record_linalg1_bool_attr(::tenzor::jit::OpType::Cholesky, A, result, "upper", upper);
+    return result;
 }
 
 auto norm(const Tensor& A, const std::string& ord) -> Tensor {
@@ -1263,20 +1371,8 @@ std::tuple<Tensor, Tensor, Tensor> canonicalize_eig(const Tensor& Wr_in,
 
 } // namespace
 
-auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tensor> {
-    // Try GPU dispatch first
-    {
-        std::vector<Tensor> results;
-        std::array<Tensor, 1> inputs = {A};
-        OpAttributes attrs;
-        attrs.set(AttrKey::FullMatrices, full_matrices);
-        if (try_gpu_dispatch_multi(OpId::LinalgSVD, inputs, attrs, results)) {
-            int64_t k = results[1].shape().back();
-            auto [Uc, Vtc] = canonicalize_uv(results[0], results[2], k, /*have_vt=*/true);
-            return {Uc, results[1], Vtc};
-        }
-    }
-
+namespace {
+auto svd_cpu_impl(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tensor> {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("svd");
 #else
@@ -1427,17 +1523,29 @@ auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tens
     }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
+} // namespace
 
-auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+auto svd(const Tensor& A, bool full_matrices) -> std::tuple<Tensor, Tensor, Tensor> {
     // Try GPU dispatch first
     {
         std::vector<Tensor> results;
         std::array<Tensor, 1> inputs = {A};
-        if (try_gpu_dispatch_multi(OpId::LinalgQR, inputs, {}, results)) {
-            return {results[0], results[1]};
+        OpAttributes attrs;
+        attrs.set(AttrKey::FullMatrices, full_matrices);
+        if (try_gpu_dispatch_multi(OpId::LinalgSVD, inputs, attrs, results)) {
+            int64_t k = results[1].shape().back();
+            auto [Uc, Vtc] = canonicalize_uv(results[0], results[2], k, /*have_vt=*/true);
+            return {Uc, results[1], Vtc};
         }
     }
+    auto [U, S, Vt] = svd_cpu_impl(A, full_matrices);
+    jit_record_linalg1to3_bool_attr(::tenzor::jit::OpType::Svd, A, U, S, Vt,
+                                     "full_matrices", full_matrices);
+    return {U, S, Vt};
+}
 
+namespace {
+auto qr_cpu_impl(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("qr");
 #else
@@ -1601,20 +1709,24 @@ auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     return {maybe_downcast(Q, original_dtype), maybe_downcast(R, original_dtype)};
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
+} // namespace
 
-auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+auto qr(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     // Try GPU dispatch first
     {
         std::vector<Tensor> results;
         std::array<Tensor, 1> inputs = {A};
-        if (try_gpu_dispatch_multi(OpId::LinalgEigh, inputs, {}, results)) {
-            int64_t nn = results[0].shape().back();
-            auto [Vc, unused] = canonicalize_uv(results[1], Tensor(), nn, /*have_vt=*/false);
-            (void)unused;
-            return {results[0], Vc};
+        if (try_gpu_dispatch_multi(OpId::LinalgQR, inputs, {}, results)) {
+            return {results[0], results[1]};
         }
     }
+    auto [Q, R] = qr_cpu_impl(A);
+    jit_record_linalg1to2(::tenzor::jit::OpType::Qr, A, Q, R);
+    return {Q, R};
+}
 
+namespace {
+auto eigh_cpu_impl(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("eigh");
 #else
@@ -1700,6 +1812,24 @@ auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         return {Wd, Vc};
     }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+} // namespace
+
+auto eigh(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch_multi(OpId::LinalgEigh, inputs, {}, results)) {
+            int64_t nn = results[0].shape().back();
+            auto [Vc, unused] = canonicalize_uv(results[1], Tensor(), nn, /*have_vt=*/false);
+            (void)unused;
+            return {results[0], Vc};
+        }
+    }
+    auto [W, V] = eigh_cpu_impl(A);
+    jit_record_linalg1to2(::tenzor::jit::OpType::Eigh, A, W, V);
+    return {W, V};
 }
 
 auto eigvalsh(const Tensor& A) -> Tensor {

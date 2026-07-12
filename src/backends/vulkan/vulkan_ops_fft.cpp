@@ -704,8 +704,19 @@ auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
     }
     uint32_t num_stages = log2_int(fft_size);
 
-    // We ping-pong between two buffers for each stage
-    Tensor buf_a = input.contiguous();
+    // findings.txt: buf_a/buf_b are ping-ponged across an ODD number of
+    // swaps for many fft_size values (one swap after bit-reversal, one more
+    // per stage -- num_stages+1 total, odd whenever num_stages is even, e.g.
+    // fft_size=4/16/64/...), so the function's returned buffer can end up
+    // being whichever physical buffer buf_a started as. input.contiguous()
+    // is a no-op alias (NOT a copy) when the caller's tensor is already
+    // contiguous, so buf_a would then alias the CALLER's own input buffer --
+    // every in-place shader write during ping-ponging silently corrupts the
+    // caller's input tensor, and for the right stage count the function even
+    // returns that same aliased buffer as "the result" while having already
+    // overwritten it. Force a genuine copy so buf_a can NEVER alias a
+    // buffer the caller still holds a reference to, regardless of parity.
+    Tensor buf_a = input.clone();
     Tensor buf_b(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     // Bit-reversal permutation first
@@ -812,8 +823,12 @@ auto VulkanBackend::runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t di
     size_t elem_size = is_f16 ? 4 : (is_f64 ? 16 : 8);
     size_t buf_size = input.numel() * elem_size;
 
-    // Ping-pong buffers
-    Tensor buf_a = input.contiguous();
+    // findings.txt: same buffer-aliasing hazard as runFFTButterfly above --
+    // input.contiguous() is a no-op alias (not a copy) for an already-
+    // contiguous caller tensor, and the ping-pong swap below can leave the
+    // function returning (and having overwritten) that same caller-owned
+    // buffer depending on the number of factor stages. Force a genuine copy.
+    Tensor buf_a = input.clone();
     Tensor buf_b(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     // Execute one stage per factor

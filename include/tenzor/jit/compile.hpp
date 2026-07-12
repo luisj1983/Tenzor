@@ -61,6 +61,15 @@ struct MlirInvokerCache;
 /// kept inline in compile.cpp) purely so it can be unit tested directly with
 /// synthetic Device values, without needing multi-GPU cross-family hardware.
 auto resolve_hal_ordinal(const std::string& target, const Device& in_dev) -> int;
+
+/// Pure vendor+product-name -> --iree-vulkan-target string classifier
+/// (JIT-R108/JIT-R131). `vendor_lower`/`name_lower` must already be
+/// lowercased. Exposed here (rather than kept inline in compile.cpp's
+/// detect_vulkan_iree_target, which does the actual hardware query) purely
+/// so it can be unit tested directly with synthetic vendor/name strings,
+/// without needing every GPU generation's real hardware on hand.
+auto classify_vulkan_target(const std::string& vendor_lower,
+                            const std::string& name_lower) -> std::string;
 }  // namespace mlir_detail
 
 

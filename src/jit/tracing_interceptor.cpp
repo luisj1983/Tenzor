@@ -287,6 +287,76 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         // data as a dense float weight to re-quantize.
         // case OpId::QuantizedLinear: intentionally not mapped.
 
+        // findings.txt JIT-R115: MultiheadAttention::scaled_dot_product_attention's
+        // cuDNN/fused-SDPA fast path dispatches OpId::FusedAttention directly
+        // (registered on every backend, not just CUDA) — without this mapping
+        // every traced attention forward using that fast path unconditionally
+        // hard graph-broke the whole trace. FlashAttention's execute_node case
+        // already decomposes to softmax(scale*QK^T [+ causal mask])V from
+        // exactly [Q,K,V(,mask)] + scale/causal/dropout_p attrs, the same
+        // inputs/attrs this dispatch site provides, so reusing that node type
+        // replays it correctly without a fused kernel.
+        case OpId::FusedAttention: return OpType::FlashAttention;
+
+        // findings.txt JIT-R132: tenzor::ops::norm() (src/ops/reduction.cpp)
+        // dispatches unconditionally on EVERY device (no gating at all,
+        // unlike most other ops here) — was entirely unmapped, hard
+        // graph-breaking any traced norm()/Tensor::norm() call on every
+        // backend including CPU.
+        case OpId::Norm: return OpType::Norm;
+
+        // findings.txt JIT-R133: the linalg family (det/inv/solve/cholesky/
+        // svd/qr/eigh) already has full OpType + execute_node +
+        // infer_types/infer_symbolic_types support (used elsewhere), just no
+        // opid_to_optype mapping — GPU/complex calls (which reach here via
+        // try_gpu_dispatch's dispatch_single()) hard graph-broke; the CPU
+        // real-dtype path (which never reached dispatch() at all) is fixed
+        // separately via manual jit_record_* calls in src/ops/linalg.cpp.
+        case OpId::LinalgDet:      return OpType::Det;
+        case OpId::LinalgInv:      return OpType::Inv;
+        case OpId::LinalgSolve:    return OpType::Solve;
+        case OpId::LinalgCholesky: return OpType::Cholesky;
+        case OpId::LinalgSVD:      return OpType::Svd;
+        case OpId::LinalgQR:       return OpType::Qr;
+        case OpId::LinalgEigh:     return OpType::Eigh;
+
+        // Needed for slogdet()'s GPU-dispatch composition (sign(det) *
+        // log(abs(det))) to be fully traceable now that Det is mapped above —
+        // tenzor::sign() dispatches OpId::Sign unconditionally and was
+        // otherwise unmapped, same hard-graph-break exposure.
+        case OpId::Sign: return OpType::Sign;
+
+        // findings.txt JIT-R134: real, reachable dispatch call sites
+        // (src/ops/vision.cpp's grid_sample/affine_grid, src/ops/fft.cpp's
+        // fft(), src/nn/loss/losses_advanced.cpp's CTCLoss) with no prior
+        // mapping — hard graph-broke any trace using spatial-transformer
+        // primitives, FFT, or CTC loss. execute_node re-dispatches these
+        // directly for inference replay (see findings.txt for why no
+        // decomposition is attempted).
+        case OpId::GridSample:      return OpType::GridSample;
+        case OpId::AffineGrid:      return OpType::AffineGrid;
+        case OpId::FFT:             return OpType::FFT;
+        // IFFT/RFFT/IRFFT share FFT's exact [input] + dim/n/norm attr shape
+        // (src/ops/fft.cpp's ifft()/rfft()/irfft() all set the same 3
+        // AttrKeys) -- same unmapped-OpId gap, fixed the same way.
+        case OpId::IFFT:            return OpType::IFFT;
+        case OpId::RFFT:            return OpType::RFFT;
+        case OpId::IRFFT:           return OpType::IRFFT;
+        case OpId::CTCLossForward:  return OpType::CTCLossForward;
+
+        // findings.txt JIT-R116: ops::FusionOptimizer's fused-op dispatch
+        // sites (src/ops/fused_ops.cpp, src/ops/fusion_optimizer.cpp) hit
+        // this exact same unmapped-OpId hard-break mechanism if FusionOptimizer
+        // is ever wired into a JIT-traced path (currently unreachable — see
+        // findings.txt — but mapped here defensively so that combination
+        // fails safely-and-traceably instead of hard-breaking, matching the
+        // other Fused* treatment above).
+        case OpId::FusedLinearReLU:          return OpType::FusedLinearReLU;
+        case OpId::FusedConv2dReLU:          return OpType::FusedConv2dReLU;
+        case OpId::FusedConv2dBnReLU:        return OpType::FusedConv2dBnReLU;
+        case OpId::FusedSoftmaxCrossEntropy: return OpType::FusedSoftmaxCrossEntropy;
+        case OpId::FusedAddReLU:             return OpType::FusedAddReLU;
+
         default:
             return std::nullopt;
     }
@@ -567,7 +637,18 @@ auto make_tracing_interceptor(
             // them, and the output-binding loop silently dropped them anyway).
             // Surface only the primary output, matching BatchNorm2d above.
             op == OpId::GroupNorm ||
-            op == OpId::InstanceNorm) {
+            op == OpId::InstanceNorm ||
+            // findings.txt JIT-R125: LayerNorm/FusedLayerNorm's registered
+            // kernels also return the {output, mean, rstd} triple on every
+            // backend (see docs/internals/attention-contract.md), but
+            // execute_node's OpType::LayerNorm case only ever produces 1
+            // output Variable at replay -- same missing-sibling gap as the
+            // GroupNorm/InstanceNorm fix above. OpId::RMSNorm is included
+            // too for hygiene (it has the identical {output, rrms} shape),
+            // even though it has no live dispatch call site today.
+            op == OpId::LayerNorm ||
+            op == OpId::FusedLayerNorm ||
+            op == OpId::RMSNorm) {
             if (!results.empty()) {
                 output_ids.push_back(register_output(results[0]));
             }
@@ -839,6 +920,37 @@ auto make_tracing_interceptor(
             traced.int_attrs["embedding_bag_mode"] =
                 (eb_mode == "mean") ? 1 : (eb_mode == "max") ? 2 : 0;
         }
+        // findings.txt JIT-R134: GridSample's mode ("bilinear"/"nearest"/
+        // "bicubic", a subset of Interpolate's set) is intentionally left
+        // to fall through to the generic AttrKey::Mode encoding above (same
+        // 0/1/2 values, GridSample never uses "trilinear") -- no separate
+        // branch needed. Its OWN padding_mode string ("zeros"/"border"/
+        // "reflection") has no existing encoding anywhere, so it gets one
+        // here under a distinct key.
+        if (attrs.has(AttrKey::PaddingMode)) {
+            const auto pm = attrs.get_string(AttrKey::PaddingMode, "zeros");
+            traced.int_attrs["padding_mode"] =
+                (pm == "border") ? 1 : (pm == "reflection") ? 2 : 0;
+        }
+        // findings.txt JIT-R134: FFT's norm string ("backward"/"forward"/"ortho").
+        if (attrs.has(AttrKey::Norm)) {
+            const auto norm = attrs.get_string(AttrKey::Norm, "backward");
+            traced.int_attrs["norm"] =
+                (norm == "forward") ? 1 : (norm == "ortho") ? 2 : 0;
+        }
+        // findings.txt JIT-R116: FusedSoftmaxCrossEntropy's reduction string
+        // ("mean"/"sum"/"none").
+        if (attrs.has(AttrKey::Reduction)) {
+            const auto red = attrs.get_string(AttrKey::Reduction, "mean");
+            traced.int_attrs["reduction"] =
+                (red == "sum") ? 1 : (red == "none") ? 2 : 0;
+        }
+        // findings.txt JIT-R116/R134: HasBias (FusedLinearReLU/FusedConv2dReLU),
+        // Momentum (FusedConv2dBnReLU), Blank/ZeroInfinity (CTCLossForward).
+        copy_bool(AttrKey::HasBias, "has_bias");
+        copy_float(AttrKey::Momentum, "momentum");
+        copy_int(AttrKey::Blank, "blank");
+        copy_bool(AttrKey::ZeroInfinity, "zero_infinity");
         copy_int(AttrKey::EmbeddingDim, "embedding_dim");
         copy_bool(AttrKey::IncludeLastOffset, "include_last_offset");
         copy_int(AttrKey::KernelSize,  "kernel_size");

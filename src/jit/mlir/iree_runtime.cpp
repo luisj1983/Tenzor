@@ -714,7 +714,11 @@ auto shared_iree_runtime_instance() -> iree_runtime_instance_t* {
 // thread(s) belong to the iree_hal_device_t, not the instance/driver
 // registry. IREE creates a fresh executor/thread-pool per device for
 // drivers backed by its task-queue infrastructure (confirmed on both
-// "local-sync" and "hip" HAL devices -- not CPU-driver-specific), so
+// "local-task" and "hip" HAL devices -- not CPU-driver-specific; see
+// iree_paths.cpp's driver_for_target() doc comment -- llvm-cpu now maps to
+// "local-sync" specifically BECAUSE it has no worker-thread pool and so
+// cannot hit this race class, which is why this comment names "local-task"
+// rather than "local-sync"), so
 // creating a fresh device per IreeInvoker::load() call recreates that
 // churn at the device level instead. Caching devices by URI, exactly
 // mirroring the instance-sharing rationale (and IREE's own guidance that
@@ -726,11 +730,24 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
                             const std::string& driver,
                             const std::string& device_uri,
                             int device_index) -> iree_hal_device_t* {
-    std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
-    auto& cache = g_shared_iree_devices;
-    auto it = cache.find(device_uri);
-    if (it != cache.end()) return it->second;
+    {
+        std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
+        auto it = g_shared_iree_devices.find(device_uri);
+        if (it != g_shared_iree_devices.end()) return it->second;
+    }
 
+    // JIT-R130: create the device OUTSIDE the lock. iree_hal_create_device /
+    // iree_runtime_instance_try_create_default_device can be genuinely slow
+    // (driver/context init, JIT warm-up) or, on a wedged/broken driver,
+    // block outright. Holding g_shared_iree_device_mu for that whole
+    // duration would serialize device creation across EVERY distinct
+    // driver/URI, not just the one being created -- a stuck Vulkan ICD or a
+    // hung CUDA context probe on one target would then block an unrelated
+    // CPU-only llvm-cpu compile queued behind it on its first device
+    // acquisition. Double-checked: create speculatively, then take the lock
+    // again only to insert-or-discard, so two threads racing to create the
+    // SAME URI (a real but rare case) release the loser's device rather than
+    // leaking it or handing out two live handles for one URI.
     iree_hal_device_t* device = nullptr;
     if (device_index > 0 && driver != "local-task" && driver != "local-sync") {
         iree_hal_driver_registry_t* registry =
@@ -751,8 +768,18 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
             std::string("iree_runtime_instance_try_create_default_device(") +
                 driver + ")");
     }
-    cache.emplace(device_uri, device);
-    return device;
+
+    std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
+    auto [it, inserted] = g_shared_iree_devices.try_emplace(device_uri, device);
+    if (!inserted) {
+        // Another thread won the race and already cached a device for this
+        // URI while we were creating ours outside the lock -- release the
+        // redundant one so callers always see exactly one live device per
+        // URI, matching the cache's contract (and cleanup_shared_iree_
+        // state()'s single-release-per-URI assumption at exit).
+        iree_hal_device_release(device);
+    }
+    return it->second;
 }
 
 }  // namespace
@@ -1251,31 +1278,45 @@ auto invoke_subprocess(IreeInvoker& self,
             "iree-run-module produced no parseable outputs.\nstdout:\n" +
             res.stdout_text);
     }
-    // R1-06: this ASCII-stdout fallback (only reached because at least one
-    // output's dtype has no numpy encoding in iree-run-module -- currently
-    // only BFloat16 -- or a temp file couldn't be created) rounds every
-    // value to ~6 significant figures. That's lossless for BFloat16
-    // (~3-digit mantissa) and for integer/bool dtypes (printed exactly), but
-    // would SILENTLY discard real precision for Float32 (~7 digits needed),
-    // Float64 (~15-17 digits), or Complex64/128 (wrapping those). With a
-    // single output this can't currently happen in production (@main is
-    // enforced to have exactly one output, and that one output is whatever
-    // triggered this fallback), but guard multi-output explicitly rather
-    // than silently return a precision-degraded tensor if that invariant is
-    // ever loosened.
-    if (outs.size() > 1) {
+    // JIT-R128: this ASCII-stdout fallback is reached for two DIFFERENT
+    // reasons, and the old guard (`if (outs.size() > 1)`) only covered one
+    // of them. Reason A: a co-produced BFloat16 output has no numpy encoding
+    // in iree-run-module (npy_path was created fine, but the npy-based
+    // subprocess call above rejected with "unsupported data encoding") --
+    // dtype-specific, and in the single-output case that one output IS the
+    // BFloat16 one, so lossy ASCII parsing is harmless there. Reason B:
+    // npy_path itself is empty because mkstemps() failed to create the .npy
+    // temp file BEFORE the bit-exact path was ever attempted (temp
+    // directory full, fd/quota exhaustion, restrictive sandbox) -- this is
+    // completely dtype-independent, so a lone Float32/Float64/Complex
+    // output can land here with no encoding-gap excuse at all and silently
+    // round to ~6 significant figures. The old `outs.size() > 1` condition
+    // only ever detects reason A; reason B needs the check to fire even for
+    // a single output. Every value here rounds to ~6 significant figures,
+    // which is lossless for BFloat16 (~3-digit mantissa) and for integer/
+    // bool dtypes (printed exactly), but SILENTLY discards real precision
+    // for Float32 (~7 digits needed), Float64 (~15-17 digits), or
+    // Complex64/128 (wrapping those).
+    const bool npy_path_unavailable = npy_path.empty();
+    if (npy_path_unavailable || outs.size() > 1) {
         for (std::size_t i = 0; i < outs.size(); ++i) {
             const auto dt = outs[i].dtype();
             if (dt == ::tenzor::DType::Float32 || dt == ::tenzor::DType::Float64 ||
                 dt == ::tenzor::DType::Complex64 || dt == ::tenzor::DType::Complex128) {
                 throw JitInvokeError(
-                    "iree-run-module: multi-output subprocess invocation fell "
-                    "back to lossy ~6-significant-figure ASCII parsing (likely "
-                    "because a co-produced BFloat16 output has no numpy "
-                    "encoding in iree-run-module), which would silently "
-                    "discard real precision for output[" + std::to_string(i) +
-                    "] (dtype requires full precision). Refusing to return a "
-                    "silently precision-degraded result.");
+                    "iree-run-module: subprocess invocation fell back to "
+                    "lossy ~6-significant-figure ASCII parsing (" +
+                    std::string(
+                        npy_path_unavailable
+                            ? "no bit-exact .npy temp file could be created "
+                              "-- temp directory full, fd/quota exhaustion, "
+                              "or a restrictive sandbox"
+                            : "likely because a co-produced BFloat16 output "
+                              "has no numpy encoding in iree-run-module") +
+                    "), which would silently discard real precision for "
+                    "output[" + std::to_string(i) + "] (dtype requires full "
+                    "precision). Refusing to return a silently precision-"
+                    "degraded result.");
             }
         }
     }
@@ -1508,11 +1549,25 @@ auto remap_hip_visible_device_index(int hip_index,
 
 auto detect_rocm_gfx_arch(int device_index) -> std::string {
     if (device_index < 0) return {};
+    const char* hip_visible_devices_env = std::getenv("HIP_VISIBLE_DEVICES");
+    // JIT-R129: the detected arch depends not just on device_index but on
+    // HIP_VISIBLE_DEVICES's actual value (remap_hip_visible_device_index()
+    // remaps `device_index` through it to a physical KFD ordinal). Caching
+    // by device_index alone means a process that changes HIP_VISIBLE_DEVICES
+    // between two calls for the same ordinal (test harnesses using setenv/
+    // unsetenv across cases, or any embedding scenario mutating it between
+    // JIT compiles) would silently reuse the arch computed for the FIRST
+    // remap on the second call -- a stale/wrong gfx ISA compiled in for
+    // whichever physical GPU the second call actually targets. Fold the raw
+    // env value into the cache key so a changed mapping always misses.
+    const std::string cache_key =
+        std::to_string(device_index) + "|" +
+        (hip_visible_devices_env != nullptr ? hip_visible_devices_env : "");
     static std::mutex mu;
-    static std::unordered_map<int, std::string> cache;
+    static std::unordered_map<std::string, std::string> cache;
     {
         std::lock_guard<std::mutex> g(mu);
-        auto it = cache.find(device_index);
+        auto it = cache.find(cache_key);
         if (it != cache.end()) return it->second;
     }
 
@@ -1537,7 +1592,7 @@ auto detect_rocm_gfx_arch(int device_index) -> std::string {
                 }
             }
             const int physical_index = remap_hip_visible_device_index(
-                device_index, std::getenv("HIP_VISIBLE_DEVICES"));
+                device_index, hip_visible_devices_env);
             if (physical_index >= 0 &&
                 physical_index < static_cast<int>(archs.size())) {
                 result = archs[static_cast<std::size_t>(physical_index)];
@@ -1550,7 +1605,7 @@ auto detect_rocm_gfx_arch(int device_index) -> std::string {
     }
 
     std::lock_guard<std::mutex> g(mu);
-    cache[device_index] = result;
+    cache[cache_key] = result;
     return result;
 }
 

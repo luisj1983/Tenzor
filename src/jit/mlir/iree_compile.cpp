@@ -737,6 +737,213 @@ auto compute_cache_key(const std::string& mlir_text,
     return sha256_hex(os.str());
 }
 
+// JIT-R127: the embedding-API compile-and-write-vmfb sequence, factored out of
+// compile_mlir so it can be retried with a different `cuda_arch`. Mirrors
+// compile_via_subprocess's JIT-R101 retry -- a cuda_arch the device genuinely
+// reports (e.g. sm_120 for a Blackwell-class GPU) can be newer than what THIS
+// linked libIREECompiler's NVPTX backend has target support for, and the
+// standalone iree-compile CLI subprocess path already retries once with the
+// sm_80 Ampere baseline in that case. The in-process embedding path used to
+// have no equivalent retry: it just threw, permanently forcing eager fallback
+// for cuda graphs on any GPU newer than this toolchain even though the exact
+// same graph on the exact same hardware compiles fine via the subprocess path.
+//
+// Returns true on success (vmfb_path now holds a valid, verified artifact).
+// On a *pipeline* rejection -- the kind the sm_80 retry can plausibly fix --
+// returns false and fills `pipeline_diag` with the captured diagnostics
+// instead of throwing, so the caller can inspect the message and decide
+// whether to retry. All other failures (session/invocation/source creation,
+// parse errors, mkstemp, output writing) still throw JitCompileError
+// directly: those aren't fixed by retrying with a different cuda_arch, so
+// there is no reason to swallow them into a silent false.
+auto compile_via_embedding_api(const std::string& mlir_text,
+                               const std::string& target,
+                               const std::string& rocm_arch,
+                               const std::string& cuda_arch,
+                               const std::string& vulkan_arch,
+                               const fs::path& vmfb_path,
+                               const fs::path& mlir_path,
+                               std::string& pipeline_diag) -> bool {
+    iree_compiler_session_t* session = ireeCompilerSessionCreate();
+    if (session == nullptr) {
+        throw JitCompileError(
+            "ireeCompilerSessionCreate returned nullptr", mlir_path);
+    }
+    struct SessionGuard {
+        iree_compiler_session_t* s;
+        ~SessionGuard() { ireeCompilerSessionDestroy(s); }
+    } session_guard{session};
+
+    const std::string target_flag =
+        "--iree-hal-target-backends=" + target;
+    const std::string input_flag = "--iree-input-type=auto";
+    const std::string demote_flag = "--iree-input-demote-f64-to-f32=false";
+    std::string rocm_target_flag;
+    std::string cuda_target_flag;
+    std::vector<const char*> flags = {target_flag.c_str(), input_flag.c_str(),
+                                      demote_flag.c_str()};
+    if (target == "rocm") {
+        rocm_target_flag = std::string("--iree-rocm-target=") + rocm_arch;
+        flags.push_back(rocm_target_flag.c_str());
+    }
+    if (target == "cuda" && !cuda_arch.empty()) {
+        cuda_target_flag = std::string("--iree-cuda-target=") + cuda_arch;
+        flags.push_back(cuda_target_flag.c_str());
+    }
+    std::string vulkan_target_flag;
+    if ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty()) {
+        vulkan_target_flag = std::string("--iree-vulkan-target=") + vulkan_arch;
+        flags.push_back(vulkan_target_flag.c_str());
+    }
+    std::string llvmcpu_target_cpu_flag;
+    std::string llvmcpu_target_cpu_features_flag;
+    if (target == "llvm-cpu") {
+        llvmcpu_target_cpu_flag = "--iree-llvmcpu-target-cpu=host";
+        flags.push_back(llvmcpu_target_cpu_flag.c_str());
+        llvmcpu_target_cpu_features_flag = "--iree-llvmcpu-target-cpu-features=host";
+        flags.push_back(llvmcpu_target_cpu_features_flag.c_str());
+    }
+    if (auto* set_err = ireeCompilerSessionSetFlags(
+            session, /*argc=*/static_cast<int>(flags.size()), flags.data());
+        set_err != nullptr) {
+        CompilerError err{set_err};
+        throw JitCompileError(
+            "ireeCompilerSessionSetFlags failed: " + err.message(), mlir_path);
+    }
+
+    iree_compiler_source_t* source = nullptr;
+    if (auto* src_err = ireeCompilerSourceWrapBuffer(
+            session, /*bufferName=*/"tenzor_jit_input.mlir",
+            mlir_text.c_str(), mlir_text.size(),
+            /*isNullTerminated=*/false, &source);
+        src_err != nullptr) {
+        CompilerError err{src_err};
+        throw JitCompileError(
+            "ireeCompilerSourceWrapBuffer failed: " + err.message(),
+            mlir_path);
+    }
+    struct SourceGuard {
+        iree_compiler_source_t* s;
+        ~SourceGuard() { ireeCompilerSourceDestroy(s); }
+    } source_guard{source};
+
+    iree_compiler_invocation_t* inv = ireeCompilerInvocationCreate(session);
+    if (inv == nullptr) {
+        throw JitCompileError(
+            "ireeCompilerInvocationCreate returned nullptr", mlir_path);
+    }
+    struct InvGuard {
+        iree_compiler_invocation_t* i;
+        ~InvGuard() { ireeCompilerInvocationDestroy(i); }
+    } inv_guard{inv};
+
+    std::string diag_buffer;
+    struct DiagCtx {
+        std::string* out;
+    } diag_ctx{&diag_buffer};
+    ireeCompilerInvocationEnableCallbackDiagnostics(
+        inv, /*flags=*/0,
+        [](enum iree_compiler_diagnostic_severity_t /*severity*/,
+           const char* message, size_t message_size, void* user_data) {
+            auto* ctx = static_cast<DiagCtx*>(user_data);
+            ctx->out->append(message, message_size);
+            ctx->out->push_back('\n');
+        },
+        &diag_ctx);
+
+    if (!ireeCompilerInvocationParseSource(inv, source)) {
+        throw JitCompileError(
+            "ireeCompilerInvocationParseSource failed:\n" + diag_buffer,
+            mlir_path);
+    }
+
+    if (!ireeCompilerInvocationPipeline(inv, IREE_COMPILER_PIPELINE_STD)) {
+        pipeline_diag = diag_buffer;
+        return false;
+    }
+
+    // Write to a unique temp file in the cache dir, then atomically rename it
+    // into the final vmfb path only after a successful, verified write. This
+    // prevents a crash mid-write or two racing processes from persisting a
+    // truncated-but-nonzero artifact that a later run would accept as a cache
+    // hit (and then fail at module-load).
+    const fs::path cache_dir = vmfb_path.parent_path();
+    const std::string tmpl =
+        (cache_dir / (vmfb_path.filename().string() + ".tmpXXXXXX")).string();
+    std::vector<char> tmp_buf(tmpl.begin(), tmpl.end());
+    tmp_buf.push_back('\0');
+    int tmp_fd = ::mkstemp(tmp_buf.data());
+    if (tmp_fd < 0) {
+        throw JitCompileError(
+            std::string("mkstemp for vmfb output failed: ") +
+                std::strerror(errno),
+            mlir_path);
+    }
+    ::close(tmp_fd);
+    const fs::path tmp_vmfb(tmp_buf.data());
+    // Remove the temp file on any error path below.
+    struct TmpFileGuard {
+        fs::path path;
+        bool armed = true;
+        ~TmpFileGuard() {
+            if (armed) {
+                std::error_code ec;
+                fs::remove(path, ec);
+            }
+        }
+    } tmp_guard{tmp_vmfb};
+
+    iree_compiler_output_t* output = nullptr;
+    const std::string tmp_vmfb_str = tmp_vmfb.string();
+    if (auto* out_err = ireeCompilerOutputOpenFile(tmp_vmfb_str.c_str(),
+                                                   &output);
+        out_err != nullptr) {
+        CompilerError err{out_err};
+        throw JitCompileError(
+            "ireeCompilerOutputOpenFile(" + tmp_vmfb_str +
+                ") failed: " + err.message(),
+            mlir_path);
+    }
+    {
+        struct OutputGuard {
+            iree_compiler_output_t* o;
+            ~OutputGuard() { ireeCompilerOutputDestroy(o); }
+        } output_guard{output};
+
+        if (auto* vmb_err =
+                ireeCompilerInvocationOutputVMBytecode(inv, output);
+            vmb_err != nullptr) {
+            CompilerError err{vmb_err};
+            throw JitCompileError(
+                "ireeCompilerInvocationOutputVMBytecode failed: " +
+                    err.message() + "\nDiagnostics:\n" + diag_buffer,
+                mlir_path);
+        }
+        ireeCompilerOutputKeep(output);
+        // output_guard destructor here flushes/closes the temp file before we
+        // verify and rename it.
+    }
+
+    if (!fs::exists(tmp_vmfb) || fs::file_size(tmp_vmfb) == 0 ||
+        !vmfb_has_valid_magic(tmp_vmfb)) {
+        throw JitCompileError(
+            "in-process compile produced an empty or malformed vmfb at " +
+                tmp_vmfb_str,
+            mlir_path);
+    }
+    {
+        std::error_code ec;
+        fs::rename(tmp_vmfb, vmfb_path, ec);
+        if (ec) {
+            throw JitCompileError(
+                "atomic rename of vmfb into place failed: " + ec.message(),
+                mlir_path);
+        }
+    }
+    tmp_guard.armed = false;  // renamed away; nothing to clean up.
+    return true;
+}
+
 auto compile_mlir(const std::string& mlir_text,
                   const CompileOptions& opts) -> CompiledArtifact {
     ensure_global_init();
@@ -952,217 +1159,37 @@ auto compile_mlir(const std::string& mlir_text,
         return CompiledArtifact{vmfb_path, target};
     }
 
-    iree_compiler_session_t* session = ireeCompilerSessionCreate();
-    if (session == nullptr) {
-        throw JitCompileError(
-            "ireeCompilerSessionCreate returned nullptr", mlir_path);
-    }
-    struct SessionGuard {
-        iree_compiler_session_t* s;
-        ~SessionGuard() { ireeCompilerSessionDestroy(s); }
-    } session_guard{session};
-
-    // Configure target via the standard flag. Tenzor exposes a small enum
-    // (target field) and we translate it 1:1 to IREE's --iree-hal-target-backends
-    // string. StableHLO is the default input form on IREE 3.11+ (auto-detected).
-    const std::string target_flag =
-        "--iree-hal-target-backends=" + target;
-    // IREE 3.11+ dropped the explicit "stablehlo" input-type alias in
-    // favour of "auto" (analyze-and-pick). "auto" is the right value on
-    // both old (3.0–3.10, where it was already accepted alongside
-    // "stablehlo") and new (3.11+, where it's the standard).
-    // We CAN'T leave this empty — ireeCompilerSessionSetFlags treats an
-    // empty string as a positional arg and rejects it.
-    const std::string input_flag = "--iree-input-type=auto";
-    // Do NOT let IREE silently demote f64 to f32 (its default) — see the matching
-    // comment on the subprocess arg path. Keeps this in-process embedding-API
-    // compile consistent: f64 graphs run correctly in f64 or fall back to eager,
-    // never a silent precision reduction. (Must outlive `flags`, which stores
-    // c_str() pointers.)
-    const std::string demote_flag = "--iree-input-demote-f64-to-f32=false";
-    // ROCm requires an explicit chip — `--iree-rocm-target=<chip>`. CUDA
-    // has a sensible default in iree-compile; Vulkan/CPU are
-    // chip-independent.
-    std::string rocm_target_flag;
-    std::string cuda_target_flag;
-    std::vector<const char*> flags = {target_flag.c_str(), input_flag.c_str(),
-                                      demote_flag.c_str()};
-    if (target == "rocm") {
-        // Device-derived arch (M1); rocm_arch is guaranteed non-empty above.
-        rocm_target_flag = std::string("--iree-rocm-target=") + rocm_arch;
-        flags.push_back(rocm_target_flag.c_str());
-    }
-    // CUDA needs an explicit target too — the old "sensible default" comment was
-    // stale (current iree-compile rejects a cuda backend without it). cuda_arch
-    // is resolved (env / build default / sm_80) above.
-    if (target == "cuda" && !cuda_arch.empty()) {
-        cuda_target_flag = std::string("--iree-cuda-target=") + cuda_arch;
-        flags.push_back(cuda_target_flag.c_str());
-    }
-    // Vulkan needs an explicit target too (F032): without it the SPIR-V env lacks
-    // shaderFloat16 / 16-bit storage and an F16 graph produces garbage on the GPU.
-    std::string vulkan_target_flag;
-    if ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty()) {
-        vulkan_target_flag = std::string("--iree-vulkan-target=") + vulkan_arch;
-        flags.push_back(vulkan_target_flag.c_str());
-    }
-    // llvm-cpu needs an explicit target-cpu too, in-process only: the standalone
-    // iree-compile CLI binary (compile_via_subprocess, above) applies a sensible
-    // default when this flag is omitted, but the raw embedding API used here does
-    // not replicate that default -- ireeCompilerInvocationPipeline fails outright
-    // ("Defaulting to targeting a generic CPU... Please specify a target CPU")
-    // once a graph is complex enough to need CPU-feature-dependent codegen (e.g.
-    // masked vector loads). 'host' is IREE's documented value for "detect and
-    // target this machine's native CPU", matching --iree-llvmcpu-target-cpu-features
-    // below.
-    std::string llvmcpu_target_cpu_flag;
-    std::string llvmcpu_target_cpu_features_flag;
-    if (target == "llvm-cpu") {
-        llvmcpu_target_cpu_flag = "--iree-llvmcpu-target-cpu=host";
-        flags.push_back(llvmcpu_target_cpu_flag.c_str());
-        llvmcpu_target_cpu_features_flag = "--iree-llvmcpu-target-cpu-features=host";
-        flags.push_back(llvmcpu_target_cpu_features_flag.c_str());
-    }
-    if (auto* set_err = ireeCompilerSessionSetFlags(
-            session, /*argc=*/static_cast<int>(flags.size()), flags.data());
-        set_err != nullptr) {
-        CompilerError err{set_err};
-        throw JitCompileError(
-            "ireeCompilerSessionSetFlags failed: " + err.message(), mlir_path);
-    }
-
-    iree_compiler_source_t* source = nullptr;
-    if (auto* src_err = ireeCompilerSourceWrapBuffer(
-            session, /*bufferName=*/"tenzor_jit_input.mlir",
-            mlir_text.c_str(), mlir_text.size(),
-            /*isNullTerminated=*/false, &source);
-        src_err != nullptr) {
-        CompilerError err{src_err};
-        throw JitCompileError(
-            "ireeCompilerSourceWrapBuffer failed: " + err.message(),
-            mlir_path);
-    }
-    struct SourceGuard {
-        iree_compiler_source_t* s;
-        ~SourceGuard() { ireeCompilerSourceDestroy(s); }
-    } source_guard{source};
-
-    iree_compiler_invocation_t* inv = ireeCompilerInvocationCreate(session);
-    if (inv == nullptr) {
-        throw JitCompileError(
-            "ireeCompilerInvocationCreate returned nullptr", mlir_path);
-    }
-    struct InvGuard {
-        iree_compiler_invocation_t* i;
-        ~InvGuard() { ireeCompilerInvocationDestroy(i); }
-    } inv_guard{inv};
-
-    // Capture diagnostics into a buffer so failures surface as JitCompileError
-    // messages rather than going to stderr silently.
     std::string diag_buffer;
-    struct DiagCtx {
-        std::string* out;
-    } diag_ctx{&diag_buffer};
-    ireeCompilerInvocationEnableCallbackDiagnostics(
-        inv, /*flags=*/0,
-        [](enum iree_compiler_diagnostic_severity_t /*severity*/,
-           const char* message, size_t message_size, void* user_data) {
-            auto* ctx = static_cast<DiagCtx*>(user_data);
-            ctx->out->append(message, message_size);
-            ctx->out->push_back('\n');
-        },
-        &diag_ctx);
-
-    if (!ireeCompilerInvocationParseSource(inv, source)) {
-        throw JitCompileError(
-            "ireeCompilerInvocationParseSource failed:\n" + diag_buffer,
-            mlir_path);
+    bool embed_ok = compile_via_embedding_api(mlir_text, target, rocm_arch,
+                                              cuda_arch, vulkan_arch, vmfb_path,
+                                              mlir_path, diag_buffer);
+    if (!embed_ok && target == "cuda" && cuda_arch != "sm_80" &&
+        (diag_buffer.find("missing GPU target") != std::string::npos ||
+         diag_buffer.find("Unknown CUDA target") != std::string::npos)) {
+        // JIT-R127: mirror compile_via_subprocess's JIT-R101 retry -- the
+        // embedding-API path (this linked libIREECompiler, no subprocess) can
+        // reject a device-reported cuda_arch newer than its NVPTX backend
+        // supports in exactly the same way the standalone iree-compile CLI
+        // does. Without this, a graph that compiles fine via the subprocess
+        // path (which already retries) would still permanently fall back to
+        // eager on this path for the same GPU/toolchain combination.
+        TENZOR_LOG_WARN(
+            "IREE CUDA compile (embedding API): target '" + cuda_arch +
+            "' rejected by the linked libIREECompiler (toolchain predates "
+            "this GPU generation); retrying with the sm_80 Ampere baseline, "
+            "which PTX-JITs forward-compatibly onto newer GPUs. Upgrade IREE "
+            "to get native codegen for this device.");
+        std::string retry_diag;
+        embed_ok = compile_via_embedding_api(mlir_text, target, rocm_arch,
+                                             "sm_80", vulkan_arch, vmfb_path,
+                                             mlir_path, retry_diag);
+        diag_buffer = embed_ok ? std::string{} : retry_diag;
     }
-
-    if (!ireeCompilerInvocationPipeline(inv, IREE_COMPILER_PIPELINE_STD)) {
+    if (!embed_ok) {
         throw JitCompileError(
             "ireeCompilerInvocationPipeline(STD) failed:\n" + diag_buffer,
             mlir_path);
     }
-
-    // Write to a unique temp file in the cache dir, then atomically rename it
-    // into the final vmfb path only after a successful, verified write. This
-    // prevents a crash mid-write or two racing processes from persisting a
-    // truncated-but-nonzero artifact that a later run would accept as a cache
-    // hit (and then fail at module-load).
-    const std::string tmpl =
-        (cache_dir / (vmfb_path.filename().string() + ".tmpXXXXXX")).string();
-    std::vector<char> tmp_buf(tmpl.begin(), tmpl.end());
-    tmp_buf.push_back('\0');
-    int tmp_fd = ::mkstemp(tmp_buf.data());
-    if (tmp_fd < 0) {
-        throw JitCompileError(
-            std::string("mkstemp for vmfb output failed: ") +
-                std::strerror(errno),
-            mlir_path);
-    }
-    ::close(tmp_fd);
-    const fs::path tmp_vmfb(tmp_buf.data());
-    // Remove the temp file on any error path below.
-    struct TmpFileGuard {
-        fs::path path;
-        bool armed = true;
-        ~TmpFileGuard() {
-            if (armed) {
-                std::error_code ec;
-                fs::remove(path, ec);
-            }
-        }
-    } tmp_guard{tmp_vmfb};
-
-    iree_compiler_output_t* output = nullptr;
-    const std::string tmp_vmfb_str = tmp_vmfb.string();
-    if (auto* out_err = ireeCompilerOutputOpenFile(tmp_vmfb_str.c_str(),
-                                                   &output);
-        out_err != nullptr) {
-        CompilerError err{out_err};
-        throw JitCompileError(
-            "ireeCompilerOutputOpenFile(" + tmp_vmfb_str +
-                ") failed: " + err.message(),
-            mlir_path);
-    }
-    {
-        struct OutputGuard {
-            iree_compiler_output_t* o;
-            ~OutputGuard() { ireeCompilerOutputDestroy(o); }
-        } output_guard{output};
-
-        if (auto* vmb_err =
-                ireeCompilerInvocationOutputVMBytecode(inv, output);
-            vmb_err != nullptr) {
-            CompilerError err{vmb_err};
-            throw JitCompileError(
-                "ireeCompilerInvocationOutputVMBytecode failed: " +
-                    err.message() + "\nDiagnostics:\n" + diag_buffer,
-                mlir_path);
-        }
-        ireeCompilerOutputKeep(output);
-        // output_guard destructor here flushes/closes the temp file before we
-        // verify and rename it.
-    }
-
-    if (!fs::exists(tmp_vmfb) || fs::file_size(tmp_vmfb) == 0 ||
-        !vmfb_has_valid_magic(tmp_vmfb)) {
-        throw JitCompileError(
-            "in-process compile produced an empty or malformed vmfb at " +
-                tmp_vmfb_str,
-            mlir_path);
-    }
-    {
-        std::error_code ec;
-        fs::rename(tmp_vmfb, vmfb_path, ec);
-        if (ec) {
-            throw JitCompileError(
-                "atomic rename of vmfb into place failed: " + ec.message(),
-                mlir_path);
-        }
-    }
-    tmp_guard.armed = false;  // renamed away; nothing to clean up.
 
     const auto compile_t1 = std::chrono::steady_clock::now();
     const double compile_ms =

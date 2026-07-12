@@ -110,48 +110,74 @@ TEST(OpReductions, SoftmaxLastDim) {
     }, {4, 8}, 5e-5F);
 }
 
+// findings.txt JIT-R119: these two tests are the primary regression coverage
+// for F16-widens-to-F32-then-reduces correctness, yet were hardcoded to
+// llvm-cpu despite this same file's check_matches_eager helper already
+// fanning out over every available IREE target (JIT-F028) -- the multi-
+// target infra existed right here and simply wasn't applied to the two
+// tests that matter most for this exact class of risk. Fan out the same way.
 TEST(OpReductions, SumFloat16WidensAccumulator) {
     // Sum a long row of 1.0 values in Float16. A half-precision accumulator
     // stops incrementing near ~2048 (1.0 + small rounds away), so an in-half
     // reduction diverges badly from the true 4096; the eager kernel and the
     // (now widened) JIT both accumulate in Float32, so they must agree.
     ensure_core_init();
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
+    namespace mt = ::tenzor::testing::mlir;
     auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return ::tenzor::sum(x, /*dim=*/1, /*keepdim=*/false);
     };
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
     auto raw = ::tenzor::ones({1, 4096}, ::tenzor::DType::Float16);
     auto x   = ::tenzor::Variable(raw, /*requires_grad=*/false);
     auto eager  = fn(x).tensor();
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x).tensor();
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto diff = ::tenzor::max(::tenzor::abs(eager - jitted))
-                    .to(::tenzor::DType::Float32).template item<float>();
-    EXPECT_LT(diff, 1.0F) << "F16 sum JIT vs eager diff=" << diff;
+
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        ::tenzor::jit::mlir_jit::reset_cache_stats();
+        auto jitted = compiled(x);
+        EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+            << "op did not run through IREE (silent eager fallback; target="
+            << target << ")";
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager.to(::tenzor::DType::Float32) -
+            jitted.tensor().to(::tenzor::Device::cpu()).to(::tenzor::DType::Float32)))
+                        .template item<float>();
+        EXPECT_LT(diff, 1.0F) << "F16 sum JIT vs eager diff=" << diff
+                              << " target=" << target;
+    }
 }
 
 TEST(OpReductions, MeanFloat16WidensAccumulator) {
     ensure_core_init();
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
+    namespace mt = ::tenzor::testing::mlir;
     auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
         return ::tenzor::mean(x, /*dim=*/1, /*keepdim=*/false);
     };
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
     auto raw = ::tenzor::ones({1, 4096}, ::tenzor::DType::Float16);
     auto x   = ::tenzor::Variable(raw, /*requires_grad=*/false);
     auto eager  = fn(x).tensor();
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jitted = compiled(x).tensor();
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback; llvm-cpu)";
-    auto diff = ::tenzor::max(::tenzor::abs(eager - jitted))
-                    .to(::tenzor::DType::Float32).template item<float>();
-    EXPECT_LT(diff, 1e-2F) << "F16 mean JIT vs eager diff=" << diff;
+
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        ::tenzor::jit::mlir_jit::reset_cache_stats();
+        auto jitted = compiled(x);
+        EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
+            << "op did not run through IREE (silent eager fallback; target="
+            << target << ")";
+        auto diff = ::tenzor::max(::tenzor::abs(
+            eager.to(::tenzor::DType::Float32) -
+            jitted.tensor().to(::tenzor::Device::cpu()).to(::tenzor::DType::Float32)))
+                        .template item<float>();
+        EXPECT_LT(diff, 1e-2F) << "F16 mean JIT vs eager diff=" << diff
+                               << " target=" << target;
+    }
 }

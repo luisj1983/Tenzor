@@ -208,3 +208,48 @@ TEST(IreeCompile, ThrowsOnEmptyTarget) {
     EXPECT_THROW((void)tj::compile_mlir(kTrivialModule, opts),
                  tj::JitCompileError);
 }
+
+// JIT-R127 regression: compile_via_subprocess already retried a rejected
+// cuda_arch once with the sm_80 Ampere baseline (JIT-R101), but the in-process
+// embedding-API path (compile_via_embedding_api, used whenever the linked
+// libIREECompiler.so itself registers the "cuda" HAL backend -- true for this
+// build's third_party/iree_dist libIREECompiler.so) had no equivalent retry:
+// it just threw JitCompileError, permanently forcing eager fallback for any
+// cuda graph on a device whose reported compute-capability arch is newer than
+// this toolchain's NVPTX backend supports -- even though the exact same graph
+// on the exact same hardware compiles fine through the subprocess path. Force
+// that exact rejection with a bogus-but-well-formed numeric arch the NVPTX
+// backend cannot possibly recognize, and confirm the compile now succeeds
+// (via the sm_80 retry) instead of throwing. This does not require a real
+// CUDA device -- IREE's target-arch validation happens purely at compile
+// time, before any device/runtime is touched. Must use a module with a real
+// compute op (not the pure-identity kTrivialModule): a trivial passthrough
+// generates no hal.executable at all, so the NVPTX target string is never
+// actually consulted and the rejection never fires (verified experimentally
+// -- the identity module compiles "successfully" for literally any garbage
+// arch string, real or not).
+TEST(IreeCompile, CudaEmbeddingApiRetriesRejectedArchWithSm80) {
+    constexpr const char* kAddModule = R"MLIR(module {
+  func.func @main(%arg0: tensor<4xf32>, %arg1: tensor<4xf32>) -> tensor<4xf32> {
+    %0 = stablehlo.add %arg0, %arg1 : tensor<4xf32>
+    return %0 : tensor<4xf32>
+  }
+}
+)MLIR";
+    const fs::path tmp = make_tmp_dir();
+    tj::CompileOptions opts;
+    opts.target = "cuda";
+    opts.cache_dir = tmp;
+    opts.cuda_arch = "sm_9999";  // no NVPTX backend has ever shipped this
+
+    tj::CompiledArtifact artifact;
+    ASSERT_NO_THROW({ artifact = tj::compile_mlir(kAddModule, opts); })
+        << "expected the sm_9999 rejection to be retried with sm_80 rather "
+           "than propagating as a hard failure";
+
+    EXPECT_TRUE(fs::exists(artifact.vmfb_path));
+    EXPECT_GT(fs::file_size(artifact.vmfb_path), 0U);
+    EXPECT_EQ(artifact.target, "cuda");
+
+    fs::remove_all(tmp);
+}

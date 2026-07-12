@@ -198,6 +198,348 @@ TEST(SymbolicShapeInferenceFixes, RoundSiLURoPERollScatterPreserveDynamicDim) {
     }
 }
 
+// findings.txt JIT-R118: the following ops were entirely absent from
+// SymbolicShapeInference::infer() -- the implementation actually used in
+// production for dynamic-shape compiled modules (via mark_dynamic_dims() ->
+// SymbolicTracePass) -- despite graph.cpp's Graph::infer_symbolic_types()
+// (a separate, effectively-dead-in-production implementation) already
+// handling every one of them. These regression tests exercise
+// SymbolicShapeInference::infer() directly (the ACTUALLY-used path), unlike
+// the "GraphInferSymbolicTypes" tests elsewhere in this file which exercise
+// the OTHER implementation.
+TEST(SymbolicShapeInferenceFixes, NewlyPortedShapePreservingOpsKeepDynamicDim) {
+    for (auto op : {OpType::Swish, OpType::RReLU, OpType::LogSigmoid,
+                    OpType::IndexCopy, OpType::ScatterAdd, OpType::GQA,
+                    OpType::ShapeGuard, OpType::GuardNode, OpType::SwapOut,
+                    OpType::SwapIn, OpType::LayoutConvert}) {
+        auto x = mk_val("x", {0, 10});
+        x->set_symbolic_shape(SymbolicShape(
+            {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+        auto node = std::make_shared<Node>(op);
+        node->add_input(x);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u) << "op=" << static_cast<int>(op);
+        ASSERT_EQ(out[0].rank(), 2u) << "op=" << static_cast<int>(op);
+        EXPECT_TRUE(out[0][0].is_symbolic()) << "op=" << static_cast<int>(op);
+    }
+}
+
+TEST(SymbolicShapeInferenceFixes, MinimumBroadcastsDynamicDim) {
+    auto a = mk_val("a", {0, 10});
+    a->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+    auto b = mk_val("b", {10});
+    b->set_symbolic_shape(SymbolicShape({SymbolicDim::concrete(10)}));
+    auto node = std::make_shared<Node>(OpType::Minimum);
+    node->add_input(a);
+    node->add_input(b);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    EXPECT_EQ(out[0][1].value(), 10);
+}
+
+TEST(SymbolicShapeInferenceFixes, GatherOutputMatchesIndicesShape) {
+    auto x = mk_val("x", {5, 10});
+    auto idx = mk_val("idx", {5, 3});
+    auto node = std::make_shared<Node>(OpType::Gather);
+    node->add_input(x);
+    node->add_input(idx);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_EQ(out[0][0].value(), 5);
+    EXPECT_EQ(out[0][1].value(), 3);
+}
+
+TEST(SymbolicShapeInferenceFixes, OneHotAppendsClassAxis) {
+    auto x = mk_val("x", {4, 5});
+    auto node = std::make_shared<Node>(OpType::OneHot);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_int_attr("num_classes", 7);
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 3u);
+    EXPECT_EQ(out[0][0].value(), 4);
+    EXPECT_EQ(out[0][1].value(), 5);
+    EXPECT_EQ(out[0][2].value(), 7);
+}
+
+TEST(SymbolicShapeInferenceFixes, SlicePreservesDynamicBatchAndComputesLength) {
+    auto x = mk_val("x", {0, 10});
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+    auto node = std::make_shared<Node>(OpType::Slice);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_int_attr("dim", 1);
+    node->set_int_attr("start", 2);
+    node->set_int_attr("end", 8);
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic()) << "batch dim must stay symbolic";
+    EXPECT_EQ(out[0][1].value(), 6) << "sliced [2,8) length must be concrete";
+}
+
+TEST(SymbolicShapeInferenceFixes, CatSumsConcatAxisPreservesDynamicBatch) {
+    auto a = mk_val("a", {0, 4});
+    a->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(4)}));
+    auto b = mk_val("b", {0, 6});
+    b->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(6)}));
+    auto node = std::make_shared<Node>(OpType::Cat);
+    node->add_input(a);
+    node->add_input(b);
+    node->add_output(mk_val("y", {}));
+    node->set_int_attr("dim", 1);
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    EXPECT_EQ(out[0][1].value(), 10);
+}
+
+TEST(SymbolicShapeInferenceFixes, StackInsertsNewAxisAtDim) {
+    auto a = mk_val("a", {4, 5});
+    auto b = mk_val("b", {4, 5});
+    auto node = std::make_shared<Node>(OpType::Stack);
+    node->add_input(a);
+    node->add_input(b);
+    node->add_output(mk_val("y", {}));
+    node->set_int_attr("dim", 0);
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 3u);
+    EXPECT_EQ(out[0][0].value(), 2);
+    EXPECT_EQ(out[0][1].value(), 4);
+    EXPECT_EQ(out[0][2].value(), 5);
+}
+
+TEST(SymbolicShapeInferenceFixes, BroadcastUsesExplicitTargetShape) {
+    auto x = mk_val("x", {1, 5});
+    auto node = std::make_shared<Node>(OpType::Broadcast);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    node->set_vec_attr("shape", {3, 5});
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_EQ(out[0][0].value(), 3);
+    EXPECT_EQ(out[0][1].value(), 5);
+}
+
+TEST(SymbolicShapeInferenceFixes, IndexSelectReplacesDimWithIndicesNumel) {
+    auto x = mk_val("x", {8, 10});
+    auto idx = mk_val("idx", {3});
+    auto node = std::make_shared<Node>(OpType::IndexSelect);
+    node->add_input(x);
+    node->add_input(idx);
+    node->add_output(mk_val("y", {}));
+    node->set_int_attr("dim", 0);
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_EQ(out[0][0].value(), 3);
+    EXPECT_EQ(out[0][1].value(), 10);
+}
+
+TEST(SymbolicShapeInferenceFixes, PaddingEnlargesDims) {
+    auto x = mk_val("x", {4, 4});
+    auto node = std::make_shared<Node>(OpType::Padding);
+    node->add_input(x);
+    node->add_output(mk_val("y", {}));
+    // [low0, high0, low1, high1] pairs, one per rank (rank==2 here).
+    node->set_vec_attr("padding", {1, 1, 2, 2});
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 2u);
+    EXPECT_EQ(out[0][0].value(), 6);
+    EXPECT_EQ(out[0][1].value(), 8);
+}
+
+TEST(SymbolicShapeInferenceFixes, LinalgFamilyShapeRules) {
+    // Det: (..., N, N) -> (...)
+    {
+        auto x = mk_val("x", {2, 4, 4});
+        auto node = std::make_shared<Node>(OpType::Det);
+        node->add_input(x);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u);
+        ASSERT_EQ(out[0].rank(), 1u);
+        EXPECT_EQ(out[0][0].value(), 2);
+    }
+    // Inv/Cholesky: shape-preserving
+    for (auto op : {OpType::Inv, OpType::Cholesky}) {
+        auto x = mk_val("x", {4, 4});
+        auto node = std::make_shared<Node>(op);
+        node->add_input(x);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u) << "op=" << static_cast<int>(op);
+        EXPECT_EQ(out[0][0].value(), 4);
+        EXPECT_EQ(out[0][1].value(), 4);
+    }
+    // Solve: A:(N,N), B:(N,K) -> (N,K)
+    {
+        auto a = mk_val("a", {4, 4});
+        auto b = mk_val("b", {4, 3});
+        auto node = std::make_shared<Node>(OpType::Solve);
+        node->add_input(a);
+        node->add_input(b);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u);
+        EXPECT_EQ(out[0][0].value(), 4);
+        EXPECT_EQ(out[0][1].value(), 3);
+    }
+    // Svd: (M,N) -> U:(M,M) S:(K) Vt:(N,N) with full_matrices default true, K=min(M,N)
+    {
+        auto x = mk_val("x", {6, 4});
+        auto node = std::make_shared<Node>(OpType::Svd);
+        node->add_input(x);
+        node->add_output(mk_val("u", {}));
+        node->add_output(mk_val("s", {}));
+        node->add_output(mk_val("vt", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 3u);
+        EXPECT_EQ(out[0][0].value(), 6);
+        EXPECT_EQ(out[0][1].value(), 6);
+        EXPECT_EQ(out[1][0].value(), 4);
+        EXPECT_EQ(out[2][0].value(), 4);
+        EXPECT_EQ(out[2][1].value(), 4);
+    }
+    // Qr: (M,N) -> Q:(M,K) R:(K,N), K=min(M,N)
+    {
+        auto x = mk_val("x", {6, 4});
+        auto node = std::make_shared<Node>(OpType::Qr);
+        node->add_input(x);
+        node->add_output(mk_val("q", {}));
+        node->add_output(mk_val("r", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 2u);
+        EXPECT_EQ(out[0][0].value(), 6);
+        EXPECT_EQ(out[0][1].value(), 4);
+        EXPECT_EQ(out[1][0].value(), 4);
+        EXPECT_EQ(out[1][1].value(), 4);
+    }
+    // Eigh: (N,N) -> eigenvalues:(N) eigenvectors:(N,N)
+    {
+        auto x = mk_val("x", {5, 5});
+        auto node = std::make_shared<Node>(OpType::Eigh);
+        node->add_input(x);
+        node->add_output(mk_val("w", {}));
+        node->add_output(mk_val("v", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 2u);
+        EXPECT_EQ(out[0][0].value(), 5);
+        EXPECT_EQ(out[1][0].value(), 5);
+        EXPECT_EQ(out[1][1].value(), 5);
+    }
+}
+
+TEST(SymbolicShapeInferenceFixes, SparseOpsShareDenseOperandOrMAttr) {
+    // SparseSpMM: [crow, col, values, dense] -> (m, dense[1:])
+    {
+        auto crow = mk_val("crow", {5});
+        auto col = mk_val("col", {8});
+        auto values = mk_val("values", {8});
+        auto dense = mk_val("dense", {4, 3});
+        auto node = std::make_shared<Node>(OpType::SparseSpMM);
+        node->add_input(crow);
+        node->add_input(col);
+        node->add_input(values);
+        node->add_input(dense);
+        node->add_output(mk_val("y", {}));
+        node->set_int_attr("m", 4);
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u);
+        ASSERT_EQ(out[0].rank(), 2u);
+        EXPECT_EQ(out[0][0].value(), 4);
+        EXPECT_EQ(out[0][1].value(), 3);
+    }
+    // SparseSpMV: attrs m only -> (m,)
+    {
+        auto node = std::make_shared<Node>(OpType::SparseSpMV);
+        node->add_output(mk_val("y", {}));
+        node->set_int_attr("m", 7);
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u);
+        ASSERT_EQ(out[0].rank(), 1u);
+        EXPECT_EQ(out[0][0].value(), 7);
+    }
+    // SparseAdd/SparseTrsv/SparseTrsm: output shape == last (RHS) input.
+    for (auto op : {OpType::SparseAdd, OpType::SparseTrsv, OpType::SparseTrsm}) {
+        auto crow = mk_val("crow", {5});
+        auto col = mk_val("col", {8});
+        auto values = mk_val("values", {8});
+        auto rhs = mk_val("rhs", {4, 2});
+        auto node = std::make_shared<Node>(op);
+        node->add_input(crow);
+        node->add_input(col);
+        node->add_input(values);
+        node->add_input(rhs);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u) << "op=" << static_cast<int>(op);
+        EXPECT_EQ(out[0][0].value(), 4) << "op=" << static_cast<int>(op);
+        EXPECT_EQ(out[0][1].value(), 2) << "op=" << static_cast<int>(op);
+    }
+}
+
+TEST(SymbolicShapeInferenceFixes, ConstantInputOutputShapeRules) {
+    // Constant: shape comes from its "value" tensor attr.
+    {
+        auto node = std::make_shared<Node>(OpType::Constant);
+        node->add_output(mk_val("y", {}));
+        node->set_tensor_attr("value", tenzor::zeros({2, 3}, tenzor::DType::Float32,
+                                                       tenzor::Device::cpu()));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u);
+        EXPECT_EQ(out[0][0].value(), 2);
+        EXPECT_EQ(out[0][1].value(), 3);
+    }
+    // Input/Output: pass through input[0]'s shape.
+    for (auto op : {OpType::Input, OpType::Output}) {
+        auto x = mk_val("x", {4, 5});
+        auto node = std::make_shared<Node>(op);
+        node->add_input(x);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u) << "op=" << static_cast<int>(op);
+        EXPECT_EQ(out[0][0].value(), 4) << "op=" << static_cast<int>(op);
+        EXPECT_EQ(out[0][1].value(), 5) << "op=" << static_cast<int>(op);
+    }
+}
+
 TEST(SymbolicShapeInferenceFixes, MaxPool2dComputesPooledSpatialDims) {
     // Concrete 4D input [1,3,8,8], kernel=2 stride=2 -> [1,3,4,4].
     auto x = mk_val("x", {1, 3, 8, 8});

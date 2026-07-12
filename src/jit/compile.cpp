@@ -59,6 +59,78 @@ auto resolve_hal_ordinal(const std::string& target, const Device& in_dev) -> int
     return in_dev.index < 0 ? 0 : in_dev.index;
 }
 
+// JIT-R108/JIT-R131: pure vendor+product-name -> --iree-vulkan-target string
+// classifier, extracted from detect_vulkan_iree_target() (which does the
+// actual hardware query) purely so it can be unit tested directly with
+// synthetic vendor/name strings, without needing every GPU generation's real
+// hardware on hand. `vendor_lower`/`name_lower` must already be lowercased by
+// the caller (matching detect_vulkan_iree_target's own preprocessing).
+auto classify_vulkan_target(const std::string& vendor_lower,
+                            const std::string& name_lower) -> std::string {
+    if (vendor_lower.find("nvidia") != std::string::npos) {
+        // JIT-R108: a single hardcoded "ampere" for every NVIDIA GPU was
+        // confirmed (via a standalone iree-run-module repro built while
+        // investigating JIT-R106) to fail to even initialize
+        // (VK_ERROR_INITIALIZATION_FAILED / SIGSEGV) on Blackwell
+        // (RTX 50-series) hardware, where "ada" compiles and runs cleanly
+        // instead. Parse the reported product name for a generation marker
+        // rather than guessing a single fixed value. "ada"/"ampere" are the
+        // only two target strings empirically verified against this IREE
+        // build; unrecognized/future NVIDIA generations fall back to the
+        // generic default profile below rather than a confidently wrong
+        // specific target — this IREE build does not yet recognize a
+        // dedicated "blackwell" target, so Blackwell-generation cards use
+        // "ada" as the newest available, empirically-working profile.
+        if (name_lower.find("rtx 50") != std::string::npos ||
+            name_lower.find("rtx pro 6000") != std::string::npos) return "ada";
+        if (name_lower.find("rtx 40") != std::string::npos) return "ada";
+        if (name_lower.find("rtx 30") != std::string::npos ||
+            name_lower.find("a100") != std::string::npos) return "ampere";
+        return {};
+    }
+    if (vendor_lower.find("amd") != std::string::npos ||
+        vendor_lower.find("radeon") != std::string::npos) {
+        // JIT-R131: a single hardcoded "rdna3" for every AMD GPU would be as
+        // stale for RDNA4 (RX 9000-series, which predates this fix) as the
+        // pre-fix NVIDIA "ampere"-for-everything default was for Blackwell.
+        // Verified against this IREE build: "rdna1"/"rdna2"/"rdna3"/"rdna4"
+        // all compile as valid, distinct --iree-vulkan-target profiles (a
+        // genuinely unrecognized string is rejected outright with "Unknown
+        // Vulkan target"). Parse the product name for a generation marker,
+        // mirroring the NVIDIA pattern above; fall back to "rdna3" for
+        // anything unmatched — verified empirically working on this
+        // review's actual RDNA3.5 (gfx1150) integrated GPU, whose marketing
+        // name ("AMD Radeon 890M Graphics") carries no RX-series number to
+        // match against, so it would otherwise fall through with no signal
+        // at all.
+        if (name_lower.find("rx 9") != std::string::npos) return "rdna4";
+        if (name_lower.find("rx 7") != std::string::npos) return "rdna3";
+        if (name_lower.find("rx 6") != std::string::npos) return "rdna2";
+        if (name_lower.find("rx 5") != std::string::npos) return "rdna1";
+        return "rdna3";
+    }
+    if (vendor_lower.find("intel") != std::string::npos) {
+        // JIT-R131: "arc" -- the previously hardcoded value -- is not merely
+        // stale, it is not a valid --iree-vulkan-target string in this IREE
+        // build at all: verified it CRASHES iree-compile outright (SIGABRT
+        // inside ExecutableTargetAttr::getBackend(), exit code 245, no vmfb
+        // produced), the same way any genuinely unrecognized target does but
+        // with an actual crash instead of a clean diagnostic. Every other
+        // plausible Intel Vulkan target string tried against this IREE
+        // build (arc/xe/xe2/battlemage/alchemist/dg2/a770/a750/a380) was
+        // rejected identically — this IREE build has no working
+        // Intel-specific Vulkan target profile at all. Return the safe
+        // default (empty) so an Intel Vulkan compile falls through to
+        // IREE's conservative default SPIR-V profile (correct for F32;
+        // F16/BF16 already refuse with a clear "shaderFloat16" error rather
+        // than silently compiling wrong, per the guard on the
+        // empty-vulkan_arch path in iree_compile.cpp) instead of a target
+        // string guaranteed to crash compilation outright.
+        return {};
+    }
+    return {};
+}
+
 #ifdef TENZOR_HAS_MLIR_JIT
 // JIT-R109: a cached invoker is paired with the leaf-argument layout the
 // compiled module actually expects (GraphToMLIR::leaf_args(), captured at
@@ -1062,34 +1134,10 @@ static auto detect_vulkan_iree_target(const ::tenzor::Device& in_dev)
         std::string v = info.vendor;
         std::transform(v.begin(), v.end(), v.begin(),
                        [](unsigned char c) { return std::tolower(c); });
-        if (v.find("nvidia") != std::string::npos) {
-            // JIT-R108: a single hardcoded "ampere" for every NVIDIA GPU was
-            // confirmed (via a standalone iree-run-module repro built while
-            // investigating JIT-R106) to fail to even initialize
-            // (VK_ERROR_INITIALIZATION_FAILED / SIGSEGV) on Blackwell
-            // (RTX 50-series) hardware, where "ada" compiles and runs
-            // cleanly instead. Parse the reported product name for a
-            // generation marker rather than guessing a single fixed value.
-            // "ada"/"ampere" are the only two target strings empirically
-            // verified against this IREE build; unrecognized/future NVIDIA
-            // generations fall back to the generic default profile below
-            // rather than a confidently wrong specific target — this IREE
-            // build does not yet recognize a dedicated "blackwell" target,
-            // so Blackwell-generation cards use "ada" as the newest
-            // available, empirically-working profile.
-            std::string name = info.name;
-            std::transform(name.begin(), name.end(), name.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (name.find("rtx 50") != std::string::npos ||
-                name.find("rtx pro 6000") != std::string::npos) return "ada";
-            if (name.find("rtx 40") != std::string::npos) return "ada";
-            if (name.find("rtx 30") != std::string::npos ||
-                name.find("a100") != std::string::npos) return "ampere";
-            return {};
-        }
-        if (v.find("amd") != std::string::npos ||
-            v.find("radeon") != std::string::npos) return "rdna3";
-        if (v.find("intel") != std::string::npos) return "arc";
+        std::string name = info.name;
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return mlir_detail::classify_vulkan_target(v, name);
     } catch (...) {
         // Best-effort: fall through to the build default.
     }

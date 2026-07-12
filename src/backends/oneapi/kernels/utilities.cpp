@@ -31,6 +31,8 @@ struct SignKernelFloat64 {};
 struct SignKernelFloat16 {};
 struct SignKernelBFloat16 {};
 struct SignKernelInt32 {};
+struct SignKernelComplex64 {};
+struct SignKernelComplex128 {};
 
 
 
@@ -569,6 +571,47 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
                 out_ptr[idx] = sycl::half(1.0f);
             } else {
                 out_ptr[idx] = sycl::half(-1.0f);
+            }
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex64) {
+        // findings.txt: sign (sgn) for complex inputs was entirely missing on
+        // OneAPI (fell through to the integer-dispatch branch below, which
+        // throws "unsupported dtype" for Complex64/128) -- linalg::slogdet()'s
+        // GPU path computes sign(det) on a complex determinant, so this made
+        // slogdet() unconditionally throw on every complex OneAPI call.
+        // z/|z|, and 0 for z == 0 -- matches CUDA/ROCm's complex sign kernels
+        // and the CPU complex slogdet sign. Complex tensors are interleaved
+        // [re0, im0, re1, im1, ...] flat float/double buffers here (see
+        // angle_kernel above), not a typed complex struct.
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<SignKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float a = in_ptr[2 * idx];
+            float b = in_ptr[2 * idx + 1];
+            float mag = sycl::hypot(a, b);
+            if (mag > 0.0f) {
+                out_ptr[2 * idx] = a / mag;
+                out_ptr[2 * idx + 1] = b / mag;
+            } else {
+                out_ptr[2 * idx] = 0.0f;
+                out_ptr[2 * idx + 1] = 0.0f;
+            }
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<SignKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double a = in_ptr[2 * idx];
+            double b = in_ptr[2 * idx + 1];
+            double mag = sycl::hypot(a, b);
+            if (mag > 0.0) {
+                out_ptr[2 * idx] = a / mag;
+                out_ptr[2 * idx + 1] = b / mag;
+            } else {
+                out_ptr[2 * idx] = 0.0;
+                out_ptr[2 * idx + 1] = 0.0;
             }
         }).wait();
     }

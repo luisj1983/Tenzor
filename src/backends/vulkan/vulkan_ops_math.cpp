@@ -565,12 +565,16 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
         }
     }
 
-    // Complex-input path for abs/neg/exp/log/sqrt/sin/cos. The generic `math`
-    // and `trigonometric` shaders interpret memory as float and would corrupt
-    // interleaved complex pairs; dispatch to dedicated complex_* shaders
-    // instead.
+    // Complex-input path for abs/neg/exp/log/sqrt/sin/cos/sign. The generic
+    // `math` and `trigonometric` shaders interpret memory as float and would
+    // corrupt interleaved complex pairs; dispatch to dedicated complex_*
+    // shaders instead. findings.txt: "sign" was missing from this set --
+    // fell through to the generic float path, silently computing sign() on
+    // the real/imag components independently instead of z/|z| (wrong output,
+    // no error) -- e.g. linalg::slogdet()'s GPU path calls sign(det) on a
+    // complex determinant.
     static const std::unordered_set<std::string> kComplexOps = {
-        "abs", "neg", "exp", "log", "sqrt", "sin", "cos"
+        "abs", "neg", "exp", "log", "sqrt", "sin", "cos", "sign"
     };
     if (kComplexOps.count(op_name) &&
         (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128)) {

@@ -32,6 +32,8 @@
 #include <tenzor/nn/layers/embedding.hpp>
 #include <tenzor/nn/layers/dropout.hpp>
 #include <tenzor/nn/layers/vision.hpp>
+#include <tenzor/ops/vision.hpp>
+#include <tenzor/ops/fft.hpp>
 #include <tenzor/nn/layers/rnn.hpp>
 #include <tenzor/nn/layers/moe.hpp>
 #include <tenzor/nn/layers/hrm.hpp>
@@ -2504,7 +2506,19 @@ TEST(JitTraceOps, CrossEntropyLossSegmentationTracksNewTarget) {
 // the real input every time, not just the first).
 // =========================================================================
 
-TEST(JitTraceOps, CTCLossRefusesToCacheButStaysCorrect) {
+// findings.txt JIT-R134: OpId::CTCLossForward is now mapped in
+// tracing_interceptor.cpp's opid_to_optype (previously entirely unmapped,
+// hard graph-breaking any traced CTCLoss forward on every backend).
+// execute_node's OpType::CTCLossForward case re-dispatches the identical op
+// for inference (non-grad) replay — exactly this test's scenario, since both
+// logits variables are constructed with requires_grad=false — and throws to
+// force an eager fallback for differentiable (grad_mode) replay instead of
+// risking an incorrect custom-backward replay. So a no-grad CTCLoss forward
+// now DOES compile/cache correctly; this test was renamed and its assertion
+// flipped accordingly. The correctness checks (replay on a SECOND, DIFFERENT
+// input must match eager on that input, not the first call's frozen result)
+// are the important regression coverage and are unchanged.
+TEST(JitTraceOps, CTCLossTracesCachesAndStaysCorrect) {
     const int64_t T = 5, N = 2, C = 4, S = 2;
     nn::CTCLoss loss("mean", /*blank=*/0, /*zero_infinity=*/false);
 
@@ -2527,11 +2541,11 @@ TEST(JitTraceOps, CTCLossRefusesToCacheButStaysCorrect) {
                                    .tensor().to(Device::cpu());
             dev.synchronize();
 
-            EXPECT_EQ(compiled.num_cached(), 0u)
-                << "nn::CTCLoss compiled/cached a graph on " << backend_name(dev)
-                << " — OpId::CTCLossForward's custom-backward output can't be "
-                   "safely replayed through the generic autograd graph, so "
-                   "caching it would risk freezing trace-time loss/gradients";
+            EXPECT_GE(compiled.num_cached(), 1u)
+                << "nn::CTCLoss (no-grad forward) did not compile/cache a graph "
+                   "on " << backend_name(dev) << " — OpId::CTCLossForward "
+                   "graph-broke, so the JIT-R134 tracer-visibility fix "
+                   "regressed on this backend";
 
             auto eager_a = fn(Variable(logits_a, false)).tensor().to(Device::cpu());
             EXPECT_TRUE(tensors_close(eager_a, replayed_a, 1e-3f, 1e-3f))
@@ -2548,6 +2562,216 @@ TEST(JitTraceOps, CTCLossRefusesToCacheButStaysCorrect) {
                    "loss regardless of the actual input";
         } catch (const std::exception& e) {
             ADD_FAILURE() << "nn::CTCLoss threw on " << backend_name(dev)
+                          << ": " << e.what();
+        }
+    }
+}
+
+// The differentiable (grad_mode) path is deliberately NOT wired for replay
+// (OpId::CTCLossForward's raw_grad output feeds a custom autograd Function
+// that JIT replay does not capture) — verify this fails safely (falls back
+// to eager, per CompiledFunction's own eager-fallback contract) rather than
+// silently producing wrong gradients.
+TEST(JitTraceOps, CTCLossGradModeFallsBackToEagerInsteadOfWrongGradients) {
+    const int64_t T = 5, N = 2, C = 4, S = 2;
+    nn::CTCLoss loss("mean", /*blank=*/0, /*zero_infinity=*/false);
+
+    for (const auto& dev : get_available_backends()) {
+        try {
+            Tensor targets = randint(1, C, {N, S}, DType::Int64, dev);
+            Tensor input_lengths = full({N}, static_cast<double>(T), DType::Int64, dev);
+            Tensor target_lengths = full({N}, static_cast<double>(S), DType::Int64, dev);
+
+            auto fn = [&](const Variable& logits) {
+                auto log_probs = tenzor::nn::log_softmax(logits, 2);
+                return loss.forward(log_probs, targets, input_lengths, target_lengths);
+            };
+
+            auto compiled = jit::compile(fn);
+            auto logits_a = randn({T, N, C}, DType::Float32, dev);
+
+            auto replayed_a = compiled(Variable(logits_a, /*requires_grad=*/true))
+                                   .tensor().to(Device::cpu());
+            dev.synchronize();
+
+            auto eager_a = fn(Variable(logits_a, /*requires_grad=*/true)).tensor().to(Device::cpu());
+            EXPECT_TRUE(tensors_close(eager_a, replayed_a, 1e-3f, 1e-3f))
+                << "nn::CTCLoss (grad-enabled forward) result != eager on "
+                << backend_name(dev);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "nn::CTCLoss (grad-enabled) threw on "
+                          << backend_name(dev) << ": " << e.what();
+        }
+    }
+}
+
+// =========================================================================
+// findings.txt JIT-R134: OpId::GridSample/AffineGrid/FFT were entirely
+// unmapped in tracing_interceptor.cpp, hard graph-breaking any trace that
+// called tenzor::grid_sample()/affine_grid()/fft() (real, reachable
+// raw-Tensor dispatch call sites — src/ops/vision.cpp, src/ops/fft.cpp).
+// None of these three ops have a Variable-level (autograd) overload in this
+// codebase, so a traced call necessarily goes through the raw Tensor
+// function wrapped in a non-tracking Variable, matching how the detection
+// ops above are traced.
+// =========================================================================
+
+TEST(JitTraceOps, GridSampleTracksNewInput) {
+    const int64_t N = 2, C = 3, Hin = 5, Win = 5, Hout = 4, Wout = 4;
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto grid_tensor = (randn({N, Hout, Wout, 2}, DType::Float32, dev) * 0.3f);
+            auto grid = Variable(grid_tensor, false);
+            auto fn = [&](const Variable& input) {
+                return tenzor::grid_sample(input, grid, "bilinear", "zeros", false);
+            };
+
+            auto compiled = jit::compile(fn);
+            auto input_a = randn({N, C, Hin, Win}, DType::Float32, dev);
+            auto input_b = randn({N, C, Hin, Win}, DType::Float32, dev) + 5.0f;
+
+            (void)compiled(Variable(input_a, false));
+            dev.synchronize();
+
+            EXPECT_GE(compiled.num_cached(), 1u)
+                << "grid_sample did not compile/cache a graph on "
+                << backend_name(dev) << " — OpId::GridSample graph-broke, "
+                   "regressing the JIT-R134 fix";
+
+            auto replayed_b = compiled(Variable(input_b, false)).tensor().to(Device::cpu());
+            dev.synchronize();
+            auto eager_b = fn(Variable(input_b, false)).tensor().to(Device::cpu());
+            EXPECT_TRUE(tensors_close(eager_b, replayed_b, 1e-4f, 1e-4f))
+                << "grid_sample: replay on a NEW input != eager on that input "
+                   "on " << backend_name(dev) << " — the compiled graph likely "
+                   "froze the trace-time value as a constant";
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "grid_sample threw on " << backend_name(dev)
+                          << ": " << e.what();
+        }
+    }
+}
+
+TEST(JitTraceOps, AffineGridTracksNewInput) {
+    const int64_t N = 2;
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto fn = [&](const Variable& theta) {
+                return tenzor::affine_grid(theta, {N, 3, 8, 8}, false);
+            };
+
+            auto compiled = jit::compile(fn);
+            auto theta_a = randn({N, 2, 3}, DType::Float32, dev) * 0.1f;
+            auto theta_b = randn({N, 2, 3}, DType::Float32, dev) * 0.1f + 0.5f;
+
+            (void)compiled(Variable(theta_a, false));
+            dev.synchronize();
+
+            EXPECT_GE(compiled.num_cached(), 1u)
+                << "affine_grid did not compile/cache a graph on "
+                << backend_name(dev) << " — OpId::AffineGrid graph-broke, "
+                   "regressing the JIT-R134 fix";
+
+            auto replayed_b = compiled(Variable(theta_b, false)).tensor().to(Device::cpu());
+            dev.synchronize();
+            auto eager_b = fn(Variable(theta_b, false)).tensor().to(Device::cpu());
+            EXPECT_TRUE(tensors_close(eager_b, replayed_b, 1e-4f, 1e-4f))
+                << "affine_grid: replay on a NEW input != eager on that input "
+                   "on " << backend_name(dev) << " — the compiled graph likely "
+                   "froze the trace-time value as a constant";
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "affine_grid threw on " << backend_name(dev)
+                          << ": " << e.what();
+        }
+    }
+}
+
+TEST(JitTraceOps, IFFTRFFTIRFFTTrackNewInput) {
+    const int64_t N = 8;
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto fn_ifft = [&](const Variable& input) {
+                return tenzor::fft_autograd::ifft(input, std::nullopt, -1, "backward");
+            };
+            auto compiled_ifft = jit::compile(fn_ifft);
+            auto ci_a = randn({N}, DType::Float32, dev).to(DType::Complex64);
+            auto ci_b = (randn({N}, DType::Float32, dev) + 2.0f).to(DType::Complex64);
+            (void)compiled_ifft(Variable(ci_a, false));
+            dev.synchronize();
+            EXPECT_GE(compiled_ifft.num_cached(), 1u)
+                << "ifft did not compile/cache on " << backend_name(dev);
+            auto r = compiled_ifft(Variable(ci_b, false)).tensor().to(Device::cpu());
+            dev.synchronize();
+            auto e = fn_ifft(Variable(ci_b, false)).tensor().to(Device::cpu());
+            EXPECT_TRUE(tensors_close(e, r, 1e-3f, 1e-3f))
+                << "ifft: replay on new input != eager on " << backend_name(dev);
+
+            auto fn_rfft = [&](const Variable& input) {
+                return tenzor::fft_autograd::rfft(input, std::nullopt, -1, "backward");
+            };
+            auto compiled_rfft = jit::compile(fn_rfft);
+            auto rr_a = randn({N}, DType::Float32, dev);
+            auto rr_b = randn({N}, DType::Float32, dev) + 2.0f;
+            (void)compiled_rfft(Variable(rr_a, false));
+            dev.synchronize();
+            EXPECT_GE(compiled_rfft.num_cached(), 1u)
+                << "rfft did not compile/cache on " << backend_name(dev);
+            auto r2 = compiled_rfft(Variable(rr_b, false)).tensor().to(Device::cpu());
+            dev.synchronize();
+            auto e2 = fn_rfft(Variable(rr_b, false)).tensor().to(Device::cpu());
+            EXPECT_TRUE(tensors_close(e2, r2, 1e-3f, 1e-3f))
+                << "rfft: replay on new input != eager on " << backend_name(dev);
+
+            auto fn_irfft = [&](const Variable& input) {
+                return tenzor::fft_autograd::irfft(input, N, -1, "backward");
+            };
+            auto compiled_irfft = jit::compile(fn_irfft);
+            auto ir_a = randn({N}, DType::Float32, dev).to(DType::Complex64);
+            auto ir_b = (randn({N}, DType::Float32, dev) + 2.0f).to(DType::Complex64);
+            (void)compiled_irfft(Variable(ir_a, false));
+            dev.synchronize();
+            EXPECT_GE(compiled_irfft.num_cached(), 1u)
+                << "irfft did not compile/cache on " << backend_name(dev);
+            auto r3 = compiled_irfft(Variable(ir_b, false)).tensor().to(Device::cpu());
+            dev.synchronize();
+            auto e3 = fn_irfft(Variable(ir_b, false)).tensor().to(Device::cpu());
+            EXPECT_TRUE(tensors_close(e3, r3, 1e-3f, 1e-3f))
+                << "irfft: replay on new input != eager on " << backend_name(dev);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "ifft/rfft/irfft threw on " << backend_name(dev)
+                          << ": " << e.what();
+        }
+    }
+}
+
+TEST(JitTraceOps, FFTTracksNewInput) {
+    const int64_t N = 8;
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto fn = [&](const Variable& input) {
+                return tenzor::fft_autograd::fft(input, std::nullopt, -1, "backward");
+            };
+
+            auto compiled = jit::compile(fn);
+            auto input_a = randn({N}, DType::Float32, dev).to(DType::Complex64);
+            auto input_b = (randn({N}, DType::Float32, dev) + 2.0f).to(DType::Complex64);
+
+            (void)compiled(Variable(input_a, false));
+            dev.synchronize();
+
+            EXPECT_GE(compiled.num_cached(), 1u)
+                << "fft did not compile/cache a graph on " << backend_name(dev)
+                << " — OpId::FFT graph-broke, regressing the JIT-R134 fix";
+
+            auto replayed_b = compiled(Variable(input_b, false)).tensor().to(Device::cpu());
+            dev.synchronize();
+            auto eager_b = fn(Variable(input_b, false)).tensor().to(Device::cpu());
+            EXPECT_TRUE(tensors_close(eager_b, replayed_b, 1e-3f, 1e-3f))
+                << "fft: replay on a NEW input != eager on that input on "
+                << backend_name(dev) << " — the compiled graph likely froze "
+                   "the trace-time value as a constant";
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "fft threw on " << backend_name(dev)
                           << ": " << e.what();
         }
     }

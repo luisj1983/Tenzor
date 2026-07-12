@@ -1,0 +1,31 @@
+#version 450
+
+// findings.txt: sign (sgn) for Complex64: z/|z|, and 0 for z == 0 -- matches
+// CUDA/ROCm/OneAPI's complex sign kernels and the CPU complex slogdet sign.
+// Previously "sign" was missing from dispatchUnaryOp's kComplexOps set, so a
+// complex input silently fell through to the generic (non-complex-aware)
+// float shader path, computing sign() independently on the interleaved
+// real/imag floats instead of z/|z| -- wrong output, no error.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;  // number of COMPLEX elements, not floats
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    float a = data_in[idx * 2u];
+    float b = data_in[idx * 2u + 1u];
+    float mag = length(vec2(a, b));
+    if (mag > 0.0) {
+        data_out[idx * 2u]      = a / mag;
+        data_out[idx * 2u + 1u] = b / mag;
+    } else {
+        data_out[idx * 2u]      = 0.0;
+        data_out[idx * 2u + 1u] = 0.0;
+    }
+}

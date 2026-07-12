@@ -448,6 +448,19 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     // be either scalar (numel==1 -- covers eps-style constants) or exactly
     // norm_size elements; anything else stops absorption here instead of
     // silently including it.
+    // findings.txt JIT-R117: the numel-only check above was NOT actually
+    // equivalent to is_per_column_bias -- it accepted ANY shape whose total
+    // element count happened to equal norm_size, regardless of which axis
+    // carried that count (e.g. a [norm_size, 1] or [N, 1] with N==norm_size
+    // per-row/per-token operand, an entirely different broadcast semantics
+    // than a genuine [norm_size] gamma or, for multi-axis normalization, a
+    // genuine [d1, ..., dK] gamma matching the K trailing normalized axes
+    // exactly -- e.g. LayerNorm(normalized_shape=(H,W)) needs a [H, W]
+    // gamma, not just any [*, *] shape whose product is H*W). Determine the
+    // genuine "normalized axes" structure from the CHAIN's own (un-reduced)
+    // shape -- not from the candidate operand -- then require the operand,
+    // after stripping any leading size-1 dims, to match that structure
+    // element-wise (or be a true scalar).
     auto other_operand_is_valid_affine_shape =
         [&](const std::shared_ptr<Node>& chain_tail,
             const std::shared_ptr<Node>& nk) -> bool {
@@ -465,7 +478,32 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
         for (auto d : oshape) {
             if (__builtin_mul_overflow(onumel, d, &onumel)) return false;
         }
-        return onumel == 1 || onumel == norm_size;
+        if (onumel == 1) return true;
+        if (onumel != norm_size) return false;
+        if (chain_tail->outputs().empty() || !chain_tail->outputs()[0]) return false;
+        const auto& chain_shape = chain_tail->outputs()[0]->shape();
+        // Find the smallest trailing run of chain_shape whose product is
+        // norm_size -- that run IS the genuine normalized-axes structure
+        // (K dims) a real gamma/beta must match.
+        int64_t suffix_prod = 1;
+        size_t k = 0;
+        bool found = false;
+        for (size_t i = chain_shape.size(); i-- > 0; ) {
+            if (__builtin_mul_overflow(suffix_prod, chain_shape[i], &suffix_prod)) return false;
+            ++k;
+            if (suffix_prod == norm_size) { found = true; break; }
+            if (suffix_prod > norm_size) break;
+        }
+        if (!found) return false;
+        // Strip oshape's own leading size-1 dims, then require exactly K
+        // dims remain, matching chain_shape's trailing K dims element-wise.
+        size_t lead = 0;
+        while (lead < oshape.size() && oshape[lead] == 1) ++lead;
+        if (oshape.size() - lead != k) return false;
+        for (size_t i = 0; i < k; ++i) {
+            if (oshape[lead + i] != chain_shape[chain_shape.size() - k + i]) return false;
+        }
+        return true;
     };
 
     // Consume remaining ops that form the normalization pattern
@@ -631,6 +669,14 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     // scalar (eps-style) or exactly norm_size elements (a genuine per-
     // channel gamma), not a full-tensor residual/gate silently truncated to
     // its first norm_size elements by generate_rms_norm.
+    // findings.txt JIT-R117: see match_layer_norm's identical fix for the
+    // full rationale -- the numel-only check accepted a [norm_size, 1] or
+    // [N, 1] (N==norm_size) per-row/per-token operand as if it were a
+    // genuine [norm_size] gamma, and a naive "trailing dim == norm_size"
+    // check would in turn wrongly reject a genuine multi-axis [d1,...,dK]
+    // gamma (e.g. [H, W] for normalized_shape=(H,W)). Determine the genuine
+    // normalized-axes structure from the CHAIN's own shape and require the
+    // operand (leading 1s stripped) to match it element-wise.
     auto other_operand_is_valid_affine_shape =
         [&](const std::shared_ptr<Node>& chain_tail,
             const std::shared_ptr<Node>& nk) -> bool {
@@ -648,7 +694,27 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
         for (auto d : oshape) {
             if (__builtin_mul_overflow(onumel, d, &onumel)) return false;
         }
-        return onumel == 1 || onumel == norm_size;
+        if (onumel == 1) return true;
+        if (onumel != norm_size) return false;
+        if (chain_tail->outputs().empty() || !chain_tail->outputs()[0]) return false;
+        const auto& chain_shape = chain_tail->outputs()[0]->shape();
+        int64_t suffix_prod = 1;
+        size_t k = 0;
+        bool found = false;
+        for (size_t i = chain_shape.size(); i-- > 0; ) {
+            if (__builtin_mul_overflow(suffix_prod, chain_shape[i], &suffix_prod)) return false;
+            ++k;
+            if (suffix_prod == norm_size) { found = true; break; }
+            if (suffix_prod > norm_size) break;
+        }
+        if (!found) return false;
+        size_t lead = 0;
+        while (lead < oshape.size() && oshape[lead] == 1) ++lead;
+        if (oshape.size() - lead != k) return false;
+        for (size_t i = 0; i < k; ++i) {
+            if (oshape[lead + i] != chain_shape[chain_shape.size() - k + i]) return false;
+        }
+        return true;
     };
 
     // Add(eps) or directly Sqrt/Rsqrt

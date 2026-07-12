@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include <tenzor/core/device.hpp>
 
 namespace tenzor::examples::jit_mlp {
@@ -27,12 +29,21 @@ namespace tenzor::examples::jit_mlp {
 /// compares it against the eager forward pass on a fresh batch, reporting
 /// the max absolute difference through `out_jit_vs_eager_diff`.
 ///
+/// JIT-R122: `out_num_cached` (optional, defaults to nullptr — existing
+/// callers that don't need it are unaffected) reports
+/// CompiledFunction::num_cached() after the comparison, so a caller can
+/// assert the JIT path was actually taken (traced/compiled/cached) rather
+/// than a silent full-eager fallback masquerading as a passing diff of 0.
+/// This is the same signal tests/jit/test_jit_backend_parity.cpp's
+/// LinearChain_JitVsEagerAllBackends already asserts on for every backend.
+///
 /// Returns 0 on success, non-zero on failure (matches showcase contract).
 int run_jit_mlp_training(int epochs,
                          double* out_initial,
                          double* out_final,
                          double* out_jit_vs_eager_diff,
                          ::tenzor::Device device,
-                         bool verbose);
+                         bool verbose,
+                         std::size_t* out_num_cached = nullptr);
 
 }  // namespace tenzor::examples::jit_mlp

@@ -314,3 +314,65 @@ TEST_F(CudaGraphReplay, InternalRetraceInvalidatesStaleCudaGraph) {
            "replaying it would silently run stale/mismatched computation";
   }  // for each gpu
 }
+
+// findings.txt JIT-R126: unlike the retrace paths covered by
+// InternalRetraceInvalidatesStaleCudaGraph above (which swap the graph_
+// POINTER, triggering forward()'s own invalidate_cuda_graph() calls),
+// optimize_for_inference() and mark_dynamic_dims() mutate *graph_ IN PLACE
+// -- no pointer reassignment. Before the fix, has_cuda_graph() stayed true
+// after either call, so replay_cuda_graph() would keep replaying the
+// PRE-mutation kernel sequence forever while forward() ran the
+// newly-mutated (non-numerically-neutral, for optimize_for_inference's
+// fusion) graph -- a silent divergence between the two APIs on one module.
+TEST_F(CudaGraphReplay, OptimizeForInferenceInvalidatesStaleCudaGraph) {
+  for (const Device& cuda : gpus_) {
+    SCOPED_TRACE("device: " + cuda.to_string());
+
+    auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
+        return {args[0] + args[0]};
+    };
+    Tensor x0 = full({4}, 1.0f, DType::Float32, cuda);
+    std::vector<Variable> trace_inputs = {Variable(x0, /*requires_grad=*/false)};
+    std::shared_ptr<jit::Graph> graph = jit::trace(closure, trace_inputs);
+    ASSERT_NE(graph, nullptr);
+
+    auto module = std::make_shared<jit::CompiledModule>(graph);
+    module->capture_cuda_graph({x0});
+    ASSERT_TRUE(module->has_cuda_graph())
+        << "capture must succeed before the mutation this test exercises";
+
+    module->optimize_for_inference();
+
+    EXPECT_FALSE(module->has_cuda_graph())
+        << "a CUDA/HIP graph captured before optimize_for_inference() must "
+           "not survive it -- optimize_for_inference() mutates *graph_ in "
+           "place (no pointer swap), so replaying the stale capture would "
+           "silently diverge from forward()'s now-optimized graph";
+  }  // for each gpu
+}
+
+TEST_F(CudaGraphReplay, MarkDynamicDimsInvalidatesStaleCudaGraph) {
+  for (const Device& cuda : gpus_) {
+    SCOPED_TRACE("device: " + cuda.to_string());
+
+    auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
+        return {args[0] + args[0]};
+    };
+    Tensor x0 = full({4}, 1.0f, DType::Float32, cuda);
+    std::vector<Variable> trace_inputs = {Variable(x0, /*requires_grad=*/false)};
+    std::shared_ptr<jit::Graph> graph = jit::trace(closure, trace_inputs);
+    ASSERT_NE(graph, nullptr);
+
+    auto module = std::make_shared<jit::CompiledModule>(graph);
+    module->capture_cuda_graph({x0});
+    ASSERT_TRUE(module->has_cuda_graph())
+        << "capture must succeed before the mutation this test exercises";
+
+    module->mark_dynamic_dims({jit::CompiledModule::DynamicDimSpec{0, 0, "batch"}});
+
+    EXPECT_FALSE(module->has_cuda_graph())
+        << "a CUDA/HIP graph captured before mark_dynamic_dims() must not "
+           "survive it -- mark_dynamic_dims() mutates *graph_'s Value shape "
+           "metadata in place (no pointer swap)";
+  }  // for each gpu
+}

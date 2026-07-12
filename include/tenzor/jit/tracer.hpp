@@ -366,9 +366,62 @@ enum class OpType {
     // JIT-R098/R100's manual-recording pattern. sizes_/aspect_ratios_ travel
     // as small CPU Float32 tensor_attrs (not vec_attrs, since they're floats)
     // so execute_node can reconstruct and re-call generate() exactly.
-    AnchorGenerate    ///< no tensor inputs; attrs feat_h/feat_w/stride (int),
+    AnchorGenerate,   ///< no tensor inputs; attrs feat_h/feat_w/stride (int),
                       ///< tensor_attrs sizes/aspect_ratios (1D Float32); ONE
                       ///< output [total_anchors, 4], always requires_grad=false
+
+    // findings.txt JIT-R132/R133: Norm/linalg family already had a full
+    // OpType + execute_node + infer_types/infer_symbolic_types implementation
+    // (used by the direct dispatch<OpId::LinalgX> replay path elsewhere) but
+    // no opid_to_optype mapping, so tracing any real call unconditionally
+    // hard-broke. Sign is the one additional elementwise op needed for
+    // slogdet()'s device-dispatch path (sign(det)/log(abs(det))) to be fully
+    // traceable now that Det itself is mapped.
+    Sign,             ///< elementwise sign(x) in {-1, 0, 1} (complex: x/|x|)
+
+    // findings.txt JIT-R116/R134: previously-unmapped ops whose dispatch call
+    // sites are real (GridSample/AffineGrid: src/ops/vision.cpp; FFT:
+    // src/ops/fft.cpp; CTCLossForward: src/nn/loss/losses_advanced.cpp;
+    // FusedLinearReLU/FusedConv2dReLU/FusedConv2dBnReLU/
+    // FusedSoftmaxCrossEntropy/FusedAddReLU: src/ops/fused_ops.cpp /
+    // src/ops/fusion_optimizer.cpp), unconditionally hard-breaking any trace
+    // that reaches them. Unlike FlashAttention/FusedFFN these are not
+    // decomposed at replay time (no simpler equivalent composition exists,
+    // or the ops are themselves the atomic primitive) -- execute_node
+    // instead re-dispatches the identical OpId with the traced attrs for
+    // inference (non-grad) replay, and throws to force an eager fallback for
+    // differentiable (grad_mode) replay, mirroring the existing Dropout/
+    // BatchNorm2d/linalg-SVD "not wired for differentiable replay" pattern.
+    GridSample,          ///< bilinear/nearest/bicubic sampling of input at
+                         ///< grid locations; inputs [input, grid], attrs
+                         ///< mode/padding_mode/align_corners
+    AffineGrid,          ///< builds a sampling grid from an affine theta;
+                         ///< inputs [theta], attrs output_size/align_corners
+    FFT,                 ///< 1D fast Fourier transform; inputs [input],
+                         ///< attrs dim/n/norm
+    IFFT,                ///< 1D inverse FFT; inputs [input], attrs dim/n/norm
+    RFFT,                ///< 1D real-to-complex FFT; inputs [input], attrs
+                         ///< dim/n/norm
+    IRFFT,               ///< 1D inverse real FFT (complex-to-real); inputs
+                         ///< [input], attrs dim/n/norm
+    CTCLossForward,      ///< CTC loss; inputs [log_probs, targets,
+                         ///< input_lengths, target_lengths], attrs
+                         ///< blank/zero_infinity; outputs
+                         ///< [losses_per_sample, raw_grad] (raw_grad only
+                         ///< meaningful for the eager custom-autograd path,
+                         ///< dropped on inference replay)
+    FusedLinearReLU,     ///< relu(linear(input, weight, bias?)); inputs
+                         ///< [input, weight(, bias)], attrs has_bias
+    FusedConv2dReLU,     ///< relu(conv2d(input, weight, bias?, stride,
+                         ///< padding)); inputs [input, weight(, bias)],
+                         ///< attrs has_bias/stride/padding
+    FusedConv2dBnReLU,   ///< relu(batch_norm(conv2d(...))); inputs [input,
+                         ///< weight, conv_bias, bn_gamma, bn_beta,
+                         ///< bn_running_mean, bn_running_var], attrs
+                         ///< stride/padding/momentum/eps
+    FusedSoftmaxCrossEntropy, ///< cross_entropy(logits, targets); inputs
+                         ///< [logits, targets], attrs reduction
+    FusedAddReLU         ///< relu(a + b); inputs [a, b]
 };
 
 /**

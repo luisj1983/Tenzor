@@ -1268,9 +1268,18 @@ auto Tracer::trace_loop(int64_t max_iter,
     // into the trace. Stored as Int64 (not Float32) so the trip count is exact
     // for max_iter > 2^24; the interpreter prefers the exact int_attr recorded
     // on the Loop op but reads this tensor as int64 as a fallback.
+    // findings.txt JIT-R135: this is a genuine trace-time-only creation-op
+    // tensor (built via tenzor::full, bypassing dispatch entirely) -- must use
+    // register_new_tensor, not the fingerprint-deduping register_tensor
+    // (JIT-R058a): if two loops with DIFFERENT max_iter values are traced in
+    // one pass, the CPU allocator can legitimately reuse the first loop's
+    // freed 1-element Int64 buffer address for the second's full({1}, ...)
+    // call, and register_tensor's fingerprint (ptr+dtype+shape+strides+device)
+    // would then silently alias the second loop's max_iter tensor to the
+    // first loop's id.
     Tensor max_iter_tensor = tenzor::full({1}, static_cast<double>(max_iter),
                                           DType::Int64, Device::cpu());
-    std::string max_iter_id = register_tensor(max_iter_tensor);
+    std::string max_iter_id = register_new_tensor(max_iter_tensor);
 
     // Entry condition (node input[1]) evaluated on the ENTRY state, BEFORE the
     // body runs. Recording these ops here — before body_ops_start — keeps them

@@ -34,9 +34,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -423,6 +426,53 @@ TEST(JitDeviceOrdinal, ResolveHalOrdinalIsFamilyAware) {
     EXPECT_EQ(tjd::resolve_hal_ordinal("cuda", ::tenzor::Device(::tenzor::Device::Type::CUDA, -1)), 0);
 }
 
+// JIT-R131 regression: AMD/Intel Vulkan --iree-vulkan-target selection used to
+// be a single hardcoded value per vendor ("rdna3" for any AMD GPU, "arc" for
+// any Intel GPU) with no GPU-generation check, unlike the NVIDIA path (fixed
+// as JIT-R108). Verified against the actual installed IREE toolchain: "arc"
+// is not merely stale, it CRASHES iree-compile outright (SIGABRT inside
+// ExecutableTargetAttr::getBackend(), exit code 245) -- every Intel Vulkan
+// JIT compile would crash the compiler, not just silently target an old
+// profile. Tests the extracted pure classifier directly (see compile.hpp's
+// mlir_detail::classify_vulkan_target doc comment) with synthetic vendor/
+// name strings, so every generation is covered without needing that
+// generation's real hardware on hand.
+TEST(JitVulkanArch, ClassifyVulkanTargetCoversAllKnownGenerations) {
+    namespace tjd = ::tenzor::jit::mlir_detail;
+
+    // NVIDIA (JIT-R108): generation-specific, falls back to empty (safe
+    // default) for anything unrecognized.
+    EXPECT_EQ(tjd::classify_vulkan_target("nvidia", "nvidia geforce rtx 5070 laptop gpu"), "ada");
+    EXPECT_EQ(tjd::classify_vulkan_target("nvidia", "nvidia rtx pro 6000"), "ada");
+    EXPECT_EQ(tjd::classify_vulkan_target("nvidia", "nvidia geforce rtx 4090"), "ada");
+    EXPECT_EQ(tjd::classify_vulkan_target("nvidia", "nvidia geforce rtx 3090"), "ampere");
+    EXPECT_EQ(tjd::classify_vulkan_target("nvidia", "nvidia a100"), "ampere");
+    EXPECT_EQ(tjd::classify_vulkan_target("nvidia", "nvidia geforce gtx 1080"), "");
+
+    // AMD (JIT-R131): generation-specific by RX-series number; falls back to
+    // "rdna3" (not empty) since that default is empirically verified working
+    // on real RDNA3.5 (gfx1150) integrated-GPU hardware, whose marketing
+    // name carries no RX number to match against.
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 9070 xt"), "rdna4");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 7900 xtx"), "rdna3");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 6800 xt"), "rdna2");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 5700 xt"), "rdna1");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon 890m graphics"), "rdna3")
+        << "an APU with no RX-series marketing number must fall back to the "
+           "verified-working default, not an empty/unresolved target";
+    EXPECT_EQ(tjd::classify_vulkan_target("radeon", "amd radeon 890m graphics"), "rdna3")
+        << "vendor string may report 'radeon' rather than 'amd'";
+
+    // Intel (JIT-R131): no known-working IREE Vulkan target profile exists
+    // for Intel at all in this toolchain -- must return empty (safe
+    // default), NEVER the old "arc" value, which crashes iree-compile.
+    EXPECT_EQ(tjd::classify_vulkan_target("intel", "intel arc a770 graphics"), "");
+    EXPECT_EQ(tjd::classify_vulkan_target("intel", "intel iris xe graphics"), "");
+
+    // Unknown vendor: safe default.
+    EXPECT_EQ(tjd::classify_vulkan_target("qualcomm", "adreno 730"), "");
+}
+
 // ── M1: the ROCm arch is read from the actual device and the derived arch
 //    compiles. ──────────────────────────────────────────────────────────────
 
@@ -503,6 +553,65 @@ TEST(JitRocmArch, RemapHipVisibleDeviceIndex) {
 
     // Negative ordinal input is passed through unchanged (defensive).
     EXPECT_EQ(tj::remap_hip_visible_device_index(-1, "1,0"), -1);
+}
+
+// JIT-R129 regression: detect_rocm_gfx_arch()'s process-lifetime cache used
+// to be keyed ONLY by HIP device_index, not by the HIP_VISIBLE_DEVICES value
+// the remap actually depends on -- so if the env var changed between two
+// calls for the SAME ordinal (test harnesses using setenv/unsetenv across
+// cases, or any embedding scenario mutating it between JIT compiles), the
+// second call would silently return the FIRST call's cached result instead
+// of re-deriving it. Demonstrated with a single real GPU (this box reports
+// exactly one, gfx1150): HIP ordinal 3 doesn't exist with no
+// HIP_VISIBLE_DEVICES override (identity remap => out-of-range => empty).
+// Setting HIP_VISIBLE_DEVICES to a 4-entry list whose index 3 is "0" remaps
+// that SAME ordinal 3 to physical/HSA ordinal 0, which DOES exist. The old
+// index-only cache would incorrectly hand back the first call's cached
+// empty string; the fixed env-folded cache key re-derives and returns the
+// real arch.
+TEST(JitRocmArch, CacheKeyRespectsHipVisibleDevicesChanges) {
+    ensure_core_init();
+    if (!tj::iree_can_initialize_default_device("hip")) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "ROCm/HIP device required by TENZOR_REQUIRE_MULTI_BACKEND "
+                      "but unavailable";
+        }
+        GTEST_SKIP() << "no ROCm/HIP device";
+    }
+
+    const char* saved_raw = std::getenv("HIP_VISIBLE_DEVICES");
+    const bool had_saved = saved_raw != nullptr;
+    const std::string saved = had_saved ? saved_raw : std::string{};
+    struct EnvGuard {
+        bool had;
+        std::string val;
+        ~EnvGuard() {
+            if (had) setenv("HIP_VISIBLE_DEVICES", val.c_str(), 1);
+            else unsetenv("HIP_VISIBLE_DEVICES");
+        }
+    } env_guard{had_saved, saved};
+
+    // A HIP ordinal never queried by any other test in this binary, so its
+    // cache entries can't collide with e.g. DetectedArchMatchesDeviceAndCompiles's
+    // ordinal-0 entry.
+    constexpr int kOrdinal = 3;
+
+    unsetenv("HIP_VISIBLE_DEVICES");
+    const std::string arch_before = tj::detect_rocm_gfx_arch(kOrdinal);
+    EXPECT_TRUE(arch_before.empty())
+        << "HIP ordinal " << kOrdinal << " should not exist on this box "
+           "with no HIP_VISIBLE_DEVICES remap, got: " << arch_before;
+
+    setenv("HIP_VISIBLE_DEVICES", "9,9,9,0", 1);
+    const std::string arch_after = tj::detect_rocm_gfx_arch(kOrdinal);
+    EXPECT_FALSE(arch_after.empty())
+        << "HIP ordinal " << kOrdinal << " remaps to physical ordinal 0 "
+           "under HIP_VISIBLE_DEVICES=9,9,9,0 and should now resolve to a "
+           "real gfx arch -- got empty, which means the cache incorrectly "
+           "reused the pre-remap result for the same ordinal under a "
+           "different HIP_VISIBLE_DEVICES value";
+    EXPECT_EQ(arch_after.rfind("gfx", 0), 0U)
+        << "expected a gfx ISA name, got: " << arch_after;
 }
 
 // ── Fix #3: a graph break / empty trace makes trace_and_compile() return
@@ -673,6 +782,168 @@ TEST(JitEagerFallback, MultiOutputSubprocessBf16WithFloat64ThrowsInsteadOfSilent
         << "a multi-output subprocess invocation with a co-produced BFloat16 "
            "output must not silently return a precision-degraded Float64 "
            "result";
+
+    std::error_code ec;
+    fs::remove_all(opts.cache_dir, ec);
+}
+
+// JIT-R128 regression: the ASCII-stdout fallback's precision-loss guard used
+// to only fire `if (outs.size() > 1)`, reasoning that in the single-output
+// case "that one output is whatever triggered this fallback" -- true only
+// when the fallback was reached via the BFloat16-numpy-encoding-gap path
+// (safe, since the one output IS the bf16 one). That reasoning breaks when
+// npy_path itself is empty because mkstemps() failed to create the .npy
+// temp file BEFORE the bit-exact path was ever attempted -- a dtype-
+// independent cause (temp dir full/inaccessible/restrictive sandbox) that
+// can strand a LONE Float64 output on lossy ~6-sig-fig ASCII parsing with
+// no encoding-gap excuse at all. Force that exact failure with a real,
+// existing-but-unwritable TMPDIR (so std::filesystem::temp_directory_path()
+// still succeeds but mkstemps() gets EACCES), and confirm the single-output
+// subprocess invocation now throws instead of silently returning a
+// precision-degraded Float64 result.
+TEST(JitEagerFallback, SingleOutputSubprocessThrowsWhenNpyTempFileUnavailable) {
+    ensure_core_init();
+
+    ::tenzor::jit::Graph g;
+    auto x_v = g.create_value("x", {4}, ::tenzor::DType::Float64,
+                              ::tenzor::Device::cpu());
+    g.set_inputs({x_v});
+
+    auto add_node_ = g.create_node(::tenzor::jit::OpType::Add);
+    add_node_->add_input(x_v);
+    add_node_->add_input(x_v);
+    auto f64_out = g.create_value("f64_out", {4}, ::tenzor::DType::Float64,
+                                  ::tenzor::Device::cpu());
+    add_node_->add_output(f64_out);
+    g.add_node(add_node_);
+    g.set_outputs({f64_out});
+
+    tj::GraphToMLIR lowerer;
+    const std::string mlir = lowerer.lower(g);
+    ASSERT_NE(mlir.find("func.func @main"), std::string::npos) << mlir;
+
+    tj::CompileOptions opts;
+    opts.target    = "llvm-cpu";
+    opts.cache_dir = make_tmp_dir();
+    tj::CompiledArtifact artifact;
+    ASSERT_NO_THROW({ artifact = tj::compile_mlir(mlir, opts); });
+
+    auto invoker =
+        tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::Subprocess);
+    auto x_t = ::tenzor::full({4}, 0.1, ::tenzor::DType::Float64);
+
+    // Create a real, existing directory with no write permission, and point
+    // TMPDIR at it: temp_directory_path() still succeeds (the path exists
+    // and is a directory), but mkstemps() inside invoke_subprocess fails
+    // with EACCES trying to create the .npy file in it, leaving npy_path
+    // empty -- exactly the fault this guard must catch.
+    const fs::path unwritable_dir = make_tmp_dir() / "unwritable";
+    fs::create_directories(unwritable_dir);
+    fs::permissions(unwritable_dir, fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+
+    const char* saved_tmpdir_raw = std::getenv("TMPDIR");
+    const bool had_saved = saved_tmpdir_raw != nullptr;
+    const std::string saved = had_saved ? saved_tmpdir_raw : std::string{};
+    struct EnvGuard {
+        bool had;
+        std::string val;
+        ~EnvGuard() {
+            if (had) setenv("TMPDIR", val.c_str(), 1);
+            else unsetenv("TMPDIR");
+        }
+    } env_guard{had_saved, saved};
+    setenv("TMPDIR", unwritable_dir.string().c_str(), 1);
+
+    try {
+        (void)invoker->invoke({x_t});
+        FAIL() << "expected invoke() to throw when the .npy temp file "
+                  "cannot be created for a precision-sensitive output";
+    } catch (const std::exception& e) {
+        EXPECT_NE(std::string(e.what()).find("no bit-exact"), std::string::npos)
+            << "expected the JIT-R128 precision-loss guard's message, got: "
+            << e.what();
+    }
+
+    // Restore permissions before cleanup so remove_all can actually delete it.
+    fs::permissions(unwritable_dir, fs::perms::owner_all, fs::perm_options::replace);
+    std::error_code ec;
+    fs::remove_all(opts.cache_dir, ec);
+    fs::remove_all(unwritable_dir.parent_path(), ec);
+}
+
+// JIT-R130 regression: shared_iree_hal_device() used to hold
+// g_shared_iree_device_mu for the ENTIRE device-creation call, serializing
+// device creation across every distinct driver/URI. The fix moved creation
+// outside the lock with a double-checked pattern (look up under the lock,
+// create outside it, then insert-or-discard under the lock again) -- the
+// risk that refactor introduces is a race when multiple threads miss the
+// cache for the SAME URI simultaneously and each create their own device:
+// exactly one must win the cache and the rest must be released, with every
+// caller ending up with a handle to the SAME winning device (not a stale
+// or double-freed one). Stress this directly: many threads concurrently
+// load a fresh IreeInvoker for the identical llvm-cpu artifact/ordinal
+// (guaranteeing a cold cache the first time this test runs) and invoke it,
+// asserting every thread gets the numerically correct result with no
+// crash, deadlock, or corruption -- which would only happen if the
+// insert-or-discard logic mishandled the race.
+TEST(JitRocmArch, ConcurrentSharedHalDeviceCreationIsRaceFree) {
+    ensure_core_init();
+
+    ::tenzor::jit::Graph g;
+    auto x_v = g.create_value("x", {4}, ::tenzor::DType::Float32,
+                              ::tenzor::Device::cpu());
+    g.set_inputs({x_v});
+    auto add_node_ = g.create_node(::tenzor::jit::OpType::Add);
+    add_node_->add_input(x_v);
+    add_node_->add_input(x_v);
+    auto out_v = g.create_value("out", {4}, ::tenzor::DType::Float32,
+                                ::tenzor::Device::cpu());
+    add_node_->add_output(out_v);
+    g.add_node(add_node_);
+    g.set_outputs({out_v});
+
+    tj::GraphToMLIR lowerer;
+    const std::string mlir = lowerer.lower(g);
+    ASSERT_NE(mlir.find("func.func @main"), std::string::npos) << mlir;
+
+    tj::CompileOptions opts;
+    opts.target    = "llvm-cpu";
+    opts.cache_dir = make_tmp_dir();
+    tj::CompiledArtifact artifact;
+    ASSERT_NO_THROW({ artifact = tj::compile_mlir(mlir, opts); });
+
+    auto x_t = ::tenzor::full({4}, 2.5F, ::tenzor::DType::Float32);
+
+    constexpr int kThreads = 16;
+    std::vector<std::thread> threads;
+    std::vector<bool> ok(kThreads, false);
+    std::vector<std::string> errors(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&, i] {
+            try {
+                auto invoker = tj::IreeInvoker::load(
+                    artifact, tj::IreeInvoker::Mode::InProcess);
+                const auto out = invoker->invoke({x_t});
+                if (out.size() == 1u) {
+                    const auto diff =
+                        ::tenzor::max(::tenzor::abs(out[0] - x_t - x_t))
+                            .item<float>();
+                    ok[i] = diff < 1e-6F;
+                    if (!ok[i]) errors[i] = "numeric mismatch, diff=" + std::to_string(diff);
+                } else {
+                    errors[i] = "unexpected output count: " + std::to_string(out.size());
+                }
+            } catch (const std::exception& e) {
+                errors[i] = e.what();
+            }
+        });
+    }
+    for (auto& t : threads) t.join();
+
+    for (int i = 0; i < kThreads; ++i) {
+        EXPECT_TRUE(ok[i]) << "thread " << i << " failed: " << errors[i];
+    }
 
     std::error_code ec;
     fs::remove_all(opts.cache_dir, ec);

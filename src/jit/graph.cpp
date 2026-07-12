@@ -4010,7 +4010,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 // Read the exponent in Float64 (not Float32) so a Float64 graph
                 // with a non-Float32-representable exponent (e.g. 1/3) replays at
                 // full precision instead of the narrowed value.
-                auto exp_cpu = input_vars[1].tensor().to(DType::Float64).to(Device::cpu());
+                // findings.txt JIT-R124: must move to CPU FIRST, then widen to
+                // Float64 -- widening on-device (the original order here) lets
+                // some backends (ROCm) canonicalize a NaN exponent to 0 before
+                // it ever reaches the host, silently diverging from CPU/eager
+                // on a NaN exponent. Matches every other scalar-extraction site
+                // in this file (If/GuardNode/Loop conditions) and the pattern
+                // documented in control_flow.cpp/script.cpp.
+                auto exp_cpu = input_vars[1].tensor().to(Device::cpu()).to(DType::Float64);
                 double exponent = exp_cpu.data<double>()[0];
                 if (grad_mode) {
                     outputs.push_back(tenzor::pow(input_vars[0], exponent));
@@ -4911,6 +4918,251 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 auto out = tenzor::matmul(h, w2.transpose(-2, -1));
                 if (has_b2) out = out + b2;
                 outputs.push_back(out);
+            }
+            break;
+        }
+
+        // findings.txt JIT-R132/R133: Sign has an autograd (Variable-level)
+        // overload, unlike Fmod/Minimum, so it replays identically in both
+        // grad/non-grad modes (mirrors Round's pattern above).
+        case OpType::Sign:
+            if (!input_vars.empty()) {
+                outputs.push_back(tenzor::sign(input_vars[0]));
+            }
+            break;
+
+        // findings.txt JIT-R134/JIT-R116: none of these have a simpler
+        // decomposition (or none is attempted here, to avoid introducing a
+        // new, unreviewed numerical decomposition) -- re-dispatch the
+        // identical op for inference (non-grad) replay; differentiable
+        // replay is not wired, matching the existing Dropout/BatchNorm2d/
+        // linalg-SVD "not wired for differentiable replay" pattern.
+        case OpType::GridSample: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: GridSample is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() >= 2) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Mode, mode_attr_to_string(*node));
+                int64_t pm = node->has_int_attr("padding_mode")
+                                 ? node->get_int_attr("padding_mode") : 0;
+                attrs.set(AttrKey::PaddingMode,
+                          pm == 1 ? "border" : pm == 2 ? "reflection" : "zeros");
+                attrs.set(AttrKey::AlignCorners,
+                          node->has_attr("align_corners") &&
+                          node->get_bool_attr("align_corners"));
+                std::vector<Tensor> inputs = {input_vars[0].tensor(),
+                                               input_vars[1].tensor()};
+                auto result = dispatch(OpId::GridSample, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::AffineGrid: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: AffineGrid is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (!input_vars.empty()) {
+                auto size = node->get_vec_attr("output_size");
+                std::string size_str;
+                for (size_t i = 0; i < size.size(); ++i) {
+                    if (i > 0) size_str += ',';
+                    size_str += std::to_string(size[i]);
+                }
+                OpAttributes attrs;
+                attrs.set(AttrKey::OutputSize, std::string_view(size_str));
+                attrs.set(AttrKey::AlignCorners,
+                          node->has_attr("align_corners") &&
+                          node->get_bool_attr("align_corners"));
+                std::vector<Tensor> inputs = {input_vars[0].tensor()};
+                auto result = dispatch(OpId::AffineGrid, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::FFT: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: FFT is not wired for differentiable "
+                    "replay; fall back to eager");
+            }
+            if (!input_vars.empty()) {
+                OpAttributes attrs;
+                if (node->has_int_attr("dim"))
+                    attrs.set(AttrKey::Dim, node->get_int_attr("dim"));
+                if (node->has_int_attr("n"))
+                    attrs.set(AttrKey::N, node->get_int_attr("n"));
+                int64_t norm_i = node->has_int_attr("norm")
+                                     ? node->get_int_attr("norm") : 0;
+                attrs.set(AttrKey::Norm,
+                          norm_i == 1 ? "forward" : norm_i == 2 ? "ortho" : "backward");
+                std::vector<Tensor> inputs = {input_vars[0].tensor()};
+                auto result = dispatch(OpId::FFT, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::IFFT:
+        case OpType::RFFT:
+        case OpType::IRFFT: {
+            // Shares FFT's exact attr shape (dim/n/norm) -- see OpType::FFT
+            // above for the rationale (no decomposition attempted).
+            const OpId op_id = (node->op_type() == OpType::IFFT)  ? OpId::IFFT
+                              : (node->op_type() == OpType::RFFT)  ? OpId::RFFT
+                                                                    : OpId::IRFFT;
+            const char* op_name = (node->op_type() == OpType::IFFT) ? "IFFT"
+                                : (node->op_type() == OpType::RFFT) ? "RFFT"
+                                                                     : "IRFFT";
+            if (grad_mode) {
+                throw std::runtime_error(
+                    std::string("JIT grad replay: ") + op_name +
+                    " is not wired for differentiable replay; fall back to eager");
+            }
+            if (!input_vars.empty()) {
+                OpAttributes attrs;
+                if (node->has_int_attr("dim"))
+                    attrs.set(AttrKey::Dim, node->get_int_attr("dim"));
+                if (node->has_int_attr("n"))
+                    attrs.set(AttrKey::N, node->get_int_attr("n"));
+                int64_t norm_i = node->has_int_attr("norm")
+                                     ? node->get_int_attr("norm") : 0;
+                attrs.set(AttrKey::Norm,
+                          norm_i == 1 ? "forward" : norm_i == 2 ? "ortho" : "backward");
+                std::vector<Tensor> inputs = {input_vars[0].tensor()};
+                auto result = dispatch(op_id, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::CTCLossForward: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: CTCLossForward is not wired for "
+                    "differentiable replay (custom backward not captured); "
+                    "fall back to eager");
+            }
+            if (input_vars.size() >= 4) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Blank, node->has_int_attr("blank")
+                                              ? node->get_int_attr("blank") : 0);
+                attrs.set(AttrKey::ZeroInfinity,
+                          node->has_attr("zero_infinity") &&
+                          node->get_bool_attr("zero_infinity"));
+                std::vector<Tensor> inputs = {
+                    input_vars[0].tensor(), input_vars[1].tensor(),
+                    input_vars[2].tensor(), input_vars[3].tensor()};
+                auto result = dispatch(OpId::CTCLossForward, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::FusedLinearReLU: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: FusedLinearReLU is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() >= 2) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::HasBias, input_vars.size() >= 3);
+                std::vector<Tensor> inputs;
+                inputs.reserve(input_vars.size());
+                for (auto& v : input_vars) inputs.push_back(v.tensor());
+                auto result = dispatch(OpId::FusedLinearReLU, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::FusedConv2dReLU: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: FusedConv2dReLU is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() >= 2) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::HasBias, input_vars.size() >= 3);
+                attrs.set(AttrKey::Stride, node->has_int_attr("stride")
+                                               ? node->get_int_attr("stride") : 1);
+                attrs.set(AttrKey::Padding, node->has_int_attr("padding")
+                                                ? node->get_int_attr("padding") : 0);
+                std::vector<Tensor> inputs;
+                inputs.reserve(input_vars.size());
+                for (auto& v : input_vars) inputs.push_back(v.tensor());
+                auto result = dispatch(OpId::FusedConv2dReLU, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::FusedConv2dBnReLU: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: FusedConv2dBnReLU is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() >= 7) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Stride, node->has_int_attr("stride")
+                                               ? node->get_int_attr("stride") : 1);
+                attrs.set(AttrKey::Padding, node->has_int_attr("padding")
+                                                ? node->get_int_attr("padding") : 0);
+                attrs.set(AttrKey::Momentum, node->has_float_attr("momentum")
+                                                  ? node->get_attr("momentum") : 0.1);
+                attrs.set(AttrKey::Eps, node->has_float_attr("eps")
+                                            ? node->get_attr("eps") : 1e-5);
+                attrs.set(AttrKey::Training, false);
+                std::vector<Tensor> inputs;
+                inputs.reserve(input_vars.size());
+                for (auto& v : input_vars) inputs.push_back(v.tensor());
+                auto result = dispatch(OpId::FusedConv2dBnReLU, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::FusedSoftmaxCrossEntropy: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: FusedSoftmaxCrossEntropy is not wired "
+                    "for differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() >= 2) {
+                OpAttributes attrs;
+                int64_t red = node->has_int_attr("reduction")
+                                  ? node->get_int_attr("reduction") : 0;
+                attrs.set(AttrKey::Reduction,
+                          red == 1 ? "sum" : red == 2 ? "none" : "mean");
+                std::vector<Tensor> inputs = {input_vars[0].tensor(),
+                                               input_vars[1].tensor()};
+                auto result = dispatch(OpId::FusedSoftmaxCrossEntropy, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+            }
+            break;
+        }
+
+        case OpType::FusedAddReLU: {
+            if (grad_mode) {
+                throw std::runtime_error(
+                    "JIT grad replay: FusedAddReLU is not wired for "
+                    "differentiable replay; fall back to eager");
+            }
+            if (input_vars.size() >= 2) {
+                OpAttributes attrs;
+                std::vector<Tensor> inputs = {input_vars[0].tensor(),
+                                               input_vars[1].tensor()};
+                auto result = dispatch(OpId::FusedAddReLU, inputs, attrs);
+                if (!result.empty()) outputs.push_back(Variable(result[0], false));
             }
             break;
         }

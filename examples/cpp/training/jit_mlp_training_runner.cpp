@@ -52,7 +52,8 @@ int run_jit_mlp_training(int epochs,
                          double* out_final,
                          double* out_jit_vs_eager_diff,
                          ::tenzor::Device device,
-                         bool verbose) {
+                         bool verbose,
+                         std::size_t* out_num_cached) {
     using namespace ::tenzor;
 
     manual_seed(42);
@@ -134,6 +135,10 @@ int run_jit_mlp_training(int epochs,
         const double diff = ::tenzor::max(::tenzor::abs(
             eager_out.tensor() - jit_out.tensor())).item<float>();
         *out_jit_vs_eager_diff = diff;
+        // JIT-R122: report num_cached() so callers can assert the compiled
+        // path (trace -> compile -> cache) was actually taken rather than a
+        // silent full-eager fallback trivially producing a diff of 0.
+        if (out_num_cached) *out_num_cached = compiled.num_cached();
         if (verbose) {
             std::cout << "JIT vs eager max abs diff: " << diff << "\n";
         }

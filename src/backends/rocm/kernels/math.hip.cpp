@@ -809,6 +809,32 @@ __global__ void neg_kernel_complex128(const hipDoubleComplex* input, hipDoubleCo
     }
 }
 
+// findings.txt: sign (sgn) for complex inputs was entirely missing on ROCm
+// (fell through to the integer-dispatch branch below, which throws
+// "unsupported dtype" for Complex64/128) -- linalg::slogdet()'s GPU path
+// computes sign(det) on a complex determinant, so this made slogdet()
+// unconditionally throw on every complex ROCm call. z/|z|, and 0 for z == 0
+// -- matches CUDA's sign_kernel_complex64/128 and the CPU complex slogdet sign.
+__global__ void sign_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float a = hipCrealf(input[idx]);
+        float b = hipCimagf(input[idx]);
+        float mag = hypotf(a, b);
+        output[idx] = (mag > 0.0f) ? make_hipFloatComplex(a / mag, b / mag)
+                                   : make_hipFloatComplex(0.0f, 0.0f);
+    }
+}
+
+__global__ void sign_kernel_complex128(const hipDoubleComplex* input, hipDoubleComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double a = hipCreal(input[idx]);
+        double b = hipCimag(input[idx]);
+        double mag = hypot(a, b);
+        output[idx] = (mag > 0.0) ? make_hipDoubleComplex(a / mag, b / mag)
+                                  : make_hipDoubleComplex(0.0, 0.0);
+    }
+}
+
 // Transcendentals on complex numbers.
 // exp(a+bi) = exp(a) * (cos(b) + i*sin(b))
 __global__ void exp_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
@@ -2560,6 +2586,14 @@ auto sign_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::BFloat16) {
         // No native BF16 sign kernel: widen to Float32, compute, narrow back.
         return sign_kernel(input.to(DType::Float32), stream).to(DType::BFloat16);
+    } else if (input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(sign_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data_ptr()),
+            reinterpret_cast<hipFloatComplex*>(result.data_ptr()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(sign_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data_ptr()),
+            reinterpret_cast<hipDoubleComplex*>(result.data_ptr()), n);
     } else {
         TENZOR_HIP_INT_DISPATCH(input.dtype(), "sign",
             hipLaunchKernelGGL(sign_int_kernel<T>, grid, block, 0, stream,
