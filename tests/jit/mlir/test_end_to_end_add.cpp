@@ -148,6 +148,13 @@ void run_add_on_target(const std::string& target) {
     ASSERT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
         << "target=" << target
         << " did NOT run through IREE (silent eager fallback)";
+    // JIT-R117: misses>=1 alone cannot distinguish "compiled and ran" from
+    // "attempted a compile, failed, and quietly ran eager" -- see
+    // mlir_target_util.hpp's assert_jit_used() for the full rationale.
+    ASSERT_EQ(::tenzor::jit::mlir_jit::cache_stats().eager_fallbacks, 0u)
+        << "target=" << target
+        << " silently fell back to eager (compiled path never actually ran; "
+           "the diff check below is vacuous for this target)";
 
     ASSERT_EQ(jitted.tensor().numel(), eager.tensor().numel())
         << "numel mismatch on target=" << target;

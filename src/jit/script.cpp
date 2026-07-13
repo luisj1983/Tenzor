@@ -1061,12 +1061,13 @@ auto compile_script_multi_with_dummies(const char* source,
     // A genuine shape/device/dtype change must retrace with ALL N inputs, so
     // register a multi-input retrace closure that re-runs the N-arg script trace.
     compiled->set_retrace_fn(
-        [module](const std::vector<Variable>& ins) -> std::shared_ptr<CompiledModule> {
+        [module](const std::vector<Variable>& ins,
+                 std::vector<Variable>* out_results) -> std::shared_ptr<CompiledModule> {
             auto g = jit::trace(
                 [module](const std::vector<Variable>& a) -> std::vector<Variable> {
                     return {module->evaluator().evaluate(a)};
                 },
-                ins);
+                ins, out_results);
             if (!g) {
                 throw std::runtime_error("compile_script: retrace produced null graph");
             }

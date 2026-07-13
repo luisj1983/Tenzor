@@ -419,7 +419,19 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
         int64_t prod = 1;
         bool overflowed = false;
         for (auto a : ax) {
-            if (a < 0 || a >= static_cast<int64_t>(in_shape.size()) ||
+            if (a < 0 || a >= static_cast<int64_t>(in_shape.size())) {
+                overflowed = true;
+                break;
+            }
+            // JIT-R113: <= 0 encodes a dynamic/unknown dim (this file's
+            // established sentinel, see estimate_elements() above) -- a real
+            // norm_size cannot be computed from it. Letting it multiply
+            // through silently produced a 0/negative norm_size that could
+            // spuriously equal an unrelated candidate operand's own
+            // sentinel-tainted numel below, passing the affine-shape guard
+            // for an operand that doesn't actually match the real
+            // (still-unresolved) normalized-axes structure.
+            if (in_shape[static_cast<size_t>(a)] <= 0 ||
                 __builtin_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
                 overflowed = true;
                 break;
@@ -476,7 +488,12 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
         const auto& oshape = other->shape();
         int64_t onumel = 1;
         for (auto d : oshape) {
-            if (__builtin_mul_overflow(onumel, d, &onumel)) return false;
+            // JIT-R113: <= 0 encodes a dynamic/unknown dim (this file's
+            // established sentinel) -- cannot validate this operand's shape
+            // against norm_size without a real count, so reject absorption
+            // rather than let a 0/negative placeholder multiply through and
+            // possibly coincide with norm_size's own value.
+            if (d <= 0 || __builtin_mul_overflow(onumel, d, &onumel)) return false;
         }
         if (onumel == 1) return true;
         if (onumel != norm_size) return false;
@@ -520,6 +537,40 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
             if ((op == OpType::Add || op == OpType::Mul) &&
                 !other_operand_is_valid_affine_shape(matched.back(), nk)) {
                 break;
+            }
+            // JIT-R114: the normalizing Div ((x-mean)/std) was absorbed with
+            // NO validation at all -- unlike Add/Mul's gamma/beta guard
+            // above. other_operand_is_valid_affine_shape isn't the right
+            // check here (Div's non-Sqrt operand is x-mean from several
+            // steps earlier in the chain, not chain_tail's own output, and
+            // has the full batched shape, not norm_size -- reusing that
+            // guard would reject every genuine LayerNorm). The actual
+            // invariant a real LayerNorm's Div must satisfy: EVERY operand
+            // is either already part of this matched chain, or is the
+            // pattern's own original input (x, feeding n0) -- never a
+            // genuinely external tensor. An unrelated Div pulling in a
+            // foreign operand (e.g. an adjacent unrelated scaling division
+            // that happens to consume the running std value) would
+            // otherwise be silently absorbed and fed through the fused
+            // kernel as if it were part of the LayerNorm math.
+            if (op == OpType::Div) {
+                std::unordered_set<Value*> chain_value_set;
+                for (const auto& m : matched) {
+                    for (const auto& out : m->outputs()) {
+                        if (out) chain_value_set.insert(out.get());
+                    }
+                }
+                Value* original_input =
+                    n0->inputs().empty() ? nullptr : n0->inputs()[0].get();
+                bool all_internal = true;
+                for (const auto& inp : nk->inputs()) {
+                    if (!inp) continue;
+                    if (chain_value_set.count(inp.get())) continue;
+                    if (original_input && inp.get() == original_input) continue;
+                    all_internal = false;
+                    break;
+                }
+                if (!all_internal) break;
             }
             matched.push_back(nk);
             ++idx;
@@ -654,7 +705,14 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
         int64_t prod = 1;
         bool overflowed = false;
         for (auto a : axes) {
-            if (a < 0 || a >= static_cast<int64_t>(in_shape.size()) ||
+            if (a < 0 || a >= static_cast<int64_t>(in_shape.size())) {
+                overflowed = true;
+                break;
+            }
+            // JIT-R113: see match_layer_norm's identical guard for the full
+            // rationale -- <= 0 encodes a dynamic/unknown dim and must not
+            // silently multiply through into norm_size.
+            if (in_shape[static_cast<size_t>(a)] <= 0 ||
                 __builtin_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
                 overflowed = true;
                 break;
@@ -692,7 +750,12 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
         const auto& oshape = other->shape();
         int64_t onumel = 1;
         for (auto d : oshape) {
-            if (__builtin_mul_overflow(onumel, d, &onumel)) return false;
+            // JIT-R113: <= 0 encodes a dynamic/unknown dim (this file's
+            // established sentinel) -- cannot validate this operand's shape
+            // against norm_size without a real count, so reject absorption
+            // rather than let a 0/negative placeholder multiply through and
+            // possibly coincide with norm_size's own value.
+            if (d <= 0 || __builtin_mul_overflow(onumel, d, &onumel)) return false;
         }
         if (onumel == 1) return true;
         if (onumel != norm_size) return false;
@@ -737,13 +800,42 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
         ++next;
     }
 
-    // Div (input / sqrt_result) or Mul (input * rsqrt_result)
+    // Div (input / sqrt_result) or Mul (input * rsqrt_result) -- the
+    // normalizing step itself, distinct from the LATER "Optional: Mul
+    // (gamma)" absorption below.
+    //
+    // JIT-R114: this step previously had NO operand validation at all,
+    // unlike the eps-Add and gamma-Mul steps around it. other_operand_is_
+    // valid_affine_shape isn't the right check here either (this step's
+    // non-chain-tail operand is the ORIGINAL input x, which has the full
+    // batched shape, not norm_size -- that guard would reject every genuine
+    // RMSNorm). The actual invariant: every operand is either already part
+    // of the matched chain, or is the pattern's own original input (x,
+    // feeding n0) -- never a genuinely external tensor. Mirrors match_
+    // layer_norm's identical Div guard.
     if (next < nodes.size() &&
         (nodes[next]->op_type() == OpType::Div || nodes[next]->op_type() == OpType::Mul) &&
         !used.count(nodes[next].get()) &&
         consumes_output(matched.back(), nodes[next])) {
-        matched.push_back(nodes[next]);
-        ++next;
+        std::unordered_set<Value*> chain_value_set;
+        for (const auto& m : matched) {
+            for (const auto& out : m->outputs()) {
+                if (out) chain_value_set.insert(out.get());
+            }
+        }
+        Value* original_input = n0->inputs().empty() ? nullptr : n0->inputs()[0].get();
+        bool all_internal = true;
+        for (const auto& inp : nodes[next]->inputs()) {
+            if (!inp) continue;
+            if (chain_value_set.count(inp.get())) continue;
+            if (original_input && inp.get() == original_input) continue;
+            all_internal = false;
+            break;
+        }
+        if (all_internal) {
+            matched.push_back(nodes[next]);
+            ++next;
+        }
     }
 
     // Optional: Mul(gamma)

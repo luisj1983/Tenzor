@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -388,6 +389,85 @@ TEST(ExtendedCodegen, ExecuteReductionSumMeanMatchesReference) {
                         << dev.to_string()
                         << (rk == OpType::Mean ? " Mean" : " Sum")
                         << " cols=" << cols << " r=" << r;
+                }
+            }
+        }
+    }
+}
+
+// JIT-R132: reduction Max/Min had zero test coverage anywhere in the suite --
+// every prior Reduction-fusion test exercised Sum/Mean only. This covers both
+// plain correctness AND NaN propagation: eager's parallel_simd_max/min_f*
+// (reduction.cpp) return NaN for a row if ANY reduced element is NaN, so the
+// fused kernel's combine() (extended_codegen.cpp's generate_reduction) must
+// match -- a bare fmax/fmin (instead of the NaN-checked combine it actually
+// uses) would silently drop the NaN and return the extremum of the remaining
+// finite elements.
+TEST(ExtendedCodegen, ExecuteReductionMaxMinMatchesReferenceAndPropagatesNaN) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    for (OpType rk : {OpType::Max, OpType::Min}) {
+        for (int cols : {48, 256, 1024}) {
+            const int rows = 4;
+            auto in = make_rows(rows, cols);
+            Tensor input_cpu = from_data(in.data(), {rows, cols});
+            for (const auto& dev : devs) {
+                Tensor input = input_cpu.to(dev);
+                ExtendedFusionGroup group;
+                group.kind = FusionKind::Reduction;
+                group.dtype = DType::Float32;
+                group.reduce_dim = -1;       // reduce the last (contiguous) axis
+                group.reduce_kind = rk;
+                group.keepdim = false;
+                Tensor out = execute_extended_fused(group, {input}).to(Device::cpu());
+                ASSERT_EQ(out.numel(), rows);
+                const float* o = out.data<float>();
+                for (int r = 0; r < rows; ++r) {
+                    double ref = (rk == OpType::Max) ? -std::numeric_limits<double>::infinity()
+                                                      : std::numeric_limits<double>::infinity();
+                    for (int c = 0; c < cols; ++c) {
+                        double v = (double)in[r * cols + c];
+                        if (rk == OpType::Max) { if (v > ref) ref = v; }
+                        else                   { if (v < ref) ref = v; }
+                    }
+                    EXPECT_NEAR(o[r], ref, 1e-4 + 1e-4 * std::abs(ref))
+                        << dev.to_string()
+                        << (rk == OpType::Max ? " Max" : " Min")
+                        << " cols=" << cols << " r=" << r;
+                }
+            }
+        }
+    }
+
+    // NaN propagation: eager returns NaN for the whole row if ANY element in
+    // it is NaN. Poison one element per row -- at a different offset per row,
+    // so both a mid-row and an end-of-row NaN are exercised -- and require
+    // every backend's fused kernel output to be NaN too.
+    for (OpType rk : {OpType::Max, OpType::Min}) {
+        for (int cols : {48, 256, 1024}) {
+            const int rows = 2;
+            auto in = make_rows(rows, cols);
+            in[0 * cols + (cols / 3)] = std::numeric_limits<float>::quiet_NaN();
+            in[1 * cols + (cols - 1)] = std::numeric_limits<float>::quiet_NaN();
+            Tensor input_cpu = from_data(in.data(), {rows, cols});
+            for (const auto& dev : devs) {
+                Tensor input = input_cpu.to(dev);
+                ExtendedFusionGroup group;
+                group.kind = FusionKind::Reduction;
+                group.dtype = DType::Float32;
+                group.reduce_dim = -1;
+                group.reduce_kind = rk;
+                group.keepdim = false;
+                Tensor out = execute_extended_fused(group, {input}).to(Device::cpu());
+                ASSERT_EQ(out.numel(), rows);
+                const float* o = out.data<float>();
+                for (int r = 0; r < rows; ++r) {
+                    EXPECT_TRUE(std::isnan(o[r]))
+                        << dev.to_string()
+                        << (rk == OpType::Max ? " Max" : " Min")
+                        << " cols=" << cols << " r=" << r << " got=" << o[r];
                 }
             }
         }

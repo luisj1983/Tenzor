@@ -17,27 +17,38 @@ namespace tenzor::jit {
 /**
  * @brief Compile a Python-like script into a runnable CompiledModule.
  *
- * This is a minimum-viable implementation of a scripting frontend — it parses
- * a small subset of Python sufficient for short pure-computation kernels. The
- * returned CompiledModule can be invoked via `forward(Variable)` for
- * single-argument scripts.
+ * This is a scripting frontend — it parses a subset of Python sufficient
+ * for short pure-computation kernels. The returned CompiledModule can be
+ * invoked via `forward(Variable)` for single-argument scripts.
  *
- * **Supported grammar (MVP)**
- * - A single top-level `def NAME(arg, ...):` function.
- * - Inside the function body, a single `return EXPR` statement.
+ * **Supported grammar**
+ * - A single top-level `def NAME(arg, ...):` function per script.
+ * - A statement body of one or more statements:
+ *   - `return EXPR` — ends the function.
+ *   - `NAME = EXPR` — variable assignment (new or existing name).
+ *   - `if COND: BODY` / `if COND: BODY else: BODY` — genuine multi-
+ *     statement then/else blocks. `COND` uses one of the comparison
+ *     operators below. Condition evaluation is NaN-safe (matches the
+ *     project-wide eager/interpreter device-side-cast-order fix).
+ *   - `for NAME in range(N): BODY` — a compile-time-constant-trip-count
+ *     loop, unrolled at script-compile time (`N` must be a literal).
  * - `EXPR` may use:
- *   - Identifiers (refer to function arguments only).
+ *   - Identifiers (function arguments or names assigned earlier in the
+ *     body).
  *   - Floating-point and integer literals.
  *   - Binary arithmetic: `+`, `-`, `*`, `/` (left-associative, standard
  *     precedence: `*` / `/` above `+` / `-`).
+ *   - Comparison: `<`, `>` (used in `if` conditions).
+ *   - Method calls on a receiver expression, e.g. `x.sum()`, `x.mean()`
+ *     (a fixed whitelist of tensor-reduction-style methods; see
+ *     `src/jit/script.cpp`'s dispatch table for the exact set).
  *   - Parenthesised subexpressions.
  *
- * **Deliberately unsupported in this MVP**
- * - Control flow (`if`, `else`, loops).
- * - Variable assignment (beyond function parameters).
- * - Attribute / method access (e.g. `x.mean()`).
- * - Multiple statements per function.
+ * **Deliberately unsupported**
  * - Multiple functions per script.
+ * - General Python control flow beyond the bounded `if`/`for` forms above
+ *   (e.g. `while`, data-dependent-trip-count loops, `break`/`continue`).
+ * - Arbitrary attribute access or method calls outside the whitelist.
  *
  * Any of these may be added as tests require them — the parser is a plain
  * recursive-descent parser in `src/jit/script.cpp`.

@@ -3652,6 +3652,28 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
             out_data[i] = BFloat16(sign_val);
         }
 
+    } else if (input.dtype() == DType::Complex64) {
+        // JIT-R140: complex sign(z) = z/|z| for |z|!=0, else 0+0i. Matches
+        // CUDA/ROCm/OneAPI's hypot-based formula exactly (std::abs on
+        // std::complex is specified equivalent to std::hypot(real, imag),
+        // i.e. overflow-safe magnitude, unlike a naive sqrt(re*re+im*im)).
+        const auto* in_data = input.data<std::complex<float>>();
+        auto* out_data = result.data<std::complex<float>>();
+        for (size_t i = 0; i < n; ++i) {
+            std::complex<float> z = in_data[i];
+            float mag = std::abs(z);
+            out_data[i] = (mag == 0.0f) ? std::complex<float>(0.0f, 0.0f) : (z / mag);
+        }
+
+    } else if (input.dtype() == DType::Complex128) {
+        const auto* in_data = input.data<std::complex<double>>();
+        auto* out_data = result.data<std::complex<double>>();
+        for (size_t i = 0; i < n; ++i) {
+            std::complex<double> z = in_data[i];
+            double mag = std::abs(z);
+            out_data[i] = (mag == 0.0) ? std::complex<double>(0.0, 0.0) : (z / mag);
+        }
+
     } else {
         // Integer dtypes (PyTorch supports torch.sign on integers): -1/0/1 for
         // signed, 0/1 for unsigned.

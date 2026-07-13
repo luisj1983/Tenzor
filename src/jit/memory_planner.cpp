@@ -500,6 +500,26 @@ auto RematerializationPlanner::find_candidates(
     for (size_t i = 0; i < nodes.size(); ++i) {
         node_index[nodes[i].get()] = i;
     }
+    // JIT-R124: node_index above is top-level-only. A consumer nested
+    // inside an If/Loop subgraph body is neither found in node_index NOR
+    // does it contribute to `death` below -- the live range silently
+    // ignores it as if it didn't exist, potentially under-reporting
+    // range_length enough to reject a candidate that DOES have a genuine
+    // (if nested) long-lived consumer, or -- for a value whose only
+    // top-level consumer dies early -- reporting a falsely-short range
+    // while a nested consumer keeps the value alive much later. Use the
+    // recursive live-node set to detect a nested consumer and, when found,
+    // conservatively treat its contribution to `death` as the last
+    // possible top-level index (this graph's own topological-index-as-
+    // execution-time-proxy invariant treats the enclosing If/Loop node's
+    // position as roughly "when" its subgraph body runs, and the subgraph
+    // body always runs no earlier than that -- using the last index is a
+    // safe, if imprecise, upper bound). apply()'s own consumer-count gate
+    // (fixed alongside this) is the authoritative correctness check for
+    // whether a candidate is actually safe to rematerialize; this only
+    // affects which candidates get proposed here.
+    std::unordered_set<const Node*> all_live_nodes;
+    collect_nodes_recursive(graph, all_live_nodes);
 
     // Collect excluded value IDs (inputs, outputs, constants)
     std::unordered_set<std::string> excluded;
@@ -524,8 +544,14 @@ auto RematerializationPlanner::find_candidates(
             size_t death = birth;
             for (const auto& use : output->uses()) {
                 auto user = use.lock();
-                if (user && node_index.count(user.get())) {
-                    death = std::max(death, node_index[user.get()]);
+                if (!user || !all_live_nodes.count(user.get())) continue;
+                auto idx_it = node_index.find(user.get());
+                if (idx_it != node_index.end()) {
+                    death = std::max(death, idx_it->second);
+                } else if (!nodes.empty()) {
+                    // Live but nested (not in the top-level index) -- see
+                    // the JIT-R124 comment above.
+                    death = std::max(death, nodes.size() - 1);
                 }
             }
 
@@ -584,6 +610,24 @@ auto RematerializationPlanner::apply(
         node_index[nodes[i].get()] = i;
     }
 
+    // JIT-R124: node_index above is top-level-only, but value->uses() can
+    // include consumers nested inside an If/Loop body's subgraph (mirrors
+    // the JIT-R016 gap collect_nodes_recursive's own doc comment above
+    // describes for MemorySwapPlanner). A value with one top-level consumer
+    // and one nested consumer read live_consumer_count==1 below (the nested
+    // one silently uncounted, since node_index.count() on it is false),
+    // incorrectly qualifying it for single-consumer rematerialization and
+    // over-crediting memory_saved (the budget loop then stops early having
+    // reclaimed less than it thinks). Use a separate recursive set purely
+    // for the COUNT so every live consumer is seen; last-consumer
+    // SELECTION below still only draws from the top-level-only node_index
+    // -- redirecting a nested consumer isn't safe anyway (the recompute
+    // node this pass appends is added at the top level via
+    // graph.add_node(), not inside the nested subgraph's own node list, so
+    // it would be out of scope for a nested consumer to reference).
+    std::unordered_set<const Node*> all_live_nodes;
+    collect_nodes_recursive(graph, all_live_nodes);
+
     for (const auto& candidate : candidates) {
         // Reclamation target: stop once we've freed the requested number of
         // bytes (0 = no cap; reclaim from all good candidates).
@@ -601,13 +645,17 @@ auto RematerializationPlanner::apply(
         size_t live_consumer_count = 0;
         for (const auto& use : value->uses()) {
             auto user = use.lock();
-            if (user && node_index.count(user.get())) {
-                ++live_consumer_count;
-                size_t idx = node_index[user.get()];
-                if (idx >= last_use_idx) {
-                    last_use_idx = idx;
-                    last_consumer = user;
-                }
+            if (!user || !all_live_nodes.count(user.get())) continue;
+            ++live_consumer_count;
+            // Only a top-level consumer can be the redirect target (see the
+            // JIT-R124 comment above); a nested-only consumer is counted
+            // but never selected here, correctly forcing live_consumer_
+            // count != 1 (so this candidate is skipped below) whenever a
+            // nested consumer exists alongside it.
+            auto idx_it = node_index.find(user.get());
+            if (idx_it != node_index.end() && idx_it->second >= last_use_idx) {
+                last_use_idx = idx_it->second;
+                last_consumer = user;
             }
         }
 

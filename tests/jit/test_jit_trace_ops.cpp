@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/compile.hpp>
+#include <tenzor/ops/linalg.hpp>
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/nn/layers/flatten.hpp>
 #include <tenzor/nn/layers/batchnorm.hpp>
@@ -3162,27 +3163,76 @@ TEST(JitTraceOps, RReLUEvalModeTracesAndCachesAcrossBackends) {
 TEST(JitTraceOps, RReLUTrainingModeRefusesToReplay) {
     // training=true + no-grad still routes through dispatch<OpId::RReLU>
     // (see rrelu()'s needs_grad-gated branch in activations.cpp), so it
-    // traces successfully but must refuse to REPLAY (the kernel draws fresh
-    // per-call randomness a frozen trace cannot represent).
+    // traces successfully but the compiled graph must refuse to REPLAY it
+    // (the kernel draws fresh per-call randomness a frozen trace cannot
+    // represent) — never silently replaying a frozen trace-time random
+    // slope is the invariant this test guards, not any particular
+    // exception-propagation shape.
+    //
+    // JIT-R120: CompiledFunction::operator()'s cache-hit path used to have
+    // no exception-safety net at all, so the graph-level replay-refusal
+    // (Graph::execute_node's OpType::RReLU throw, whose own message ends
+    // "...that a trace cannot represent); fall back to eager") propagated
+    // all the way to the caller as an uncaught hard error even in
+    // non-strict mode — inconsistent with every OTHER JIT failure mode in
+    // this file (compile failure, graph break, mlir invoke failure), all of
+    // which honor config.strict. Now that the cache-hit path has the same
+    // strict-aware safety net, non-strict mode must gracefully fall back to
+    // a genuinely fresh eager call (fn_ was never run this call, so no
+    // double-exec risk) instead of throwing, while strict=true must still
+    // surface the incompatibility as a hard error, matching every other
+    // JIT fallback's strict contract.
     auto fn = [](const Variable& x) {
         return nn::rrelu(x, 1.0 / 8.0, 1.0 / 3.0, /*training=*/true);
     };
     for (const auto& dev : get_available_backends()) {
+        // Non-strict (the default): cache-hit replay failure gracefully
+        // falls back to eager instead of throwing.
         auto compiled = jit::compile(fn);
         auto a = randn({4, 8}, DType::Float32, dev);
         // First call: traces successfully (fn_ ran eagerly during trace).
         ASSERT_NO_THROW({ (void)compiled(Variable(a, /*requires_grad=*/false)); })
             << "nn::rrelu(training=true) unexpectedly threw on first "
                "(trace) call on " << backend_name(dev);
-        // Second call: cache hit replays the captured graph, which must
-        // now refuse via the OpType::RReLU execute_node training guard.
+
         auto b = randn({4, 8}, DType::Float32, dev);
+        Variable out1, out2;
+        ASSERT_NO_THROW({ out1 = compiled(Variable(b, /*requires_grad=*/false)); })
+            << "nn::rrelu(training=true) cache-hit replay must gracefully "
+               "fall back to eager (JIT-R120), not throw, in non-strict mode "
+               "on " << backend_name(dev);
+        ASSERT_NO_THROW({ out2 = compiled(Variable(b, /*requires_grad=*/false)); })
+            << "the eager fallback must keep working on every subsequent "
+               "call, not just once, on " << backend_name(dev);
+        // The safety property the ORIGINAL guard exists for: never silently
+        // replay a FROZEN trace-time random slope. Two independent eager
+        // fallback calls on the identical input must draw independent
+        // randomness (overwhelmingly unlikely to be bit-identical by
+        // chance), proving this is a genuine fresh recomputation each time,
+        // not a frozen replay slipping through under a different guise.
+        EXPECT_GT(tenzor::max(tenzor::abs(
+                      out1.tensor() - out2.tensor())).item<float>(), 0.0f)
+            << "two eager-fallback calls on the same input produced "
+               "bit-identical output — a frozen/stale replay may have "
+               "slipped through despite the guard, on " << backend_name(dev);
+
+        // Strict mode: the same incompatibility must surface as a hard
+        // error, matching every other JIT fallback's strict contract.
+        jit::CompileConfig strict_cfg;
+        strict_cfg.backend = "nvrtc";
+        strict_cfg.strict = true;
+        jit::CompiledFunction strict_compiled(
+            jit::CompiledFunction::FnType(fn), strict_cfg);
+        auto c = randn({4, 8}, DType::Float32, dev);
+        ASSERT_NO_THROW({ (void)strict_compiled(Variable(c, /*requires_grad=*/false)); })
+            << "trace (first) call itself must not throw under strict mode "
+               "on " << backend_name(dev);
+        auto d = randn({4, 8}, DType::Float32, dev);
         EXPECT_THROW(
-            { (void)compiled(Variable(b, /*requires_grad=*/false)); },
+            { (void)strict_compiled(Variable(d, /*requires_grad=*/false)); },
             std::exception)
-            << "nn::rrelu(training=true) did not refuse to replay on "
-            << backend_name(dev) << " — would silently freeze the "
-               "trace-time random slope forever";
+            << "nn::rrelu(training=true) must throw on cache-hit replay "
+               "under explicit strict=true on " << backend_name(dev);
 
         EXPECT_NO_THROW({ (void)fn(Variable(a, false)); })
             << "nn::rrelu(training=true) incorrectly threw on a plain "
@@ -3564,4 +3614,270 @@ TEST(JitDetectionOps, PostprocessDetectionsRefusesToTrace) {
         << "RoIHead::postprocess_detections should refuse to trace "
            "(JIT-R088) instead of silently baking one trace-time detection-"
            "count branch as fixed structure";
+}
+
+// ============================================================================
+// JIT-R110: 11 LAPACK-backed linalg ops previously bypassed the tracer
+// entirely on CPU (their LAPACKE calls never went through dispatch(), so
+// the tracer never recorded them -- the op's output silently froze as a
+// trace-time constant on replay) and hard-broke the WHOLE trace on GPU/
+// complex-dtype dispatch (real backend kernels exist and go through
+// dispatch(), but no OpType existed to map the OpId to). Each test below
+// traces once, replays on a genuinely DIFFERENT input, and verifies the
+// replayed result matches fresh eager computation on that new input -- a
+// frozen trace-time constant would instead keep returning the FIRST call's
+// result regardless of what's passed on replay.
+// ============================================================================
+
+namespace {
+auto make_mat(std::vector<int64_t> shape, std::vector<float> values) -> Tensor {
+    auto t = zeros(shape, DType::Float32, Device::cpu());
+    auto* data = t.data<float>();
+    for (size_t i = 0; i < values.size() && i < static_cast<size_t>(t.numel()); ++i) {
+        data[i] = values[i];
+    }
+    return t;
+}
+} // namespace
+
+TEST(JitLinalgOps, SolveTriangularTracksNewInput) {
+    auto A = make_mat({3, 3}, {2.0f, 1.0f, 0.5f,
+                               0.0f, 3.0f, 1.0f,
+                               0.0f, 0.0f, 1.5f});
+    auto fn = [A](const Variable& B) {
+        return Variable(linalg::solve_triangular(A, B.tensor(), /*upper=*/true,
+                                                   /*unitriangular=*/false),
+                        false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_B = make_mat({3, 1}, {1.0f, 2.0f, 3.0f});
+    (void)compiled(Variable(dummy_B, false));
+
+    auto other_B = make_mat({3, 1}, {4.0f, -1.0f, 2.0f});
+    auto replayed = compiled(Variable(other_B, false));
+    auto eager = linalg::solve_triangular(A, other_B, true, false);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "solve_triangular did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "SolveTriangular replay on a NEW input != eager on that input — "
+           "frozen trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, SlogdetTracksNewInput) {
+    auto fn = [](const Variable& A) {
+        auto [sign, logabsdet] = linalg::slogdet(A.tensor());
+        return Variable(tenzor::add(sign, logabsdet), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({3, 3}, {4.0f, 1.0f, 0.0f, 1.0f, 4.0f, 1.0f, 0.0f, 1.0f, 4.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({3, 3}, {5.0f, 2.0f, 1.0f, 2.0f, 6.0f, 3.0f, 1.0f, 3.0f, 7.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_sign, eager_logabsdet] = linalg::slogdet(other_A);
+    auto eager = tenzor::add(eager_sign, eager_logabsdet);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "slogdet did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "Slogdet CPU replay on a NEW input != eager on that input — "
+           "frozen trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, EigvalshTracksNewInput) {
+    auto fn = [](const Variable& A) {
+        return Variable(linalg::eigvalsh(A.tensor()), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({3, 3}, {2.0f, 1.0f, 0.0f, 1.0f, 2.0f, 1.0f, 0.0f, 1.0f, 2.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({3, 3}, {3.0f, 1.0f, 0.0f, 1.0f, 3.0f, 1.0f, 0.0f, 1.0f, 3.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto eager = linalg::eigvalsh(other_A);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "eigvalsh did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "Eigvalsh replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, EigTracksNewInput) {
+    auto fn = [](const Variable& A) {
+        auto [Wr, Wi, V] = linalg::eig(A.tensor());
+        (void)V;
+        return Variable(tenzor::add(Wr, Wi), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({3, 3}, {2.0f, 1.0f, 0.0f, 0.0f, 3.0f, 1.0f, 1.0f, 0.0f, 2.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({3, 3}, {3.0f, 0.0f, 1.0f, 1.0f, 2.0f, 0.0f, 0.0f, 1.0f, 4.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_Wr, eager_Wi, eager_V] = linalg::eig(other_A);
+    (void)eager_V;
+    auto eager = tenzor::add(eager_Wr, eager_Wi);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "eig did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-3f, 1e-3f))
+        << "Eig replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, LuTracksNewInput) {
+    auto fn = [](const Variable& A) {
+        auto [L, U, pivots] = linalg::lu(A.tensor());
+        (void)pivots;
+        return Variable(tenzor::matmul(L, U), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({3, 3}, {4.0f, 3.0f, 2.0f, 2.0f, 5.0f, 1.0f, 1.0f, 1.0f, 6.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({3, 3}, {6.0f, 1.0f, 2.0f, 1.0f, 7.0f, 3.0f, 2.0f, 3.0f, 8.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_L, eager_U, eager_pivots] = linalg::lu(other_A);
+    (void)eager_pivots;
+    auto eager = tenzor::matmul(eager_L, eager_U);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "lu did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "LU replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, LuSolveTracksNewInput) {
+    // Composite trace (lu -> pack -> lu_solve) so LU_data/pivots are always
+    // a genuinely valid factorization of whatever A is passed, on every
+    // call -- not just the trace-time A.
+    auto B = make_mat({3, 1}, {1.0f, 2.0f, 3.0f});
+    auto eye3 = tenzor::eye(3);
+    auto fn = [B, eye3](const Variable& A) {
+        auto [L, U, pivots] = linalg::lu(A.tensor());
+        auto LU_data = tenzor::add(tenzor::sub(L, eye3), U);
+        return Variable(linalg::lu_solve(LU_data, pivots, B), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({3, 3}, {4.0f, 3.0f, 2.0f, 2.0f, 5.0f, 1.0f, 1.0f, 1.0f, 6.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({3, 3}, {6.0f, 1.0f, 2.0f, 1.0f, 7.0f, 3.0f, 2.0f, 3.0f, 8.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_L, eager_U, eager_pivots] = linalg::lu(other_A);
+    auto eager_LU_data = tenzor::add(tenzor::sub(eager_L, eye3), eager_U);
+    auto eager = linalg::lu_solve(eager_LU_data, eager_pivots, B);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "lu_solve did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-3f, 1e-3f))
+        << "LuSolve replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, HouseholderProductTracksNewInput) {
+    // Composite trace (geqrf -> householder_product) so (input, tau) are
+    // always a genuinely valid Householder factorization of whatever A is
+    // passed, on every call.
+    auto fn = [](const Variable& A) {
+        auto [qr_packed, tau] = linalg::geqrf(A.tensor());
+        return Variable(linalg::householder_product(qr_packed, tau), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({2, 2}, {2.0f, 1.0f, 1.0f, 3.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_qr, eager_tau] = linalg::geqrf(other_A);
+    auto eager = linalg::householder_product(eager_qr, eager_tau);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "householder_product did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "HouseholderProduct replay on a NEW input != eager on that input "
+           "— frozen trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, LdlFactorTracksNewInput) {
+    auto fn = [](const Variable& A) {
+        auto [LD, pivots] = linalg::ldl_factor(A.tensor());
+        (void)pivots;
+        return Variable(LD, false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({2, 2}, {4.0f, 2.0f, 2.0f, 3.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({2, 2}, {5.0f, 1.0f, 1.0f, 4.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_LD, eager_pivots] = linalg::ldl_factor(other_A);
+    (void)eager_pivots;
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "ldl_factor did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager_LD, replayed.tensor(), 1e-4f, 1e-4f))
+        << "LdlFactor replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, LdlSolveTracksNewInput) {
+    // Composite trace (ldl_factor -> ldl_solve) so LD/pivots are always a
+    // genuinely valid factorization of whatever A is passed, on every call.
+    auto b = make_mat({2, 1}, {1.0f, 2.0f});
+    auto fn = [b](const Variable& A) {
+        auto [LD, pivots] = linalg::ldl_factor(A.tensor());
+        return Variable(linalg::ldl_solve(LD, pivots, b), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({2, 2}, {4.0f, 2.0f, 2.0f, 3.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({2, 2}, {5.0f, 1.0f, 1.0f, 4.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_LD, eager_pivots] = linalg::ldl_factor(other_A);
+    auto eager = linalg::ldl_solve(eager_LD, eager_pivots, b);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "ldl_solve did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "LdlSolve replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, OrmqrTracksNewInput) {
+    // Composite trace (geqrf -> ormqr) so (input, tau) are always a
+    // genuinely valid Householder factorization of whatever A is passed.
+    auto other = make_mat({2, 2}, {5.0f, 6.0f, 7.0f, 8.0f});
+    auto fn = [other](const Variable& A) {
+        auto [qr_packed, tau] = linalg::geqrf(A.tensor());
+        return Variable(linalg::ormqr(qr_packed, tau, other), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({2, 2}, {2.0f, 1.0f, 1.0f, 3.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_qr, eager_tau] = linalg::geqrf(other_A);
+    auto eager = linalg::ormqr(eager_qr, eager_tau, other);
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "ormqr did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "Ormqr replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
+}
+
+TEST(JitLinalgOps, GeqrfTracksNewInput) {
+    auto fn = [](const Variable& A) {
+        auto [qr_packed, tau] = linalg::geqrf(A.tensor());
+        return Variable(tenzor::add(qr_packed, tenzor::reshape(tau, {2, 1})), false);
+    };
+    auto compiled = jit::compile(fn);
+    auto dummy_A = make_mat({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f});
+    (void)compiled(Variable(dummy_A, false));
+
+    auto other_A = make_mat({2, 2}, {2.0f, 1.0f, 1.0f, 3.0f});
+    auto replayed = compiled(Variable(other_A, false));
+    auto [eager_qr, eager_tau] = linalg::geqrf(other_A);
+    auto eager = tenzor::add(eager_qr, tenzor::reshape(eager_tau, {2, 1}));
+
+    EXPECT_GE(compiled.num_cached(), 1u) << "geqrf did not compile/cache";
+    EXPECT_TRUE(tensors_close(eager, replayed.tensor(), 1e-4f, 1e-4f))
+        << "Geqrf replay on a NEW input != eager on that input — frozen "
+           "trace-time constant, not real tracer visibility";
 }

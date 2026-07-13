@@ -177,7 +177,22 @@ def test_jit_matches_eager_on_device(device):
     def jit_fn(x):
         return x * 2.0 + 1.0
 
+    # JIT-R129: a compiled-vs-eager numeric check is vacuous if the compiled
+    # call silently fell back to eager -- mirrors the C++ suite's
+    # assert_jit_used() anti-vacuity pattern (mlir_target_util.hpp), which
+    # this Python-side test never had.
+    tz.jit.reset_cache_stats()
     jit_out = jit_fn(x)
+    stats = tz.jit.cache_stats()
+
+    assert stats["misses"] >= 1, (
+        f"@tz.jit did NOT run through IREE on device={device!r} (silent "
+        "eager fallback makes the check below vacuous)"
+    )
+    assert stats["eager_fallbacks"] == 0, (
+        f"@tz.jit silently fell back to eager on device={device!r} "
+        "(compiled path never actually ran; the diff check below is vacuous)"
+    )
 
     assert _allclose(jit_out, eager_out), (
         f"@tz.jit output diverged from eager on device={device!r} "

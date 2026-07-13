@@ -984,6 +984,21 @@ private:
     /// a CPU constant into a GPU op (JIT-050). Guarded by CompiledModule's
     /// forward_mutex_, so the mutable member is not raced.
     mutable Device exec_target_device_{Device::cpu()};
+    /// JIT-R116: some dispatch calls in execute_node() produce MORE tensors
+    /// than the node exposes as declared Graph outputs (e.g. OpId::LayerNorm/
+    /// OpId::RMSNorm's saved mean/inv_std/rrms, needed by the SAME kernel
+    /// launch that also writes the primary output, but not by this
+    /// inference-only replay). Those extra tensors never get a Value id and
+    /// so never enter value_map -- meaning they would never reach
+    /// out_all_values (forward()'s intermediate-buffer-pinning out-param)
+    /// through the normal path, and could be freed back into the
+    /// CachingAllocator's pool while a CUDA/HIP graph capture in progress
+    /// still expects every future replay to write into their exact address.
+    /// execute_node() stashes any such discarded tensor here; forward()
+    /// clears it at the start of each call and folds it into out_all_values
+    /// at the end, so it gets pinned exactly like a normal intermediate.
+    /// Guarded by CompiledModule's forward_mutex_ like exec_target_device_.
+    mutable std::vector<Tensor> capture_scratch_tensors_;
 
 public:
     /// Check if a shape guard triggered a retrace request

@@ -256,6 +256,70 @@ inline auto jit_record_linalg1to3_bool_attr(::tenzor::jit::OpType type, const Te
     tracer.record_op(std::move(op));
 }
 
+// JIT-R110: added alongside wiring solve_triangular/slogdet/eigvalsh/eig/lu/
+// lu_solve/householder_product/ldl_factor/ldl_solve/ormqr/geqrf's CPU
+// LAPACKE paths into the tracer -- these were the remaining input/output
+// arities among that group not already covered above.
+inline auto jit_record_linalg2to1_2bool_attr(::tenzor::jit::OpType type, const Tensor& a,
+                                              const Tensor& b, const Tensor& out,
+                                              const char* attr0_name, bool attr0_val,
+                                              const char* attr1_name, bool attr1_val)
+    -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto b_id = tracer.register_tensor(b);
+    auto o_id = tracer.register_new_tensor(out);
+    ::tenzor::jit::TracedOp op(type, {a_id, b_id}, {o_id});
+    op.bool_attrs[attr0_name] = attr0_val;
+    op.bool_attrs[attr1_name] = attr1_val;
+    tracer.record_op(std::move(op));
+}
+
+inline auto jit_record_linalg1to3(::tenzor::jit::OpType type, const Tensor& a,
+                                   const Tensor& out0, const Tensor& out1,
+                                   const Tensor& out2) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto o0_id = tracer.register_new_tensor(out0);
+    auto o1_id = tracer.register_new_tensor(out1);
+    auto o2_id = tracer.register_new_tensor(out2);
+    ::tenzor::jit::TracedOp op(type, {a_id}, {o0_id, o1_id, o2_id});
+    tracer.record_op(std::move(op));
+}
+
+inline auto jit_record_linalg3to1(::tenzor::jit::OpType type, const Tensor& a,
+                                   const Tensor& b, const Tensor& c,
+                                   const Tensor& out) -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto b_id = tracer.register_tensor(b);
+    auto c_id = tracer.register_tensor(c);
+    auto o_id = tracer.register_new_tensor(out);
+    ::tenzor::jit::TracedOp op(type, {a_id, b_id, c_id}, {o_id});
+    tracer.record_op(std::move(op));
+}
+
+inline auto jit_record_linalg3to1_2bool_attr(::tenzor::jit::OpType type, const Tensor& a,
+                                              const Tensor& b, const Tensor& c,
+                                              const Tensor& out,
+                                              const char* attr0_name, bool attr0_val,
+                                              const char* attr1_name, bool attr1_val)
+    -> void {
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    if (!tracer.is_tracing()) return;
+    auto a_id = tracer.register_tensor(a);
+    auto b_id = tracer.register_tensor(b);
+    auto c_id = tracer.register_tensor(c);
+    auto o_id = tracer.register_new_tensor(out);
+    ::tenzor::jit::TracedOp op(type, {a_id, b_id, c_id}, {o_id});
+    op.bool_attrs[attr0_name] = attr0_val;
+    op.bool_attrs[attr1_name] = attr1_val;
+    tracer.record_op(std::move(op));
+}
+
 } // namespace
 
 namespace {
@@ -726,7 +790,13 @@ auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitria
             }
         }
     }
-    return maybe_downcast(work_b, original_dtype);
+    {
+        Tensor result = maybe_downcast(work_b, original_dtype);
+        jit_record_linalg2to1_2bool_attr(::tenzor::jit::OpType::SolveTriangular, A, B,
+                                          result, "upper", upper, "unitriangular",
+                                          unitriangular);
+        return result;
+    }
 #else
     // Use CBLAS trsm for triangular solve
     auto original_dtype = A.dtype();
@@ -786,7 +856,13 @@ auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitria
         }
     }
 
-    return maybe_downcast(work_b, original_dtype);
+    {
+        Tensor result = maybe_downcast(work_b, original_dtype);
+        jit_record_linalg2to1_2bool_attr(::tenzor::jit::OpType::SolveTriangular, A, B,
+                                          result, "upper", upper, "unitriangular",
+                                          unitriangular);
+        return result;
+    }
 #endif
 }
 
@@ -985,6 +1061,7 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
                     logabs_data[b] = std::log(mag);
                 }
             }
+            jit_record_linalg1to2(::tenzor::jit::OpType::Slogdet, A, sign_c, logabs_r);
             return {sign_c, logabs_r};
         } else {
             auto sign_c = zeros(out_shape, DType::Complex128, Device::cpu());
@@ -1011,6 +1088,7 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
                     logabs_data[b] = std::log(mag);
                 }
             }
+            jit_record_linalg1to2(::tenzor::jit::OpType::Slogdet, A, sign_c, logabs_r);
             return {sign_c, logabs_r};
         }
     }
@@ -1084,8 +1162,12 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
-    return {maybe_downcast(sign_result, original_dtype),
-            maybe_downcast(logabsdet_result, original_dtype)};
+    {
+        Tensor sign_out = maybe_downcast(sign_result, original_dtype);
+        Tensor logabsdet_out = maybe_downcast(logabsdet_result, original_dtype);
+        jit_record_linalg1to2(::tenzor::jit::OpType::Slogdet, A, sign_out, logabsdet_out);
+        return {sign_out, logabsdet_out};
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -1911,9 +1993,14 @@ auto eigvalsh(const Tensor& A) -> Tensor {
 
     // For complex input W already has the correct real dtype; no downcast.
     if (original_dtype == DType::Complex64 || original_dtype == DType::Complex128) {
+        jit_record_linalg1(::tenzor::jit::OpType::Eigvalsh, A, W);
         return W;
     }
-    return maybe_downcast(W, original_dtype);
+    {
+        Tensor result = maybe_downcast(W, original_dtype);
+        jit_record_linalg1(::tenzor::jit::OpType::Eigvalsh, A, result);
+        return result;
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -2000,7 +2087,9 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
                 }
             }
         }
-        return canonicalize_eig(Wr, Wi, V);
+        auto [Wr_out, Wi_out, V_out] = canonicalize_eig(Wr, Wi, V);
+        jit_record_linalg1to3(::tenzor::jit::OpType::LinalgEig, A, Wr_out, Wi_out, V_out);
+        return {Wr_out, Wi_out, V_out};
     }
 
     auto Wr = zeros(w_shape, work.dtype(), Device::cpu());  // real part of eigenvalues
@@ -2052,9 +2141,13 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
         }
     }
 
-    return canonicalize_eig(maybe_downcast(Wr, original_dtype),
-                            maybe_downcast(Wi, original_dtype),
-                            maybe_downcast(Vr, original_dtype));
+    {
+        auto [Wr_out, Wi_out, V_out] = canonicalize_eig(
+            maybe_downcast(Wr, original_dtype), maybe_downcast(Wi, original_dtype),
+            maybe_downcast(Vr, original_dtype));
+        jit_record_linalg1to3(::tenzor::jit::OpType::LinalgEig, A, Wr_out, Wi_out, V_out);
+        return {Wr_out, Wi_out, V_out};
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -2207,7 +2300,12 @@ auto lu(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
         }
     }
 
-    return {maybe_downcast(L, original_dtype), maybe_downcast(U, original_dtype), pivots_out};
+    {
+        Tensor L_out = maybe_downcast(L, original_dtype);
+        Tensor U_out = maybe_downcast(U, original_dtype);
+        jit_record_linalg1to3(::tenzor::jit::OpType::LinalgLU, A, L_out, U_out, pivots_out);
+        return {L_out, U_out, pivots_out};
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -2300,7 +2398,12 @@ auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
         }
     }
 
-    return maybe_downcast(work_b, original_dtype);
+    {
+        Tensor result = maybe_downcast(work_b, original_dtype);
+        jit_record_linalg3to1(::tenzor::jit::OpType::LinalgLUSolve, LU_data, pivots, B,
+                               result);
+        return result;
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -2933,7 +3036,11 @@ auto householder_product(const Tensor& input, const Tensor& tau) -> Tensor {
         }
     }
 
-    return maybe_downcast(work, original_dtype);
+    {
+        Tensor result = maybe_downcast(work, original_dtype);
+        jit_record_linalg2to1(::tenzor::jit::OpType::LinalgHouseholder, input, tau, result);
+        return result;
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -3003,7 +3110,11 @@ auto ldl_factor(const Tensor& A) -> std::tuple<Tensor, Tensor> {
         }
     }
 
-    return {maybe_downcast(work, original_dtype), pivots_out};
+    {
+        Tensor LD_out = maybe_downcast(work, original_dtype);
+        jit_record_linalg1to2(::tenzor::jit::OpType::LinalgLDLFactor, A, LD_out, pivots_out);
+        return {LD_out, pivots_out};
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -3100,7 +3211,11 @@ auto ldl_solve(const Tensor& LD, const Tensor& pivots,
         }
     }
 
-    return maybe_downcast(work_b, original_dtype);
+    {
+        Tensor result = maybe_downcast(work_b, original_dtype);
+        jit_record_linalg3to1(::tenzor::jit::OpType::LinalgLDLSolve, LD, pivots, B, result);
+        return result;
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -3520,7 +3635,12 @@ auto ormqr(const Tensor& input, const Tensor& tau, const Tensor& other,
         }
     }
 
-    return maybe_downcast(work_other, original_dtype);
+    {
+        Tensor result = maybe_downcast(work_other, original_dtype);
+        jit_record_linalg3to1_2bool_attr(::tenzor::jit::OpType::Ormqr, input, tau, other,
+                                          result, "left", left, "transpose", transpose);
+        return result;
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
@@ -3591,7 +3711,12 @@ auto geqrf(const Tensor& input) -> std::tuple<Tensor, Tensor> {
         }
     }
 
-    return {maybe_downcast(work, original_dtype), maybe_downcast(tau_result, original_dtype)};
+    {
+        Tensor A_factored = maybe_downcast(work, original_dtype);
+        Tensor tau_out = maybe_downcast(tau_result, original_dtype);
+        jit_record_linalg1to2(::tenzor::jit::OpType::Geqrf, input, A_factored, tau_out);
+        return {A_factored, tau_out};
+    }
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 

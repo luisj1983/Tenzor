@@ -188,19 +188,40 @@ TEST(OpRMSNormExpand, WithNonUnitWeight) {
     tzm::GraphToMLIR lowerer;
     lowerer.set_plugin_enabled(false);
     const std::string mlir = lowerer.lower(g);
-    tzm::CompileOptions opts;
-    opts.target         = "llvm-cpu";
-    opts.plugin_enabled = false;
-    auto artifact = tzm::compile_mlir(mlir, opts);
-    auto invoker  = tzm::IreeInvoker::load(artifact);
-    auto outs     = invoker->invoke({x_t, w_t});
-    ASSERT_EQ(outs.size(), 1u);
-    const float* op = outs[0].data<float>();
     const float rms = std::sqrt(7.5f);
-    EXPECT_NEAR(op[0], (1.0f / rms) * 2.0f, 1e-5f);
-    EXPECT_NEAR(op[1], (2.0f / rms) * 2.0f, 1e-5f);
-    EXPECT_NEAR(op[2], (3.0f / rms) * 2.0f, 1e-5f);
-    EXPECT_NEAR(op[3], (4.0f / rms) * 2.0f, 1e-5f);
+
+    // JIT-R128: fan out over every available IREE target, mirroring the
+    // sibling ExpandResultMatchesHandComputed test in this file, so a
+    // GPU-specific non-unit-weight scaling bug isn't invisible to this suite.
+    namespace mt = ::tenzor::testing::mlir;
+    for (const auto& target : mt::available_iree_targets()) {
+        tzm::CompileOptions opts;
+        opts.target         = target;
+        opts.plugin_enabled = false;
+        if (target == "vulkan-spirv" || target == "vulkan") {
+            opts.vulkan_arch = "ampere";  // enable F16/F64 SPIR-V caps (F032)
+        }
+        auto artifact = tzm::compile_mlir(mlir, opts);
+        std::unique_ptr<tzm::IreeInvoker> invoker;
+        try {
+            invoker = tzm::IreeInvoker::load(artifact);
+        } catch (const std::exception& e) {
+            // See ExpandResultMatchesHandComputed above for why this is a
+            // runtime-availability fact of this host, not a lowering defect.
+            if (std::string(e.what()).find("no driver") != std::string::npos ||
+                std::string(e.what()).find("NOT_FOUND") != std::string::npos) {
+                continue;
+            }
+            throw;
+        }
+        auto outs = invoker->invoke({x_t, w_t});
+        ASSERT_EQ(outs.size(), 1u) << "target=" << target;
+        const float* op = outs[0].data<float>();
+        EXPECT_NEAR(op[0], (1.0f / rms) * 2.0f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(op[1], (2.0f / rms) * 2.0f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(op[2], (3.0f / rms) * 2.0f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(op[3], (4.0f / rms) * 2.0f, 1e-5f) << "target=" << target;
+    }
 }
 
 // R1-04/JIT-R113 regression: handle_rms_norm_expand's sum-of-squares

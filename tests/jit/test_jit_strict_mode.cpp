@@ -128,5 +128,98 @@ TEST_F(JitStrictModeTest, GraphBreakCountResetsOnStartTrace) {
     t.clear();
 }
 
+// JIT-R119/JIT-R121 regression: TENZOR_JIT_STRICT used to be parsed by two
+// separate, silently-diverging implementations -- tracer.cpp's own copy
+// treated "false"/"False"/"FALSE" as disabled while compile.cpp's copies
+// (and jit_strict_mode_enabled's predecessor, jit_strict_enabled) treated
+// ANY non-empty, non-"0" string -- including "false" -- as enabled. A user
+// setting TENZOR_JIT_STRICT=false to opt OUT of strict mode would get
+// non-strict behavior during tracing but strict behavior during compile,
+// an inconsistent contract across the same env var. Now both call the same
+// centralized tenzor::jit::jit_strict_mode_enabled(), so this must agree
+// for every value tested here, matching the exact semantics that Tracer's
+// start_trace() (env-only, no per-call override) and compile.cpp's 8
+// call sites (env-or-per-call-config) both rely on.
+class JitStrictModeEnvParsingTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        saved_ = std::getenv("TENZOR_JIT_STRICT");
+        had_saved_ = saved_ != nullptr;
+        if (had_saved_) saved_value_ = saved_;
+    }
+    void TearDown() override {
+        if (had_saved_) {
+            setenv("TENZOR_JIT_STRICT", saved_value_.c_str(), 1);
+        } else {
+            unsetenv("TENZOR_JIT_STRICT");
+        }
+    }
+    const char* saved_ = nullptr;
+    bool had_saved_ = false;
+    std::string saved_value_;
+};
+
+TEST_F(JitStrictModeEnvParsingTest, UnsetEnvDisabledWithoutConfigOverride) {
+    unsetenv("TENZOR_JIT_STRICT");
+    EXPECT_FALSE(jit::jit_strict_mode_enabled(false));
+}
+
+TEST_F(JitStrictModeEnvParsingTest, EmptyStringDisabled) {
+    setenv("TENZOR_JIT_STRICT", "", 1);
+    EXPECT_FALSE(jit::jit_strict_mode_enabled(false));
+}
+
+TEST_F(JitStrictModeEnvParsingTest, ZeroDisabled) {
+    setenv("TENZOR_JIT_STRICT", "0", 1);
+    EXPECT_FALSE(jit::jit_strict_mode_enabled(false));
+}
+
+TEST_F(JitStrictModeEnvParsingTest, LowercaseFalseDisabled) {
+    setenv("TENZOR_JIT_STRICT", "false", 1);
+    EXPECT_FALSE(jit::jit_strict_mode_enabled(false))
+        << "an explicit, correctly-spelled opt-out must actually disable "
+           "strict mode, not silently enable it";
+}
+
+TEST_F(JitStrictModeEnvParsingTest, MixedCaseFalseDisabled) {
+    setenv("TENZOR_JIT_STRICT", "False", 1);
+    EXPECT_FALSE(jit::jit_strict_mode_enabled(false));
+    setenv("TENZOR_JIT_STRICT", "FALSE", 1);
+    EXPECT_FALSE(jit::jit_strict_mode_enabled(false));
+    setenv("TENZOR_JIT_STRICT", "FaLsE", 1);
+    EXPECT_FALSE(jit::jit_strict_mode_enabled(false));
+}
+
+TEST_F(JitStrictModeEnvParsingTest, OneEnabled) {
+    setenv("TENZOR_JIT_STRICT", "1", 1);
+    EXPECT_TRUE(jit::jit_strict_mode_enabled(false));
+}
+
+TEST_F(JitStrictModeEnvParsingTest, TrueEnabled) {
+    setenv("TENZOR_JIT_STRICT", "true", 1);
+    EXPECT_TRUE(jit::jit_strict_mode_enabled(false));
+}
+
+TEST_F(JitStrictModeEnvParsingTest, PerCallConfigOverridesDisabledEnv) {
+    setenv("TENZOR_JIT_STRICT", "false", 1);
+    // Per-call config_strict=true must win even when the env var says
+    // disabled.
+    EXPECT_TRUE(jit::jit_strict_mode_enabled(true));
+}
+
+TEST_F(JitStrictModeEnvParsingTest, TracerStartTraceAgreesWithSharedHelper) {
+    // Tracer::start_trace() calls jit_strict_mode_enabled(false) directly
+    // (no per-call override at trace-start time) -- verify its observable
+    // strict_mode() output actually agrees with the shared helper for the
+    // exact value that used to diverge.
+    setenv("TENZOR_JIT_STRICT", "false", 1);
+    auto& t = Tracer::get_instance();
+    t.start_trace();
+    EXPECT_FALSE(t.is_strict_mode())
+        << "Tracer::start_trace() must agree with jit_strict_mode_enabled() "
+           "-- both read the same env var through the same shared parser";
+    t.clear();
+}
+
 } // namespace
 } // namespace tenzor

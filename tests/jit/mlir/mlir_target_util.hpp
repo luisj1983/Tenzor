@@ -36,11 +36,33 @@ namespace tenzor::testing::mlir {
 inline auto reset_jit_stats() -> void {
     ::tenzor::jit::mlir_jit::reset_cache_stats();
 }
-inline auto assert_jit_used(const std::string& what, const std::string& target)
-    -> void {
+// JIT-R117: misses>=1 alone cannot distinguish "compiled and ran" from
+// "attempted a compile, failed, and quietly ran eager" -- a target that
+// fails to lower/compile/invoke still increments misses via the initial
+// attempt, then silently falls back to eager (mlir_invoke's non-strict
+// C2 safety net). test_jit_mlir_numeric_parity.cpp's own local
+// assert_parity_over_targets() was independently hardened with this exact
+// check after JIT-R012/JIT-R120 found a real bug it would have caught (F16
+// SDPA on cuda failed to bufferize and fell back to eager with zero test-
+// visible signal). This is that same check, folded into the canonical
+// shared helper so the 10 files using assert_jit_used() get it too instead
+// of only the one file that happened to get hardened first.
+// allow_eager_fallback exists ONLY for the narrow, already-understood case
+// where a target genuinely lacks the dtype/op support being exercised --
+// eager IS the correct reference there. It must NOT be used to paper over
+// a genuine compile/lower/invoke failure.
+inline auto assert_jit_used(const std::string& what, const std::string& target,
+                            bool allow_eager_fallback = false) -> void {
     EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
         << what << " did NOT run through IREE on target=" << target
         << " (silent eager fallback makes the numeric check vacuous)";
+    if (!allow_eager_fallback) {
+        EXPECT_EQ(::tenzor::jit::mlir_jit::cache_stats().eager_fallbacks, 0u)
+            << what << " silently fell back to eager on target=" << target
+            << " (compiled path never actually ran; misses>=1 alone made "
+               "this look like real JIT activity -- the numeric check is "
+               "vacuous for this target)";
+    }
 }
 
 inline auto ensure_core_init() -> void {

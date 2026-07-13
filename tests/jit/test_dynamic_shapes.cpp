@@ -863,9 +863,26 @@ TEST(SymbolicShapeInferenceFixes, RetraceOnDeviceMismatchPreservesDynamicDimsAnd
     ASSERT_NO_THROW({ (void)module->forward(cpu_input); });
     ASSERT_TRUE(module->has_dynamic_shapes());
 
-    for (const auto& dev : get_available_backends()) {
-        if (dev.type == tenzor::Device::Type::CPU) continue;  // already the trace device
+    // JIT-R130: this test's whole point is exercising the device-mismatch
+    // retrace path, which requires a SECOND (non-CPU) device -- without this
+    // gate, a CPU-only host silently ran zero iterations of the loop below
+    // (and thus zero assertions) and still reported a full PASS.
+    std::vector<tenzor::Device> non_cpu_backends;
+    for (const auto& d : get_available_backends()) {
+        if (d.type != tenzor::Device::Type::CPU) non_cpu_backends.push_back(d);
+    }
+    if (non_cpu_backends.empty()) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1) "
+                      "but no non-CPU device is available to exercise the "
+                      "device-mismatch retrace path";
+        }
+        GTEST_SKIP() << "No non-CPU device available; this test specifically "
+                        "exercises CompiledModule::forward's device-mismatch "
+                        "retrace path.";
+    }
 
+    for (const auto& dev : non_cpu_backends) {
         auto other_device_input = tenzor::Variable(
             tenzor::randn({3, 4}, tenzor::DType::Float32, dev), false);
 
@@ -893,7 +910,10 @@ TEST(SymbolicShapeInferenceFixes, RetraceOnDeviceMismatchPreservesDynamicDimsAnd
             << " threw after the dynamic-dims config should have survived "
                "the earlier retrace";
         EXPECT_EQ(out.tensor().shape()[0], 5);
-        break;  // one non-CPU backend is enough to exercise the retrace path
+        // JIT-R130: previously `break`d after the first non-CPU backend, so
+        // on a multi-backend host every backend but the first was silently
+        // never exercised despite the test reporting a full PASS. Loop
+        // through every available non-CPU backend instead.
     }
 }
 

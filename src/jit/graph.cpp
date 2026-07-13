@@ -1260,6 +1260,87 @@ auto Graph::infer_types() -> void {
                 output_shapes.push_back({});
                 break;
 
+            case OpType::SolveTriangular:
+            case OpType::LinalgLUSolve:
+            case OpType::LinalgLDLSolve:
+                // A/LU_data/LD: (..., N, N), B: (..., N, K) -> (..., N, K)
+                // (same output-shape-equals-RHS-shape rule as Solve).
+                if (input_shapes.size() >= 2) {
+                    output_shapes.push_back(input_shapes.back());
+                }
+                break;
+
+            case OpType::LinalgHouseholder:
+                // input: (..., N, K), tau: (..., K) -> Q: (..., N, K)
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            case OpType::Ormqr:
+                // input: (..., N, K), tau: (..., K), other: (..., M, P) ->
+                // result: (..., M, P) (same shape as `other`).
+                if (input_shapes.size() >= 3) {
+                    output_shapes.push_back(input_shapes[2]);
+                }
+                break;
+
+            case OpType::LinalgEig:
+                // (..., N, N) -> Wr: (..., N), Wi: (..., N), V: (..., N, N)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto& s = input_shapes[0];
+                    int64_t N = s[s.size() - 1];
+                    auto batch = std::vector<int64_t>(s.begin(), s.end() - 2);
+                    auto w_shape = batch;
+                    w_shape.push_back(N);
+                    output_shapes.push_back(w_shape);   // Wr
+                    output_shapes.push_back(w_shape);   // Wi
+                    output_shapes.push_back(input_shapes[0]);  // V
+                }
+                break;
+
+            case OpType::LinalgLU:
+                // (..., N, N) -> L: (..., N, N), U: (..., N, N), pivots: (..., N)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto& s = input_shapes[0];
+                    int64_t N = s[s.size() - 1];
+                    auto batch = std::vector<int64_t>(s.begin(), s.end() - 2);
+                    auto piv_shape = batch;
+                    piv_shape.push_back(N);
+                    output_shapes.push_back(input_shapes[0]);  // L
+                    output_shapes.push_back(input_shapes[0]);  // U
+                    output_shapes.push_back(piv_shape);        // pivots
+                }
+                break;
+
+            case OpType::LinalgLDLFactor:
+                // (..., N, N) -> LD: (..., N, N), pivots: (..., N)
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto& s = input_shapes[0];
+                    int64_t N = s[s.size() - 1];
+                    auto batch = std::vector<int64_t>(s.begin(), s.end() - 2);
+                    auto piv_shape = batch;
+                    piv_shape.push_back(N);
+                    output_shapes.push_back(input_shapes[0]);  // LD
+                    output_shapes.push_back(piv_shape);        // pivots
+                }
+                break;
+
+            case OpType::Geqrf:
+                // (..., M, N) -> A_factored: (..., M, N), tau: (..., min(M,N))
+                if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
+                    auto& s = input_shapes[0];
+                    int64_t M = s[s.size() - 2];
+                    int64_t N = s[s.size() - 1];
+                    int64_t K = std::min(M, N);
+                    auto batch = std::vector<int64_t>(s.begin(), s.end() - 2);
+                    auto tau_shape = batch;
+                    tau_shape.push_back(K);
+                    output_shapes.push_back(input_shapes[0]);  // A_factored
+                    output_shapes.push_back(tau_shape);        // tau
+                }
+                break;
+
             case OpType::Slogdet:
                 // (..., N, N) -> sign: (...), logabsdet: (...)
                 if (!input_shapes.empty() && input_shapes[0].size() >= 2) {
@@ -2441,6 +2522,104 @@ auto Graph::infer_symbolic_types() -> void {
                 output_sym_shapes.push_back(SymbolicShape());
                 break;
 
+            case OpType::SolveTriangular:
+            case OpType::LinalgLUSolve:
+            case OpType::LinalgLDLSolve:
+                // A/LU_data/LD: (..., N, N), B: (..., N, K) -> (..., N, K)
+                if (input_sym_shapes.size() >= 2) {
+                    output_sym_shapes.push_back(input_sym_shapes.back());
+                }
+                break;
+
+            case OpType::LinalgHouseholder:
+                // input: (..., N, K), tau: (..., K) -> Q: (..., N, K)
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::Ormqr:
+                // input: (..., N, K), tau: (..., K), other: (..., M, P) ->
+                // result: (..., M, P)
+                if (input_sym_shapes.size() >= 3) {
+                    output_sym_shapes.push_back(input_sym_shapes[2]);
+                }
+                break;
+
+            case OpType::LinalgEig:
+                // (..., N, N) -> Wr: (..., N), Wi: (..., N), V: (..., N, N)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto& s = input_sym_shapes[0];
+                    auto N_dim = s[s.rank() - 1];
+                    std::vector<SymbolicDim> batch_dims;
+                    for (size_t d = 0; d + 2 < s.rank(); ++d) {
+                        batch_dims.push_back(s[d]);
+                    }
+                    auto w_dims = batch_dims;
+                    w_dims.push_back(N_dim);
+                    output_sym_shapes.push_back(SymbolicShape(w_dims));   // Wr
+                    output_sym_shapes.push_back(SymbolicShape(std::move(w_dims)));  // Wi
+                    output_sym_shapes.push_back(input_sym_shapes[0]);    // V
+                }
+                break;
+
+            case OpType::LinalgLU:
+                // (..., N, N) -> L: (..., N, N), U: (..., N, N), pivots: (..., N)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto& s = input_sym_shapes[0];
+                    auto N_dim = s[s.rank() - 1];
+                    std::vector<SymbolicDim> batch_dims;
+                    for (size_t d = 0; d + 2 < s.rank(); ++d) {
+                        batch_dims.push_back(s[d]);
+                    }
+                    auto piv_dims = batch_dims;
+                    piv_dims.push_back(N_dim);
+                    output_sym_shapes.push_back(input_sym_shapes[0]);  // L
+                    output_sym_shapes.push_back(input_sym_shapes[0]);  // U
+                    output_sym_shapes.push_back(SymbolicShape(std::move(piv_dims)));  // pivots
+                }
+                break;
+
+            case OpType::LinalgLDLFactor:
+                // (..., N, N) -> LD: (..., N, N), pivots: (..., N)
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto& s = input_sym_shapes[0];
+                    auto N_dim = s[s.rank() - 1];
+                    std::vector<SymbolicDim> batch_dims;
+                    for (size_t d = 0; d + 2 < s.rank(); ++d) {
+                        batch_dims.push_back(s[d]);
+                    }
+                    auto piv_dims = batch_dims;
+                    piv_dims.push_back(N_dim);
+                    output_sym_shapes.push_back(input_sym_shapes[0]);  // LD
+                    output_sym_shapes.push_back(SymbolicShape(std::move(piv_dims)));  // pivots
+                }
+                break;
+
+            case OpType::Geqrf:
+                // (..., M, N) -> A_factored: (..., M, N), tau: (..., min(M,N))
+                if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
+                    auto& s = input_sym_shapes[0];
+                    auto M = s[s.rank() - 2];
+                    auto N_dim = s[s.rank() - 1];
+                    auto min_dim = [](const SymbolicDim& a,
+                                      const SymbolicDim& b) -> SymbolicDim {
+                        if (a.is_concrete() && b.is_concrete())
+                            return SymbolicDim(std::min(a.value(), b.value()));
+                        return a.is_concrete() ? a : b;
+                    };
+                    SymbolicDim K = min_dim(M, N_dim);
+                    std::vector<SymbolicDim> batch_dims;
+                    for (size_t d = 0; d + 2 < s.rank(); ++d) {
+                        batch_dims.push_back(s[d]);
+                    }
+                    auto tau_dims = batch_dims;
+                    tau_dims.push_back(K);
+                    output_sym_shapes.push_back(input_sym_shapes[0]);  // A_factored
+                    output_sym_shapes.push_back(SymbolicShape(std::move(tau_dims)));  // tau
+                }
+                break;
+
             case OpType::Slogdet:
                 // (..., N, N) -> sign: (...), logabsdet: (...)
                 if (!input_sym_shapes.empty() && input_sym_shapes[0].rank() >= 2) {
@@ -2654,6 +2833,9 @@ auto Graph::infer_symbolic_types() -> void {
 auto Graph::forward(const std::vector<Variable>& runtime_inputs,
                     bool grad_mode,
                     std::vector<Variable>* out_all_values) -> std::vector<Variable> {
+    // JIT-R116: reset per-call; see the member's doc comment.
+    capture_scratch_tensors_.clear();
+
     // Map values to runtime variables
     std::unordered_map<std::string, Variable> value_map;
 
@@ -2803,11 +2985,30 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
     }
 
     if (out_all_values != nullptr) {
-        out_all_values->reserve(out_all_values->size() + value_map.size());
+        out_all_values->reserve(out_all_values->size() + value_map.size() +
+                                 capture_scratch_tensors_.size());
         for (auto& [id, var] : value_map) {
             out_all_values->push_back(var);
         }
+        // JIT-R116: fold in dispatch results that never got a Value id (see
+        // capture_scratch_tensors_'s doc comment) so they get pinned exactly
+        // like a normal intermediate during CUDA/HIP graph capture.
+        for (auto& t : capture_scratch_tensors_) {
+            out_all_values->emplace_back(t, /*requires_grad=*/false);
+        }
     }
+    // JIT-R116: ownership of these tensors is transferred to out_all_values
+    // (and thus, via capture_cuda_graph(), to CompiledModule::captured_
+    // intermediates_) for THIS call only -- Graph itself must never keep
+    // holding them past this point. capture_cuda_graph()'s reset_capture_
+    // state() carefully frees captured_intermediates_ BEFORE cuda_graph_
+    // (whose capture stream those tensors' storage is tagged with) is
+    // destroyed; a Graph that outlives (or is destroyed independently of, in
+    // an uncontrolled order relative to) that teardown would otherwise free
+    // these tensors itself via ~Graph() -- a stream-handle use-after-free
+    // inside the CUDA driver (cuEventRecord on an already-destroyed stream)
+    // that crashed exactly this way before this second half of the fix.
+    capture_scratch_tensors_.clear();
 
     return results;
 }
@@ -3131,6 +3332,15 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             case OpType::Eigvalsh:
             case OpType::Norm:
             case OpType::Slogdet:
+            case OpType::SolveTriangular:
+            case OpType::LinalgEig:
+            case OpType::LinalgLU:
+            case OpType::LinalgLUSolve:
+            case OpType::LinalgHouseholder:
+            case OpType::LinalgLDLFactor:
+            case OpType::LinalgLDLSolve:
+            case OpType::Ormqr:
+            case OpType::Geqrf:
                 throw std::runtime_error(
                     "JIT grad replay: linear-algebra op " +
                     op_type_to_string(node->op_type()) +
@@ -3323,6 +3533,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 std::vector<Tensor> inputs = {input_vars[0].tensor()};
                 auto result = dispatch(OpId::MaxPool2dForward, inputs, pool_attrs);
                 if (!result.empty()) {
+                    // JIT-R116: OpId::MaxPool2dForward's kernel returns
+                    // {output, indices} -- indices is needed for backward
+                    // gradient routing, not by this inference-only replay,
+                    // but is written by the SAME kernel launch as output. See
+                    // the identical OpId::LayerNorm fix/comment (this file)
+                    // for why it must be pinned rather than left to be freed
+                    // while a captured kernel launch still writes into it.
+                    for (size_t i = 1; i < result.size(); ++i) {
+                        capture_scratch_tensors_.push_back(result[i]);
+                    }
                     outputs.push_back(Variable(result[0], false));
                 }
             }
@@ -3610,6 +3830,18 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 auto result = dispatch(OpId::LayerNorm, inputs, ln_attrs);
                 if (!result.empty()) {
                     Variable ln_out(result[0], false);
+                    // JIT-R116: OpId::LayerNorm's kernel returns {output, mean,
+                    // inv_std} -- mean/inv_std are written by the SAME kernel
+                    // launch that writes output, but this inference-only replay
+                    // has no Value id for them (only output is a declared node
+                    // output). Stash them so forward() pins their buffers for
+                    // the lifetime of any in-progress CUDA/HIP graph capture;
+                    // otherwise they get freed back to the allocator the moment
+                    // `result` goes out of scope while the SAME captured kernel
+                    // launch still writes into their address on every replay.
+                    for (size_t i = 1; i < result.size(); ++i) {
+                        capture_scratch_tensors_.push_back(result[i]);
+                    }
                     // FuseLayerNormActivationPass may fold a following ReLU/GELU
                     // into this node and delete the activation node; apply it
                     // here so the activation is not dropped (act: 1=relu,2=gelu).
@@ -4483,6 +4715,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     input_vars[0].tensor(), input_vars[1].tensor()};
                 auto result = dispatch(OpId::EmbeddingBagForward, bag_inputs, bag_attrs);
                 if (!result.empty()) {
+                    // JIT-R116: OpId::EmbeddingBagForward's kernel returns
+                    // {output, max_indices} in "max" mode -- see the
+                    // identical OpId::LayerNorm fix/comment (this file) for
+                    // why the extra tensor must be pinned during capture.
+                    for (size_t i = 1; i < result.size(); ++i) {
+                        capture_scratch_tensors_.push_back(result[i]);
+                    }
                     outputs.push_back(Variable(result[0], false));
                 }
             }
@@ -4547,6 +4786,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 }
                 auto result = dispatch(OpId::RMSNorm, inputs, attrs);
                 if (!result.empty()) {
+                    // JIT-R116: OpId::RMSNorm's kernel returns {output, rrms} --
+                    // see the identical LayerNorm fix/comment above for why
+                    // rrms must be pinned here rather than left to be freed
+                    // while a captured kernel launch still writes into it.
+                    for (size_t i = 1; i < result.size(); ++i) {
+                        capture_scratch_tensors_.push_back(result[i]);
+                    }
                     outputs.push_back(Variable(result[0], false));
                 }
             }
@@ -4558,10 +4804,31 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::GQA:
         case OpType::RoPE:
         case OpType::Padding:
+            // JIT-R139: these are compiler-dialect ops with no interpreter
+            // execution path — the MLIR/IREE lowering path (lowering.cpp)
+            // handles them directly during codegen instead of via this
+            // interpreter. Reaching this throw means a tracer/pattern-
+            // matcher change started emitting one of these OpTypes into a
+            // graph that also needs interpreter execution (training's
+            // un-fused graph replay in particular runs through THIS SAME
+            // interpreter on every backend, not just the ones with an IREE
+            // HAL) without adding real execution support here first.
+            // "Retry via MLIR" is not universally safe advice: OneAPI/MPS
+            // have no IREE HAL at all and cannot execute these ops via
+            // EITHER path, so name that constraint explicitly rather than
+            // suggesting a fix that doesn't exist on those backends.
             throw std::runtime_error(
-                "JIT interpreter does not execute compiler-dialect op " +
-                op_type_to_string(node->op_type()) +
-                "; lower this graph through the MLIR/IREE path");
+                "JIT interpreter has no execution support for compiler-"
+                "dialect op " + op_type_to_string(node->op_type()) +
+                " (this OpType is currently only ever lowered directly by "
+                "the MLIR/IREE codegen path, never interpreted). If this "
+                "graph is being interpreted rather than compiled through "
+                "backend=\"mlir\" (e.g. training's un-fused graph replay, "
+                "which always uses this interpreter regardless of backend), "
+                "interpreter execution support must be added for this "
+                "OpType before it can appear here. Note OneAPI/MPS have no "
+                "IREE HAL and cannot execute this op via the MLIR path "
+                "either.");
 
         case OpType::Det:
             if (!input_vars.empty()) {
@@ -4655,6 +4922,85 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 auto [sign, logabsdet] = tenzor::linalg::slogdet(input_vars[0].tensor());
                 outputs.push_back(Variable(sign, false));
                 outputs.push_back(Variable(logabsdet, false));
+            }
+            break;
+
+        case OpType::SolveTriangular:
+            if (input_vars.size() >= 2) {
+                bool upper = node->get_bool_attr("upper");
+                bool unitriangular = node->get_bool_attr("unitriangular");
+                auto result = tenzor::linalg::solve_triangular(
+                    input_vars[0].tensor(), input_vars[1].tensor(), upper, unitriangular);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::LinalgEig:
+            if (!input_vars.empty()) {
+                auto [Wr, Wi, V] = tenzor::linalg::eig(input_vars[0].tensor());
+                outputs.push_back(Variable(Wr, false));
+                outputs.push_back(Variable(Wi, false));
+                outputs.push_back(Variable(V, false));
+            }
+            break;
+
+        case OpType::LinalgLU:
+            if (!input_vars.empty()) {
+                auto [L, U, pivots] = tenzor::linalg::lu(input_vars[0].tensor());
+                outputs.push_back(Variable(L, false));
+                outputs.push_back(Variable(U, false));
+                outputs.push_back(Variable(pivots, false));
+            }
+            break;
+
+        case OpType::LinalgLUSolve:
+            if (input_vars.size() >= 3) {
+                auto result = tenzor::linalg::lu_solve(
+                    input_vars[0].tensor(), input_vars[1].tensor(), input_vars[2].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::LinalgHouseholder:
+            if (input_vars.size() >= 2) {
+                auto result = tenzor::linalg::householder_product(
+                    input_vars[0].tensor(), input_vars[1].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::LinalgLDLFactor:
+            if (!input_vars.empty()) {
+                auto [LD, pivots] = tenzor::linalg::ldl_factor(input_vars[0].tensor());
+                outputs.push_back(Variable(LD, false));
+                outputs.push_back(Variable(pivots, false));
+            }
+            break;
+
+        case OpType::LinalgLDLSolve:
+            if (input_vars.size() >= 3) {
+                auto result = tenzor::linalg::ldl_solve(
+                    input_vars[0].tensor(), input_vars[1].tensor(), input_vars[2].tensor());
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Ormqr:
+            if (input_vars.size() >= 3) {
+                bool left = node->get_bool_attr("left");
+                bool transpose = node->get_bool_attr("transpose");
+                auto result = tenzor::linalg::ormqr(
+                    input_vars[0].tensor(), input_vars[1].tensor(), input_vars[2].tensor(),
+                    left, transpose);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Geqrf:
+            if (!input_vars.empty()) {
+                auto [A_factored, tau] = tenzor::linalg::geqrf(input_vars[0].tensor());
+                outputs.push_back(Variable(A_factored, false));
+                outputs.push_back(Variable(tau, false));
             }
             break;
 
@@ -5060,7 +5406,17 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                     input_vars[0].tensor(), input_vars[1].tensor(),
                     input_vars[2].tensor(), input_vars[3].tensor()};
                 auto result = dispatch(OpId::CTCLossForward, inputs, attrs);
-                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+                if (!result.empty()) {
+                    // JIT-R116: OpId::CTCLossForward's kernel returns
+                    // {loss_per_sample, raw_grad} -- raw_grad is saved for
+                    // backward, not needed by this inference-only replay,
+                    // but written by the SAME kernel launch as the loss. See
+                    // the identical OpId::LayerNorm fix/comment (this file).
+                    for (size_t i = 1; i < result.size(); ++i) {
+                        capture_scratch_tensors_.push_back(result[i]);
+                    }
+                    outputs.push_back(Variable(result[0], false));
+                }
             }
             break;
         }
@@ -5146,7 +5502,18 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 std::vector<Tensor> inputs = {input_vars[0].tensor(),
                                                input_vars[1].tensor()};
                 auto result = dispatch(OpId::FusedSoftmaxCrossEntropy, inputs, attrs);
-                if (!result.empty()) outputs.push_back(Variable(result[0], false));
+                if (!result.empty()) {
+                    // JIT-R116: OpId::FusedSoftmaxCrossEntropy's kernel
+                    // returns {loss, grad_logits} by default (ComputeGrad
+                    // defaults to true) -- grad_logits is saved for backward,
+                    // not needed by this inference-only replay, but written
+                    // by the SAME kernel launch as loss. See the identical
+                    // OpId::LayerNorm fix/comment (this file).
+                    for (size_t i = 1; i < result.size(); ++i) {
+                        capture_scratch_tensors_.push_back(result[i]);
+                    }
+                    outputs.push_back(Variable(result[0], false));
+                }
             }
             break;
         }

@@ -463,6 +463,31 @@ TEST(JitVulkanArch, ClassifyVulkanTargetCoversAllKnownGenerations) {
     EXPECT_EQ(tjd::classify_vulkan_target("radeon", "amd radeon 890m graphics"), "rdna3")
         << "vendor string may report 'radeon' rather than 'amd'";
 
+    // JIT-R112 regression: a bare "rx 5" substring used to match BOTH the
+    // intended RDNA1 "RX 5000-series" (4-digit) AND the unrelated pre-RDNA
+    // Polaris/GCN4 "RX 500-series" (3-digit), silently misrouting Polaris
+    // cards to an RDNA1 target they don't support. Polaris/GCN4 must now
+    // fall through to the safe empty default, like NVIDIA/Intel do for
+    // anything unrecognized -- NOT the iGPU "rdna3" catch-all, since an
+    // explicit-but-unmatched RX number is a different case from "no RX
+    // number present at all".
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 580"), "")
+        << "Polaris/GCN4 RX 500-series (3-digit) must not collide with "
+           "RDNA1's RX 5000-series (4-digit) via a bare \"rx 5\" substring";
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 570"), "");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 590"), "");
+
+    // JIT-R112 regression: CDNA/Instinct datacenter GPUs are an entirely
+    // different architecture family from consumer RDNA and must never
+    // silently receive a consumer RDNA target guess (the old code's
+    // blanket "return rdna3" catch-all covered these too, since they carry
+    // no RX-series number either -- same shape as the iGPU case, wrong
+    // architecture family).
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd instinct mi300x"), "")
+        << "CDNA/Instinct must not receive the RDNA-targeted iGPU fallback";
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd instinct mi210"), "");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd instinct mi100"), "");
+
     // Intel (JIT-R131): no known-working IREE Vulkan target profile exists
     // for Intel at all in this toolchain -- must return empty (safe
     // default), NEVER the old "arc" value, which crashes iree-compile.
@@ -612,6 +637,140 @@ TEST(JitRocmArch, CacheKeyRespectsHipVisibleDevicesChanges) {
            "different HIP_VISIBLE_DEVICES value";
     EXPECT_EQ(arch_after.rfind("gfx", 0), 0U)
         << "expected a gfx ISA name, got: " << arch_after;
+}
+
+// JIT-R118 regression: shared_iree_hal_device()'s cache used to be keyed
+// ONLY by device_uri (e.g. "hip://0"/"cuda://0"), not by the
+// HIP_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES value that actually determines
+// which PHYSICAL GPU that URI's ordinal binds to at device-creation time --
+// mirroring JIT-R129's fix to the sibling arch-detection cache one function
+// away (see CacheKeyRespectsHipVisibleDevicesChanges above). The real-world
+// motivation is CUDA/ROCm-specific, but this host's linked-in IREE runtime
+// (like most Tenzor distributions) has no in-process cuda/hip HAL driver at
+// all -- IreeInvoker::load(..., Mode::InProcess, ...) for those drivers
+// always throws "no driver registered" before ever reaching the cache, so
+// the stale-cache-hit scenario can't be exercised with real cuda/hip
+// hardware here. shared_iree_hal_device()'s cache-key construction is
+// driver-agnostic, so this test instead exercises the SAME code path via
+// Vulkan (which this host does have an in-process driver for) and toggles
+// CUDA_VISIBLE_DEVICES (a no-op for Vulkan device SELECTION, but exactly
+// the value the fixed cache key folds in for any non-"hip" driver) between
+// two loads for the same URI/ordinal: pre-fix, the cache is keyed by
+// device_uri alone, so it unconditionally hits on the second call and
+// returns the SAME device object regardless of any env change; post-fix,
+// the differing env value changes the cache key, forcing a fresh device.
+TEST(JitRocmArch, SharedHalDeviceCacheRespectsVisibleDevicesEnvChanges) {
+    ensure_core_init();
+
+    ::tenzor::jit::Graph g;
+    auto x_v = g.create_value("x", {4}, ::tenzor::DType::Float32,
+                              ::tenzor::Device::cpu());
+    g.set_inputs({x_v});
+    auto add_node_ = g.create_node(::tenzor::jit::OpType::Add);
+    add_node_->add_input(x_v);
+    add_node_->add_input(x_v);
+    auto out = g.create_value("out", {4}, ::tenzor::DType::Float32,
+                              ::tenzor::Device::cpu());
+    add_node_->add_output(out);
+    g.add_node(add_node_);
+    g.set_outputs({out});
+
+    tj::GraphToMLIR lowerer;
+    const std::string mlir = lowerer.lower(g);
+
+    tj::CompileOptions opts;
+    opts.target    = "vulkan-spirv";
+    opts.cache_dir = make_tmp_dir();
+    tj::CompiledArtifact artifact;
+    ASSERT_NO_THROW({ artifact = tj::compile_mlir(mlir, opts); });
+
+    std::unique_ptr<tj::IreeInvoker> invoker_a;
+    try {
+        invoker_a =
+            tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::InProcess, 0);
+    } catch (const std::exception&) {
+        GTEST_SKIP() << "no in-process Vulkan device available";
+    }
+    if (invoker_a->raw_device_handle_for_testing() == nullptr) {
+        GTEST_SKIP() << "no in-process Vulkan device available";
+    }
+
+    const char* saved_raw = std::getenv("CUDA_VISIBLE_DEVICES");
+    const bool had_saved = saved_raw != nullptr;
+    const std::string saved = had_saved ? saved_raw : std::string{};
+    struct EnvGuard {
+        bool had;
+        std::string val;
+        ~EnvGuard() {
+            if (had) setenv("CUDA_VISIBLE_DEVICES", val.c_str(), 1);
+            else unsetenv("CUDA_VISIBLE_DEVICES");
+        }
+    } env_guard{had_saved, saved};
+
+    unsetenv("CUDA_VISIBLE_DEVICES");
+    auto invoker_before =
+        tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::InProcess, 0);
+    const void* device_before = invoker_before->raw_device_handle_for_testing();
+    ASSERT_NE(device_before, nullptr);
+
+    setenv("CUDA_VISIBLE_DEVICES", "0", 1);
+    auto invoker_after =
+        tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::InProcess, 0);
+    const void* device_after = invoker_after->raw_device_handle_for_testing();
+    ASSERT_NE(device_after, nullptr);
+
+    EXPECT_NE(device_before, device_after)
+        << "shared_iree_hal_device()'s cache reused the SAME device object "
+           "for the same driver/ordinal across a visible-devices env change "
+           "-- must create a fresh device per distinct visible-devices value";
+
+    std::error_code ec;
+    fs::remove_all(opts.cache_dir, ec);
+}
+
+// JIT-R123 regression: iree_can_initialize_default_device()'s cache used to
+// be keyed ONLY by driver_name, not by the HIP_VISIBLE_DEVICES/
+// CUDA_VISIBLE_DEVICES value that determines which PHYSICAL GPU (if any)
+// ordinal 0 actually binds to -- the sibling of JIT-R118's fix to
+// shared_iree_hal_device (which this function calls internally). Demonstrated
+// by probing "hip" with HIP_VISIBLE_DEVICES unset (available on this host)
+// vs set to an out-of-range ordinal that hides every real GPU (unavailable):
+// the old cache would return the FIRST probe's answer for BOTH calls; the
+// fixed cache must re-probe and return a DIFFERENT (correct) answer.
+TEST(JitRocmArch, CanInitializeDefaultDeviceCacheRespectsHipVisibleDevicesChanges) {
+    ensure_core_init();
+
+    const char* saved_raw = std::getenv("HIP_VISIBLE_DEVICES");
+    const bool had_saved = saved_raw != nullptr;
+    const std::string saved = had_saved ? saved_raw : std::string{};
+    struct EnvGuard {
+        bool had;
+        std::string val;
+        ~EnvGuard() {
+            if (had) setenv("HIP_VISIBLE_DEVICES", val.c_str(), 1);
+            else unsetenv("HIP_VISIBLE_DEVICES");
+        }
+    } env_guard{had_saved, saved};
+
+    unsetenv("HIP_VISIBLE_DEVICES");
+    const bool ok_before = tj::iree_can_initialize_default_device("hip");
+    if (!ok_before) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "ROCm/HIP device required by TENZOR_REQUIRE_MULTI_BACKEND "
+                      "but unavailable";
+        }
+        GTEST_SKIP() << "no ROCm/HIP device";
+    }
+
+    // An out-of-range ordinal hides every real GPU on any host with fewer
+    // than 100 devices.
+    setenv("HIP_VISIBLE_DEVICES", "99", 1);
+    const bool ok_after = tj::iree_can_initialize_default_device("hip");
+    EXPECT_FALSE(ok_after)
+        << "HIP_VISIBLE_DEVICES=99 hides every real GPU and "
+           "iree_can_initialize_default_device(\"hip\") should now report "
+           "false -- true means the cache incorrectly reused the pre-remap "
+           "availability answer instead of re-probing under the new value";
 }
 
 // ── Fix #3: a graph break / empty trace makes trace_and_compile() return
@@ -871,6 +1030,13 @@ TEST(JitEagerFallback, SingleOutputSubprocessThrowsWhenNpyTempFileUnavailable) {
     fs::remove_all(opts.cache_dir, ec);
     fs::remove_all(unwritable_dir.parent_path(), ec);
 }
+
+// JIT-R125 regression (multi-output subprocess mkstemps partial failure):
+// see tests/jit/mlir/test_jit_r125_output_temp_exhaustion.cpp -- moved to
+// its own executable because the repro needs unshare(CLONE_NEWUSER), which
+// only succeeds in a single-threaded process; this suite's other tests
+// (backend loading, ConcurrentSharedHalDeviceCreationIsRaceFree, etc.)
+// leave the process multi-threaded for the rest of its life.
 
 // JIT-R130 regression: shared_iree_hal_device() used to hold
 // g_shared_iree_device_mu for the ENTIRE device-creation call, serializing

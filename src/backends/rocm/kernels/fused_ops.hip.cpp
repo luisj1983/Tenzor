@@ -20,6 +20,7 @@
 #include <tuple>
 #include <vector>
 #include <span>
+#include "../rocm_stream.hpp"  // rocm_current_stream() -- JIT-R115
 
 namespace tenzor {
 namespace rocm {
@@ -1841,7 +1842,7 @@ auto flash_attention_backward_hip(
         size_t smem = compute_bwd_smem(32);
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<32, Br, Bc, BLOCK_SIZE>),
-            grid, threads, smem, 0,
+            grid, threads, smem, rocm_current_stream(),
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
             seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
@@ -1849,7 +1850,7 @@ auto flash_attention_backward_hip(
         size_t smem = compute_bwd_smem(64);
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<64, Br, Bc, BLOCK_SIZE>),
-            grid, threads, smem, 0,
+            grid, threads, smem, rocm_current_stream(),
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
             seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
@@ -1857,7 +1858,7 @@ auto flash_attention_backward_hip(
         size_t smem = compute_bwd_smem(128);
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(flash_attention_backward_kernel_hip<128, Br, Bc, BLOCK_SIZE>),
-            grid, threads, smem, 0,
+            grid, threads, smem, rocm_current_stream(),
             q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
             seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
         HIP_CHECK(hipGetLastError());
@@ -1889,8 +1890,13 @@ auto fused_attention_hip(
         const int64_t head_dim = Q.shape()[Q.ndim() - 1];
         switch (head_dim) {
             case 16: case 32: case 48: case 64: case 80: case 96: case 128:
+                // JIT-R115: was hardcoded nullptr (always the legacy/
+                // default stream) instead of the real current stream --
+                // illegal during CUDA/HIP-graph capture on a non-default
+                // capture stream, and silently excluded this kernel from
+                // any captured graph otherwise.
                 return fused_attention_hip_f64(Q, K, V, static_cast<double>(scale),
-                                               causal, /*stream=*/nullptr);
+                                               causal, rocm_current_stream());
             default: break;
         }
     }
@@ -1950,17 +1956,17 @@ auto fused_attention_hip(
         if (d_k == 32) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<32, BLOCK_SIZE>),
-                grid, threads, compute_fwd_smem(32), 0,
+                grid, threads, compute_fwd_smem(32), rocm_current_stream(),
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
         } else if (d_k == 64) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<64, BLOCK_SIZE>),
-                grid, threads, compute_fwd_smem(64), 0,
+                grid, threads, compute_fwd_smem(64), rocm_current_stream(),
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
         } else if (d_k == 128) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<128, BLOCK_SIZE>),
-                grid, threads, compute_fwd_smem(128), 0,
+                grid, threads, compute_fwd_smem(128), rocm_current_stream(),
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
         }
         HIP_CHECK(hipGetLastError());

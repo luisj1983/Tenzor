@@ -255,8 +255,36 @@ TEST(JitHardening, PostRollOpTypeRoundTrips) {
     ASSERT_EQ(loaded2->nodes().size(), 1u);
     EXPECT_EQ(loaded2->nodes()[0]->op_type(), jit::OpType::AnchorGenerate);
 
+    // JIT-R111 regression: 13 more OpType enumerators (Sign, GridSample,
+    // AffineGrid, FFT/IFFT/RFFT/IRFFT, CTCLossForward, FusedLinearReLU,
+    // FusedConv2dReLU, FusedConv2dBnReLU, FusedSoftmaxCrossEntropy,
+    // FusedAddReLU) were appended after AnchorGenerate but the read_nodes()
+    // bounds check was left pointing at AnchorGenerate -- round-trip the new
+    // true last enumerator specifically, since it's the exact value the
+    // fixed bound must accept.
+    auto g3 = std::make_shared<jit::Graph>();
+    auto a3 = g3->create_value("a", {2, 2}, DType::Float32, Device::cpu());
+    auto b3 = g3->create_value("b", {2, 2}, DType::Float32, Device::cpu());
+    auto out3 = g3->create_value("out", {2, 2}, DType::Float32, Device::cpu());
+    auto addrelu_node = g3->create_node(jit::OpType::FusedAddReLU, "add_relu");
+    addrelu_node->add_input(a3);
+    addrelu_node->add_input(b3);
+    out3->set_node(addrelu_node);
+    addrelu_node->add_output(out3);
+    g3->add_node(addrelu_node);
+    g3->set_inputs({a3, b3});
+    g3->set_outputs({out3});
+
+    auto path3 = temp_graph_path("post_roll_optype_new_last");
+    jit::save_graph(*g3, path3);
+    auto loaded3 = jit::load_graph(path3);
+    ASSERT_NE(loaded3, nullptr);
+    ASSERT_EQ(loaded3->nodes().size(), 1u);
+    EXPECT_EQ(loaded3->nodes()[0]->op_type(), jit::OpType::FusedAddReLU);
+
     std::remove(path.c_str());
     std::remove(path2.c_str());
+    std::remove(path3.c_str());
 }
 
 // R1-10 regression: a malformed/hand-built AdaptiveAvgPool2d node whose

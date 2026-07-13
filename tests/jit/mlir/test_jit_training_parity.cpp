@@ -185,6 +185,13 @@ void run_inference(const Device& dev, const std::string& label) {
             << "inference on a runnable IREE target (" << label
             << ") did not exercise the IREE compile path (misses="
             << stats.misses << ")";
+        // JIT-R117: misses>=1 alone cannot distinguish "compiled and ran"
+        // from "attempted a compile, failed, and quietly ran eager" -- see
+        // mlir_target_util.hpp's assert_jit_used() for the full rationale.
+        EXPECT_EQ(stats.eager_fallbacks, 0u)
+            << "inference on " << label << " silently fell back to eager "
+               "(compiled path never actually ran; the diff check above is "
+               "vacuous for this target)";
     }
 }
 

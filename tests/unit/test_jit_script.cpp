@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/script.hpp>
+#include <tenzor/backend/dispatch_interceptor.hpp>
+#include <atomic>
 #include <cmath>
 #include <stdexcept>
 
@@ -187,6 +189,69 @@ TEST(JitScript, MultiArgScriptForwardWorks) {
     ASSERT_EQ(r3.numel(), 3);
     EXPECT_NEAR(r3.data<float>()[0], 3.0f, 1e-5);
     EXPECT_NEAR(r3.data<float>()[2], 3.0f, 1e-5);
+}
+
+// JIT-R138: the "Different-shape call" in MultiArgScriptForwardWorks above
+// exercises compile_script's multi-input retrace_fn_ closure (set in
+// compile_script_multi_with_dummies). That closure retraces the script for
+// real (genuinely running its Add op) to build a fresh graph; forward() must
+// reuse that real result instead of ALSO replaying the freshly built graph on
+// the same inputs, which would run the script's ops twice for one logical
+// forward() call. Verified by counting total op dispatches: a call that
+// doesn't need to retrace (same shape as the dummies) dispatches N ops; a
+// call that DOES need to retrace must also dispatch exactly N, not 2N.
+TEST(JitScript, MultiArgScriptRetraceDoesNotDoubleExecute) {
+    const char* src = R"(def forward(x, y): return x + y)";
+    std::vector<Tensor> dummies = {
+        ones({2}, DType::Float32, Device::cpu()),
+        ones({2}, DType::Float32, Device::cpu()),
+    };
+    auto compiled = jit::compile_script(src, dummies);
+    ASSERT_NE(compiled, nullptr);
+
+    auto count_dispatches_during = [](const std::function<void()>& fn) -> int {
+        std::atomic<int> count{0};
+        {
+            InterceptorGuard guard(
+                [&count](OpId op, std::span<const Tensor> inputs,
+                         const OpAttributes& attrs, DispatchNext next) {
+                    count.fetch_add(1, std::memory_order_relaxed);
+                    return next(op, inputs, attrs);
+                });
+            fn();
+        }
+        return count.load();
+    };
+
+    // Baseline: same shape as the dummies -> no retrace, one graph execution.
+    Tensor a = full({2}, 3.0, DType::Float32, Device::cpu());
+    Tensor b = full({2}, 4.0, DType::Float32, Device::cpu());
+    int baseline_dispatches = count_dispatches_during([&] {
+        auto outs = compiled->forward({Variable(a, false), Variable(b, false)});
+        ASSERT_EQ(outs.size(), 1u);
+        auto r = outs[0].tensor().to(Device::cpu());
+        EXPECT_NEAR(r.data<float>()[0], 7.0f, 1e-5);
+    });
+    ASSERT_GT(baseline_dispatches, 0);
+
+    // Different shape -> triggers the multi-input retrace_fn_ closure.
+    Tensor a3 = full({3}, 1.0, DType::Float32, Device::cpu());
+    Tensor b3 = full({3}, 2.0, DType::Float32, Device::cpu());
+    int retrace_dispatches = count_dispatches_during([&] {
+        auto outs3 = compiled->forward({Variable(a3, false), Variable(b3, false)});
+        ASSERT_EQ(outs3.size(), 1u);
+        auto r3 = outs3[0].tensor().to(Device::cpu());
+        ASSERT_EQ(r3.numel(), 3);
+        EXPECT_NEAR(r3.data<float>()[0], 3.0f, 1e-5);
+        EXPECT_NEAR(r3.data<float>()[2], 3.0f, 1e-5);
+    });
+
+    EXPECT_EQ(retrace_dispatches, baseline_dispatches)
+        << "compile_script's multi-input retrace path dispatched "
+        << retrace_dispatches << " ops for a single external forward() call "
+           "vs. " << baseline_dispatches << " for a no-retrace call -- the "
+           "retrace_fn_ closure's real result was discarded and the graph "
+           "was executed again on the same inputs (JIT-R138)";
 }
 
 TEST(JitScript, RejectsIfElse) {

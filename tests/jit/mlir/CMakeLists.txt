@@ -57,6 +57,26 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_jit_eager_fallback
         DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
 
+    # JIT-R125 regression, in its own executable: the repro needs
+    # unshare(CLONE_NEWUSER), which only succeeds in a single-threaded
+    # process -- see the file's header comment.
+    add_executable(test_jit_r125_output_temp_exhaustion
+        test_jit_r125_output_temp_exhaustion.cpp)
+    target_link_libraries(test_jit_r125_output_temp_exhaustion
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_jit_r125_output_temp_exhaustion
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
+
+    # JIT-R109 regression, in its own executable: testing_force_shared_iree_
+    # state_cleanup() permanently disables the shared IREE runtime instance
+    # for the rest of the process -- see the file's header comment.
+    add_executable(test_jit_r109_shared_state_teardown_race
+        test_jit_r109_shared_state_teardown_race.cpp)
+    target_link_libraries(test_jit_r109_shared_state_teardown_race
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_jit_r109_shared_state_teardown_race
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task C.1 — Elementwise ops lower to StableHLO primitives.
     add_executable(test_op_elementwise test_op_elementwise.cpp)
     target_link_libraries(test_op_elementwise
@@ -69,6 +89,14 @@ if(TENZOR_USE_MLIR_JIT)
     target_link_libraries(test_op_where
         PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_op_where
+        DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
+
+    # JIT-R133 — LogicalAnd/Or/Not + comparison predicates (Eq/Ne/Lt/Le/Gt/Ge)
+    # numeric coverage, fanned out over every available IREE target.
+    add_executable(test_op_logical_predicates test_op_logical_predicates.cpp)
+    target_link_libraries(test_op_logical_predicates
+        PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_op_logical_predicates
         DISCOVERY_TIMEOUT 120 BACKENDS none LABELS "jit;mlir;iree")
 
     # Task C.2 — Activations (ReLU / Sigmoid / SiLU / GELU).

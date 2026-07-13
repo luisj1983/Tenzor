@@ -135,6 +135,12 @@ TEST(MlirNumericParity, SubprocessFloat32BitExact) {
     ASSERT_GE(mj::cache_stats().misses, 1u)
         << "forced-subprocess f32 inference did NOT run through IREE (it fell "
            "back to eager — the precision check below would be vacuous)";
+    // JIT-R117: misses>=1 alone cannot distinguish "compiled and ran" from
+    // "attempted a compile, failed, and quietly ran eager" -- see this
+    // file's assert_parity_over_targets() for the full rationale.
+    EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+        << "forced-subprocess f32 inference silently fell back to eager "
+           "(compiled path never actually ran)";
 
     // .npy path is bit-exact (~1e-4 f32 rounding); ASCII stdout loses ~1e-2.
     EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 1e-3)
@@ -180,6 +186,10 @@ TEST(MlirNumericParity, SubprocessBFloat16LargeInputMarshals) {
         << "forced-subprocess large-BF16 inference did NOT run through IREE "
            "(it fell back to eager -- the precision check below would be "
            "vacuous)";
+    // JIT-R117: see the identical check/rationale above.
+    EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+        << "forced-subprocess large-BF16 inference silently fell back to "
+           "eager (compiled path never actually ran)";
 
     EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 1e-2)
         << "subprocess BF16 large-input marshaling lost precision or "
@@ -224,6 +234,10 @@ TEST(MlirNumericParity, SubprocessStrictRunsThroughIree) {
            "iree-run-module wrote a raw buffer that read_npy_output rejects)";
     ASSERT_GE(mj::cache_stats().misses, 1u)
         << "strict forced-subprocess run did not go through IREE";
+    // JIT-R117: see the identical check/rationale above.
+    EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+        << "strict forced-subprocess run silently fell back to eager "
+           "(compiled path never actually ran)";
     EXPECT_LT(max_abs_diff_f64(eager.tensor(), out.tensor()), 1e-3);
 
     ::unsetenv("TENZOR_MLIR_FORCE_SUBPROCESS");
@@ -284,6 +298,58 @@ TEST(MlirNumericParity, Float64SoftmaxWideAxisAccumulates) {
                                1e-9, /*allow_eager_fallback=*/true);
 }
 
+// findings.txt JIT-R126: softmax's MLIR lowering (both handle_softmax and
+// the plugin-disabled expand::emit_softmax_last_dim decomposition) used to
+// call emit_stablehlo_reduce directly for its reduce_max/reduce_sum, unlike
+// LayerNorm/RMSNorm/emit_reduce_with_keepdim's shared helper, all of which
+// unconditionally wrap a Float64-dtype reduce operand in a stablehlo.
+// optimization_barrier to protect IREE's LLVMGPUVectorDistribute CUDA/ROCm
+// codegen from a reduce+convert fusion miscompile (see Float16LayerNorm/
+// RMSNormAccumulatesInF64's identical rationale above). A native Float64
+// softmax input compiled both of its reduces with no barrier at all before
+// this fix. Text-level check (mirroring those two tests) rather than a
+// numeric comparison: the barrier is a documented no-op on llvm-cpu (the
+// only target this test compiles for), so a dropped barrier would not
+// surface as a numeric divergence here, only on real CUDA/ROCm hardware --
+// exactly the gap a text-level assertion closes.
+TEST(MlirNumericParity, Float64SoftmaxHasOptimizationBarrierBeforeReduces) {
+    mt::ensure_core_init();
+    require_cpu_iree();
+
+    const int64_t D = 64;
+    auto fn = ::tenzor::jit::CompiledFunction::FnType(
+        [](const Variable& x) -> Variable { return nn::softmax(x, -1); });
+    Tensor x_t = ::tenzor::randn({2, D}, DType::Float32, Device::cpu())
+                     .to(DType::Float64);
+    Variable x(x_t, /*requires_grad=*/false);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend = "mlir";
+    cfg.target = "llvm-cpu";
+    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+    const std::string mlir_text = compiled.dump_stablehlo(x);
+
+    EXPECT_NE(mlir_text.find("f64"), std::string::npos)
+        << "Float64 softmax input should compile with f64 reduces:\n"
+        << mlir_text;
+
+    // softmax has TWO reduces (reduce_max, reduce_sum) -- both must be
+    // barriered, not just one.
+    std::size_t barrier_count = 0;
+    std::size_t pos = 0;
+    while ((pos = mlir_text.find("stablehlo.optimization_barrier", pos)) !=
+           std::string::npos) {
+        ++barrier_count;
+        pos += 1;
+    }
+    EXPECT_GE(barrier_count, 2u)
+        << "Float64 softmax's reduce_max AND reduce_sum must each be preceded "
+           "by a stablehlo.optimization_barrier (protects IREE's "
+           "LLVMGPUVectorDistribute CUDA/ROCm codegen), same rationale as "
+           "LayerNorm/RMSNorm's identical tests above -- got " << barrier_count
+        << ":\n" << mlir_text;
+}
+
 // R1-13 coverage gap (the exact gap that hid R1-04): this file had NO RMSNorm
 // test at all, so the eps-narrowed-to-float32 bug in the MLIR plugin path
 // went undetected here. test_op_rms_norm.cpp/test_op_rms_norm_callback.cpp
@@ -326,10 +392,6 @@ TEST(MlirNumericParity, Complex64ElementwiseMatchesEager) {
 
     auto fn = ::tenzor::jit::CompiledFunction::FnType(
         [](const Variable& x) -> Variable { return (x * x) + x; });
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target = "llvm-cpu";
-    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
 
     Tensor x_t({4}, DType::Complex64, Device::cpu());
     {
@@ -342,18 +404,39 @@ TEST(MlirNumericParity, Complex64ElementwiseMatchesEager) {
     Variable x(x_t, /*requires_grad=*/false);
 
     const Variable eager = (x * x) + x;
-    mj::reset_cache_stats();
-    Variable out;
-    ASSERT_NO_THROW({ out = compiled(x); })
-        << "Complex64 elementwise inference must not throw";
-    ASSERT_GE(mj::cache_stats().misses, 1u)
-        << "Complex64 elementwise did NOT run through IREE (silent eager "
-           "fallback makes the check below vacuous)";
 
-    const auto diff =
-        ::tenzor::max(::tenzor::abs(eager.tensor() - out.tensor())).item<float>();
-    EXPECT_LT(diff, 1e-4f)
-        << "compiled Complex64 result diverged from eager by " << diff;
+    // JIT-R128: fan out over every available IREE target -- complex-dtype
+    // backend divergence is a documented recurring bug class in this project
+    // (96e21acb fixed complex sign() missing on ROCm/OneAPI and silently
+    // wrong on Vulkan), so llvm-cpu-only coverage here would miss it. Uses
+    // a hand-rolled complex-safe diff (max_abs_diff_f64's .to(Float64) cast
+    // is not meaningful for a complex dtype) instead of
+    // assert_parity_over_targets.
+    for (const auto& target : mt::available_iree_targets()) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target = target;
+        ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+
+        mj::reset_cache_stats();
+        Variable out;
+        ASSERT_NO_THROW({ out = compiled(x); })
+            << "Complex64 elementwise inference must not throw on target=" << target;
+        ASSERT_GE(mj::cache_stats().misses, 1u)
+            << "Complex64 elementwise did NOT run through IREE on target=" << target
+            << " (silent eager fallback makes the check below vacuous)";
+        // JIT-R117: see the identical check/rationale above.
+        EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+            << "Complex64 elementwise silently fell back to eager on target=" << target
+            << " (compiled path never actually ran)";
+
+        const auto diff =
+            ::tenzor::max(::tenzor::abs(eager.tensor() - out.tensor().to(Device::cpu())))
+                .item<float>();
+        EXPECT_LT(diff, 1e-4f)
+            << "compiled Complex64 result diverged from eager by " << diff
+            << " on target=" << target;
+    }
 }
 
 // M3 — F16 LayerNorm over a long axis: mean/variance must accumulate in F32.
@@ -598,6 +681,12 @@ TEST(MlirNumericParity, PowNegativeBaseRuntimeTensorExponent) {
         ASSERT_GE(mj::cache_stats().misses, 1u)
             << "PowNegativeBaseRuntimeTensorExponent did not attempt an IREE "
                "compile on target=" << target;
+        // JIT-R117: misses>=1 alone cannot distinguish "compiled and ran"
+        // from "attempted a compile, failed, and quietly ran eager" -- see
+        // this file's assert_parity_over_targets() for the full rationale.
+        EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+            << "PowNegativeBaseRuntimeTensorExponent silently fell back to "
+               "eager on target=" << target;
 
         // JIT-R029/R101: this machine's GPU is sm_120 (Blackwell); the
         // installed IREE 3.11.0rc / LLVM 23.0.0git NVPTX backend compiles
@@ -689,6 +778,23 @@ TEST(MlirNumericParity, PowNegativeBaseFloatPowerEndToEnd) {
             << "PowNegativeBaseFloatPowerEndToEnd did not attempt an IREE "
                "compile on target=" << target
             << " (float_power graph-broke again?)";
+        // JIT-R117: see the identical check/rationale above. float_power's
+        // negative-base decomposition internally widens to Float64 for the
+        // log/exp round-trip (avoids precision loss detecting an integer
+        // exponent) -- discovered via this exact check newly firing on
+        // llvm-cpu AND vulkan-spirv with "op operand #0 must be 16/32-bit
+        // float ... but got 'f64'" from the SPIR-V/LLVM codegen for `log`.
+        // This is the SAME already-established, target-capability gap
+        // Float64SoftmaxWideAxisAccumulates documents above (no F64
+        // transcendental codegen on llvm-cpu/vulkan-spirv) -- eager IS the
+        // correct reference there, so the numeric checks below still hold;
+        // cuda/rocm have real F64 log codegen and stay held to the strict
+        // (no-fallback) check.
+        if (target != "llvm-cpu" && target != "vulkan-spirv") {
+            EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+                << "PowNegativeBaseFloatPowerEndToEnd silently fell back to "
+                   "eager on target=" << target;
+        }
         // No cuda special-case needed here: whether this specific machine's
         // sm_120 GPU can genuinely compile via IREE or degrades to eager,
         // tenzor::float_power's eager kernel is itself correct, so the
@@ -725,43 +831,51 @@ TEST(MlirNumericParity, BatchNorm2dRunningStatsLiveViaWithBuffers_MlirBackend) {
     mt::ensure_core_init();
     require_cpu_iree();
 
-    nn::BatchNorm2d bn(4);
-    bn.eval();
-    NoGradGuard no_grad;
-    auto fn = ::tenzor::jit::CompiledFunction::FnType(
-        [&bn](const Variable& x) { return bn.forward(x); });
+    // JIT-R128: fan out over every available IREE target -- GPU-HAL-specific
+    // live-buffer marshaling bugs were previously untested. bn/x are
+    // recreated fresh per target so the running_mean mutation below doesn't
+    // leak state across iterations.
+    for (const auto& target : mt::available_iree_targets()) {
+        nn::BatchNorm2d bn(4);
+        bn.eval();
+        NoGradGuard no_grad;
+        auto fn = ::tenzor::jit::CompiledFunction::FnType(
+            [&bn](const Variable& x) { return bn.forward(x); });
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target = "llvm-cpu";
-    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
-    compiled.set_buffers(bn.buffers());
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target = target;
+        ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+        compiled.set_buffers(bn.buffers());
 
-    auto x = randn({2, 4, 3, 3}, DType::Float32, Device::cpu()) + 1.0f;
-    auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+        auto x = randn({2, 4, 3, 3}, DType::Float32, Device::cpu()) + 1.0f;
+        auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
 
-    EXPECT_GE(compiled.num_cached(), 1u)
-        << "nn::BatchNorm2d(with_buffers, backend=mlir) did not compile/"
-           "cache a module -- the op likely graph-broke and silently fell "
-           "back to eager, so replay correctness was never exercised";
+        EXPECT_GE(compiled.num_cached(), 1u)
+            << "nn::BatchNorm2d(with_buffers, backend=mlir) did not compile/"
+               "cache a module on target=" << target << " -- the op likely "
+               "graph-broke and silently fell back to eager, so replay "
+               "correctness was never exercised";
 
-    // Simulate an eager EMA update happening OUTSIDE the compiled module
-    // (e.g. a training step), the same way BatchNorm2dRunningStatsLive-
-    // ViaWithBuffers (the nvrtc-path sibling test) does.
-    auto rm = bn.get_buffer("running_mean");
-    ASSERT_TRUE(rm != nullptr) << "nn::BatchNorm2d has no 'running_mean' buffer";
-    rm->tensor() = rm->tensor() + 5.0;
+        // Simulate an eager EMA update happening OUTSIDE the compiled module
+        // (e.g. a training step), the same way BatchNorm2dRunningStatsLive-
+        // ViaWithBuffers (the nvrtc-path sibling test) does.
+        auto rm = bn.get_buffer("running_mean");
+        ASSERT_TRUE(rm != nullptr) << "nn::BatchNorm2d has no 'running_mean' buffer";
+        rm->tensor() = rm->tensor() + 5.0;
 
-    auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
-    auto eager_after = fn(Variable(x, false)).tensor();
+        auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+        auto eager_after = fn(Variable(x, false)).tensor();
 
-    EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)
-        << "nn::BatchNorm2d MLIR-backend replay did not react to a "
-           "running_mean_ mutation -- running stats are still frozen as "
-           "trace-time constants despite with_buffers()";
-    EXPECT_LT(max_abs_diff_f64(eager_after, after), 1e-4)
-        << "nn::BatchNorm2d MLIR-backend replay after mutation != eager "
-           "after mutation";
+        EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)
+            << "nn::BatchNorm2d MLIR-backend replay did not react to a "
+               "running_mean_ mutation on target=" << target << " -- running "
+               "stats are still frozen as trace-time constants despite "
+               "with_buffers()";
+        EXPECT_LT(max_abs_diff_f64(eager_after, after), 1e-4)
+            << "nn::BatchNorm2d MLIR-backend replay after mutation != eager "
+               "after mutation on target=" << target;
+    }
 }
 
 // Same fix, exercised via with_parameters() instead of with_buffers(): a
@@ -771,41 +885,47 @@ TEST(MlirNumericParity, LinearWeightLiveViaWithParameters_MlirBackend) {
     mt::ensure_core_init();
     require_cpu_iree();
 
-    auto weight = std::make_shared<Variable>(
-        ::tenzor::full({3, 3}, 1.0f, DType::Float32, Device::cpu()), false);
-    NoGradGuard no_grad;
-    auto fn = ::tenzor::jit::CompiledFunction::FnType(
-        [weight](const Variable& x) -> Variable {
-            return matmul(x, *weight);
-        });
+    // JIT-R128: fan out over every available IREE target -- GPU-HAL-specific
+    // live-parameter marshaling bugs were previously untested. weight/x are
+    // recreated fresh per target so the mutation below doesn't leak state
+    // across iterations.
+    for (const auto& target : mt::available_iree_targets()) {
+        auto weight = std::make_shared<Variable>(
+            ::tenzor::full({3, 3}, 1.0f, DType::Float32, Device::cpu()), false);
+        NoGradGuard no_grad;
+        auto fn = ::tenzor::jit::CompiledFunction::FnType(
+            [weight](const Variable& x) -> Variable {
+                return matmul(x, *weight);
+            });
 
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target = "llvm-cpu";
-    ::tenzor::jit::CompiledFunction compiled(fn, cfg);
-    compiled.set_parameters({weight});
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target = target;
+        ::tenzor::jit::CompiledFunction compiled(fn, cfg);
+        compiled.set_parameters({weight});
 
-    auto x = ::tenzor::full({3, 3}, 2.0f, DType::Float32, Device::cpu());
-    auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+        auto x = ::tenzor::full({3, 3}, 2.0f, DType::Float32, Device::cpu());
+        auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
 
-    EXPECT_GE(compiled.num_cached(), 1u)
-        << "Linear-weight closure (with_parameters, backend=mlir) did not "
-           "compile/cache a module";
+        EXPECT_GE(compiled.num_cached(), 1u)
+            << "Linear-weight closure (with_parameters, backend=mlir) did not "
+               "compile/cache a module on target=" << target;
 
-    // Mutate the weight in place (e.g. an optimizer step) OUTSIDE the
-    // compiled module.
-    weight->tensor() = weight->tensor() + 10.0f;
+        // Mutate the weight in place (e.g. an optimizer step) OUTSIDE the
+        // compiled module.
+        weight->tensor() = weight->tensor() + 10.0f;
 
-    auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
-    auto eager_after = fn(Variable(x, false)).tensor();
+        auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+        auto eager_after = fn(Variable(x, false)).tensor();
 
-    EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)
-        << "Linear weight MLIR-backend replay did not react to a weight "
-           "mutation -- still frozen as a trace-time constant despite "
-           "with_parameters()";
-    EXPECT_LT(max_abs_diff_f64(eager_after, after), 1e-4)
-        << "Linear weight MLIR-backend replay after mutation != eager "
-           "after mutation";
+        EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)
+            << "Linear weight MLIR-backend replay did not react to a weight "
+               "mutation on target=" << target << " -- still frozen as a "
+               "trace-time constant despite with_parameters()";
+        EXPECT_LT(max_abs_diff_f64(eager_after, after), 1e-4)
+            << "Linear weight MLIR-backend replay after mutation != eager "
+               "after mutation on target=" << target;
+    }
 }
 
 // R1-04/JIT-R113 regression: handle_layer_norm/handle_rms_norm_expand's

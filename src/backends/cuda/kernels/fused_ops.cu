@@ -15,6 +15,7 @@
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"  // CudaBuffer (device-side error flag)
 #include "../cublas_handle_pool.hpp"
+#include "../cuda_stream.hpp"  // cuda::cuda_current_stream() -- JIT-R115
 #include "../cuda_stream_pool.hpp"
 #include <stdexcept>
 #include <cmath>
@@ -2585,6 +2586,16 @@ auto fused_attention_cuda(
     // y-dim (limit 65535, always ample for batch*heads).
     dim3 threads(BLOCK_SIZE);
     dim3 blocks(seq_len_q, batch_heads);
+    // JIT-R115: launching on the implicit legacy/default stream instead of
+    // the current stream is illegal ("operation would make the legacy
+    // stream depend on a capturing blocking stream") the moment this runs
+    // during active CUDA-graph capture, and silently excludes this kernel
+    // from the captured graph otherwise -- the same bug class already fixed
+    // for activations.cu/reduction.cu's dispatch wrappers. FusedAttention
+    // was made tracer-visible specifically so it participates in JIT graph/
+    // CUDA-graph capture, so this path is now reachable in exactly that
+    // scenario.
+    cudaStream_t stream = cuda::cuda_current_stream();
 
     // Compute shared memory size based on head_dim
     // Layout: K_tile[Bc][HEAD_DIM+4] + V_tile[Bc][HEAD_DIM+4] + Q_shared[HEAD_DIM] + scores[Bc] + reduce[8]
@@ -2598,31 +2609,31 @@ auto fused_attention_cuda(
     // Dispatch based on head_dim for optimal unrolling
     if (head_dim == 64) {
         size_t smem_size = compute_smem_size(64);
-        flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+        flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size, stream>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 128) {
         size_t smem_size = compute_smem_size(128);
-        flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+        flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size, stream>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 32) {
         size_t smem_size = compute_smem_size(32);
-        flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+        flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size, stream>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 80) {
         size_t smem_size = compute_smem_size(80);
-        flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+        flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size, stream>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (head_dim == 96) {
         size_t smem_size = compute_smem_size(96);
-        flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+        flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size, stream>>>(
             Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -2665,23 +2676,23 @@ auto fused_attention_cuda(
         };
 
         if (padded_hd == 32) {
-            flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(32)>>>(
+            flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(32), stream>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
                 lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else if (padded_hd == 64) {
-            flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(64)>>>(
+            flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(64), stream>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
                 lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else if (padded_hd == 80) {
-            flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(80)>>>(
+            flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(80), stream>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
                 lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else if (padded_hd == 96) {
-            flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(96)>>>(
+            flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(96), stream>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
                 lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         } else {
-            flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(128)>>>(
+            flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(128), stream>>>(
                 Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
                 lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale, causal, dropout_p, rng_seed);
         }
@@ -3316,6 +3327,8 @@ auto flash_attention_backward_cuda(
     int num_kv_tiles = (seq_len_k + Bc - 1) / Bc;
     dim3 grid(num_kv_tiles, batch_heads);
     dim3 threads(BLOCK_SIZE);
+    // JIT-R115: see fused_attention_cuda's identical fix/rationale above.
+    cudaStream_t stream = cuda::cuda_current_stream();
 
     // Shared memory is always FP32 regardless of input dtype
     auto compute_bwd_smem = [&](int hd) -> size_t {
@@ -3355,7 +3368,7 @@ auto flash_attention_backward_cuda(
         auto launch_f32 = [&](auto kernel_fn, int hd) {
             size_t smem = compute_bwd_smem(hd);
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
-            kernel_fn<<<grid, threads, smem>>>(
+            kernel_fn<<<grid, threads, smem, stream>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_ptr, dk_ptr, dv_ptr,
                 seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -3400,7 +3413,7 @@ auto flash_attention_backward_cuda(
         auto launch_mp = [&](auto kernel_fn, int hd) {
             size_t smem = compute_bwd_smem(hd);
             maybe_set_max_smem(reinterpret_cast<const void*>(kernel_fn), smem);
-            kernel_fn<<<grid, threads, smem>>>(
+            kernel_fn<<<grid, threads, smem, stream>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, l_ptr, dq_f32_ptr, dk_ptr, dv_ptr,
                 seq_len_q_int, seq_len_k_int, scale, causal, dropout_p, rng_seed);
             TENZOR_CUDA_POST_LAUNCH_CHECK();

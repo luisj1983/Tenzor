@@ -164,6 +164,13 @@ void run_jit_match(const std::string& target) {
     ASSERT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
         << "ResNet18 did NOT run through IREE (silent eager fallback would make "
            "the parity check vacuous); target=" << target;
+    // JIT-R117: misses>=1 alone cannot distinguish "compiled and ran" from
+    // "attempted a compile, failed, and quietly ran eager" -- see
+    // mlir_target_util.hpp's assert_jit_used() for the full rationale.
+    ASSERT_EQ(::tenzor::jit::mlir_jit::cache_stats().eager_fallbacks, 0u)
+        << "ResNet18 silently fell back to eager on target=" << target
+        << " (compiled path never actually ran; the parity check above is "
+           "vacuous for this target)";
 
     const auto e_shape = eager.tensor().shape();
     const auto j_shape = jit_out.tensor().shape();

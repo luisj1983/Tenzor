@@ -143,4 +143,28 @@ TEST_P(UtilityOpsTest, SignOperation) {
     }
 }
 
+// JIT-R127: sign(z) for a very-large-magnitude complex input must still be a
+// correct unit-magnitude direction, not Inf/NaN from an overflowed
+// intermediate |z|^2 computation. |a|,|b| ~ 3e19 is comfortably past the
+// ~1.06e19 threshold where a naive sqrt(a*a+b*b) overflows in Float32, but
+// the true hypot value (and thus sign()) is perfectly representable.
+TEST_P(UtilityOpsTest, SignComplex64VeryLargeMagnitudeNoOverflow) {
+    auto z_cpu = tenzor::zeros({1}, DType::Complex64, Device::cpu());
+    z_cpu.data<std::complex<float>>()[0] = {3.0e19f, 4.0e19f};  // |z| = 5e19
+    auto z = z_cpu.to(device);
+
+    auto result = tenzor::sign(z);
+    auto result_cpu = result.to(Device::cpu());
+    auto v = result_cpu.data<std::complex<float>>()[0];
+
+    EXPECT_FALSE(std::isnan(v.real())) << "sign() real part must not be NaN";
+    EXPECT_FALSE(std::isnan(v.imag())) << "sign() imag part must not be NaN";
+    EXPECT_FALSE(std::isinf(v.real())) << "sign() real part must not be Inf";
+    EXPECT_FALSE(std::isinf(v.imag())) << "sign() imag part must not be Inf";
+    EXPECT_NEAR(v.real(), 0.6f, 1e-4f)   // 3e19/5e19
+        << "an overflowed intermediate |z|^2 would give 0 here instead";
+    EXPECT_NEAR(v.imag(), 0.8f, 1e-4f);  // 4e19/5e19
+    EXPECT_NEAR(std::abs(v), 1.0f, 1e-4f) << "result must be unit magnitude";
+}
+
 INSTANTIATE_BACKEND_TESTS(UtilityOpsTest);

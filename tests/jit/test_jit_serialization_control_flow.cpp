@@ -337,6 +337,15 @@ TEST(JITSerializationControlFlow, GpuSerializedConstantRunsOnCpu) {
         ran = true;
     }
     if (!ran) {
+        // JIT-R129: honor the same TENZOR_REQUIRE_MULTI_BACKEND hard-fail
+        // escalation the rest of the suite uses -- a bare GTEST_SKIP() here
+        // would silently hide a CI box that's supposed to have a non-CPU
+        // backend but where the driver failed to init.
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1) "
+                      "but no non-CPU backend is available for the GPU->CPU "
+                      "direction";
+        }
         GTEST_SKIP() << "no non-CPU backend available for GPU->CPU direction";
     }
 }

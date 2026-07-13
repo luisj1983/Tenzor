@@ -700,6 +700,25 @@ auto shared_iree_runtime_instance() -> iree_runtime_instance_t* {
         std::atexit(cleanup_shared_iree_state);
         return inst;
     }();
+
+    // JIT-R109: retain UNDER THE SAME LOCK cleanup_shared_iree_state() uses
+    // to release this instance at exit, so the two can never interleave.
+    // Before this, callers retained AFTER this function returned (and after
+    // the lock, if any, was released) -- a background thread mid-JIT-call
+    // could read `instance` here, get preempted, have cleanup_shared_iree_
+    // state() run at process exit (releasing the cache's own reference and
+    // destroying the object if nothing else held one), and then resume and
+    // call iree_runtime_instance_retain() on the now-freed pointer. Callers
+    // must no longer retain a second time themselves -- this function's
+    // contract is now "always returns an already-retained reference."
+    std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
+    if (!g_shared_iree_instance) {
+        throw std::runtime_error(
+            "shared_iree_runtime_instance: the shared IREE runtime instance "
+            "has already been torn down (process is exiting) -- cannot hand "
+            "out a new reference to it");
+    }
+    iree_runtime_instance_retain(instance);
     return instance;
 }
 
@@ -730,10 +749,36 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
                             const std::string& driver,
                             const std::string& device_uri,
                             int device_index) -> iree_hal_device_t* {
+    // JIT-R118: fold the raw CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES env
+    // value into the cache key, mirroring detect_rocm_gfx_arch's JIT-R129
+    // fix one function away. device_uri alone (e.g. "cuda://0"/"hip://0")
+    // is blind to which PHYSICAL GPU ordinal 0 actually binds to -- that
+    // binding is resolved by IREE's own CUDA/HIP driver from the process's
+    // CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES at device-creation time.
+    // Without this, a process that changes the visible-devices env var
+    // between two calls for the same driver/index (test harnesses using
+    // setenv/unsetenv across cases, or any embedding scenario mutating it
+    // between JIT compiles) reuses the FIRST call's device object --
+    // silently executing against the wrong physical GPU.
+    const char* visible_devices_env =
+        (driver == "hip") ? std::getenv("HIP_VISIBLE_DEVICES")
+                           : std::getenv("CUDA_VISIBLE_DEVICES");
+    const std::string cache_key =
+        device_uri + "|" + (visible_devices_env != nullptr ? visible_devices_env : "");
+
     {
         std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
-        auto it = g_shared_iree_devices.find(device_uri);
-        if (it != g_shared_iree_devices.end()) return it->second;
+        auto it = g_shared_iree_devices.find(cache_key);
+        if (it != g_shared_iree_devices.end()) {
+            // JIT-R109: retain UNDER THE SAME LOCK cleanup_shared_iree_
+            // state() uses to release every cached device at exit, so a
+            // caller's retain can never race a concurrent release-to-zero
+            // (see shared_iree_runtime_instance()'s identical fix/comment).
+            // This function's contract is now "always returns an already-
+            // retained reference" -- callers must no longer retain again.
+            iree_hal_device_retain(it->second);
+            return it->second;
+        }
     }
 
     // JIT-R130: create the device OUTSIDE the lock. iree_hal_create_device /
@@ -770,19 +815,32 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
     }
 
     std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
-    auto [it, inserted] = g_shared_iree_devices.try_emplace(device_uri, device);
+    auto [it, inserted] = g_shared_iree_devices.try_emplace(cache_key, device);
     if (!inserted) {
         // Another thread won the race and already cached a device for this
-        // URI while we were creating ours outside the lock -- release the
+        // key while we were creating ours outside the lock -- release the
         // redundant one so callers always see exactly one live device per
-        // URI, matching the cache's contract (and cleanup_shared_iree_
-        // state()'s single-release-per-URI assumption at exit).
+        // key, matching the cache's contract (and cleanup_shared_iree_
+        // state()'s single-release-per-entry assumption at exit).
         iree_hal_device_release(device);
     }
+    // JIT-R109: retain an ADDITIONAL reference for the caller on top of the
+    // cache's own implicit reference (from iree_hal_create_device /
+    // iree_runtime_instance_try_create_default_device's refcount-1 result),
+    // under the SAME lock cleanup_shared_iree_state() uses to release every
+    // cached device at exit -- see the cache-hit branch above for the full
+    // rationale. Applies to `it->second` regardless of `inserted`: if we
+    // lost the race, that's the WINNING thread's device, which still needs
+    // a retain for THIS caller.
+    iree_hal_device_retain(it->second);
     return it->second;
 }
 
 }  // namespace
+
+auto testing_force_shared_iree_state_cleanup() -> void {
+    cleanup_shared_iree_state();
+}
 
 auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode,
                        int device_index)
@@ -810,9 +868,12 @@ auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode,
     // ─── InProcess setup ─────────────────────────────────────────────────
     // 1. Acquire the shared, process-lifetime runtime instance (see
     //    shared_iree_runtime_instance()'s doc comment for why this must not
-    //    be a fresh instance per invoker).
+    //    be a fresh instance per invoker). JIT-R109: shared_iree_runtime_
+    //    instance() now retains under the same lock cleanup_shared_iree_
+    //    state() uses to release it, so it always returns an already-
+    //    retained reference -- do NOT retain a second time here (that would
+    //    leak a reference relative to ~IreeInvoker()'s single release).
     iree_runtime_instance_t* instance = shared_iree_runtime_instance();
-    iree_runtime_instance_retain(instance);
     inv->instance_ = instance;
 
     // 2. Acquire the shared, process-lifetime HAL device for this driver+
@@ -823,10 +884,11 @@ auto IreeInvoker::load(const CompiledArtifact& artifact, Mode mode,
     //    this uses the driver's default device, preserving the long-tested
     //    path. For a non-zero ordinal (M3) it selects the specific device by
     //    URI ("cuda://1", "hip://1", "vulkan://1") via the instance's driver
-    //    registry so a cuda:1 model actually runs on GPU 1.
+    //    registry so a cuda:1 model actually runs on GPU 1. JIT-R109: same
+    //    already-retained contract as shared_iree_runtime_instance() above
+    //    -- do NOT retain a second time here.
     iree_hal_device_t* device = shared_iree_hal_device(
         instance, inv->device_, inv->device_uri_, inv->device_index_);
-    iree_hal_device_retain(device);
     inv->device_handle_ = device;
 
     // 3. Create the session bound to the device.
@@ -1070,7 +1132,33 @@ auto write_raw_binary(const ::tenzor::Tensor& t, const std::string& path) -> boo
 auto build_input_arg(const ::tenzor::Tensor& t,
                      std::vector<std::string>& temp_files) -> std::string {
     const std::string descr = dtype_to_npy_descr(t.dtype());
-    if (t.numel() > 4096 && !descr.empty()) {
+    // Complex64/Complex128's IREE element-type token ("complex<f32>" /
+    // "complex<f64>") contains a literal 'x', which collides with
+    // iree-run-module's own naive 'x'-delimited SHAPExTYPE shape-token
+    // parser: "4xcomplex<f32>=..." splits into shape tokens "4" and
+    // "comple" (it stops at the embedded 'x' inside "complex") and the
+    // subprocess rejects "comple" as an invalid shape dimension with
+    // INVALID_ARGUMENT.
+    //
+    // Bool's "i1" element type hits a SEPARATE ASCII-format incompatibility:
+    // JIT-R133's LogicalAnd/Or/Not coverage caught a genuine Bool graph
+    // INPUT (not a trace-time-frozen constant, unlike every prior Bool use
+    // in this suite) going through this path for the first time and failing
+    // with "binary hex element count mismatch: buffer length=1 <
+    // expected=2" on a space-separated decimal "4xi1=1 1 0 0" rendering --
+    // iree-run-module's i1 parser does not accept the same per-element
+    // decimal-token form every other integer dtype uses here.
+    //
+    // Both are protocol-level incompatibilities of the inline ASCII
+    // --input= form, not size-based ARG_MAX optimization gaps like every
+    // other dtype, so both are routed through the npy binary path
+    // unconditionally -- its header carries the dtype as a distinct textual
+    // field ("'descr': '<c8'" / "'descr': '|b1'"), not glued into the
+    // SHAPExTYPE token or subject to i1's ASCII parsing quirk.
+    const bool must_use_npy = t.dtype() == ::tenzor::DType::Complex64 ||
+                              t.dtype() == ::tenzor::DType::Complex128 ||
+                              t.dtype() == ::tenzor::DType::Bool;
+    if ((t.numel() > 4096 || must_use_npy) && !descr.empty()) {
         auto tmpl = (std::filesystem::temp_directory_path() /
                      "tenzor_iree_in_XXXXXX.npy").string();
         std::vector<char> buf(tmpl.begin(), tmpl.end());
@@ -1084,6 +1172,12 @@ auto build_input_arg(const ::tenzor::Tensor& t,
                 return "--input=@" + p;
             }
             std::remove(p.c_str());
+        }
+        if (must_use_npy) {
+            throw JitInvokeError(
+                "iree-run-module marshaling: failed to write a temp .npy file "
+                "for a dtype (complex or bool) whose ASCII --input= form "
+                "iree-run-module cannot parse correctly");
         }
     }
     if (t.numel() > 4096 && t.dtype() == ::tenzor::DType::BFloat16) {
@@ -1217,6 +1311,17 @@ auto invoke_subprocess(IreeInvoker& self,
         // cleaned up with the inputs at scope exit.
         std::vector<std::string> out_paths;
         out_paths.push_back(npy_path);
+        // JIT-R125: if mkstemps() fails for a LATER output's temp file (temp
+        // dir full, fd/quota exhaustion), out_paths would end up shorter than
+        // expected_outputs. Passing fewer --output=@path flags than @main
+        // actually returns would invoke iree-run-module with a mismatched
+        // output count -- whether it then errors or silently produces fewer
+        // outputs than the caller expects is not something to rely on either
+        // way. Abandon the bit-exact npy attempt entirely in that case and
+        // fall through to the ASCII-stdout path below, mirroring how a
+        // failure to create the FIRST (npy_path) temp file already skips
+        // this whole block via the `!npy_path.empty()` guard.
+        bool all_output_temps_created = true;
         for (int j = 1; j < expected_outputs; ++j) {
             auto tmpl = (std::filesystem::temp_directory_path() /
                          "tenzor_iree_out_XXXXXX.npy").string();
@@ -1227,32 +1332,44 @@ auto invoke_subprocess(IreeInvoker& self,
                 ::close(fd);
                 out_paths.emplace_back(b.data());
                 input_temps.push_back(out_paths.back());  // reuse the temp guard
+            } else {
+                all_output_temps_created = false;
+                break;
             }
         }
-        std::vector<std::string> argv = base_argv();
-        for (const auto& op : out_paths) {
-            argv.push_back("--output=@" + op);
-        }
-        for (const auto& t : inputs) {
-            argv.push_back(build_input_arg(t, input_temps));
-        }
-        SubprocessResult res = run_subprocess(argv);
-        if (res.exit_code == 0) {
-            std::vector<::tenzor::Tensor> outs;
-            outs.reserve(out_paths.size());
+        if (all_output_temps_created) {
+            std::vector<std::string> argv = base_argv();
             for (const auto& op : out_paths) {
-                outs.push_back(read_npy_output(op));
+                argv.push_back("--output=@" + op);
             }
-            return outs;
-        }
-        // Only the known numpy-encoding gap (bf16) is retried via stdout; any
-        // other non-zero exit is a genuine failure.
-        if (res.stderr_text.find("unsupported data encoding") ==
-            std::string::npos) {
-            throw JitInvokeError(
-                "iree-run-module exit=" + std::to_string(res.exit_code) +
-                "\nstderr:\n" + res.stderr_text +
-                "\nstdout:\n" + res.stdout_text);
+            for (const auto& t : inputs) {
+                argv.push_back(build_input_arg(t, input_temps));
+            }
+            SubprocessResult res = run_subprocess(argv);
+            if (res.exit_code == 0) {
+                std::vector<::tenzor::Tensor> outs;
+                outs.reserve(out_paths.size());
+                for (const auto& op : out_paths) {
+                    outs.push_back(read_npy_output(op));
+                }
+                if (outs.size() != static_cast<std::size_t>(expected_outputs)) {
+                    throw JitInvokeError(
+                        "iree-run-module: bit-exact npy output path returned " +
+                        std::to_string(outs.size()) + " outputs but @main "
+                        "produces " + std::to_string(expected_outputs) +
+                        " -- refusing to silently return a truncated result.");
+                }
+                return outs;
+            }
+            // Only the known numpy-encoding gap (bf16) is retried via stdout;
+            // any other non-zero exit is a genuine failure.
+            if (res.stderr_text.find("unsupported data encoding") ==
+                std::string::npos) {
+                throw JitInvokeError(
+                    "iree-run-module exit=" + std::to_string(res.exit_code) +
+                    "\nstderr:\n" + res.stderr_text +
+                    "\nstdout:\n" + res.stdout_text);
+            }
         }
     }
 
@@ -1611,13 +1728,29 @@ auto detect_rocm_gfx_arch(int device_index) -> std::string {
 
 auto iree_can_initialize_default_device(const std::string& driver_name)
     -> bool {
-    // Per-driver cache: dlopen + device-create costs ~30ms on a warm
-    // laptop and tests may probe the same driver dozens of times.
+    // JIT-R123: fold the raw CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES env
+    // value into the cache key, mirroring shared_iree_hal_device's JIT-R118
+    // fix and detect_rocm_gfx_arch's JIT-R129 fix. Without this, a process
+    // that changes the visible-devices env var between two probes for the
+    // same driver reuses the FIRST probe's true/false answer even though it
+    // no longer reflects which physical GPU ordinal 0 actually binds to --
+    // e.g. probing "false" while the only GPU is hidden, then hiding a
+    // DIFFERENT GPU and reusing that stale "false" even though ordinal 0 is
+    // now a real, available device (or vice versa).
+    const char* visible_devices_env =
+        (driver_name == "hip") ? std::getenv("HIP_VISIBLE_DEVICES")
+                                : std::getenv("CUDA_VISIBLE_DEVICES");
+    const std::string cache_key = driver_name + "|" +
+        (visible_devices_env != nullptr ? visible_devices_env : "");
+
+    // Per-driver(+visible-devices) cache: dlopen + device-create costs
+    // ~30ms on a warm laptop and tests may probe the same driver dozens of
+    // times.
     static std::mutex cache_mu;
     static std::unordered_map<std::string, bool> cache;
     {
         std::lock_guard<std::mutex> g(cache_mu);
-        auto it = cache.find(driver_name);
+        auto it = cache.find(cache_key);
         if (it != cache.end()) return it->second;
     }
 
@@ -1654,9 +1787,29 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
     // invocation for this driver.
     bool inproc_ok = false;
     try {
+        // JIT-R109: shared_iree_runtime_instance()/shared_iree_hal_device()
+        // now each return an already-retained reference (retained under the
+        // same lock cleanup_shared_iree_state() uses to release them, to
+        // close the TOCTOU use-after-free this finding originally covered).
+        // This probe only needs them for the duration of this synchronous
+        // check -- the shared cache itself (not this function) is what
+        // keeps the real objects alive for later real invocations -- so
+        // release both again once done, via RAII guards that also cover
+        // the exception path (e.g. a throw from shared_iree_hal_device()
+        // after instance was already acquired must still release instance).
         iree_runtime_instance_t* instance = shared_iree_runtime_instance();
+        struct InstanceGuard {
+            iree_runtime_instance_t* p;
+            ~InstanceGuard() { if (p) iree_runtime_instance_release(p); }
+        } instance_guard{instance};
+
         iree_hal_device_t* device = shared_iree_hal_device(
             instance, driver_name, hal_device_uri(driver_name, 0), 0);
+        struct DeviceGuard {
+            iree_hal_device_t* p;
+            ~DeviceGuard() { if (p) iree_hal_device_release(p); }
+        } device_guard{device};
+
         inproc_ok = device != nullptr;
     } catch (...) {
         inproc_ok = false;
@@ -1664,7 +1817,7 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
 
     if (inproc_ok) {
         std::lock_guard<std::mutex> g(cache_mu);
-        cache[driver_name] = true;
+        cache[cache_key] = true;
         return true;
     }
 
@@ -1684,7 +1837,7 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
         run_module = resolve_iree_run_module();
     } catch (...) {
         std::lock_guard<std::mutex> g(cache_mu);
-        cache[driver_name] = false;
+        cache[cache_key] = false;
         return false;
     }
     // Probe directly via fork/exec (no shell): `iree-run-module
@@ -1704,7 +1857,7 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
     }
 
     std::lock_guard<std::mutex> g(cache_mu);
-    cache[driver_name] = subproc_ok;
+    cache[cache_key] = subproc_ok;
     return subproc_ok;
 }
 

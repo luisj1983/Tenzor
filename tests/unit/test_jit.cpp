@@ -11,9 +11,12 @@
 #include "../../include/tenzor/jit/compiler.hpp"
 #include "../../include/tenzor/jit/serialization.hpp"
 #include "../../include/tenzor/jit/graph.hpp"
+#include "../../include/tenzor/backend/dispatch_interceptor.hpp"
 #include <memory>
 #include <fstream>
 #include <filesystem>
+#include <atomic>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -91,6 +94,70 @@ TEST_F(JITTest, TraceSimpleModel) {
     auto output = traced->forward(input);
     EXPECT_EQ(output.tensor().shape()[0], 2);
     EXPECT_EQ(output.tensor().shape()[1], 5);
+}
+
+// JIT-R138: CompiledModule::forward()'s retrace path (device/dtype/shape
+// mismatch against the CompiledModule's currently-traced graph) calls
+// CompiledModule::trace(source_module_, input), which for real executes
+// source_module_->forward(input) once (inside jit::trace()) to build the
+// fresh graph -- then discards that real output and unconditionally calls
+// graph_->forward({input}) again on the SAME input to produce the value
+// actually returned to the caller. Both the trace-time execution and the
+// interpreter replay dispatch the real underlying ops, so whichever single
+// external forward() call happens to trigger a retrace runs the module's
+// computation TWICE instead of once. Detected via total dispatch-call count:
+// a call that does NOT need to retrace (same shape as the last trace)
+// dispatches N ops; a call that DOES need to retrace must also dispatch
+// exactly N ops for a correct single-execution implementation, not 2N.
+TEST_F(JITTest, ForwardRetraceDoesNotDoubleExecuteUnderlyingOps) {
+    auto model = std::make_shared<SimpleLinearModel>();
+
+    Tensor dummy({2, 10}, DType::Float32, Device::cpu());
+    dummy.fill_(1.0f);
+    auto traced = jit::trace(model, dummy);
+    ASSERT_NE(traced, nullptr);
+
+    auto count_dispatches_during = [](const std::function<void()>& fn) -> int {
+        std::atomic<int> count{0};
+        {
+            InterceptorGuard guard(
+                [&count](OpId op, std::span<const Tensor> inputs,
+                         const OpAttributes& attrs, DispatchNext next) {
+                    count.fetch_add(1, std::memory_order_relaxed);
+                    return next(op, inputs, attrs);
+                });
+            fn();
+        }
+        return count.load();
+    };
+
+    // Baseline: same shape as the trace dummy -> no retrace needed, exactly
+    // one graph execution's worth of dispatches.
+    Tensor same_shape_input({2, 10}, DType::Float32, Device::cpu());
+    same_shape_input.fill_(1.0f);
+    Variable same_shape_var(same_shape_input, false);
+    int baseline_dispatches = count_dispatches_during([&] {
+        auto out = traced->forward(same_shape_var);
+        EXPECT_EQ(out.tensor().shape()[0], 2);
+    });
+    ASSERT_GT(baseline_dispatches, 0);
+
+    // A DIFFERENT batch size forces forward() onto the shape-mismatch
+    // retrace path.
+    Tensor retrace_input({4, 10}, DType::Float32, Device::cpu());
+    retrace_input.fill_(1.0f);
+    Variable retrace_var(retrace_input, false);
+    int retrace_dispatches = count_dispatches_during([&] {
+        auto out = traced->forward(retrace_var);
+        EXPECT_EQ(out.tensor().shape()[0], 4);
+    });
+
+    EXPECT_EQ(retrace_dispatches, baseline_dispatches)
+        << "forward()'s retrace path dispatched " << retrace_dispatches
+        << " ops for a single external call vs. " << baseline_dispatches
+        << " for a no-retrace call of the same model -- the trace-time "
+           "execution's real result was discarded and the graph was "
+           "executed again on the same input (JIT-R138)";
 }
 
 TEST_F(JITTest, InfersPhase13TracedOpShapes) {

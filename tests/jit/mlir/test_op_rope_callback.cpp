@@ -22,6 +22,8 @@
 #include <filesystem>
 #include <random>
 
+#include "mlir_target_util.hpp"
+
 namespace cc = ::tenzor::jit::mlir_jit::customcalls;
 
 namespace {
@@ -216,21 +218,41 @@ TEST(OpRoPECallback, EndToEndPluginPathMatchesEager) {
     ASSERT_NE(mlir.find("call @tenzor_plugin.rope_apply"),
               std::string::npos) << mlir;
 
-    tzm::CompileOptions opts;
-    opts.target         = "llvm-cpu";
-    opts.plugin_enabled = true;
-    opts.cache_dir      = make_tmp_cache_dir_rope();
-    auto artifact = tzm::compile_mlir(mlir, opts);
-    auto invoker  = tzm::IreeInvoker::load(
-        artifact, tzm::IreeInvoker::Mode::InProcess);
+    // JIT-R128: fan out over every available IREE target, mirroring
+    // test_op_rope_expand.cpp -- the plugin callback itself always runs the
+    // computation on the host, but the surrounding compiled module's HAL
+    // buffer marshaling is genuinely target-specific.
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
+    for (const auto& target : mt::available_iree_targets()) {
+        tzm::CompileOptions opts;
+        opts.target         = target;
+        opts.plugin_enabled = true;
+        opts.cache_dir      = make_tmp_cache_dir_rope();
+        auto artifact = tzm::compile_mlir(mlir, opts);
+        std::unique_ptr<tzm::IreeInvoker> invoker;
+        try {
+            invoker = tzm::IreeInvoker::load(
+                artifact, tzm::IreeInvoker::Mode::InProcess);
+        } catch (const std::exception& e) {
+            std::error_code _ec;
+            std::filesystem::remove_all(opts.cache_dir, _ec);
+            if (std::string(e.what()).find("no driver") != std::string::npos ||
+                std::string(e.what()).find("NOT_FOUND") != std::string::npos) {
+                continue;
+            }
+            throw;
+        }
 
-    auto outs = invoker->invoke({x_t, cos_t, sin_t});
-    ASSERT_EQ(outs.size(), 1u);
-    auto diff = ::tenzor::max(::tenzor::abs(eager_out - outs[0]))
-                    .item<float>();
-    EXPECT_LT(diff, 1e-5f)
-        << "plugin-path RoPE diverged from eager-dispatcher by " << diff;
+        auto outs = invoker->invoke({x_t, cos_t, sin_t});
+        ASSERT_EQ(outs.size(), 1u) << "target=" << target;
+        auto diff = ::tenzor::max(::tenzor::abs(eager_out - outs[0]))
+                        .item<float>();
+        EXPECT_LT(diff, 1e-5f)
+            << "plugin-path RoPE diverged from eager-dispatcher by " << diff
+            << " on target=" << target;
 
-    std::error_code _ec;
-    std::filesystem::remove_all(opts.cache_dir, _ec);
+        std::error_code _ec;
+        std::filesystem::remove_all(opts.cache_dir, _ec);
+    }
 }

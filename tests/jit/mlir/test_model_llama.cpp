@@ -413,6 +413,13 @@ void run_jit_match(const std::string& target) {
     ASSERT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
         << "MiniLlama did NOT run through IREE (silent eager fallback); target="
         << target;
+    // JIT-R117: misses>=1 alone cannot distinguish "compiled and ran" from
+    // "attempted a compile, failed, and quietly ran eager" -- see
+    // mlir_target_util.hpp's assert_jit_used() for the full rationale.
+    ASSERT_EQ(::tenzor::jit::mlir_jit::cache_stats().eager_fallbacks, 0u)
+        << "MiniLlama silently fell back to eager (compiled path never "
+           "actually ran; the parity check below is vacuous); target="
+        << target;
 
     const auto e_shape = eager.tensor().shape();
     const auto j_shape = jit_out.tensor().shape();

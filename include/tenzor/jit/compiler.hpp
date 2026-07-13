@@ -928,8 +928,12 @@ private:
  * (Float16/BFloat16) for compute-heavy operations while keeping
  * precision-sensitive operations in Float32.
  *
- * Only active on GPU-device graphs. Must be explicitly enabled
- * or triggered via "max-autotune" compilation mode.
+ * Only active on GPU-device graphs. NOT wired into Compiler::optimize()'s
+ * default pass pipeline, and NOT triggered by "max-autotune" compilation
+ * mode (an earlier version of this pass was auto-triggered by max-
+ * autotune; that wiring was deliberately removed). Currently dead unless
+ * a caller manually constructs a DTypeOptimizationPass and runs it
+ * against a Graph directly.
  */
 class DTypeOptimizationPass : public Pass {
 public:
@@ -1287,7 +1291,18 @@ public:
      *
      * @param g Graph to set
      */
-    auto set_graph(std::shared_ptr<Graph> g) -> void { graph_ = std::move(g); }
+    auto set_graph(std::shared_ptr<Graph> g) -> void {
+        // JIT-R122: a captured CUDA/HIP graph replays the PHYSICAL device
+        // buffers/kernel-launch geometry recorded from the OLD graph_ --
+        // reassigning graph_ without invalidating it left a stale capture
+        // that forward()'s reduce-overhead path could replay against the
+        // new graph's differently-shaped/differently-allocated buffers.
+        // Mirrors the identical invalidate_cuda_graph() call already made
+        // on every other graph_-reassigning entry point (forward(),
+        // optimize_for_inference(), mark_dynamic_dims()).
+        invalidate_cuda_graph();
+        graph_ = std::move(g);
+    }
 
     /**
      * @brief Get the memory plan for this module.
@@ -1437,8 +1452,15 @@ public:
     /// forward() retrace paths re-run THIS closure with ALL inputs instead of the
     /// single-input source-module trace (which would drop args and throw an
     /// "argument count mismatch").
+    ///
+    /// The closure's second parameter is an optional out-param (mirroring
+    /// jit::trace()'s out_result/out_results): when non-null, the closure must
+    /// publish the REAL outputs it computed while retracing, so the caller can
+    /// reuse them instead of replaying the returned graph a second time on the
+    /// same inputs (JIT-R138).
     auto set_retrace_fn(
-        std::function<std::shared_ptr<CompiledModule>(const std::vector<Variable>&)> fn)
+        std::function<std::shared_ptr<CompiledModule>(const std::vector<Variable>&,
+                                                        std::vector<Variable>*)> fn)
         -> void {
         retrace_fn_ = std::move(fn);
     }
@@ -1450,6 +1472,14 @@ public:
     auto set_traced_signature(const std::vector<Variable>& example_inputs) -> void;
 
 private:
+    /// Shared implementation behind the public trace(module, example_input)
+    /// overload. Also used internally by forward()'s retrace paths, which pass
+    /// a non-null out_result to capture the REAL output computed while
+    /// retracing (JIT-R138) instead of discarding it and replaying the
+    /// returned graph a second time on the same input.
+    static auto trace_capturing(std::shared_ptr<nn::Module> module,
+                                 const Variable& example_input,
+                                 Variable* out_result) -> std::shared_ptr<CompiledModule>;
     std::shared_ptr<Graph> graph_;                                   ///< IR graph
     std::unordered_map<std::string, std::string> metadata_;          ///< Metadata storage
     MemoryPlan memory_plan_;                                         ///< Memory plan for buffer reuse
@@ -1487,7 +1517,8 @@ private:
     std::string traced_shape_key_;                                   ///< Full shape+device+dtype key the current graph_ is specialized for
     /// Optional multi-input retrace closure (see set_retrace_fn). Non-null for
     /// modules that cannot be retraced via the single-input source_module_ path.
-    std::function<std::shared_ptr<CompiledModule>(const std::vector<Variable>&)> retrace_fn_;
+    std::function<std::shared_ptr<CompiledModule>(const std::vector<Variable>&,
+                                                    std::vector<Variable>*)> retrace_fn_;
 
     /// True once optimize_for_inference() has been called on this module.
     /// The device/dtype-mismatch and ShapeGuard retrace paths in forward()

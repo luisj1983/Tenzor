@@ -97,17 +97,64 @@ auto classify_vulkan_target(const std::string& vendor_lower,
         // all compile as valid, distinct --iree-vulkan-target profiles (a
         // genuinely unrecognized string is rejected outright with "Unknown
         // Vulkan target"). Parse the product name for a generation marker,
-        // mirroring the NVIDIA pattern above; fall back to "rdna3" for
-        // anything unmatched — verified empirically working on this
-        // review's actual RDNA3.5 (gfx1150) integrated GPU, whose marketing
-        // name ("AMD Radeon 890M Graphics") carries no RX-series number to
-        // match against, so it would otherwise fall through with no signal
-        // at all.
-        if (name_lower.find("rx 9") != std::string::npos) return "rdna4";
-        if (name_lower.find("rx 7") != std::string::npos) return "rdna3";
-        if (name_lower.find("rx 6") != std::string::npos) return "rdna2";
-        if (name_lower.find("rx 5") != std::string::npos) return "rdna1";
-        return "rdna3";
+        // mirroring the NVIDIA pattern above.
+        //
+        // JIT-R112 fix: a plain "rx 5" substring collides with the pre-RDNA
+        // Polaris/GCN4 "RX 500-series" (RX 580/570/560/550/590 -- a 3-digit
+        // marketing number) as well as the intended RDNA1 "RX 5000-series"
+        // (RX 5700/5600/5500/5300 XT -- a 4-digit number). Require a full
+        // 4-digit number after the generation digit so Polaris/GCN4 cards
+        // don't get silently misrouted to an RDNA1 target they don't
+        // support. RDNA2/3/4's RX 6000/7000/9000-series numbers have no
+        // legacy 3-digit family to collide with, but the same digit-count
+        // check is applied uniformly for consistency.
+        auto matches_rdna_rx_series = [&](char gen_digit) -> bool {
+            const std::string needle = std::string("rx ") + gen_digit;
+            const auto pos = name_lower.find(needle);
+            if (pos == std::string::npos) return false;
+            std::size_t p = pos + needle.size();
+            int extra_digits = 0;
+            while (p < name_lower.size() &&
+                   name_lower[p] >= '0' && name_lower[p] <= '9') {
+                ++extra_digits;
+                ++p;
+            }
+            // gen_digit itself is the 1st digit; need >=3 more for a full
+            // 4-digit RDNA-generation number (e.g. "5" + "700" = "5700").
+            return extra_digits >= 3;
+        };
+        if (matches_rdna_rx_series('9')) return "rdna4";
+        if (matches_rdna_rx_series('7')) return "rdna3";
+        if (matches_rdna_rx_series('6')) return "rdna2";
+        if (matches_rdna_rx_series('5')) return "rdna1";
+        // CDNA/Instinct datacenter GPUs (MI100/MI200/MI300) are an entirely
+        // different architecture family from consumer RDNA -- plausible for
+        // Tenzor ML workloads, and must never silently receive a consumer
+        // RDNA target guess.
+        if (name_lower.find("instinct") != std::string::npos ||
+            name_lower.find(" mi100") != std::string::npos ||
+            name_lower.find(" mi2") != std::string::npos ||
+            name_lower.find(" mi3") != std::string::npos) {
+            return {};
+        }
+        // No RX-series or Instinct marketing number matched at all -- this
+        // is the case an integrated APU (e.g. "AMD Radeon 890M Graphics",
+        // which carries no RX number) falls into. Fall back to "rdna3",
+        // empirically verified working on this review's actual RDNA3.5
+        // (gfx1150) integrated GPU, so it isn't left with no signal at all.
+        // This default intentionally does NOT apply to the Polaris/GCN4 or
+        // CDNA/Instinct cases above, nor to any OTHER unrecognized-but-RX-
+        // numbered card (handled just below) -- only to genuinely RX/
+        // Instinct-number-less AMD hardware.
+        if (name_lower.find("rx ") == std::string::npos) {
+            return "rdna3";
+        }
+        // An "rx" token IS present (so this isn't the no-signal iGPU case
+        // above) but didn't match any known 4-digit RDNA generation -- e.g.
+        // the 3-digit Polaris/GCN4 "RX 500-series", or any other RX-numbered
+        // but unrecognized generation. Prefer the safe empty default over a
+        // confidently wrong guess, matching the NVIDIA/Intel pattern.
+        return {};
     }
     if (vendor_lower.find("intel") != std::string::npos) {
         // JIT-R131: "arc" -- the previously hardcoded value -- is not merely
@@ -186,21 +233,6 @@ struct MlirInvokerCache {};
 #endif
 
 }  // namespace mlir_detail
-
-namespace {
-// Strict mode is on if the per-call config requests it OR the global
-// TENZOR_JIT_STRICT env var is set to a non-empty, non-"0" value. Centralized so
-// every JIT fallback site — compile failure, graph break / empty trace, and
-// replay failure, on both the nvrtc and mlir backends — applies the identical
-// rule. A graph break that escaped this check would silently degrade to eager on
-// one path while another path throws: an inconsistent strict contract across
-// backends and between inference and training.
-auto jit_strict_enabled(bool config_strict) -> bool {
-    if (config_strict) return true;
-    const char* s = std::getenv("TENZOR_JIT_STRICT");
-    return s && *s && *s != '0';
-}
-}  // namespace
 
 // ============================================================================
 // CompiledFunction
@@ -428,6 +460,19 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
         }
     }
     if (compiled_module) {
+        // JIT-R120: the entire cache-hit path (below, including its reduce-
+        // overhead/CUDA-graph replay/capture sub-branch) used to have no
+        // exception safety net at all -- any runtime failure (a ShapeGuard
+        // mismatch with no source_module_ to retrace, CUDA OOM, an internal
+        // dispatch error) propagated uncaught regardless of config_.strict,
+        // silently violating the documented non-strict "compile-or-eager"
+        // contract that both the cache-MISS branch below and the mlir
+        // backend's cache-hit path (mlir_invoke's C2 wrapper) already honor.
+        // fn_ is guaranteed NOT to have run yet on a cache hit (only
+        // compiled_module methods are called below), so falling back to
+        // fn_(inputs) here can never double-execute a side-effecting
+        // closure.
+        try {
             // reduce-overhead mode: capture and replay CUDA graphs. This path
             // mutates shared CUDA-graph state and warmup_counts_; serialize it.
             // CUDA-graph capture only applies to CUDA/ROCm; for CPU/Vulkan/OneAPI
@@ -514,6 +559,14 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
                     "CompiledFunction: compiled graph produced no outputs");
             }
             return outs[0];
+        } catch (const std::exception& e) {
+            if (jit_strict_mode_enabled(config_.strict)) throw;
+            TENZOR_LOG_WARN(
+                "JIT cache-hit replay failed ({} backend, target={}): {}. "
+                "Falling back to eager execution.",
+                config_.backend, config_.target, e.what());
+            return fn_(inputs);
+        }
     }
 
     // Cache miss: trace, compile, and cache. Trace ONCE — fn_() runs a single
@@ -567,7 +620,7 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
         // want this to be silent: it would hide regressions in the JIT pipeline.
         // In non-strict mode log a WARN every time so callers can see exactly
         // which graphs fail.
-        if (jit_strict_enabled(config_.strict)) {
+        if (jit_strict_mode_enabled(config_.strict)) {
             throw;
         }
         TENZOR_LOG_WARN("JIT compilation failed ({} backend, target={}): {}. "
@@ -582,7 +635,7 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
             if (cache_.size() < static_cast<size_t>(config_.max_retraces)) {
                 cache_[key] = compiled;
             }
-        } else if (config_.fullgraph || jit_strict_enabled(config_.strict)) {
+        } else if (config_.fullgraph || jit_strict_mode_enabled(config_.strict)) {
             // fullgraph=True must error on ANY graph break — including the
             // .item()/in-place breaks that now surface via the trace hooks
             // (JIT-F054), not only unmapped-op breaks caught by the interceptor.
@@ -653,13 +706,7 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
             // fn_ itself threw (before finishing): a genuine closure error —
             // propagate it exactly as a plain eager call would.
             if (!fn_ran_this_call) throw;
-            bool strict = config_.strict;
-            if (!strict) {
-                if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
-                    strict = true;
-                }
-            }
-            if (strict) throw;
+            if (jit_strict_mode_enabled(config_.strict)) throw;
             TENZOR_LOG_WARN("JIT grad compile failed: {}. Falling back to eager "
                             "autograd on the input's backend.", e.what());
             return grad_result;  // fn_ already ran once (grad-enabled result)
@@ -670,7 +717,7 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
             // autograd while the same config would throw on the mlir inference
             // path — an inconsistent strict contract between inference and
             // training. In non-strict mode WARN so the fallback is visible.
-            if (config_.fullgraph || jit_strict_enabled(config_.strict)) {
+            if (config_.fullgraph || jit_strict_mode_enabled(config_.strict)) {
                 throw std::runtime_error(
                     "JIT grad trace produced no compiled graph (graph break or "
                     "empty trace) and fullgraph/strict mode is enabled");
@@ -696,13 +743,7 @@ auto CompiledFunction::grad_invoke(std::span<const Variable> inputs) -> Variable
     try {
         outs = compiled_module->forward_grad(input_vars);
     } catch (const std::exception& e) {
-        bool strict = config_.strict;
-        if (!strict) {
-            if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
-                strict = true;
-            }
-        }
-        if (strict) throw;
+        if (jit_strict_mode_enabled(config_.strict)) throw;
         TENZOR_LOG_WARN("JIT grad replay fell back to eager autograd: {}", e.what());
         // If THIS call traced fn_ (cache miss above), reuse that grad-enabled
         // result — re-running fn_ here would double-execute a side-effecting
@@ -1162,14 +1203,7 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
         // lowering gap on CUDA/ROCm — the documented strict contract is "JIT
         // coverage gaps throw loudly". Without this, identical strict code threw
         // on a CUDA lowering gap but silently ran eager on OneAPI/MPS.
-        bool strict = config_.strict;
-        if (!strict) {
-            if (const char* s = std::getenv("TENZOR_JIT_STRICT");
-                s && *s && *s != '0') {
-                strict = true;
-            }
-        }
-        if (strict) {
+        if (jit_strict_mode_enabled(config_.strict)) {
             throw std::runtime_error(
                 "MLIR JIT (strict): device '" + dev.to_string() +
                 "' has no IREE target backend (Intel OneAPI / Apple MPS have no "
@@ -1207,14 +1241,7 @@ auto CompiledFunction::mlir_invoke(std::span<const Variable> inputs) -> Variable
     try {
         return mlir_invoke_impl(inputs, &traced_result, &fn_attempted, &fn_ok);
     } catch (const std::exception& e) {
-        bool strict = config_.strict;
-        if (!strict) {
-            if (const char* s = std::getenv("TENZOR_JIT_STRICT");
-                s && *s && *s != '0') {
-                strict = true;
-            }
-        }
-        if (strict) throw;
+        if (jit_strict_mode_enabled(config_.strict)) throw;
         if (fn_ok) {
             TENZOR_LOG_WARN(
                 "MLIR JIT: compile/run failed (target={}): {}. Reusing the "
@@ -1321,15 +1348,9 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
         // Trace produced nothing (graph break in fullgraph mode, or the
         // function only ran ops the interceptor doesn't capture). Either
         // surface a hard error (strict) or log + degrade to eager.
-        bool strict = config_.strict;
-        if (!strict) {
-            if (const char* s = std::getenv("TENZOR_JIT_STRICT"); s && *s && *s != '0') {
-                strict = true;
-            }
-        }
         // fullgraph=True must also error on a graph break here (JIT-F054), not
         // only in strict mode.
-        if (strict || config_.fullgraph) {
+        if (jit_strict_mode_enabled(config_.strict) || config_.fullgraph) {
             throw std::runtime_error(
                 "CompiledFunction::mlir_invoke: trace produced no graph "
                 "(graph break; config.fullgraph / TENZOR_JIT_STRICT).");

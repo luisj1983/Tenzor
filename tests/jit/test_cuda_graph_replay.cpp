@@ -30,6 +30,8 @@
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/tenzor.hpp>
 
+#include "../backend_parity/golden_util.hpp"
+
 using namespace tenzor;
 
 namespace {
@@ -62,6 +64,16 @@ protected:
         tenzor::initialize();
         gpus_ = available_gpus();
         if (gpus_.empty()) {
+            // JIT-R129: a bare GTEST_SKIP() here would silently hide a CI box
+            // that's supposed to have a CUDA/ROCm GPU but where the driver
+            // failed to init -- honor the same TENZOR_REQUIRE_MULTI_BACKEND
+            // hard-fail escalation the other GPU-gated suites use (e.g.
+            // test_jit_backend_parity.cpp's NvrtcVsMlirDirectParity_NormOpsF16).
+            if (::tenzor::testing::golden::require_multi_backend()) {
+                FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1) "
+                          "but no CUDA/ROCm device is available; CUDA-graph "
+                          "capture is a GPU-only path (no CPU fallback).";
+            }
             GTEST_SKIP() << "No CUDA/ROCm device available; graph capture is a "
                             "GPU-only path (no CPU fallback).";
         }
@@ -263,6 +275,78 @@ TEST_F(CudaGraphReplay, IntermediateBufferSurvivesUnrelatedAllocationAfterCaptur
   }  // for each gpu
 }
 
+// JIT-R116: OpId::LayerNorm's CUDA kernel returns {output, mean, inv_std} --
+// mean/inv_std are written by the SAME kernel launch that writes output
+// (needed by fused_layer_norm_cuda's single-pass algorithm), but execute_node
+// only exposes `output` as this node's declared Graph output (mean/inv_std
+// have no Value id in an inference-only replay). Before the fix, those two
+// extra Tensors were local C++ temporaries with no other reference once
+// execute_node's `result` vector went out of scope -- freed back to the
+// CachingAllocator's pool immediately after capture, even though the SAME
+// captured kernel launch keeps writing into their exact address on every
+// future replay. This is the identical corruption shape as
+// IntermediateBufferSurvivesUnrelatedAllocationAfterCapture above, just for a
+// dispatch result that never became a tracked Graph Variable at all.
+TEST_F(CudaGraphReplay, LayerNormSavedStatsScratchBufferDoesNotCorruptUnrelatedAllocation) {
+  for (const Device& cuda : gpus_) {
+    SCOPED_TRACE("device: " + cuda.to_string());
+
+    constexpr int64_t kBatch = 8;
+    constexpr int64_t kFeat = 64;
+    auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
+        return {nn::functional::layer_norm(args[0], {kFeat})};
+    };
+
+    Tensor x0 = full({kBatch, kFeat}, 1.0f, DType::Float32, cuda);
+    std::vector<Variable> trace_inputs = {Variable(x0, /*requires_grad=*/false)};
+
+    std::shared_ptr<jit::Graph> graph = jit::trace(closure, trace_inputs);
+    ASSERT_NE(graph, nullptr);
+    bool has_layer_norm_node = false;
+    for (const auto& node : graph->nodes()) {
+        if (node->op_type() == jit::OpType::LayerNorm) has_layer_norm_node = true;
+    }
+    ASSERT_TRUE(has_layer_norm_node)
+        << "test requires nn::functional::layer_norm to trace as a single "
+           "OpType::LayerNorm node (the path that discards mean/inv_std)";
+
+    auto module = std::make_shared<jit::CompiledModule>(graph);
+    module->capture_cuda_graph({x0});
+    ASSERT_TRUE(module->has_cuda_graph());
+
+    // Plant a canary matching mean/inv_std's shape+dtype+device ({kBatch},
+    // Float32) right after capture returns -- the most likely candidate to
+    // receive the just-freed scratch buffer's address if it was not pinned.
+    constexpr float kSentinel = -98765.0f;
+    Tensor canary = full({kBatch}, kSentinel, DType::Float32, cuda);
+
+    // Replay with a fresh input -- this physically re-executes the captured
+    // LayerNorm kernel, which unconditionally rewrites mean/inv_std at
+    // whatever address it recorded for them at capture time.
+    Tensor x1 = full({kBatch, kFeat}, 5.0f, DType::Float32, cuda);
+    std::vector<Tensor> replay_inputs = {x1};
+    ASSERT_TRUE(module->replay_cuda_graph(replay_inputs));
+
+    auto outs = module->replay_cuda_graph_outputs();
+    ASSERT_EQ(outs.size(), 1u);
+
+    // The unrelated canary, which the caller never passed to the graph in
+    // any way, must be untouched. A corrupted canary means the replay's
+    // discarded-scratch-buffer write landed on memory the caller believes
+    // it privately owns -- exactly the silent-corruption scenario JIT-R116
+    // describes.
+    Tensor canary_host = canary.to(Device::cpu());
+    const float* cp = canary_host.data<float>();
+    for (int64_t i = 0; i < canary_host.numel(); ++i) {
+        ASSERT_FLOAT_EQ(cp[i], kSentinel)
+            << "canary tensor at " << i << " was corrupted by graph replay -- "
+               "LayerNorm's discarded mean/inv_std scratch buffer's freed "
+               "address was handed to an unrelated allocation while the "
+               "captured graph still wrote into it every replay";
+    }
+  }  // for each gpu
+}
+
 // R3-02: CompiledModule's internal retrace paths (device/dtype-mismatch and
 // ShapeGuard-triggered, both in forward()) reassign graph_ to a freshly
 // retraced replacement without invalidating any CUDA/HIP graph already
@@ -374,5 +458,46 @@ TEST_F(CudaGraphReplay, MarkDynamicDimsInvalidatesStaleCudaGraph) {
         << "a CUDA/HIP graph captured before mark_dynamic_dims() must not "
            "survive it -- mark_dynamic_dims() mutates *graph_'s Value shape "
            "metadata in place (no pointer swap)";
+  }  // for each gpu
+}
+
+// JIT-R122 regression: unlike optimize_for_inference()/mark_dynamic_dims()
+// (which mutate *graph_ in place) set_graph() does a full POINTER swap of
+// graph_ -- but a captured CUDA/HIP graph replays the OLD graph's physical
+// device buffers/kernel-launch geometry regardless of which mutation style
+// produced the staleness. Before the fix, set_graph() was the one
+// graph_-reassigning entry point with no invalidate_cuda_graph() call at
+// all, so has_cuda_graph() stayed true and replay_cuda_graph() would keep
+// replaying the PRE-set_graph() kernel sequence against buffers sized/
+// shaped for a completely different graph.
+TEST_F(CudaGraphReplay, SetGraphInvalidatesStaleCudaGraph) {
+  for (const Device& cuda : gpus_) {
+    SCOPED_TRACE("device: " + cuda.to_string());
+
+    auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
+        return {args[0] + args[0]};
+    };
+    Tensor x0 = full({4}, 1.0f, DType::Float32, cuda);
+    std::vector<Variable> trace_inputs = {Variable(x0, /*requires_grad=*/false)};
+    std::shared_ptr<jit::Graph> graph = jit::trace(closure, trace_inputs);
+    ASSERT_NE(graph, nullptr);
+
+    auto module = std::make_shared<jit::CompiledModule>(graph);
+    module->capture_cuda_graph({x0});
+    ASSERT_TRUE(module->has_cuda_graph())
+        << "capture must succeed before the mutation this test exercises";
+
+    auto other_closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
+        return {args[0] * args[0]};
+    };
+    std::shared_ptr<jit::Graph> other_graph = jit::trace(other_closure, trace_inputs);
+    ASSERT_NE(other_graph, nullptr);
+    module->set_graph(other_graph);
+
+    EXPECT_FALSE(module->has_cuda_graph())
+        << "a CUDA/HIP graph captured before set_graph() must not survive "
+           "it -- set_graph() pointer-swaps graph_ to an entirely different "
+           "graph, so replaying the stale capture would run the OLD "
+           "graph's kernels/buffers while forward() now runs the NEW one";
   }  // for each gpu
 }

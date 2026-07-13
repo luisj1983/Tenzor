@@ -71,6 +71,17 @@ public:
     /// or "local-task" for CPU). Reflects the ordinal that `load()` resolved.
     auto device_uri() const -> const std::string& { return device_uri_; }
 
+    /// The underlying iree_hal_device_t* (opaque here to avoid leaking the
+    /// IREE C API into this header) this invoker's device_uri()/device_index
+    /// resolved to via the shared, process-lifetime device cache
+    /// (InProcess mode only -- nullptr in Subprocess mode, which has no
+    /// in-process device handle). Exposed purely for identity comparison in
+    /// tests (JIT-R118: verifying two invokers for the same driver/ordinal
+    /// under DIFFERENT CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES values get
+    /// DISTINCT cached device objects rather than silently sharing one bound
+    /// to the wrong physical GPU) -- not meant for production use.
+    auto raw_device_handle_for_testing() const -> const void* { return device_handle_; }
+
     /// Invoke the `@main` function with the given input tensors. Returns the
     /// output tensors in the order they were returned by the MLIR function.
     /// Float32 and Float64 dtypes are supported; other dtypes throw
@@ -182,6 +193,17 @@ auto detect_rocm_gfx_arch(int device_index) -> std::string;
 /// requiring ROCm hardware.
 auto remap_hip_visible_device_index(int hip_index,
                                      const char* hip_visible_devices) -> int;
+
+/// Force the shared IREE runtime instance / HAL device cache teardown that
+/// normally only runs once, via std::atexit, at real process exit. Exposed
+/// purely so a test can deterministically exercise the exact teardown-vs-
+/// concurrent-use race that JIT-R109 fixed, without needing to actually
+/// terminate the process. PERMANENTLY disables shared_iree_runtime_instance()/
+/// shared_iree_hal_device() for the remaining lifetime of the process (they
+/// correctly throw afterward rather than reviving a freed pointer) -- must
+/// only be called from a test that is the last (or only) use of the MLIR JIT
+/// InProcess path in its process.
+auto testing_force_shared_iree_state_cleanup() -> void;
 
 /// Thrown when iree-run-module reports a runtime failure. Carries the full
 /// stderr text for debugging.

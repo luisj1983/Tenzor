@@ -181,3 +181,170 @@ TEST(PatternMatcherAffineShapeGuard, RmsNormAbsorbsScalarGamma) {
     EXPECT_EQ(matches[0].nodes.size(), 6u)
         << "a scalar affine operand (numel==1) must still be absorbed";
 }
+
+// Builds the same decomposed RMSNorm as build_decomposed_rms_norm, except
+// the normalizing Div's dividend is a FOREIGN external tensor unrelated to
+// x (instead of x itself) -- simulating an adjacent-but-unrelated Div node
+// that happens to consume the running rms/sqrt value as one operand.
+auto build_decomposed_rms_norm_foreign_div_operand(Graph& g) -> void {
+    auto dev = Device::cpu();
+    auto x = g.create_value("x", {kRows, kC}, DType::Float32, dev);
+
+    auto sq_out = g.create_value("sq", {kRows, kC}, DType::Float32, dev);
+    auto n0 = g.create_node(OpType::Pow, "sq_pow");
+    n0->add_input(x);
+    n0->set_attr("exponent", 2.0);
+    sq_out->set_node(n0);
+    n0->add_output(sq_out);
+    g.add_node(n0);
+
+    auto mean_out = g.create_value("mean", {kRows, 1}, DType::Float32, dev);
+    auto n1 = g.create_node(OpType::Mean, "mean");
+    n1->add_input(sq_out);
+    n1->set_int_attr("dim", -1);
+    n1->set_bool_attr("keepdim", true);
+    mean_out->set_node(n1);
+    n1->add_output(mean_out);
+    g.add_node(n1);
+
+    auto eps = g.create_value("eps", {}, DType::Float32, dev);
+    auto eps_out = g.create_value("mean_eps", {kRows, 1}, DType::Float32, dev);
+    auto n2 = g.create_node(OpType::Add, "add_eps");
+    n2->add_input(mean_out);
+    n2->add_input(eps);
+    eps_out->set_node(n2);
+    n2->add_output(eps_out);
+    g.add_node(n2);
+
+    auto sqrt_out = g.create_value("rms", {kRows, 1}, DType::Float32, dev);
+    auto n3 = g.create_node(OpType::Sqrt, "sqrt");
+    n3->add_input(eps_out);
+    sqrt_out->set_node(n3);
+    n3->add_output(sqrt_out);
+    g.add_node(n3);
+
+    // JIT-R114: dividend is `foreign`, NOT x -- an operand with no
+    // legitimate connection to this normalization chain at all.
+    auto foreign = g.create_value("foreign", {kRows, kC}, DType::Float32, dev);
+    auto norm_out = g.create_value("normalized", {kRows, kC}, DType::Float32, dev);
+    auto n4 = g.create_node(OpType::Div, "normalize");
+    n4->add_input(foreign);
+    n4->add_input(sqrt_out);
+    norm_out->set_node(n4);
+    n4->add_output(norm_out);
+    g.add_node(n4);
+
+    auto affine = g.create_value("affine_operand", {kC}, DType::Float32, dev);
+    auto out = g.create_value("out", {kRows, kC}, DType::Float32, dev);
+    auto n5 = g.create_node(OpType::Mul, "affine_mul");
+    n5->add_input(norm_out);
+    n5->add_input(affine);
+    out->set_node(n5);
+    n5->add_output(out);
+    g.add_node(n5);
+
+    g.set_inputs({x, foreign});
+    g.set_outputs({out});
+}
+
+// JIT-R114 regression: the normalizing Div previously had NO operand
+// validation at all -- unlike the Add(eps)/Mul(gamma) steps around it. A
+// Div whose dividend is a genuinely foreign tensor (not x, not any earlier
+// node in this chain) must NOT be silently absorbed into the RMSNorm
+// match; extended_codegen's fused kernel only ever reads x and gamma/beta,
+// so a foreign operand folded in here would be silently dropped/misread.
+TEST(PatternMatcherAffineShapeGuard, RmsNormRejectsForeignDivOperand) {
+    Graph g;
+    build_decomposed_rms_norm_foreign_div_operand(g);
+
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(g);
+    ASSERT_EQ(matches.size(), 1u)
+        << "the RMS core (Pow/Mean/Add/Sqrt) must still match up to Sqrt";
+    EXPECT_EQ(matches[0].nodes.size(), 4u)
+        << "a Div consuming a genuinely foreign (non-x, non-chain) operand "
+           "must NOT be absorbed -- match should stop at Sqrt (4 nodes), "
+           "leaving Div/Mul unfused for the correct eager path";
+    for (const auto& n : matches[0].nodes) {
+        EXPECT_NE(n->op_type(), OpType::Div)
+            << "the foreign-operand Div must not be part of the fused match";
+    }
+}
+
+// JIT-R113 regression: a dynamic/unresolved reduction-axis dim (this
+// codebase's <= 0 sentinel) must not silently multiply through into
+// norm_size -- an unresolved norm_size could otherwise coincide with an
+// unrelated candidate operand's own numel, incorrectly passing the
+// affine-shape guard. Build the same decomposed RMSNorm but with the
+// reduced axis's size reported as the dynamic-shape sentinel (0): no match
+// should be produced at all (norm_size cannot be computed), rather than a
+// match that misabsorbs based on a bogus norm_size.
+TEST(PatternMatcherAffineShapeGuard, RmsNormRejectsDynamicShapeSentinelDim) {
+    Graph g;
+    auto dev = Device::cpu();
+    // JIT-R113: the reduced (last) dim is reported as 0 -- this codebase's
+    // sentinel for "dynamic/unresolved", not a real 0-sized tensor.
+    auto x = g.create_value("x", {kRows, 0}, DType::Float32, dev);
+
+    auto sq_out = g.create_value("sq", {kRows, 0}, DType::Float32, dev);
+    auto n0 = g.create_node(OpType::Pow, "sq_pow");
+    n0->add_input(x);
+    n0->set_attr("exponent", 2.0);
+    sq_out->set_node(n0);
+    n0->add_output(sq_out);
+    g.add_node(n0);
+
+    auto mean_out = g.create_value("mean", {kRows, 1}, DType::Float32, dev);
+    auto n1 = g.create_node(OpType::Mean, "mean");
+    n1->add_input(sq_out);
+    n1->set_int_attr("dim", -1);
+    n1->set_bool_attr("keepdim", true);
+    mean_out->set_node(n1);
+    n1->add_output(mean_out);
+    g.add_node(n1);
+
+    auto eps = g.create_value("eps", {}, DType::Float32, dev);
+    auto eps_out = g.create_value("mean_eps", {kRows, 1}, DType::Float32, dev);
+    auto n2 = g.create_node(OpType::Add, "add_eps");
+    n2->add_input(mean_out);
+    n2->add_input(eps);
+    eps_out->set_node(n2);
+    n2->add_output(eps_out);
+    g.add_node(n2);
+
+    auto sqrt_out = g.create_value("rms", {kRows, 1}, DType::Float32, dev);
+    auto n3 = g.create_node(OpType::Sqrt, "sqrt");
+    n3->add_input(eps_out);
+    sqrt_out->set_node(n3);
+    n3->add_output(sqrt_out);
+    g.add_node(n3);
+
+    auto norm_out = g.create_value("normalized", {kRows, 0}, DType::Float32, dev);
+    auto n4 = g.create_node(OpType::Div, "normalize");
+    n4->add_input(x);
+    n4->add_input(sqrt_out);
+    norm_out->set_node(n4);
+    n4->add_output(norm_out);
+    g.add_node(n4);
+
+    // A [0]-shaped operand would (pre-fix) compute onumel==0, coinciding
+    // with the sentinel-tainted norm_size==0, and be silently absorbed.
+    auto affine = g.create_value("affine_operand", {0}, DType::Float32, dev);
+    auto out = g.create_value("out", {kRows, 0}, DType::Float32, dev);
+    auto n5 = g.create_node(OpType::Mul, "affine_mul");
+    n5->add_input(norm_out);
+    n5->add_input(affine);
+    out->set_node(n5);
+    n5->add_output(out);
+    g.add_node(n5);
+
+    g.set_inputs({x});
+    g.set_outputs({out});
+
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(g);
+    EXPECT_TRUE(matches.empty())
+        << "a dynamic-shape-sentinel reduction dim must reject the whole "
+           "match (norm_size cannot be computed), not silently absorb an "
+           "operand based on a bogus 0/negative norm_size";
+}

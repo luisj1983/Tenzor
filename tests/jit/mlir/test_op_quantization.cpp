@@ -42,6 +42,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <optional>
 #include <random>
 #include <string>
 
@@ -83,17 +84,40 @@ auto rel_l2(const ::tenzor::Tensor& a, const ::tenzor::Tensor& b) -> float {
 // Compile a Graph directly (bypassing CompiledFunction, which never applies
 // QuantizationPass) and invoke it via the same low-level compile_mlir +
 // IreeInvoker path test_iree_invoke.cpp exercises.
+//
+// JIT-R128: takes an explicit target so callers can fan out over every
+// available IREE target instead of hardcoding llvm-cpu (GPU-specific INT8/
+// per-channel-scale codegen bugs were previously invisible to this suite).
+// Returns std::nullopt only when this target's IREE runtime has no
+// in-process HAL driver registered on this host (a runtime-availability
+// fact, not a lowering defect -- mirrors test_op_rms_norm_expand.cpp's
+// ExpandResultMatchesHandComputed); any genuine lowering/compile/invoke
+// failure propagates and fails the test.
 auto lower_compile_invoke(const tzj::Graph& g, const std::vector<::tenzor::Tensor>& inputs,
-                          const std::string& tag) -> std::vector<::tenzor::Tensor> {
+                          const std::string& tag, const std::string& target)
+    -> std::optional<std::vector<::tenzor::Tensor>> {
     tzm::GraphToMLIR lowerer;
     const std::string mlir_text = lowerer.lower(g);
 
-    const fs::path tmp = make_tmp_dir(tag);
+    const fs::path tmp = make_tmp_dir(tag + "_" + target);
     tzm::CompileOptions opts;
-    opts.target = "llvm-cpu";
+    opts.target = target;
     opts.cache_dir = tmp;
+    if (target == "vulkan-spirv" || target == "vulkan") {
+        opts.vulkan_arch = "ampere";  // enable F16/F64 SPIR-V caps (F032)
+    }
     auto artifact = tzm::compile_mlir(mlir_text, opts);
-    auto invoker = tzm::IreeInvoker::load(artifact);
+    std::unique_ptr<tzm::IreeInvoker> invoker;
+    try {
+        invoker = tzm::IreeInvoker::load(artifact);
+    } catch (const std::exception& e) {
+        fs::remove_all(tmp);
+        if (std::string(e.what()).find("no driver") != std::string::npos ||
+            std::string(e.what()).find("NOT_FOUND") != std::string::npos) {
+            return std::nullopt;
+        }
+        throw;
+    }
     auto outs = invoker->invoke(inputs);
     fs::remove_all(tmp);
     return outs;
@@ -111,7 +135,29 @@ TEST(OpQuantization, QuantizedLinearStaticEndToEnd) {
     const int64_t B = 4, IN = 16, OUT = 8;
     ::tenzor::nn::Linear fp_linear(IN, OUT, /*bias=*/true);
 
-    auto qconfig = ::tenzor::nn::quantization::DefaultQConfigs::default_qconfig();
+    // JIT-R117: DefaultQConfigs::default_qconfig() (and every other named
+    // preset: fast_/qat_/per_channel_asymmetric_/uint8_activation_qconfig)
+    // uses PER-CHANNEL weight quantization. QuantizedLinear::forward_impl's
+    // jit_record_quantized_linear_static() only records a trace node for
+    // the per-tensor weight case (a documented, intentionally-scoped-out
+    // gap for per-channel/INT4 -- see its comment); per-channel silently
+    // records NOTHING, so the trace here produced zero nodes and this test
+    // was, undetected until assert_jit_used() gained an eager_fallbacks
+    // check, comparing eager against itself via a full silent eager
+    // fallback the whole time. Build a per-tensor-weight QConfig by hand so
+    // this test genuinely exercises QuantizedLinearStatic's MLIR lowering,
+    // which is what it claims to test.
+    auto qconfig = ::tenzor::nn::quantization::QConfig(
+        []() { return ::tenzor::nn::quantization::make_observer(
+                   ::tenzor::nn::quantization::QuantizationScheme::PerTensorSymmetric,
+                   /*use_histogram=*/false, /*axis=*/0); },
+        []() { return ::tenzor::nn::quantization::make_observer(
+                   ::tenzor::nn::quantization::QuantizationScheme::PerTensorSymmetric,
+                   /*use_histogram=*/false, /*axis=*/0); },
+        ::tenzor::nn::quantization::QuantDType::INT8,
+        ::tenzor::nn::quantization::QuantDType::INT8,
+        ::tenzor::nn::quantization::QuantizationScheme::PerTensorSymmetric,
+        ::tenzor::nn::quantization::QuantizationScheme::PerTensorSymmetric);
     auto q_layer = ::tenzor::nn::quantization::QuantizedLinear::from_float(fp_linear, qconfig);
 
     // Calibrate the activation qparams so forward_impl records
@@ -127,27 +173,35 @@ TEST(OpQuantization, QuantizedLinearStaticEndToEnd) {
         };
 
     const auto eager = fn(::tenzor::Variable(input, false)).tensor();
-
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
-    mt::reset_jit_stats();
-    auto jitted = compiled(::tenzor::Variable(input, false));
-    mt::assert_jit_used("quantized_linear_static", "llvm-cpu");
-
     auto eager_cpu = eager.to(::tenzor::Device::cpu());
-    auto jit_cpu = jitted.tensor().to(::tenzor::Device::cpu());
-    ASSERT_EQ(eager_cpu.numel(), jit_cpu.numel());
-    EXPECT_LT(rel_l2(eager_cpu, jit_cpu), 1e-3f)
-        << "QuantizedLinearStatic MLIR lowering diverged from eager/interpreter";
+
+    // JIT-R128: fan out over every available IREE target -- this is the only
+    // GPU coverage for QuantizedLinearStatic codegen (NVRTC/HIPRTC codegen
+    // doesn't implement quantization at all).
+    for (const auto& target : mt::available_iree_targets()) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+
+        mt::reset_jit_stats();
+        auto jitted = compiled(::tenzor::Variable(input, false));
+        mt::assert_jit_used("quantized_linear_static", target);
+
+        auto jit_cpu = jitted.tensor().to(::tenzor::Device::cpu());
+        ASSERT_EQ(eager_cpu.numel(), jit_cpu.numel()) << "target=" << target;
+        EXPECT_LT(rel_l2(eager_cpu, jit_cpu), 1e-3f)
+            << "QuantizedLinearStatic MLIR lowering diverged from eager/interpreter on target="
+            << target;
+    }
 }
 
 // ─── QuantizedLinear / QuantizedConv2d (dynamic): manual Graph + QuantizationPass ──
 
 TEST(OpQuantization, QuantizedLinearDynamicEndToEnd) {
+    namespace mt = ::tenzor::testing::mlir;
     ensure_core_init();
+    mt::ensure_core_init();
 
     const int64_t B = 4, IN = 16, OUT = 8;
     ::tenzor::nn::Linear fc(IN, OUT, /*bias=*/true);
@@ -171,16 +225,23 @@ TEST(OpQuantization, QuantizedLinearDynamicEndToEnd) {
     compiler.add_pass(std::make_unique<tzj::QuantizationPass>());
     compiler.optimize(*graph);
 
-    auto outs = lower_compile_invoke(*graph, {input}, "qlinear_dynamic");
-    ASSERT_EQ(outs.size(), 1u);
+    // JIT-R128: fan out over every available IREE target -- this is the
+    // sole GPU coverage path for QuantizedLinear (dynamic) codegen.
+    for (const auto& target : mt::available_iree_targets()) {
+        auto outs = lower_compile_invoke(*graph, {input}, "qlinear_dynamic", target);
+        if (!outs) continue;
+        ASSERT_EQ(outs->size(), 1u) << "target=" << target;
 
-    EXPECT_LT(rel_l2(q_eager, outs[0]), 1e-3f)
-        << "QuantizedLinear (dynamic) MLIR lowering diverged from "
-           "quantized_linear_dynamic eager reference";
+        EXPECT_LT(rel_l2(q_eager, (*outs)[0]), 1e-3f)
+            << "QuantizedLinear (dynamic) MLIR lowering diverged from "
+               "quantized_linear_dynamic eager reference on target=" << target;
+    }
 }
 
 TEST(OpQuantization, QuantizedConv2dDynamicEndToEnd) {
+    namespace mt = ::tenzor::testing::mlir;
     ensure_core_init();
+    mt::ensure_core_init();
 
     const int64_t N = 2, C = 4, H = 8, W = 8, OUTC = 6, K = 3;
     ::tenzor::nn::Conv2d conv(C, OUTC, K, /*stride=*/1, /*padding=*/1);
@@ -204,12 +265,17 @@ TEST(OpQuantization, QuantizedConv2dDynamicEndToEnd) {
     compiler.add_pass(std::make_unique<tzj::QuantizationPass>());
     compiler.optimize(*graph);
 
-    auto outs = lower_compile_invoke(*graph, {input}, "qconv2d_dynamic");
-    ASSERT_EQ(outs.size(), 1u);
+    // JIT-R128: fan out over every available IREE target -- the sole GPU
+    // coverage path for quantized Conv2d codegen.
+    for (const auto& target : mt::available_iree_targets()) {
+        auto outs = lower_compile_invoke(*graph, {input}, "qconv2d_dynamic", target);
+        if (!outs) continue;
+        ASSERT_EQ(outs->size(), 1u) << "target=" << target;
 
-    EXPECT_LT(rel_l2(q_eager, outs[0]), 1e-3f)
-        << "QuantizedConv2d (dynamic) MLIR lowering diverged from "
-           "quantized_conv2d_dynamic eager reference";
+        EXPECT_LT(rel_l2(q_eager, (*outs)[0]), 1e-3f)
+            << "QuantizedConv2d (dynamic) MLIR lowering diverged from "
+               "quantized_conv2d_dynamic eager reference on target=" << target;
+    }
 }
 
 // ─── Standalone Quantize / Dequantize: hand-built Graph (no current producer) ──
@@ -236,15 +302,20 @@ TEST(OpQuantization, DequantizeHandBuiltGraph) {
         p[0] = 2; p[1] = 4; p[2] = -3; p[3] = 127;
     }
 
-    auto outs = lower_compile_invoke(g, {x_t}, "dequantize");
-    ASSERT_EQ(outs.size(), 1u);
-    ASSERT_EQ(outs[0].dtype(), ::tenzor::DType::Float32);
-    const float* p = outs[0].data<const float>();
-    // dequantized = (quantized - zero_point) * scale
-    EXPECT_NEAR(p[0], (2 - 2) * 0.5f, 1e-5f);
-    EXPECT_NEAR(p[1], (4 - 2) * 0.5f, 1e-5f);
-    EXPECT_NEAR(p[2], (-3 - 2) * 0.5f, 1e-5f);
-    EXPECT_NEAR(p[3], (127 - 2) * 0.5f, 1e-5f);
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
+    for (const auto& target : mt::available_iree_targets()) {
+        auto outs = lower_compile_invoke(g, {x_t}, "dequantize", target);
+        if (!outs) continue;
+        ASSERT_EQ(outs->size(), 1u) << "target=" << target;
+        ASSERT_EQ((*outs)[0].dtype(), ::tenzor::DType::Float32) << "target=" << target;
+        const float* p = (*outs)[0].data<const float>();
+        // dequantized = (quantized - zero_point) * scale
+        EXPECT_NEAR(p[0], (2 - 2) * 0.5f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(p[1], (4 - 2) * 0.5f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(p[2], (-3 - 2) * 0.5f, 1e-5f) << "target=" << target;
+        EXPECT_NEAR(p[3], (127 - 2) * 0.5f, 1e-5f) << "target=" << target;
+    }
 }
 
 TEST(OpQuantization, QuantizeHandBuiltGraph) {
@@ -269,15 +340,20 @@ TEST(OpQuantization, QuantizeHandBuiltGraph) {
         p[0] = 0.0f; p[1] = 1.0f; p[2] = -1.5f; p[3] = 62.0f;
     }
 
-    auto outs = lower_compile_invoke(g, {x_t}, "quantize");
-    ASSERT_EQ(outs.size(), 1u);
-    ASSERT_EQ(outs[0].dtype(), ::tenzor::DType::Int8);
-    const int8_t* p = outs[0].data<const int8_t>();
-    // quantized = clamp(round_nearest_even(value/scale) + zero_point, -128, 127)
-    EXPECT_EQ(p[0], 2);   // round(0/0.5)+2 = 2
-    EXPECT_EQ(p[1], 4);   // round(1/0.5)+2 = 4
-    EXPECT_EQ(p[2], -1);  // round(-1.5/0.5)+2 = -3+2 = -1
-    EXPECT_EQ(p[3], 126); // round(62/0.5)+2 = 124+2 = 126
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
+    for (const auto& target : mt::available_iree_targets()) {
+        auto outs = lower_compile_invoke(g, {x_t}, "quantize", target);
+        if (!outs) continue;
+        ASSERT_EQ(outs->size(), 1u) << "target=" << target;
+        ASSERT_EQ((*outs)[0].dtype(), ::tenzor::DType::Int8) << "target=" << target;
+        const int8_t* p = (*outs)[0].data<const int8_t>();
+        // quantized = clamp(round_nearest_even(value/scale) + zero_point, -128, 127)
+        EXPECT_EQ(p[0], 2) << "target=" << target;    // round(0/0.5)+2 = 2
+        EXPECT_EQ(p[1], 4) << "target=" << target;    // round(1/0.5)+2 = 4
+        EXPECT_EQ(p[2], -1) << "target=" << target;   // round(-1.5/0.5)+2 = -3+2 = -1
+        EXPECT_EQ(p[3], 126) << "target=" << target;  // round(62/0.5)+2 = 124+2 = 126
+    }
 }
 
 // R1-09/JIT-R114 regression: emit_static_quantize/emit_static_dequant used to
@@ -323,18 +399,24 @@ TEST(OpQuantization, QuantizeHandBuiltGraphF16) {
     x_f32.data<float>()[0] = 1157.0f;
     ::tenzor::Tensor x_t = x_f32.to(::tenzor::DType::Float16);
 
-    auto outs = lower_compile_invoke(g, {x_t}, "quantize_f16");
-    ASSERT_EQ(outs.size(), 1u);
-    ASSERT_EQ(outs[0].dtype(), ::tenzor::DType::Int8);
-    const int8_t* p = outs[0].data<const int8_t>();
-    // round_nearest_even(1157/9) + (-30) = round_nearest_even(128.5556) - 30
-    //                                     = 129 - 30 = 99 (F32 arithmetic).
-    // The old F16-arithmetic behavior would instead compute 128 - 30 = 98.
-    EXPECT_EQ(p[0], 99)
-        << "F16 quantize computed the divide/round_nearest_even in F16 "
-           "storage precision instead of widening to F32 (eager's actual "
-           "computation dtype) -- the discrete rounding decision flipped "
-           "(got 98, the stale F16-arithmetic tie-to-even result).";
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
+    for (const auto& target : mt::available_iree_targets()) {
+        auto outs = lower_compile_invoke(g, {x_t}, "quantize_f16", target);
+        if (!outs) continue;
+        ASSERT_EQ(outs->size(), 1u) << "target=" << target;
+        ASSERT_EQ((*outs)[0].dtype(), ::tenzor::DType::Int8) << "target=" << target;
+        const int8_t* p = (*outs)[0].data<const int8_t>();
+        // round_nearest_even(1157/9) + (-30) = round_nearest_even(128.5556) - 30
+        //                                     = 129 - 30 = 99 (F32 arithmetic).
+        // The old F16-arithmetic behavior would instead compute 128 - 30 = 98.
+        EXPECT_EQ(p[0], 99)
+            << "F16 quantize computed the divide/round_nearest_even in F16 "
+               "storage precision instead of widening to F32 (eager's actual "
+               "computation dtype) -- the discrete rounding decision flipped "
+               "(got 98, the stale F16-arithmetic tie-to-even result). target="
+            << target;
+    }
 }
 
 TEST(OpQuantization, DequantizeHandBuiltGraphF16) {
@@ -359,15 +441,20 @@ TEST(OpQuantization, DequantizeHandBuiltGraphF16) {
         p[0] = 2; p[1] = 4; p[2] = -3; p[3] = 127;
     }
 
-    auto outs = lower_compile_invoke(g, {x_t}, "dequantize_f16");
-    ASSERT_EQ(outs.size(), 1u);
-    ASSERT_EQ(outs[0].dtype(), ::tenzor::DType::Float16);
-    ::tenzor::Tensor out_f32 = outs[0].to(::tenzor::DType::Float32);
-    const float* p = out_f32.data<const float>();
-    EXPECT_NEAR(p[0], (2 - 2) * 0.5f, 1e-3f);
-    EXPECT_NEAR(p[1], (4 - 2) * 0.5f, 1e-3f);
-    EXPECT_NEAR(p[2], (-3 - 2) * 0.5f, 1e-3f);
-    EXPECT_NEAR(p[3], (127 - 2) * 0.5f, 1e-3f);
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
+    for (const auto& target : mt::available_iree_targets()) {
+        auto outs = lower_compile_invoke(g, {x_t}, "dequantize_f16", target);
+        if (!outs) continue;
+        ASSERT_EQ(outs->size(), 1u) << "target=" << target;
+        ASSERT_EQ((*outs)[0].dtype(), ::tenzor::DType::Float16) << "target=" << target;
+        ::tenzor::Tensor out_f32 = (*outs)[0].to(::tenzor::DType::Float32);
+        const float* p = out_f32.data<const float>();
+        EXPECT_NEAR(p[0], (2 - 2) * 0.5f, 1e-3f) << "target=" << target;
+        EXPECT_NEAR(p[1], (4 - 2) * 0.5f, 1e-3f) << "target=" << target;
+        EXPECT_NEAR(p[2], (-3 - 2) * 0.5f, 1e-3f) << "target=" << target;
+        EXPECT_NEAR(p[3], (127 - 2) * 0.5f, 1e-3f) << "target=" << target;
+    }
 }
 
 TEST(OpQuantization, QuantizeDequantizeRoundTrip) {
@@ -401,12 +488,17 @@ TEST(OpQuantization, QuantizeDequantizeRoundTrip) {
         p[0] = 0.3f; p[1] = -0.7f; p[2] = 1.25f; p[3] = -5.0f; p[4] = 12.0f; p[5] = 0.0f;
     }
 
-    auto outs = lower_compile_invoke(g, {x_t}, "roundtrip");
-    ASSERT_EQ(outs.size(), 1u);
-    const float* in_p = x_t.data<const float>();
-    const float* out_p = outs[0].data<const float>();
-    for (int i = 0; i < 6; ++i) {
-        // Round-trip error must stay within one quantization step (scale=0.1).
-        EXPECT_NEAR(in_p[i], out_p[i], 0.1f + 1e-5f) << "i=" << i;
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
+    for (const auto& target : mt::available_iree_targets()) {
+        auto outs = lower_compile_invoke(g, {x_t}, "roundtrip", target);
+        if (!outs) continue;
+        ASSERT_EQ(outs->size(), 1u) << "target=" << target;
+        const float* in_p = x_t.data<const float>();
+        const float* out_p = (*outs)[0].data<const float>();
+        for (int i = 0; i < 6; ++i) {
+            // Round-trip error must stay within one quantization step (scale=0.1).
+            EXPECT_NEAR(in_p[i], out_p[i], 0.1f + 1e-5f) << "i=" << i << " target=" << target;
+        }
     }
 }

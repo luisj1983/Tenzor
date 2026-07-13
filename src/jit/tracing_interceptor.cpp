@@ -320,6 +320,22 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
         case OpId::LinalgQR:       return OpType::Qr;
         case OpId::LinalgEigh:     return OpType::Eigh;
 
+        // JIT-R110: same pattern as the block above -- these 9 LAPACK-
+        // backed ops already had real backend kernels (dispatched via
+        // try_gpu_dispatch/dispatch()) but no OpType/opid_to_optype mapping
+        // at all, so GPU/complex calls hard graph-broke the whole trace; the
+        // CPU real-dtype path (which never reaches dispatch()) is fixed
+        // separately via manual jit_record_* calls in src/ops/linalg.cpp.
+        case OpId::SolveTriangular:   return OpType::SolveTriangular;
+        case OpId::LinalgEig:         return OpType::LinalgEig;
+        case OpId::LinalgLU:          return OpType::LinalgLU;
+        case OpId::LinalgLUSolve:     return OpType::LinalgLUSolve;
+        case OpId::LinalgHouseholder: return OpType::LinalgHouseholder;
+        case OpId::LinalgLDLFactor:   return OpType::LinalgLDLFactor;
+        case OpId::LinalgLDLSolve:    return OpType::LinalgLDLSolve;
+        case OpId::Ormqr:             return OpType::Ormqr;
+        case OpId::Geqrf:             return OpType::Geqrf;
+
         // Needed for slogdet()'s GPU-dispatch composition (sign(det) *
         // log(abs(det))) to be fully traceable now that Det is mapped above —
         // tenzor::sign() dispatches OpId::Sign unconditionally and was

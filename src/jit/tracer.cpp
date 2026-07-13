@@ -9,6 +9,8 @@
 #include "../../include/tenzor/backend/dispatch_interceptor.hpp"
 #include "../../include/tenzor/core/jit_hooks.hpp"
 #include "../../include/tenzor/ops/creation.hpp"
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +86,15 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Eigvalsh: return "Eigvalsh";
         case OpType::Norm: return "Norm";
         case OpType::Slogdet: return "Slogdet";
+        case OpType::SolveTriangular: return "SolveTriangular";
+        case OpType::LinalgEig: return "LinalgEig";
+        case OpType::LinalgLU: return "LinalgLU";
+        case OpType::LinalgLUSolve: return "LinalgLUSolve";
+        case OpType::LinalgHouseholder: return "LinalgHouseholder";
+        case OpType::LinalgLDLFactor: return "LinalgLDLFactor";
+        case OpType::LinalgLDLSolve: return "LinalgLDLSolve";
+        case OpType::Ormqr: return "Ormqr";
+        case OpType::Geqrf: return "Geqrf";
         case OpType::FlashAttention: return "FlashAttention";
         case OpType::FusedFFN: return "FusedFFN";
         case OpType::ResidualAdd: return "ResidualAdd";
@@ -347,27 +358,32 @@ auto string_to_op_type(const std::string& str) -> OpType {
 // Tracer implementation
 // ============================================================================
 
-namespace {
-// Read TENZOR_JIT_STRICT from the environment. Accepts any non-empty
-// string that is not "0" / "false" as "enabled".
-bool read_strict_mode_from_env() {
+// JIT-R119/JIT-R121: was a locally-duplicated read_strict_mode_from_env()
+// that treated "false"/"False"/"FALSE" as disabled while compile.cpp's
+// separate copies treated any non-"0" string as enabled -- the same env var
+// meant opposite things depending which stage of the pipeline read it. Now
+// delegates to the single shared implementation (declared in tracer.hpp so
+// both tracer.cpp and compile.cpp -- which already depends on tracer.hpp --
+// can call it without a circular include).
+auto jit_strict_mode_enabled(bool config_strict) -> bool {
+    if (config_strict) return true;
     const char* env = std::getenv("TENZOR_JIT_STRICT");
-    if (env == nullptr) return false;
-    if (env[0] == '\0') return false;
+    if (env == nullptr || env[0] == '\0') return false;
     if (std::strcmp(env, "0") == 0) return false;
-    if (std::strcmp(env, "false") == 0) return false;
-    if (std::strcmp(env, "False") == 0) return false;
-    if (std::strcmp(env, "FALSE") == 0) return false;
+    std::string lowered(env);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (lowered == "false") return false;
     return true;
 }
-} // anonymous namespace
 
 auto Tracer::start_trace() -> void {
     clear();
     tracing_ = true;
     // Default strict mode from environment — can be overridden after
-    // start_trace() via set_strict_mode().
-    strict_mode_ = read_strict_mode_from_env();
+    // start_trace() via set_strict_mode(). No per-call config override
+    // exists at trace-start time, so this is purely env-var-driven.
+    strict_mode_ = jit_strict_mode_enabled(false);
     graph_break_count_ = 0;
 }
 
@@ -1088,7 +1104,8 @@ auto TracingGuard::get_graph(const std::vector<Variable>& inputs,
 // ============================================================================
 
 auto trace(std::shared_ptr<nn::Module> module,
-           const Variable& dummy_input) -> std::shared_ptr<Graph> {
+           const Variable& dummy_input,
+           Variable* out_result) -> std::shared_ptr<Graph> {
     if (!module) {
         throw std::runtime_error("Cannot trace null module");
     }
@@ -1102,12 +1119,19 @@ auto trace(std::shared_ptr<nn::Module> module,
     // Run forward pass
     Variable output = module->forward(dummy_input);
 
+    // JIT-R138: publish the real trace-time output so a caller that needs
+    // the actual result for THIS input (e.g. CompiledModule::forward()'s
+    // retrace path) can reuse it instead of replaying the graph a second
+    // time on the same input.
+    if (out_result) *out_result = output;
+
     // End tracing and get graph
     return guard.get_graph({dummy_input}, {output});
 }
 
 auto trace(std::function<std::vector<Variable>(const std::vector<Variable>&)> func,
-           const std::vector<Variable>& inputs) -> std::shared_ptr<Graph> {
+           const std::vector<Variable>& inputs,
+           std::vector<Variable>* out_results) -> std::shared_ptr<Graph> {
     if (!func) {
         throw std::runtime_error("Cannot trace null function");
     }
@@ -1117,6 +1141,9 @@ auto trace(std::function<std::vector<Variable>(const std::vector<Variable>&)> fu
 
     // Run function
     auto outputs = func(inputs);
+
+    // JIT-R138: see the module-tracing overload's comment.
+    if (out_results) *out_results = outputs;
 
     // End tracing and get graph
     return guard.get_graph(inputs, outputs);

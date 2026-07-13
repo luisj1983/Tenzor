@@ -15,12 +15,30 @@ layout(push_constant) uniform PushConstants {
     uint num_elements;  // number of COMPLEX elements, not floats
 };
 
+// JIT-R127: GLSL's length(vec2(a,b)) computes sqrt(a*a + b*b) directly,
+// which overflows to Inf for |a| or |b| >~ 1.06e19 (float32) even when the
+// true hypot value is representable -- diverging from CPU/CUDA/ROCm/
+// OneAPI's hypotf-based sign() for very-large-magnitude complex inputs
+// (e.g. from an ill-conditioned det()/slogdet() feeding sign()). Standard
+// overflow-safe two-argument hypot: scale by the larger magnitude first so
+// the squared ratio never overflows before the true (representable)
+// result would.
+float hypot_safe(float x, float y) {
+    x = abs(x);
+    y = abs(y);
+    float mx = max(x, y);
+    float mn = min(x, y);
+    if (mx == 0.0) return 0.0;
+    float r = mn / mx;
+    return mx * sqrt(1.0 + r * r);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= num_elements) return;
     float a = data_in[idx * 2u];
     float b = data_in[idx * 2u + 1u];
-    float mag = length(vec2(a, b));
+    float mag = hypot_safe(a, b);
     if (mag > 0.0) {
         data_out[idx * 2u]      = a / mag;
         data_out[idx * 2u + 1u] = b / mag;

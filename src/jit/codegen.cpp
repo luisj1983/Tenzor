@@ -402,8 +402,24 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
 auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
     const std::string T = dtype_to_cuda_type(group.dtype);        // storage type
     const std::string C = elementwise_compute_type(group.dtype);  // compute type
+    // JIT-R134: naming purely by step COUNT let two semantically different
+    // fusion groups (e.g. a lone Sigmoid vs. a lone Tanh, or [Add,Relu] vs
+    // [Sub,Gelu]) with equal step count/dtype/device-arch/numel collapse
+    // onto the SAME AutotuneCache key (CompiledKernel::launch() builds the
+    // key from this name) even though FusionGroup::compute_signature()
+    // correctly distinguishes them as separate cached CompiledKernel
+    // objects -- a block size autotuned for one kernel silently got reused
+    // for a completely different one. Fold a hash of the full op-sequence
+    // signature into the name so distinct fusion patterns get distinct
+    // autotune keys; purely a naming addition, does not change compile()'s
+    // C-identifier validity (hex digits only).
     std::string kernel_name = "fused_elementwise_" +
-        std::to_string(group.steps.size()) + "_ops";
+        std::to_string(group.steps.size()) + "_ops_" +
+        [&group]() {
+            std::ostringstream hex;
+            hex << std::hex << std::hash<std::string>{}(group.signature);
+            return hex.str();
+        }();
 
     std::ostringstream body;
 
@@ -806,8 +822,24 @@ auto KernelCache::get_or_compile(const FusionGroup& group) -> std::shared_ptr<Co
 
     // Generate source code
     auto source = KernelCodegen::generate(group);
+    // JIT-R134: naming purely by step COUNT let two semantically different
+    // fusion groups (e.g. a lone Sigmoid vs. a lone Tanh, or [Add,Relu] vs
+    // [Sub,Gelu]) with equal step count/dtype/device-arch/numel collapse
+    // onto the SAME AutotuneCache key (CompiledKernel::launch() builds the
+    // key from this name) even though FusionGroup::compute_signature()
+    // correctly distinguishes them as separate cached CompiledKernel
+    // objects -- a block size autotuned for one kernel silently got reused
+    // for a completely different one. Fold a hash of the full op-sequence
+    // signature into the name so distinct fusion patterns get distinct
+    // autotune keys; purely a naming addition, does not change compile()'s
+    // C-identifier validity (hex digits only).
     std::string kernel_name = "fused_elementwise_" +
-        std::to_string(group.steps.size()) + "_ops";
+        std::to_string(group.steps.size()) + "_ops_" +
+        [&group]() {
+            std::ostringstream hex;
+            hex << std::hex << std::hash<std::string>{}(group.signature);
+            return hex.str();
+        }();
 
     // Compile for the group's target GPU (its context + compute arch), not a
     // hardcoded device 0. Select CUDA vs ROCm runtime by the group's device type.

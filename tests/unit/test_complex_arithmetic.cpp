@@ -150,6 +150,50 @@ TEST_P(ComplexArithmeticTest, ComplexAbs) {
     }
 }
 
+// JIT-R140: CPU's sign() previously had no Complex64/128 branch at all and
+// threw "sign: unsupported dtype", while CUDA/ROCm/OneAPI/Vulkan all
+// support it (sign(z) = z/|z| for |z|!=0, else 0+0i). Verify CPU now
+// matches that same formula, including the overflow-safe-magnitude and
+// zero-input edge cases the GPU backends' hypot-based implementations
+// already handle correctly.
+TEST_P(ComplexArithmeticTest, ComplexSign) {
+    auto a = Tensor({int64_t(3)}, DType::Complex64, device);
+    a.data<std::complex<float>>()[0] = {3.0f, 4.0f};   // |z|=5
+    a.data<std::complex<float>>()[1] = {0.0f, 0.0f};   // zero input
+    a.data<std::complex<float>>()[2] = {-1.0f, 0.0f};  // negative real axis
+
+    auto result = sign(a).to(Device::cpu());
+    ASSERT_EQ(result.dtype(), DType::Complex64);
+    auto* rp = result.data<std::complex<float>>();
+
+    EXPECT_NEAR(rp[0].real(), 0.6f, 1e-5f);   // 3/5
+    EXPECT_NEAR(rp[0].imag(), 0.8f, 1e-5f);   // 4/5
+    EXPECT_NEAR(std::abs(rp[0]), 1.0f, 1e-5f);
+
+    EXPECT_EQ(rp[1].real(), 0.0f);
+    EXPECT_EQ(rp[1].imag(), 0.0f);
+
+    EXPECT_NEAR(rp[2].real(), -1.0f, 1e-5f);
+    EXPECT_NEAR(rp[2].imag(), 0.0f, 1e-5f);
+}
+
+TEST_P(ComplexArithmeticTest, Complex128SignMatchesFormula) {
+    auto a = Tensor({int64_t(2)}, DType::Complex128, device);
+    a.data<std::complex<double>>()[0] = {6.0, 8.0};   // |z|=10
+    a.data<std::complex<double>>()[1] = {0.0, 0.0};
+
+    auto result = sign(a).to(Device::cpu());
+    ASSERT_EQ(result.dtype(), DType::Complex128);
+    auto* rp = result.data<std::complex<double>>();
+
+    EXPECT_NEAR(rp[0].real(), 0.6, 1e-12);
+    EXPECT_NEAR(rp[0].imag(), 0.8, 1e-12);
+    EXPECT_NEAR(std::abs(rp[0]), 1.0, 1e-12);
+
+    EXPECT_EQ(rp[1].real(), 0.0);
+    EXPECT_EQ(rp[1].imag(), 0.0);
+}
+
 TEST_P(ComplexArithmeticTest, ComplexRealAdd) {
     auto complex_t = Tensor({int64_t(2)}, DType::Complex64, device);
     auto real_t = Tensor({int64_t(2)}, DType::Float32, device);

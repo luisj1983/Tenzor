@@ -419,6 +419,51 @@ TEST(Codegen, AutotuneCacheEntryReusedWithoutModeActive) {
     }
 }
 
+// JIT-R134 regression: two semantically DIFFERENT single-step fusion groups
+// (Relu vs Neg -- same step count, dtype, device-arch, and numel) must get
+// DISTINCT AutotuneCache entries, not collide onto one shared key. Before
+// the fix, CompiledKernel::launch()'s autotune key was built purely from
+// "fused_elementwise_<N>_ops" (N = step count only), so these two groups'
+// block-size choices would silently alias.
+TEST(Codegen, AutotuneCacheKeyDistinguishesDifferentSingleStepOps) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    ScopedAutotuneDiskCache scoped_disk_cache;
+    AutotuneCache::instance().clear();
+
+    auto group_relu = build_fusion({
+        {ElemOp::Relu, 0, -1, 0.0},
+    }, 1, DType::Float32);
+    auto group_neg = build_fusion({
+        {ElemOp::Neg, 0, -1, 0.0},
+    }, 1, DType::Float32);
+
+    std::vector<float> in(4096, 1.0f);
+    Tensor cpu = from_data(in.data(), {4096});
+
+    for (const auto& dev : devs) {
+        Tensor gpu = cpu.to(dev);
+        {
+            AutotuneModeGuard guard(true);
+            (void)execute_fused(group_relu, {gpu});
+        }
+        size_t size_after_relu = AutotuneCache::instance().size();
+        ASSERT_GT(size_after_relu, 0u);
+
+        {
+            AutotuneModeGuard guard(true);
+            (void)execute_fused(group_neg, {gpu});
+        }
+        size_t size_after_neg = AutotuneCache::instance().size();
+        EXPECT_GT(size_after_neg, size_after_relu)
+            << dev.to_string() << ": Relu and Neg (same step count/dtype/"
+               "device/numel, different op) must record SEPARATE autotune "
+               "cache entries, not collide onto one shared key";
+    }
+}
+
 TEST(Codegen, KernelCacheHit) {
     auto& cache = KernelCache::instance();
     size_t compilations_before = cache.num_compilations();

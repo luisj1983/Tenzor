@@ -15,6 +15,7 @@
 #include "../../include/tenzor/backend/backend.hpp"  // Backend::copy / CopyKind
 #include <algorithm>
 #include <cstdio>
+#include <optional>
 #include <stdexcept>
 
 #ifdef TENZOR_HAS_ROCM
@@ -39,12 +40,18 @@ CompiledModule::CompiledModule(std::shared_ptr<Graph> graph)
 
 auto CompiledModule::trace(std::shared_ptr<nn::Module> module,
                             const Variable& example_input) -> std::shared_ptr<CompiledModule> {
+    return trace_capturing(module, example_input, nullptr);
+}
+
+auto CompiledModule::trace_capturing(std::shared_ptr<nn::Module> module,
+                                      const Variable& example_input,
+                                      Variable* out_result) -> std::shared_ptr<CompiledModule> {
     if (!module) {
         throw std::runtime_error("Cannot trace null module");
     }
 
     // Use the existing jit::trace function to build the graph
-    auto graph = jit::trace(module, example_input);
+    auto graph = jit::trace(module, example_input, out_result);
 
     auto compiled = std::make_shared<CompiledModule>(graph);
     // Record the device / dtype the graph was traced with so forward() can
@@ -194,6 +201,16 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             {input.tensor().device()});
     }
 
+    // JIT-R138: when a retrace freshly re-traces source_module_ against THIS
+    // exact input, tracing already genuinely executes the module for real —
+    // discarding that result and then replaying the rebuilt graph on the same
+    // input would run the module's computation twice for one logical
+    // forward() call. `fresh_result` captures that real trace-time output so
+    // it can be reused directly instead. Left empty (and unused) on every
+    // path that doesn't freshly retrace (no retrace needed, or a shape-cache
+    // hit), both of which still need the normal graph_->forward() replay.
+    std::optional<Variable> fresh_result;
+
     // Device/dtype mismatch retrace: if the current graph was traced with a
     // different device or dtype than the incoming input, retrace using the
     // actual input. Cached by shape-key (which now encodes device+dtype).
@@ -217,13 +234,18 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             // replaying the old graph on a new shape silently uses stale shapes.
             // Cache only while under the capacity bound; past it, use the fresh
             // graph for this call without growing the cache.
-            auto retraced = CompiledModule::trace(source_module_, input);
+            Variable traced_output;
+            auto retraced = CompiledModule::trace_capturing(source_module_, input, &traced_output);
             // Mirror THIS module's optimization state onto the retraced
             // replacement (JIT-R008): unconditionally optimizing here made
             // a never-optimized module start silently fusing (and thus
             // computing different numerics -- fusion is not numerically
             // neutral) the instant any input triggered a retrace, while a
             // module the caller HAD optimized stayed unfused on this path.
+            // (traced_output came from the real, UNfused eager forward pass
+            // run during tracing, so it remains the numerically-authoritative
+            // result for THIS call regardless of optimizing graph_ here for
+            // subsequent calls.)
             if (was_optimized_) retraced->optimize_for_inference();
             // JIT-R015: propagate the dynamic-dims config and user metadata_
             // onto the retraced replacement too, mirroring was_optimized_
@@ -241,70 +263,87 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             }
             invalidate_cuda_graph();  // R3-02: see comment above
             graph_ = retraced->graph_;
+            fresh_result = std::move(traced_output);
         }
         traced_device_ = input.tensor().device();
         traced_dtype_  = input.tensor().dtype();
         traced_shape_key_ = key;
     }
 
-    auto results = graph_->forward({input});
-
-    // Check if a ShapeGuard triggered a retrace request
-    if (graph_->needs_retrace() && source_module_) {
-        graph_->reset_retrace();
-
-        auto key = compute_shape_key(input);
-
-        // Check shape cache first
-        auto it = shape_cache_.find(key);
-        if (it != shape_cache_.end()) {
-            invalidate_cuda_graph();  // R3-02: see comment above
-            graph_ = it->second;
-        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
-            // Re-trace with the new input shape and cache
-            auto retraced = CompiledModule::trace(source_module_, input);
-            // Mirror THIS module's optimization state onto the retraced
-            // replacement (JIT-R008): unconditionally optimizing here made
-            // a never-optimized module start silently fusing (and thus
-            // computing different numerics -- fusion is not numerically
-            // neutral) the instant any input triggered a retrace, while a
-            // module the caller HAD optimized stayed unfused on this path.
-            if (was_optimized_) retraced->optimize_for_inference();
-            // JIT-R015: propagate the dynamic-dims config and user metadata_
-            // onto the retraced replacement too, mirroring was_optimized_
-            // just above. Without this, a device/dtype/ShapeGuard-driven
-            // retrace silently drops mark_dynamic_dims()'s symbolic-shape
-            // structure — confirmed perf-only (compute_shape_key() already
-            // retraces unconditionally on every shape change regardless, so
-            // this was never a correctness bug), but it degrades a caller's
-            // "reuse one dynamic-shape graph" configuration into "retrace on
-            // every shape change" for the remaining lifetime of the module.
-            if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
-            retraced->metadata_ = metadata_;
-            shape_cache_[key] = retraced->graph_;
-            invalidate_cuda_graph();  // R3-02: see comment above
-            graph_ = retraced->graph_;
-        }
-        // else: too many distinct shapes, stay on current graph
-
-        // Re-execute with new/cached graph
+    std::vector<Variable> results;
+    if (fresh_result.has_value()) {
+        // JIT-R138: reuse the real output computed while retracing above —
+        // do NOT also replay the (freshly built, guaranteed-matching) graph_
+        // on the same input.
+        results = {std::move(*fresh_result)};
+    } else {
         results = graph_->forward({input});
-    } else if (graph_->needs_retrace()) {
-        // JIT-R015: a ShapeGuard mismatch was detected but this module has no
-        // source_module_ to retrace with (e.g. loaded from serialization
-        // without its originating nn::Module). Graph::forward() now stops as
-        // soon as the guard trips rather than completing the run on
-        // known-mismatched data, so `results` here is whatever was computed
-        // before the trip (possibly empty) -- fail loudly and specifically
-        // rather than either silently returning a partial/stale result or
-        // falling through to the generic "produced no outputs" message below,
-        // which wouldn't explain WHY.
-        graph_->reset_retrace();
-        throw std::runtime_error(
-            "CompiledModule: input shape mismatch detected by a ShapeGuard, "
-            "but no source module is available to retrace with (this "
-            "CompiledModule was likely loaded from a serialized graph without "
-            "its originating nn::Module). Cannot safely continue.");
+
+        // Check if a ShapeGuard triggered a retrace request
+        if (graph_->needs_retrace() && source_module_) {
+            graph_->reset_retrace();
+
+            auto retrace_key = compute_shape_key(input);
+
+            // Check shape cache first
+            auto it = shape_cache_.find(retrace_key);
+            if (it != shape_cache_.end()) {
+                invalidate_cuda_graph();
+                graph_ = it->second;
+                // Re-execute with the cached graph.
+                results = graph_->forward({input});
+            } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+                Variable traced_output;
+                auto retraced = CompiledModule::trace_capturing(source_module_, input, &traced_output);
+                // Mirror THIS module's optimization state onto the retraced
+                // replacement (JIT-R008): unconditionally optimizing here made
+                // a never-optimized module start silently fusing (and thus
+                // computing different numerics -- fusion is not numerically
+                // neutral) the instant any input triggered a retrace, while a
+                // module the caller HAD optimized stayed unfused on this path.
+                if (was_optimized_) retraced->optimize_for_inference();
+                // JIT-R015: propagate the dynamic-dims config and user metadata_
+                // onto the retraced replacement too, mirroring was_optimized_
+                // just above. Without this, a device/dtype/ShapeGuard-driven
+                // retrace silently drops mark_dynamic_dims()'s symbolic-shape
+                // structure — confirmed perf-only (compute_shape_key() already
+                // retraces unconditionally on every shape change regardless, so
+                // this was never a correctness bug), but it degrades a caller's
+                // "reuse one dynamic-shape graph" configuration into "retrace on
+                // every shape change" for the remaining lifetime of the module.
+                if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
+                retraced->metadata_ = metadata_;
+                shape_cache_[retrace_key] = retraced->graph_;
+                invalidate_cuda_graph();
+                graph_ = retraced->graph_;
+                // JIT-R138: reuse the real trace-time output instead of
+                // replaying the freshly built graph again on the same input.
+                results = {std::move(traced_output)};
+            } else {
+                // Too many distinct shapes: stay on the current (mismatched)
+                // graph and re-execute it — this is the only execution on
+                // this branch since the earlier graph_->forward() call above
+                // never completed (it stopped as soon as the ShapeGuard
+                // tripped).
+                results = graph_->forward({input});
+            }
+        } else if (graph_->needs_retrace()) {
+            // JIT-R015: a ShapeGuard mismatch was detected but this module has no
+            // source_module_ to retrace with (e.g. loaded from serialization
+            // without its originating nn::Module). Graph::forward() now stops as
+            // soon as the guard trips rather than completing the run on
+            // known-mismatched data, so `results` here is whatever was computed
+            // before the trip (possibly empty) -- fail loudly and specifically
+            // rather than either silently returning a partial/stale result or
+            // falling through to the generic "produced no outputs" message below,
+            // which wouldn't explain WHY.
+            graph_->reset_retrace();
+            throw std::runtime_error(
+                "CompiledModule: input shape mismatch detected by a ShapeGuard, "
+                "but no source module is available to retrace with (this "
+                "CompiledModule was likely loaded from a serialized graph without "
+                "its originating nn::Module). Cannot safely continue.");
+        }
     }
 
     if (results.empty()) {
@@ -384,6 +423,12 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
         throw_if_loaded_shape_mismatch(call_shapes, call_dtypes, call_devices);
     }
 
+    // JIT-R138: see the single-input overload's comment on fresh_result. Here
+    // a retrace's real trace-time outputs (from either retrace_fn_ or
+    // source_module_) are captured so a freshly retraced graph_ is not also
+    // replayed a second time on the same inputs.
+    std::optional<std::vector<Variable>> fresh_results;
+
     auto key = compute_shape_key(inputs);
     if ((source_module_ || retrace_fn_) && !inputs.empty() && key != traced_shape_key_) {
         auto it = shape_cache_.find(key);
@@ -394,14 +439,25 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
             // Prefer the multi-input retrace closure when present (e.g. a
             // multi-argument script): the single-input source_module_ trace would
             // drop all but inputs[0] and throw an argument-count mismatch.
-            auto retraced = retrace_fn_ ? retrace_fn_(inputs)
-                                        : CompiledModule::trace(source_module_, inputs[0]);
+            std::vector<Variable> traced_outputs;
+            std::shared_ptr<CompiledModule> retraced;
+            if (retrace_fn_) {
+                retraced = retrace_fn_(inputs, &traced_outputs);
+            } else {
+                Variable single_output;
+                retraced = CompiledModule::trace_capturing(source_module_, inputs[0], &single_output);
+                traced_outputs = {std::move(single_output)};
+            }
             // Mirror THIS module's optimization state onto the retraced
             // replacement (JIT-R008): unconditionally optimizing here made
             // a never-optimized module start silently fusing (and thus
             // computing different numerics -- fusion is not numerically
             // neutral) the instant any input triggered a retrace, while a
             // module the caller HAD optimized stayed unfused on this path.
+            // (traced_outputs came from the real, UNfused eager forward pass
+            // run during retracing, so they remain the numerically-
+            // authoritative results for THIS call regardless of optimizing
+            // graph_ here for subsequent calls.)
             if (was_optimized_) retraced->optimize_for_inference();
             // JIT-R015: propagate the dynamic-dims config and user metadata_
             // onto the retraced replacement too, mirroring was_optimized_
@@ -419,64 +475,88 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
             }
             invalidate_cuda_graph();  // R3-02: see single-input overload's comment
             graph_ = retraced->graph_;
+            fresh_results = std::move(traced_outputs);
         }
         traced_device_ = inputs[0].tensor().device();
         traced_dtype_  = inputs[0].tensor().dtype();
         traced_shape_key_ = key;
     }
 
-    auto results = graph_->forward(inputs);
-
-    // Check if a ShapeGuard triggered a retrace request
-    if (graph_->needs_retrace() && (source_module_ || retrace_fn_) && !inputs.empty()) {
-        graph_->reset_retrace();
-
-        auto key = compute_shape_key(inputs);
-
-        auto it = shape_cache_.find(key);
-        if (it != shape_cache_.end()) {
-            invalidate_cuda_graph();  // R3-02: see single-input overload's comment
-            graph_ = it->second;
-        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
-            auto retraced = retrace_fn_ ? retrace_fn_(inputs)
-                                        : CompiledModule::trace(source_module_, inputs[0]);
-            // Mirror THIS module's optimization state onto the retraced
-            // replacement (JIT-R008): unconditionally optimizing here made
-            // a never-optimized module start silently fusing (and thus
-            // computing different numerics -- fusion is not numerically
-            // neutral) the instant any input triggered a retrace, while a
-            // module the caller HAD optimized stayed unfused on this path.
-            if (was_optimized_) retraced->optimize_for_inference();
-            // JIT-R015: propagate the dynamic-dims config and user metadata_
-            // onto the retraced replacement too, mirroring was_optimized_
-            // just above. Without this, a device/dtype/ShapeGuard-driven
-            // retrace silently drops mark_dynamic_dims()'s symbolic-shape
-            // structure — confirmed perf-only (compute_shape_key() already
-            // retraces unconditionally on every shape change regardless, so
-            // this was never a correctness bug), but it degrades a caller's
-            // "reuse one dynamic-shape graph" configuration into "retrace on
-            // every shape change" for the remaining lifetime of the module.
-            if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
-            retraced->metadata_ = metadata_;
-            shape_cache_[key] = retraced->graph_;
-            invalidate_cuda_graph();  // R3-02: see single-input overload's comment
-            graph_ = retraced->graph_;
-        }
-
+    std::vector<Variable> results;
+    if (fresh_results.has_value()) {
+        // JIT-R138: reuse the real outputs computed while retracing above —
+        // do NOT also replay the (freshly built, guaranteed-matching) graph_
+        // on the same inputs.
+        results = std::move(*fresh_results);
+    } else {
         results = graph_->forward(inputs);
-    } else if (graph_->needs_retrace()) {
-        // JIT-R015: mirrors the single-input overload above -- a ShapeGuard
-        // mismatch fired but there's no way to retrace (no source_module_/
-        // retrace_fn_, or a niladic call with an empty inputs list).
-        // Graph::forward() now stops as soon as the guard trips, so `results`
-        // here may be empty/incomplete rather than the old fully-computed
-        // (but already-known-wrong) run. Fail loudly instead of silently
-        // returning a partial result to the caller.
-        graph_->reset_retrace();
-        throw std::runtime_error(
-            "CompiledModule: input shape mismatch detected by a ShapeGuard, "
-            "but no source module/retrace closure is available to retrace "
-            "with. Cannot safely continue.");
+
+        // Check if a ShapeGuard triggered a retrace request
+        if (graph_->needs_retrace() && (source_module_ || retrace_fn_) && !inputs.empty()) {
+            graph_->reset_retrace();
+
+            auto retrace_key = compute_shape_key(inputs);
+
+            auto it = shape_cache_.find(retrace_key);
+            if (it != shape_cache_.end()) {
+                invalidate_cuda_graph();  // R3-02: see single-input overload's comment
+                graph_ = it->second;
+                results = graph_->forward(inputs);
+            } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+                std::vector<Variable> traced_outputs;
+                std::shared_ptr<CompiledModule> retraced;
+                if (retrace_fn_) {
+                    retraced = retrace_fn_(inputs, &traced_outputs);
+                } else {
+                    Variable single_output;
+                    retraced = CompiledModule::trace_capturing(source_module_, inputs[0], &single_output);
+                    traced_outputs = {std::move(single_output)};
+                }
+                // Mirror THIS module's optimization state onto the retraced
+                // replacement (JIT-R008): unconditionally optimizing here made
+                // a never-optimized module start silently fusing (and thus
+                // computing different numerics -- fusion is not numerically
+                // neutral) the instant any input triggered a retrace, while a
+                // module the caller HAD optimized stayed unfused on this path.
+                if (was_optimized_) retraced->optimize_for_inference();
+                // JIT-R015: propagate the dynamic-dims config and user metadata_
+                // onto the retraced replacement too, mirroring was_optimized_
+                // just above. Without this, a device/dtype/ShapeGuard-driven
+                // retrace silently drops mark_dynamic_dims()'s symbolic-shape
+                // structure — confirmed perf-only (compute_shape_key() already
+                // retraces unconditionally on every shape change regardless, so
+                // this was never a correctness bug), but it degrades a caller's
+                // "reuse one dynamic-shape graph" configuration into "retrace on
+                // every shape change" for the remaining lifetime of the module.
+                if (!dynamic_dims_.empty()) retraced->mark_dynamic_dims(dynamic_dims_);
+                retraced->metadata_ = metadata_;
+                shape_cache_[retrace_key] = retraced->graph_;
+                invalidate_cuda_graph();  // R3-02: see single-input overload's comment
+                graph_ = retraced->graph_;
+                // JIT-R138: reuse the real trace-time outputs instead of
+                // replaying the freshly built graph again on the same inputs.
+                results = std::move(traced_outputs);
+            } else {
+                // Too many distinct shapes: stay on the current (mismatched)
+                // graph and re-execute it — this is the only execution on this
+                // branch since the earlier graph_->forward() call above never
+                // completed (it stopped as soon as the ShapeGuard tripped).
+                results = graph_->forward(inputs);
+            }
+        } else if (graph_->needs_retrace()) {
+            // JIT-R015: mirrors the single-input overload above -- a ShapeGuard
+            // mismatch fired but there's no way to retrace (no source_module_/
+            // retrace_fn_, or a niladic call with an empty inputs list).
+            // Graph::forward() now stops as soon as the guard trips, so `results`
+            // here may be empty/incomplete rather than the old fully-computed
+            // (but already-known-wrong) run. Fail loudly instead of silently
+            // returning a partial result to the caller.
+            graph_->reset_retrace();
+            throw std::runtime_error(
+                "CompiledModule: input shape mismatch detected by a ShapeGuard, "
+                "but no source module/retrace closure is available to retrace "
+                "with. Cannot safely continue.");
+        }
     }
 
     return results;

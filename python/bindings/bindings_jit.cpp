@@ -381,8 +381,17 @@ void register_jit(py::module_& m) {
              "Enable verbose logging")
         .def("clear_stats", &tenzor::jit::Compiler::clear_stats);
 
-    jit.def("trace", py::overload_cast<std::shared_ptr<tenzor::nn::Module>,
-            const tenzor::Variable&>(&tenzor::jit::trace),
+    // JIT-R138 note: tenzor::jit::trace(module, dummy_input) gained a third
+    // parameter (Variable* out_result = nullptr, for retrace-path double-
+    // exec avoidance) -- py::overload_cast<A, B>(&fn) requires an EXACT
+    // signature match and no longer selects this overload with only 2
+    // template args. A lambda sidesteps overload_cast entirely (and stays
+    // robust to future default-parameter additions).
+    jit.def("trace",
+            [](std::shared_ptr<tenzor::nn::Module> module,
+               const tenzor::Variable& dummy_input) {
+                return tenzor::jit::trace(module, dummy_input);
+            },
             py::arg("module"), py::arg("dummy_input"),
             "Trace a module's forward pass",
             // Y.26: release the GIL during trace — runs the module's

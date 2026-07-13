@@ -372,6 +372,105 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
             // Scalar output.
             return {SymbolicShape()};
 
+        case OpType::SolveTriangular:
+        case OpType::LinalgLUSolve:
+        case OpType::LinalgLDLSolve: {
+            // A/LU_data/LD: (..., N, N), B: (..., N, K) -> (..., N, K)
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2) {
+                return {input_shapes.back()};
+            }
+            return {};
+        }
+
+        case OpType::LinalgHouseholder: {
+            // input: (..., N, K), tau: (..., K) -> Q: (..., N, K)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                return {input_shapes[0]};
+            }
+            return {};
+        }
+
+        case OpType::Ormqr: {
+            // input: (..., N, K), tau: (..., K), other: (..., M, P) ->
+            // result: (..., M, P)
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 3) {
+                return {input_shapes[2]};
+            }
+            return {};
+        }
+
+        case OpType::LinalgEig: {
+            // (..., N, N) -> Wr: (..., N), Wi: (..., N), V: (..., N, N)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto& s = input_shapes[0];
+                auto N_dim = s[s.rank() - 1];
+                std::vector<SymbolicDim> batch_dims;
+                for (size_t d = 0; d + 2 < s.rank(); ++d) batch_dims.push_back(s[d]);
+                auto w_dims = batch_dims;
+                w_dims.push_back(N_dim);
+                return {SymbolicShape(w_dims), SymbolicShape(std::move(w_dims)),
+                        input_shapes[0]};
+            }
+            return {};
+        }
+
+        case OpType::LinalgLU: {
+            // (..., N, N) -> L: (..., N, N), U: (..., N, N), pivots: (..., N)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto& s = input_shapes[0];
+                auto N_dim = s[s.rank() - 1];
+                std::vector<SymbolicDim> batch_dims;
+                for (size_t d = 0; d + 2 < s.rank(); ++d) batch_dims.push_back(s[d]);
+                auto piv_dims = batch_dims;
+                piv_dims.push_back(N_dim);
+                return {input_shapes[0], input_shapes[0],
+                        SymbolicShape(std::move(piv_dims))};
+            }
+            return {};
+        }
+
+        case OpType::LinalgLDLFactor: {
+            // (..., N, N) -> LD: (..., N, N), pivots: (..., N)
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto& s = input_shapes[0];
+                auto N_dim = s[s.rank() - 1];
+                std::vector<SymbolicDim> batch_dims;
+                for (size_t d = 0; d + 2 < s.rank(); ++d) batch_dims.push_back(s[d]);
+                auto piv_dims = batch_dims;
+                piv_dims.push_back(N_dim);
+                return {input_shapes[0], SymbolicShape(std::move(piv_dims))};
+            }
+            return {};
+        }
+
+        case OpType::Geqrf: {
+            // (..., M, N) -> A_factored: (..., M, N), tau: (..., min(M,N))
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() >= 2) {
+                auto& s = input_shapes[0];
+                auto M = s[s.rank() - 2];
+                auto N_dim = s[s.rank() - 1];
+                auto min_dim = [](const SymbolicDim& a, const SymbolicDim& b) -> SymbolicDim {
+                    if (a.is_concrete() && b.is_concrete())
+                        return SymbolicDim(std::min(a.value(), b.value()));
+                    return a.is_concrete() ? a : b;
+                };
+                SymbolicDim K = min_dim(M, N_dim);
+                std::vector<SymbolicDim> batch_dims;
+                for (size_t d = 0; d + 2 < s.rank(); ++d) batch_dims.push_back(s[d]);
+                auto tau_dims = batch_dims;
+                tau_dims.push_back(K);
+                return {input_shapes[0], SymbolicShape(std::move(tau_dims))};
+            }
+            return {};
+        }
+
         case OpType::Slogdet: {
             // (..., N, N) -> sign: (...), logabsdet: (...)
             auto input_shapes = gather_input_shapes(node);

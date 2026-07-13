@@ -421,7 +421,36 @@ enum class OpType {
                          ///< stride/padding/momentum/eps
     FusedSoftmaxCrossEntropy, ///< cross_entropy(logits, targets); inputs
                          ///< [logits, targets], attrs reduction
-    FusedAddReLU         ///< relu(a + b); inputs [a, b]
+    FusedAddReLU,        ///< relu(a + b); inputs [a, b]
+
+    // JIT-R110: these LAPACK-backed linalg ops previously bypassed the
+    // tracer entirely on CPU (direct LAPACKE calls, no dispatch()) and hard-
+    // broke the trace on CUDA/ROCm/Vulkan/OneAPI (real GPU kernels exist,
+    // dispatched via try_gpu_dispatch/dispatch(), but had no OpType to map
+    // to). Mirrors the already-fixed Det/Inv/Solve/Cholesky/Svd/Qr/Eigh/
+    // Eigvalsh/Slogdet pattern.
+    SolveTriangular,      ///< triangular solve; inputs [A, B], attrs
+                         ///< upper/unitriangular
+    LinalgEig,            ///< general (non-symmetric) eigendecomposition;
+                         ///< inputs [A]; outputs [eigenvalues_real,
+                         ///< eigenvalues_imag, eigenvectors]
+    LinalgLU,             ///< LU decomposition with partial pivoting;
+                         ///< inputs [A]; outputs [L, U, pivots]
+    LinalgLUSolve,        ///< solve via a precomputed LU factorization;
+                         ///< inputs [LU_data, pivots, B]
+    LinalgHouseholder,    ///< reconstruct Q from Householder reflectors
+                         ///< (torch.linalg.householder_product); inputs
+                         ///< [input, tau]
+    LinalgLDLFactor,      ///< symmetric indefinite LDL^T factorization;
+                         ///< inputs [A]; outputs [LD, pivots]
+    LinalgLDLSolve,       ///< solve via a precomputed LDL^T factorization;
+                         ///< inputs [LD, pivots, B]
+    Ormqr,                ///< apply Householder-reflector-represented Q to
+                         ///< a matrix; inputs [input, tau, other], attrs
+                         ///< left/transpose
+    Geqrf                 ///< raw LAPACK QR factorization (factored form +
+                         ///< tau, not the explicit Q/R of Qr); inputs
+                         ///< [input]; outputs [A_factored, tau]
 };
 
 /**
@@ -713,10 +742,15 @@ public:
      * brittle for inputs that would take a different branch.
      *
      * Strict mode defaults to the value of the `TENZOR_JIT_STRICT`
-     * environment variable read at `start_trace()` time. Set the env
-     * var to any non-empty, non-"0" value to enable.
+     * environment variable read at `start_trace()` time via the shared
+     * jit_strict_mode_enabled() parser (see its doc comment) -- absent/
+     * empty/"0"/"false" (case-insensitive) disable it, anything else
+     * enables it.
      */
     auto set_strict_mode(bool strict) -> void { strict_mode_ = strict; }
+
+    /// Current strict-mode state (see set_strict_mode()).
+    auto is_strict_mode() const -> bool { return strict_mode_; }
 
 
     /**
@@ -883,6 +917,13 @@ private:
  *
  * @param module Module to trace (must have forward() method)
  * @param dummy_input Example input for tracing
+ * @param out_result Optional out-param receiving the REAL output computed
+ * while tracing (tracing genuinely executes module->forward(dummy_input),
+ * it does not just symbolically record it). Callers that need the actual
+ * result for this exact call (e.g. a retrace triggered mid-forward()) should
+ * capture it here and reuse it instead of replaying the returned graph a
+ * second time on the same input (JIT-R138: replaying after tracing runs the
+ * module's computation twice for one logical call).
  * @return Traced and compiled graph
  *
  * @code
@@ -893,7 +934,8 @@ private:
  * @endcode
  */
 auto trace(std::shared_ptr<nn::Module> module,
-           const Variable& dummy_input) -> std::shared_ptr<Graph>;
+           const Variable& dummy_input,
+           Variable* out_result = nullptr) -> std::shared_ptr<Graph>;
 
 /**
  * @brief Trace a function.
@@ -902,10 +944,13 @@ auto trace(std::shared_ptr<nn::Module> module,
  *
  * @param func Function to trace
  * @param inputs Input variables
+ * @param out_results Optional out-param receiving the REAL outputs computed
+ * while tracing (see the module-tracing overload's out_result doc for why).
  * @return Traced graph
  */
 auto trace(std::function<std::vector<Variable>(const std::vector<Variable>&)> func,
-           const std::vector<Variable>& inputs) -> std::shared_ptr<Graph>;
+           const std::vector<Variable>& inputs,
+           std::vector<Variable>* out_results = nullptr) -> std::shared_ptr<Graph>;
 
 // Forward declaration
 class CompiledModule;
@@ -930,6 +975,23 @@ class CompiledModule;
  */
 auto trace(std::shared_ptr<nn::Module> module,
            const Tensor& dummy_input) -> std::shared_ptr<CompiledModule>;
+
+/**
+ * @brief Centralized TENZOR_JIT_STRICT + per-call strict-mode resolution.
+ *
+ * Strict mode is on if @p config_strict is true OR the TENZOR_JIT_STRICT env
+ * var is set to a value other than absent/empty/"0"/"false" (case-
+ * insensitive). Shared by the tracer (trace-time graph-break handling, via
+ * Tracer::start_trace()) and the compiler (compile-failure / graph-break /
+ * replay-failure fallback handling in compile.cpp) so every JIT strict-mode
+ * decision — whether made while tracing or while compiling/replaying —
+ * applies the identical rule. Before this was centralized, tracer.cpp had
+ * its own separate implementation that treated "false"/"False"/"FALSE" as
+ * disabled while compile.cpp's copies treated any non-"0" string (including
+ * "false") as enabled — the same env var could mean opposite things
+ * depending which stage of the pipeline read it (JIT-R119/JIT-R121).
+ */
+auto jit_strict_mode_enabled(bool config_strict) -> bool;
 
 } // namespace jit
 } // namespace tenzor

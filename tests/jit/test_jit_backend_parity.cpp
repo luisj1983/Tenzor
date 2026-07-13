@@ -6,6 +6,21 @@
  * across all available backends (CPU, CUDA, ROCm, Vulkan, OneAPI).
  * Each test builds a small model on CPU, gets a reference output,
  * then copies parameters to each backend and compares outputs.
+ *
+ * JIT-R135 naming note: despite the suite name, NOT every test here drives
+ * the JIT compiler. Conv2dBNReLU, AttentionBlock, ResNetBottleneck,
+ * LSTMSequence, SoftmaxCrossEntropy, LayerNormMLP, EmbeddingLookup,
+ * MultiHeadAttentionBlock, and ConvPool are pure EAGER cross-backend
+ * comparisons (build on CPU, copy params to each backend, run eager
+ * forward() on each, diff) -- no jit::compile()/CompiledFunction/tracing
+ * anywhere in them. Each is marked "(eager only, no JIT compiler
+ * involved)" at its own "Test N:" banner below. Only the tests whose
+ * bodies construct a jit::CompiledFunction / call jit::compile() (the
+ * JITCompiled* tests, the NvrtcVsMlirDirectParity_* test, the multi-dtype/
+ * complex/int helpers, and LinearChain's JIT-vs-eager half) actually
+ * exercise the JIT compiler. This does not affect correctness -- the eager
+ * cross-backend tests are still valuable numeric coverage on their own --
+ * it only affects what a reader should expect this SUITE NAME to imply.
  */
 
 #include <gtest/gtest.h>
@@ -118,12 +133,15 @@ TEST(JITBackendParity, LinearChain_JitVsEagerAllBackends) {
 }
 
 // ============================================================================
-// Test 2: Conv2dBNReLU — x -> conv2d -> batchnorm2d -> relu
+// Test 2: Conv2dBNReLU — x -> conv2d -> batchnorm2d -> relu (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, Conv2dBNReLU) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     nn::Conv2d conv(3, 16, 3, 1, 1);
     nn::BatchNorm2d bn(16);
@@ -159,12 +177,15 @@ TEST(JITBackendParity, Conv2dBNReLU) {
 }
 
 // ============================================================================
-// Test 3: AttentionBlock — q,k,v -> matmul(q, k.T) / sqrt(d) -> softmax -> matmul(_, v)
+// Test 3: AttentionBlock — q,k,v -> matmul(q, k.T) / sqrt(d) -> softmax -> matmul(_, v) (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, AttentionBlock) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     int64_t batch = 2, seq = 8, d = 16;
     auto q = randn({batch, seq, d}, DType::Float32, Device::cpu());
@@ -197,13 +218,16 @@ TEST(JITBackendParity, AttentionBlock) {
 }
 
 // ============================================================================
-// Test 4: ResNetBottleneck — conv1x1 -> bn -> relu -> conv3x3 -> bn -> relu
+// Test 4: ResNetBottleneck — conv1x1 -> bn -> relu -> conv3x3 -> bn -> relu (eager only, no JIT compiler involved)
 //         -> conv1x1 -> bn -> residual add
 // ============================================================================
 
 TEST(JITBackendParity, ResNetBottleneck) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     int64_t in_ch = 16, mid_ch = 4, out_ch = 16;
 
@@ -257,12 +281,15 @@ TEST(JITBackendParity, ResNetBottleneck) {
 }
 
 // ============================================================================
-// Test 5: LSTMSequence — LSTM cell unrolled for 4 steps
+// Test 5: LSTMSequence — LSTM cell unrolled for 4 steps (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, LSTMSequence) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     int64_t input_size = 16, hidden_size = 32, batch = 2, seq_len = 4;
 
@@ -305,12 +332,15 @@ TEST(JITBackendParity, LSTMSequence) {
 }
 
 // ============================================================================
-// Test 6: SoftmaxCrossEntropy — softmax -> log -> nll_loss chain
+// Test 6: SoftmaxCrossEntropy — softmax -> log -> nll_loss chain (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, SoftmaxCrossEntropy) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     int64_t batch = 4, num_classes = 10;
     auto logits = randn({batch, num_classes}, DType::Float32, Device::cpu());
@@ -334,12 +364,15 @@ TEST(JITBackendParity, SoftmaxCrossEntropy) {
 }
 
 // ============================================================================
-// Test 7: LayerNormMLP — x -> layernorm -> linear -> gelu -> linear
+// Test 7: LayerNormMLP — x -> layernorm -> linear -> gelu -> linear (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, LayerNormMLP) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     int64_t dim = 32;
     nn::LayerNorm ln({dim});
@@ -378,12 +411,15 @@ TEST(JITBackendParity, LayerNormMLP) {
 }
 
 // ============================================================================
-// Test 8: EmbeddingLookup — embedding -> linear -> relu -> sum
+// Test 8: EmbeddingLookup — embedding -> linear -> relu -> sum (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, EmbeddingLookup) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     int64_t vocab = 64, emb_dim = 16, hidden = 8;
     nn::Embedding emb(vocab, emb_dim);
@@ -427,12 +463,15 @@ TEST(JITBackendParity, EmbeddingLookup) {
 }
 
 // ============================================================================
-// Test 9: MultiHeadAttentionBlock — uses nn::MultiheadAttention if available
+// Test 9: MultiHeadAttentionBlock — uses nn::MultiheadAttention if available (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, MultiHeadAttentionBlock) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     int64_t d_model = 32, nhead = 4, seq = 8, batch = 2;
 
@@ -477,12 +516,15 @@ TEST(JITBackendParity, MultiHeadAttentionBlock) {
 }
 
 // ============================================================================
-// Test 10: ConvPool — conv2d -> relu -> maxpool2d -> flatten -> linear
+// Test 10: ConvPool — conv2d -> relu -> maxpool2d -> flatten -> linear (eager only, no JIT compiler involved)
 // ============================================================================
 
 TEST(JITBackendParity, ConvPool) {
     auto backends = get_available_backends();
-    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
+    // JIT-R135: this is a pure eager cross-backend comparison (see the
+    // file-level doc comment) -- the reason string reflects that, not the
+    // JIT compiler.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("eager cross-backend parity");
 
     nn::Conv2d conv(3, 8, 3, 1, 1);   // Output: (1, 8, 8, 8)
     nn::MaxPool2d pool(2);             // Output: (1, 8, 4, 4)
@@ -920,6 +962,13 @@ void check_jit_matches_eager_per_dtype(
                 Tensor replay = compiled(Variable(input, false)).tensor()
                                     .to(DType::Float32).to(Device::cpu());
                 dev.synchronize();
+                // JIT-R117: unlike every other JIT test in this file,
+                // check_jit_matches_eager_per_dtype never asserted the
+                // compiled path was actually taken -- a silent eager
+                // fallback made the comparison below eager-vs-eager.
+                EXPECT_GT(compiled.num_cached(), 0u)
+                    << label << " JIT silently fell back to eager on "
+                    << backend_name(dev) << " / " << d.name;
                 EXPECT_TRUE(tensors_close(eager, replay, d.rtol, d.atol))
                     << label << " JIT replay != eager on " << backend_name(dev)
                     << " / " << d.name;
@@ -965,6 +1014,12 @@ TEST(JITBackendParity, ComplexAndIntegerElementwiseJitParity) {
                 Tensor replay =
                     compiled(Variable(input, false)).tensor().to(Device::cpu());
                 dev.synchronize();
+                // JIT-R117: see check_jit_matches_eager_per_dtype's identical
+                // fix/rationale above -- this test never asserted the
+                // compiled path was actually taken either.
+                EXPECT_GT(compiled.num_cached(), 0u)
+                    << "Complex/Int JIT silently fell back to eager on "
+                    << backend_name(dev) << " / " << d.name;
                 // abs() gives a real magnitude for complex and |v| for integers,
                 // so a single max-abs-diff works across all four dtypes.
                 const double diff = tenzor::max(tenzor::abs(eager - replay))
@@ -1054,6 +1109,13 @@ TEST(JITBackendParity, Float16ElementwiseChainPerStepRounding) {
             backends[i].synchronize();
 
             SCOPED_TRACE("f16 elementwise chain on " + backend_name(backends[i]));
+            // JIT-R117: unlike every other JIT test in this file, this one
+            // never asserted the compiled path was actually taken -- a
+            // silent eager fallback would make the tight bound below pass
+            // vacuously (eager-vs-eager).
+            EXPECT_GT(compiled.num_cached(), 0u)
+                << "f16 elementwise chain JIT silently fell back to eager on "
+                << backend_name(backends[i]);
             // Tight bound: with per-step rounding the JIT kernel reproduces eager's
             // f16 trajectory (pure IEEE mul/add, identical device/host), so the two
             // agree to a couple f16 ULP. The unpatched kernel diverges by >1e-2.

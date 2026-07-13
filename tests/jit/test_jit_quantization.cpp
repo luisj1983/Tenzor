@@ -150,6 +150,23 @@ TEST(JITQuantization, QuantizedConv2dCrossBackend) {
             auto input = input_cpu.to(backends[i]);
 
             Tensor fp32 = conv.forward(Variable(input, false)).tensor();
+            // JIT-R131: independent eager-quantized reference (the SAME
+            // helper the JIT interpreter uses for QuantizedConv2d), mirroring
+            // QuantizedLinearCrossBackend's q_eager check above. Without
+            // this, rel_l2(fp32, q_jit) < 0.1 and the cross-backend
+            // agreement check both trivially pass if QuantizationPass
+            // silently stops retagging Conv2d entirely: an unquantized fp32
+            // output "agrees" with itself exactly on every backend.
+            std::shared_ptr<Variable> conv_weight, conv_bias;
+            for (auto& [pname, pvar] : conv.named_parameters()) {
+                if (pname == "weight") conv_weight = pvar;
+                else if (pname == "bias") conv_bias = pvar;
+            }
+            ASSERT_NE(conv_weight, nullptr);
+            Tensor q_eager = nn::quantization::quantized_conv2d_dynamic(
+                input, conv_weight->tensor(),
+                conv_bias ? std::optional<Tensor>(conv_bias->tensor()) : std::nullopt,
+                /*stride=*/1, /*padding=*/1, /*dilation=*/1, /*groups=*/1);
 
             std::shared_ptr<jit::Graph> graph;
             {
@@ -170,7 +187,12 @@ TEST(JITQuantization, QuantizedConv2dCrossBackend) {
             backends[i].synchronize();
 
             SCOPED_TRACE("quantized conv2d on " + backend_name(backends[i]));
-            // quantized conv ~= fp32 conv within a few percent.
+
+            // (a) JIT-quantized == eager-quantized (same code path) -- catches
+            // QuantizationPass silently not firing on Conv2d.
+            EXPECT_TENSORS_CLOSE(q_eager, q_jit, 1e-3f, 1e-3f);
+
+            // (b) quantized conv ~= fp32 conv within a few percent.
             EXPECT_LT(rel_l2(fp32, q_jit), 0.1f)
                 << "int8-quantized conv2d diverged too far from fp32 on "
                 << backend_name(backends[i]);

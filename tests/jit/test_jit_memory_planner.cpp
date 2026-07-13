@@ -498,6 +498,100 @@ TEST(RematerializationPlannerTest, ExcludesValueWithMultipleConsumers) {
     EXPECT_EQ(v->uses().size(), 2u) << "no consumer should have been redirected";
 }
 
+// JIT-R124 regression: node_index (used to count live consumers) was
+// top-level-only, so a value with ONE top-level consumer and ONE consumer
+// nested inside an If/Loop subgraph read live_consumer_count==1 (the
+// nested one silently uncounted), incorrectly qualifying it for single-
+// consumer rematerialization. Mirrors MemorySwapPlanner's own JIT-R016
+// captured-value shape (test_memory_planner_swap.cpp): the subgraph node's
+// input is the SAME Value object as the outer producer's output, not a
+// distinct subgraph-local placeholder.
+TEST(RematerializationPlannerTest, ExcludesValueWithConsumerNestedInIfSubgraph) {
+    Graph graph;
+    const std::vector<int64_t> shape = {4};
+    auto x = graph.create_value("x", shape, DType::Float32, Device::cpu());
+    auto cond = graph.create_value("cond", {1}, DType::Float32, Device::cpu());
+
+    // Cheap producer with a long-enough live range to otherwise qualify
+    // (mirrors ExcludesValueWithMultipleConsumers's chain1 padding).
+    auto node_a = graph.create_node(OpType::ReLU, "A");
+    auto out_a = graph.create_value("out_A", shape, DType::Float32, Device::cpu());
+    node_a->add_input(x);
+    node_a->add_output(out_a);
+    out_a->set_node(node_a);
+    graph.add_node(node_a);
+
+    // Top-level consumer #1.
+    std::shared_ptr<Value> prev1 = out_a;
+    for (int i = 0; i < 3; ++i) {
+        auto node = graph.create_node(OpType::ReLU, "chain1_" + std::to_string(i));
+        auto out = graph.create_value("chain1_out_" + std::to_string(i), shape,
+                                       DType::Float32, Device::cpu());
+        node->add_input(prev1);
+        node->add_output(out);
+        out->set_node(node);
+        graph.add_node(node);
+        prev1 = out;
+    }
+
+    // If node, purely structural -- does not itself consume out_A.
+    auto if_out = graph.create_value("if_out", shape, DType::Float32, Device::cpu());
+    auto if_node = graph.create_node(OpType::If, "if");
+    if_node->add_input(cond);
+    if_out->set_node(if_node);
+    if_node->add_output(if_out);
+
+    // Nested consumer #2: a node inside the then-branch subgraph captures
+    // out_A directly (same Value object as the outer graph's).
+    auto sub = std::make_shared<Graph>();
+    auto sub_neg = sub->create_node(OpType::Neg, "sub_neg");
+    sub_neg->add_input(out_a);
+    auto sub_out = sub->create_value("sub_out", shape, DType::Float32, Device::cpu());
+    sub_out->set_node(sub_neg);
+    sub_neg->add_output(sub_out);
+    sub->add_node(sub_neg);
+    sub->set_inputs({});
+    sub->set_outputs({sub_out});
+    if_node->set_then_branch(sub);
+    graph.add_node(if_node);
+
+    auto node_y = graph.create_node(OpType::Add, "Y");
+    auto out_y = graph.create_value("out_Y", shape, DType::Float32, Device::cpu());
+    node_y->add_input(prev1);
+    node_y->add_input(if_out);
+    node_y->add_output(out_y);
+    out_y->set_node(node_y);
+    graph.add_node(node_y);
+
+    graph.set_inputs({x, cond});
+    graph.set_outputs({out_y});
+
+    // Sanity: out_A has exactly 2 real consumers (one top-level, one
+    // nested), even though only 1 is visible to a top-level-only index.
+    ASSERT_EQ(out_a->uses().size(), 2u);
+
+    RematerializationPlanner planner;
+    auto candidates = planner.find_candidates(graph);
+    bool found_out_a = false;
+    for (const auto& c : candidates) if (c.value_id == "out_A") found_out_a = true;
+    ASSERT_TRUE(found_out_a);
+
+    size_t applied = planner.apply(graph, candidates);
+    EXPECT_EQ(applied, 0u)
+        << "out_A has 2 live consumers (1 top-level + 1 nested in an If "
+           "subgraph) -- apply() must reject it, not silently undercount "
+           "the nested one and over-credit memory_saved";
+
+    auto v = graph.get_value("out_A");
+    ASSERT_TRUE(v);
+    EXPECT_EQ(v->uses().size(), 2u) << "no consumer should have been redirected";
+    // The nested consumer specifically must still read the ORIGINAL value
+    // (not have been silently redirected to an out-of-scope recompute node
+    // added at the top level).
+    ASSERT_EQ(sub_neg->inputs().size(), 1u);
+    EXPECT_EQ(sub_neg->inputs()[0]->id(), "out_A");
+}
+
 TEST(RematerializationPlannerTest, ExcludesExpensiveOp) {
     Graph graph;
     const std::vector<int64_t> shape = {8, 8};

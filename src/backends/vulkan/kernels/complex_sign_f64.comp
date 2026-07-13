@@ -11,12 +11,27 @@ layout(push_constant) uniform PushConstants {
     uint num_elements;  // number of COMPLEX elements
 };
 
+// JIT-R127: a * a + b * b overflows to Inf for |a| or |b| >~ 1e154 (double)
+// even when the true hypot value is representable -- diverging from CPU/
+// CUDA/ROCm/OneAPI's hypot-based sign() for very-large-magnitude complex
+// inputs. Standard overflow-safe two-argument hypot (see complex_sign.comp
+// for the Float32 variant).
+double hypot_safe(double x, double y) {
+    x = abs(x);
+    y = abs(y);
+    double mx = max(x, y);
+    double mn = min(x, y);
+    if (mx == 0.0) return 0.0;
+    double r = mn / mx;
+    return mx * sqrt(1.0 + r * r);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= num_elements) return;
     double a = data_in[idx * 2u];
     double b = data_in[idx * 2u + 1u];
-    double mag = sqrt(a * a + b * b);
+    double mag = hypot_safe(a, b);
     if (mag > 0.0) {
         data_out[idx * 2u]      = a / mag;
         data_out[idx * 2u + 1u] = b / mag;

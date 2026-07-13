@@ -56,6 +56,22 @@ def pytest_configure(config):
 _SKIP_BACKENDS = {
     s.strip() for s in os.getenv("TENZOR_SKIP_BACKENDS", "").split(",") if s.strip()
 }
+
+
+def _env_flag(name):
+    """Match tests/backend_parity/golden_util.hpp's env_flag(): a var is
+    "on" if it's set, non-empty, and doesn't start with '0'."""
+    v = os.getenv(name, "")
+    return bool(v) and not v.startswith("0")
+
+
+def _require_multi_backend():
+    """JIT-R129: single Python-side source of truth for the C++ suite's
+    TENZOR_REQUIRE_MULTI_BACKEND convention -- turns an unavailable-backend
+    skip into a hard failure so a CI box that's supposed to have e.g. ROCm
+    but where the driver silently failed to init doesn't just quietly skip
+    that parametrization."""
+    return _env_flag("TENZOR_REQUIRE_MULTI_BACKEND")
 ALL_DEVICES = [
     d for d in ["cpu", "cuda", "vulkan", "oneapi", "rocm", "mps"]
     if d not in _SKIP_BACKENDS
@@ -91,16 +107,31 @@ def device(request):
     dev = request.param
     if dev in _SKIP_BACKENDS:
         pytest.skip(f"{dev} excluded via TENZOR_SKIP_BACKENDS")
+
+    unavailable_reason = None
     if dev == "cuda" and not tz.cuda_is_available():
-        pytest.skip("CUDA not available")
+        unavailable_reason = "CUDA not available"
     elif dev == "vulkan" and not tz.vulkan_is_available():
-        pytest.skip("Vulkan not available")
+        unavailable_reason = "Vulkan not available"
     elif dev == "oneapi" and not tz.oneapi_is_available():
-        pytest.skip("OneAPI not available")
+        unavailable_reason = "OneAPI not available"
     elif dev == "rocm" and not tz.rocm_is_available():
-        pytest.skip("ROCm not available")
+        unavailable_reason = "ROCm not available"
     elif dev == "mps" and not tz.mps_is_available():
-        pytest.skip("MPS not available")
+        unavailable_reason = "MPS not available"
+
+    if unavailable_reason is not None:
+        # JIT-R129: honor TENZOR_REQUIRE_MULTI_BACKEND the same way the C++
+        # suite does (tests/backend_parity/golden_util.hpp's require_multi_
+        # backend()) -- a bare skip here would silently hide a CI box that's
+        # supposed to have this backend but where the driver failed to init.
+        if _require_multi_backend():
+            pytest.fail(
+                f"Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1) "
+                f"but {dev} is unavailable: {unavailable_reason}"
+            )
+        pytest.skip(unavailable_reason)
+
     return dev
 
 

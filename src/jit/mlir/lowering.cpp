@@ -1431,9 +1431,28 @@ auto handle_softmax(LoweringContext& ctx,
     else if (cd == ::tenzor::DType::BFloat16) init_max = "0xFF80";
     auto init_m = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, init_m, init_max, {}, cd); body << '\n';
+    // findings.txt JIT-R126: mirror emit_reduce_with_keepdim's/LayerNorm's/
+    // RMSNorm's unconditional Float64-reduce barrier here. softmax calls
+    // emit_stablehlo_reduce directly (bypassing emit_reduce_with_keepdim's
+    // automatic protection), so it needs its own barrier at each of its two
+    // reduce sites, applied per the same rule: whenever the reduce's own
+    // working dtype (cd) is Float64. stablehlo.optimization_barrier is a
+    // documented semantic no-op on every target, so this is safe even for
+    // the reduce_max operand (xc), which is never itself the direct output
+    // of a widening convert in softmax's F64 path (only F16/BF16 widen, and
+    // only to Float32) -- applying it unconditionally for Float64 matches
+    // this codebase's established "protection is automatic, not reasoned
+    // about per call site" policy rather than relying on that distinction.
+    std::string reduce_max_operand = xc;
+    if (cd == ::tenzor::DType::Float64) {
+        auto barriered = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, barriered, xc, shape, cd);
+        body << '\n';
+        reduce_max_operand = barriered;
+    }
     auto m_name = ctx.fresh_name();
-    emit_stablehlo_reduce(body, m_name, xc, init_m, "maximum", reduce_dims,
-                          shape, reduced_shape, cd);
+    emit_stablehlo_reduce(body, m_name, reduce_max_operand, init_m, "maximum",
+                          reduce_dims, shape, reduced_shape, cd);
     body << '\n';
     // broadcast m back
     auto m_b = ctx.fresh_name();
@@ -1452,9 +1471,18 @@ auto handle_softmax(LoweringContext& ctx,
     auto init_s = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, cd), {}, cd);
     body << '\n';
+    // JIT-R126: same barrier rule as reduce_max above, applied to the
+    // reduce_sum operand.
+    std::string reduce_sum_operand = e;
+    if (cd == ::tenzor::DType::Float64) {
+        auto barriered = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, barriered, e, shape, cd);
+        body << '\n';
+        reduce_sum_operand = barriered;
+    }
     auto s_name = ctx.fresh_name();
-    emit_stablehlo_reduce(body, s_name, e, init_s, "add", reduce_dims,
-                          shape, reduced_shape, cd);
+    emit_stablehlo_reduce(body, s_name, reduce_sum_operand, init_s, "add",
+                          reduce_dims, shape, reduced_shape, cd);
     body << '\n';
     auto s_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, s_b, s_name, bcast_dims,
@@ -2058,6 +2086,28 @@ auto handle_conv2d(LoweringContext& ctx,
         ", precision_config = [#stablehlo<precision HIGHEST>, "
         "#stablehlo<precision HIGHEST>]";
 
+    // JIT-R131 follow-up (same mechanism as JIT-R110/emit_stablehlo_dot_general):
+    // IREE's Vulkan/SPIR-V backend can miscompute when an operand chain (e.g.
+    // the dynamic-fake-quantize round-trip's final int8->float convert,
+    // handle_quantized_conv2d_dynamic) fuses directly into a consuming op.
+    // Every stablehlo.dot_general emission in this file already routes both
+    // operands through an unconditional optimization_barrier for exactly this
+    // reason; stablehlo.convolution -- emitted as raw text below, not through
+    // that helper -- never got the same protection, and
+    // QuantizedConv2dDynamicEndToEnd caught the resulting large-magnitude
+    // divergence on vulkan-spirv only (llvm-cpu/cuda numerically correct).
+    // stablehlo.optimization_barrier is a documented no-op on every target, so
+    // both convolution operands are barriered unconditionally rather than only
+    // when fed by a convert, matching this file's "protection is automatic
+    // rather than remembered per call site" policy.
+    auto barrier_conv_operand = [&](const std::string& name,
+                                    const std::vector<int64_t>& shape) -> std::string {
+        auto b = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, b, name, shape, d);
+        body << '\n';
+        return b;
+    };
+
     // Widen the input/weight when needed; all emits below use `d` (== cd).
     std::string x_name = ctx.name_for(x->id());
     std::string w_name = ctx.name_for(w->id());
@@ -2189,8 +2239,10 @@ auto handle_conv2d(LoweringContext& ctx,
                                      /*strides=*/{1, 1, 1, 1}, cur_shape, trimmed,
                                      d);
                 body << '\n';
-                body << '%' << conv_name << " = stablehlo.convolution(%" << sl
-                     << ", %" << w_name << ")\n"
+                auto sl_b = barrier_conv_operand(sl, trimmed);
+                auto w_b1 = barrier_conv_operand(w_name, ws);
+                body << '%' << conv_name << " = stablehlo.convolution(%" << sl_b
+                     << ", %" << w_b1 << ")\n"
                      << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, "
                         "1],\n"
                      << "    window = {stride = [" << stride_h << ", " << stride_w
@@ -2211,8 +2263,10 @@ auto handle_conv2d(LoweringContext& ctx,
     }
 
     if (!emitted) {
+        auto x_b = barrier_conv_operand(x_name, x->shape());
+        auto w_b2 = barrier_conv_operand(w_name, w->shape());
         body << '%' << conv_name << " = stablehlo.convolution(%"
-             << x_name << ", %" << w_name << ")\n"
+             << x_b << ", %" << w_b2 << ")\n"
              << "    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],\n"
              << "    window = {stride = [" << stride_h << ", " << stride_w
              << "], pad = [[" << pad_h << ", " << pad_h << "], ["
@@ -4270,9 +4324,19 @@ auto emit_softmax_last_dim(LoweringContext& ctx, std::ostream& body,
 
     auto init_m = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, init_m, init_max, {}, cd); body << '\n';
+    // JIT-R126: see handle_softmax's identical barrier comment above -- this
+    // is the plugin-disabled decomposition path with the same reduce
+    // structure, needing the same unconditional Float64-reduce protection.
+    std::string reduce_max_operand = xc;
+    if (cd == ::tenzor::DType::Float64) {
+        auto barriered = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, barriered, xc, shape, cd);
+        body << '\n';
+        reduce_max_operand = barriered;
+    }
     auto m = ctx.fresh_name();
-    emit_stablehlo_reduce(body, m, xc, init_m, "maximum", reduce_dims, shape,
-                          reduced_shape, cd); body << '\n';
+    emit_stablehlo_reduce(body, m, reduce_max_operand, init_m, "maximum",
+                          reduce_dims, shape, reduced_shape, cd); body << '\n';
     auto m_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, m_b, m, bcast_dims, reduced_shape,
                                     shape, cd); body << '\n';
@@ -4283,9 +4347,16 @@ auto emit_softmax_last_dim(LoweringContext& ctx, std::ostream& body,
     auto init_s = ctx.fresh_name();
     emit_stablehlo_splat_constant(body, init_s, scalar_literal(0.0, cd), {}, cd);
     body << '\n';
+    std::string reduce_sum_operand = e;
+    if (cd == ::tenzor::DType::Float64) {
+        auto barriered = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, barriered, e, shape, cd);
+        body << '\n';
+        reduce_sum_operand = barriered;
+    }
     auto s = ctx.fresh_name();
-    emit_stablehlo_reduce(body, s, e, init_s, "add", reduce_dims, shape,
-                          reduced_shape, cd); body << '\n';
+    emit_stablehlo_reduce(body, s, reduce_sum_operand, init_s, "add",
+                          reduce_dims, shape, reduced_shape, cd); body << '\n';
     auto s_b = ctx.fresh_name();
     emit_stablehlo_broadcast_in_dim(body, s_b, s, bcast_dims, reduced_shape,
                                     shape, cd); body << '\n';
