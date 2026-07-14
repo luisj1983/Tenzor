@@ -30,6 +30,16 @@ Variable ones_var(std::initializer_list<int64_t> shape) {
     return Variable(ones(s, DType::Float32, Device::cpu()), false);
 }
 
+bool cuda_available() {
+    try {
+        auto t = randn({2, 2}, DType::Float32, Device::cpu());
+        (void)t.to(Device::cuda(0));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -252,6 +262,36 @@ TEST(JitScript, MultiArgScriptRetraceDoesNotDoubleExecute) {
            "vs. " << baseline_dispatches << " for a no-retrace call -- the "
            "retrace_fn_ closure's real result was discarded and the graph "
            "was executed again on the same inputs (JIT-R138)";
+}
+
+// JIT-R146: visit(CmpOpExpr) didn't normalise a scalar operand's device/dtype
+// to match its non-scalar sibling the way visit(BinOpExpr) does, so a scripted
+// comparison between operands sourced from different-device multi-arg dummies
+// threw a device-mismatch error at dispatch<Lt> instead of evaluating -- even
+// though the analogous arithmetic form (x + y) succeeds via normalisation.
+TEST(JitScript, MultiArgScriptCrossDeviceComparisonWorks) {
+    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+
+    const char* src = R"(def forward(x, y): return x < y)";
+    std::vector<Tensor> dummies = {
+        full({}, 1.0, DType::Float32, Device::cpu()),
+        full({}, 2.0, DType::Float32, Device::cuda(0)),
+    };
+    auto compiled = jit::compile_script(src, dummies);
+    ASSERT_NE(compiled, nullptr);
+
+    Tensor a = full({}, 1.0, DType::Float32, Device::cpu());
+    Tensor b = full({}, 5.0, DType::Float32, Device::cuda(0));
+    auto outs = compiled->forward({Variable(a, false), Variable(b, false)});
+    ASSERT_EQ(outs.size(), 1u);
+    auto r = outs[0].tensor().to(Device::cpu());
+    EXPECT_NEAR(r.item<float>(), 1.0f, 1e-6f) << "1 < 5 should be true";
+
+    Tensor a2 = full({}, 9.0, DType::Float32, Device::cpu());
+    Tensor b2 = full({}, 5.0, DType::Float32, Device::cuda(0));
+    auto outs2 = compiled->forward({Variable(a2, false), Variable(b2, false)});
+    auto r2 = outs2[0].tensor().to(Device::cpu());
+    EXPECT_NEAR(r2.item<float>(), 0.0f, 1e-6f) << "9 < 5 should be false";
 }
 
 TEST(JitScript, RejectsIfElse) {

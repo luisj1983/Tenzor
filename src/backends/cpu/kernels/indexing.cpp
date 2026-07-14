@@ -1030,13 +1030,22 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
 
     // Support Bool dtype and any floating condition dtype (for CUDA
     // compatibility and Float64/Float16/BFloat16 conditions). Any non-zero
-    // element is treated as true. Non-Float32 floating conditions are widened
-    // to Float32 so a single non-zero test covers every case.
+    // element is treated as true. Float16/BFloat16 conditions are widened to
+    // Float32, which is lossless for those formats. Float64 is NOT widened
+    // to Float32 -- that would be a NARROWING conversion (52 mantissa bits
+    // down to 23) that can underflow a tiny nonzero double (e.g. 1e-40) to
+    // exactly 0.0f, silently flipping truthiness vs. every other backend,
+    // which all test Float64 conditions at native double precision
+    // (CUDA/OneAPI's generic .to(DType::Bool) does a native-precision
+    // static_cast<bool>(double); ROCm's cond_to_bool_kernel<double> tests
+    // in != T(0) at double precision). Float64 conditions are therefore
+    // tested directly at their own precision here too.
     const bool cond_is_bool = (condition.dtype() == DType::Bool);
-    const bool cond_is_floating =
-        condition.dtype() == DType::Float32 || condition.dtype() == DType::Float64 ||
-        condition.dtype() == DType::Float16 || condition.dtype() == DType::BFloat16;
-    if (!cond_is_bool && !cond_is_floating) {
+    const bool cond_is_f64 = (condition.dtype() == DType::Float64);
+    const bool cond_is_narrow_float =
+        condition.dtype() == DType::Float32 || condition.dtype() == DType::Float16 ||
+        condition.dtype() == DType::BFloat16;
+    if (!cond_is_bool && !cond_is_f64 && !cond_is_narrow_float) {
         char msg[256];
         snprintf(msg, sizeof(msg), "where: condition tensor must have dtype Bool or a floating dtype, but got dtype %d",
                  static_cast<int>(condition.dtype()));
@@ -1044,21 +1053,28 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
     }
 
     Tensor cond_f32;
-    const bool use_float_cond = cond_is_floating;
+    const bool use_float_cond = cond_is_narrow_float;
     const bool* bool_cond_ptr = nullptr;
     const float* float_cond_ptr = nullptr;
+    const double* double_cond_ptr = nullptr;
 
     if (cond_is_bool) {
         bool_cond_ptr = condition.data<bool>();
+    } else if (cond_is_f64) {
+        double_cond_ptr = condition.data<double>();
     } else {
-        // Widen Float64/Float16/BFloat16 conditions to Float32 (no-op for Float32).
+        // Widen Float16/BFloat16 conditions to Float32 (no-op for Float32) --
+        // lossless, since Float32 has strictly more mantissa/exponent range.
         cond_f32 = (condition.dtype() == DType::Float32) ? condition : condition.to(DType::Float32);
         float_cond_ptr = cond_f32.data<float>();
     }
 
-    // Helper to check condition value
-    auto is_cond_true = [use_float_cond, bool_cond_ptr, float_cond_ptr](int64_t i) -> bool {
-        return use_float_cond ? (float_cond_ptr[i] != 0.0f) : bool_cond_ptr[i];
+    // Helper to check condition value, at each dtype's own native precision.
+    auto is_cond_true = [use_float_cond, cond_is_f64, bool_cond_ptr, float_cond_ptr,
+                          double_cond_ptr](int64_t i) -> bool {
+        if (use_float_cond) return float_cond_ptr[i] != 0.0f;
+        if (cond_is_f64) return double_cond_ptr[i] != 0.0;
+        return bool_cond_ptr[i];
     };
 
     // Select elements based on dtype
@@ -1080,10 +1096,11 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
             }
 #endif
         } else {
-            // Bool condition - scalar loop with OpenMP
+            // Bool or Float64 condition - scalar loop with OpenMP, tested at
+            // each dtype's own native precision via is_cond_true.
             #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())
             for (int64_t i = 0; i < numel; ++i) {
-                output_ptr[i] = bool_cond_ptr[i] ? x_ptr[i] : y_ptr[i];
+                output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
             }
         }
     } else {

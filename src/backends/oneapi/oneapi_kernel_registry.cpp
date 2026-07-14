@@ -3508,11 +3508,35 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 orig_q_shape.assign(inputs[0].shape().begin(), inputs[0].shape().end());
                 int64_t b = orig_q_shape[0], h = orig_q_shape[1];
                 int64_t sq = orig_q_shape[2], d = orig_q_shape[3];
+                int64_t h_kv = inputs[1].shape()[1];
                 int64_t sk = inputs[1].shape()[2];
                 int64_t dv = inputs[2].shape()[3];
+                Tensor Kb = inputs[1], Vb = inputs[2];
+                // JIT-R160/JIT-R161: when H_kv != H_q (GQA/MQA), broadcast
+                // K/V along the head dim BEFORE the 3D collapse below.
+                // Without this, reshape({b*h, sk, *}) on a [b, h_kv, sk, *]
+                // tensor has a mismatched element count (b*h*sk** vs.
+                // b*h_kv*sk**) and throws -- mirrors the identical fix in
+                // the CUDA/ROCm OpId::FlashAttention registries.
+                if (h_kv != h) {
+                    if (h % h_kv != 0) {
+                        throw std::invalid_argument(
+                            "FlashAttention OneAPI: H_q must be a multiple of H_kv; got " +
+                            std::to_string(h) + " and " + std::to_string(h_kv));
+                    }
+                    int64_t reps = h / h_kv;
+                    Tensor Kc = inputs[1].is_contiguous() ? inputs[1] : inputs[1].contiguous();
+                    Tensor Vc = inputs[2].is_contiguous() ? inputs[2] : inputs[2].contiguous();
+                    Tensor Ku = tenzor::unsqueeze(Kc, 2);
+                    Tensor Vu = tenzor::unsqueeze(Vc, 2);
+                    Tensor Ke = tenzor::expand(Ku, {b, h_kv, reps, sk, d});
+                    Tensor Ve = tenzor::expand(Vu, {b, h_kv, reps, sk, dv});
+                    Kb = Ke.contiguous().reshape({b, h, sk, d});
+                    Vb = Ve.contiguous().reshape({b, h, sk, dv});
+                }
                 Qi = tenzor::reshape(inputs[0], std::vector<int64_t>{b * h, sq, d}).contiguous();
-                Ki = tenzor::reshape(inputs[1], std::vector<int64_t>{b * h, sk, d}).contiguous();
-                Vi = tenzor::reshape(inputs[2], std::vector<int64_t>{b * h, sk, dv}).contiguous();
+                Ki = tenzor::reshape(Kb, std::vector<int64_t>{b * h, sk, d}).contiguous();
+                Vi = tenzor::reshape(Vb, std::vector<int64_t>{b * h, sk, dv}).contiguous();
             }
 
             // Audit A.11: native Float64 FlashAttention path. Dispatches to a

@@ -242,7 +242,24 @@ TEST(OpGQACallback, EndToEndPluginPathMatchesEager) {
             throw;
         }
 
-        auto outs = invoker->invoke({q_t, k_t, v_t});
+        // JIT review (found via test_op_rms_norm_callback.cpp's identical
+        // gap): invoke() -- not load() -- is where the require_local_hal
+        // guard (iree_customcalls.cpp F005) fires for a non-CPU target,
+        // throwing UNIMPLEMENTED "valid only on a local (CPU) HAL". Expected
+        // for this test (which forces plugin_enabled=true on every target to
+        // exercise the callback's HAL buffer marshaling); skip, don't fail.
+        std::vector<::tenzor::Tensor> outs;
+        try {
+            outs = invoker->invoke({q_t, k_t, v_t});
+        } catch (const std::exception& e) {
+            std::error_code _ec;
+            std::filesystem::remove_all(opts.cache_dir, _ec);
+            if (std::string(e.what()).find("valid only on a local (CPU) HAL") !=
+                std::string::npos) {
+                continue;
+            }
+            throw;
+        }
         ASSERT_EQ(outs.size(), 1u) << "target=" << target;
         auto diff = ::tenzor::max(::tenzor::abs(eager_out - outs[0]))
                         .item<float>();

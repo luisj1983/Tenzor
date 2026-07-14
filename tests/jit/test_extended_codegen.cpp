@@ -359,6 +359,46 @@ TEST(ExtendedCodegen, ExecuteSoftmaxMatchesReference) {
     }
 }
 
+// JIT-R142: Float64 softmax must take extended_codegen.cpp's dedicated
+// Float64 branch (elementwise_compute_type() -> "double", unsuffixed
+// literals) through the REAL NVRTC/HIPRTC device compiler -- every other
+// dtype-specific test in this file (Float16/BFloat16 above) is exercised on
+// real hardware, but Float64 never was.
+TEST(ExtendedCodegen, ExecuteSoftmaxF64MatchesReference) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    for (int cols : {48, 256, 1024}) {
+        const int rows = 3;
+        auto in_f32 = make_rows(rows, cols);
+        std::vector<double> in(in_f32.begin(), in_f32.end());
+        Tensor input_cpu = from_data(in.data(), {rows, cols});
+
+        for (const auto& dev : devs) {
+            Tensor input = input_cpu.to(dev);
+            ExtendedFusionGroup group;
+            group.kind = FusionKind::Softmax;
+            group.dtype = DType::Float64;
+            group.softmax_dim = -1;
+            Tensor out = execute_extended_fused(group, {input}).to(Device::cpu());
+            ASSERT_EQ(out.numel(), rows * cols);
+            const double* o = out.data<double>();
+            for (int r = 0; r < rows; ++r) {
+                double mx = -1e30;
+                for (int c = 0; c < cols; ++c) mx = std::max(mx, in[r * cols + c]);
+                double sum = 0.0;
+                for (int c = 0; c < cols; ++c) sum += std::exp(in[r * cols + c] - mx);
+                for (int c = 0; c < cols; ++c) {
+                    double ref = std::exp(in[r * cols + c] - mx) / sum;
+                    EXPECT_NEAR(o[r * cols + c], ref, 1e-10)
+                        << dev.to_string() << " cols=" << cols << " r=" << r << " c=" << c;
+                }
+            }
+        }
+    }
+}
+
 TEST(ExtendedCodegen, ExecuteReductionSumMeanMatchesReference) {
     initialize();
     auto devs = available_gpu_devices();
@@ -560,6 +600,47 @@ TEST(ExtendedCodegen, ExecuteRMSNormMatchesReference) {
                 for (int c = 0; c < n; ++c) {
                     double ref = (double)in[r * n + c] * inv;
                     EXPECT_NEAR(o[r * n + c], ref, 1e-4)
+                        << dev.to_string() << " n=" << n << " r=" << r << " c=" << c;
+                }
+            }
+        }
+    }
+}
+
+// JIT-R142: Float64 RMSNorm must take extended_codegen.cpp's dedicated
+// Float64 accumulator branch (ACC="double") through the REAL NVRTC/HIPRTC
+// device compiler -- this specific accumulator-widening path (distinct from
+// the plain elementwise Float64 branch exercised by
+// ExecuteSoftmaxF64MatchesReference above) had zero real-hardware coverage.
+TEST(ExtendedCodegen, ExecuteRMSNormF64MatchesReference) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    const double eps = 1e-5;
+    for (int n : {48, 256, 1024}) {
+        const int rows = 3;
+        auto in_f32 = make_rows(rows, n);
+        std::vector<double> in(in_f32.begin(), in_f32.end());
+        Tensor input_cpu = from_data(in.data(), {rows, n});
+        for (const auto& dev : devs) {
+            Tensor input = input_cpu.to(dev);
+            ExtendedFusionGroup group;
+            group.kind = FusionKind::RMSNorm;
+            group.dtype = DType::Float64;
+            group.norm_axis = -1;
+            group.has_affine = false;
+            group.eps = eps;
+            Tensor out = execute_extended_fused(group, {input}).to(Device::cpu());
+            ASSERT_EQ(out.numel(), rows * n);
+            const double* o = out.data<double>();
+            for (int r = 0; r < rows; ++r) {
+                double ss = 0.0;
+                for (int c = 0; c < n; ++c) ss += in[r * n + c] * in[r * n + c];
+                double inv = 1.0 / std::sqrt(ss / n + eps);
+                for (int c = 0; c < n; ++c) {
+                    double ref = in[r * n + c] * inv;
+                    EXPECT_NEAR(o[r * n + c], ref, 1e-9)
                         << dev.to_string() << " n=" << n << " r=" << r << " c=" << c;
                 }
             }

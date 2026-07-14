@@ -1317,7 +1317,14 @@ __global__ void flash_attention_v2_kernel_hip(
         // masked tile contributes nothing to the softmax, so skip it entirely.
         // All threads in the block evaluate the same condition, so this branch is
         // uniform and does not desync the __syncthreads() calls below.
-        if (causal && kv_start > q_row) {
+        // JIT-R159: bottom-right causal alignment (matches the per-element
+        // mask check below and the F021/F026/F030 convention used
+        // throughout this codebase) -- a query at absolute position q_row
+        // attends to keys <= q_row + (seq_len_k - seq_len_q). Without this
+        // offset, this tile-skip pre-check used the top-left convention
+        // (offset 0), which for seq_len_k > seq_len_q incorrectly skipped
+        // tiles containing keys the query legitimately needs to attend to.
+        if (causal && kv_start > q_row + (seq_len_k - seq_len_q)) {
             continue;
         }
 
@@ -1913,6 +1920,13 @@ auto fused_attention_hip(
 
     int64_t batch_size = Q.shape()[0];
     int64_t seq_len = Q.shape()[1];
+    // JIT-R158: K/V carry their OWN sequence length (kv_len), which differs
+    // from Q's seq_len for cross-attention / KV-cache (seq_q != seq_k). The
+    // tiled kernel below previously received Q's seq_len for BOTH the
+    // seq_len_q and seq_len_k launch args, mis-striding/truncating the K/V
+    // buffer for any call where seq_len_q != seq_len_k (matches the fix
+    // already applied to the composed-ops fallback below, F026/F030).
+    int64_t kv_len = K.shape()[1];
     int64_t d_k = Q.shape()[2];
     int64_t d_v = V.shape()[2];
 
@@ -1932,6 +1946,7 @@ auto fused_attention_hip(
         // Flash Attention v2: tiled, O(1) memory per query row
         constexpr int Bc = 32;
         int seq_len_int = static_cast<int>(seq_len);
+        int kv_len_int = static_cast<int>(kv_len);
 
         dim3 grid(static_cast<int>(batch_size), seq_len_int);
         dim3 threads(BLOCK_SIZE);
@@ -1957,17 +1972,17 @@ auto fused_attention_hip(
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<32, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(32), rocm_current_stream(),
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, kv_len_int, scale, causal, dropout_p, rng_seed);
         } else if (d_k == 64) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<64, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(64), rocm_current_stream(),
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, kv_len_int, scale, causal, dropout_p, rng_seed);
         } else if (d_k == 128) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<128, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(128), rocm_current_stream(),
-                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale, causal, dropout_p, rng_seed);
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, kv_len_int, scale, causal, dropout_p, rng_seed);
         }
         HIP_CHECK(hipGetLastError());
     } else {

@@ -1493,15 +1493,19 @@ auto fused_rms_norm_kernel(const Tensor& input_orig, const Tensor& weight, float
                 int64_t b = idx[0];
                 const float* row = in_ptr + b * norm_size;
 
-                // Compute sum of squares
-                float ss = 0.0f;
+                // JIT-R153: accumulate sum-of-squares in double, matching
+                // CPU/CUDA/ROCm/MLIR's unconditional double accumulation for
+                // RMSNorm regardless of storage dtype -- a float accumulator
+                // drifts vs. those backends for hidden_dim >= ~4096.
+                double ss = 0.0;
                 for (int64_t i = 0; i < norm_size; ++i) {
-                    ss += row[i] * row[i];
+                    double v = static_cast<double>(row[i]);
+                    ss += v * v;
                 }
-                ss /= static_cast<float>(norm_size);
+                ss /= static_cast<double>(norm_size);
 
                 // Compute reciprocal RMS
-                float rr = 1.0f / sycl::sqrt(ss + eps);
+                float rr = static_cast<float>(1.0 / sycl::sqrt(ss + static_cast<double>(eps)));
                 rrms_ptr[b] = rr;
 
                 // Apply normalization with weight
@@ -1552,14 +1556,15 @@ auto fused_rms_norm_kernel(const Tensor& input_orig, const Tensor& weight, float
                 int64_t b = idx[0];
                 const sycl::half* row = in_ptr + b * norm_size;
 
-                float ss = 0.0f;
+                // JIT-R153: accumulate in double (see the Float32 branch above).
+                double ss = 0.0;
                 for (int64_t i = 0; i < norm_size; ++i) {
-                    float v = static_cast<float>(row[i]);
+                    double v = static_cast<double>(row[i]);
                     ss += v * v;
                 }
-                ss /= static_cast<float>(norm_size);
+                ss /= static_cast<double>(norm_size);
 
-                float rr = 1.0f / sycl::sqrt(ss + eps);
+                float rr = static_cast<float>(1.0 / sycl::sqrt(ss + static_cast<double>(eps)));
                 rrms_ptr[b] = rr;  // Float32 rrms (no half overflow)
 
                 sycl::half* out_row = out_ptr + b * norm_size;
@@ -1581,14 +1586,15 @@ auto fused_rms_norm_kernel(const Tensor& input_orig, const Tensor& weight, float
                 int64_t b = idx[0];
                 const uint16_t* row = in_ptr + b * norm_size;
 
-                float ss = 0.0f;
+                // JIT-R153: accumulate in double (see the Float32 branch above).
+                double ss = 0.0;
                 for (int64_t i = 0; i < norm_size; ++i) {
-                    float v = bf16_to_f32(row[i]);
+                    double v = static_cast<double>(bf16_to_f32(row[i]));
                     ss += v * v;
                 }
-                ss /= static_cast<float>(norm_size);
+                ss /= static_cast<double>(norm_size);
 
-                float rr = 1.0f / sycl::sqrt(ss + eps);
+                float rr = static_cast<float>(1.0 / sycl::sqrt(ss + static_cast<double>(eps)));
                 rrms_ptr[b] = rr;  // Float32 rrms (no bf16 overflow)
 
                 uint16_t* out_row = out_ptr + b * norm_size;

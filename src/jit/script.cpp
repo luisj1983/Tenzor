@@ -45,6 +45,7 @@
 #include <variant>
 #include <vector>
 
+#include <tenzor/jit/control_flow.hpp>
 #include <tenzor/jit/tracer.hpp>
 #include <tenzor/nn/module.hpp>
 #include <tenzor/nn/utils/variable_cast.hpp>
@@ -695,22 +696,13 @@ private:
         // bypasses the hook and would silently bake one branch even in strict
         // mode — the bug this replaces.
         Variable cond_var = eval(*iff.cond, env);
-        Tensor cond_t = cond_var.tensor();
-        // item<float>() requires a single-element Float32 tensor; the condition
-        // inherits ctx_dtype_ so it may be Float64/Float16/BFloat16, and it may
-        // live on a GPU (ctx_device_). Move it to the host BEFORE the Float32
-        // narrowing: a device-side cast can canonicalize a NaN condition to 0 on
-        // CUDA/ROCm, baking a different branch into the graph depending on the
-        // scripting device. ForStmt/NumberExpr below already use this CPU-first
-        // idiom.
-        cond_t = cond_t.to(Device::cpu());
-        // Compare in Float64, NOT Float32 (JIT-F001): a nonzero Float64 condition
-        // below the Float32 denormal floor (e.g. 1e-40) would underflow to 0.0f
-        // and wrongly take the else-branch, baking a different graph than eager /
-        // jit::cond. control_flow.cpp's cond()/while_loop() widen to Float64 for
-        // exactly this reason; the scripted `if` must match.
-        if (cond_t.dtype() != DType::Float64) cond_t = cond_t.to(DType::Float64);
-        bool cond_val = cond_t.item<double>() != 0.0;
+        // tensor_condition_to_bool (control_flow.hpp, JIT-R151a) applies the
+        // same CPU-first, Float64-widening cast shared by control_flow.cpp's
+        // cond()/while_loop() and the compiled-graph interpreter's If/Loop/
+        // GuardNode cases (graph.cpp), so the scripted `if` picks the
+        // identical branch as eager on every backend without hand-copying
+        // the cast order/dtype here.
+        bool cond_val = tensor_condition_to_bool(cond_var.tensor());
         const auto& body = cond_val ? iff.then_body : iff.else_body;
         exec_block(body, env, returned);
     }
@@ -874,27 +866,32 @@ private:
             "sum(dim), mean(dim))");
     }
 
+    // JIT-R027/JIT-R146: use the autograd-aware to_device/variable_cast
+    // helpers (which build proper DeviceTransferBackward/TypeCastBackward
+    // nodes) instead of `Variable(a.tensor().to(...).to(...),
+    // a.requires_grad())`, which discarded grad_fn. Shared by every binary
+    // scripted expression (arithmetic AND comparison) so a scalar operand
+    // (e.g. a literal, or a reduction result) on a mismatched device/dtype
+    // from its sibling is reconciled before dispatch, instead of throwing a
+    // device-mismatch error at the kernel for comparisons specifically.
+    auto normalise_scalar_operand(Variable& a, Variable& other) const -> void {
+        if (a.tensor().numel() == 1 &&
+            (a.tensor().dtype() != other.tensor().dtype() ||
+             a.tensor().device() != other.tensor().device())) {
+            if (a.tensor().device() != other.tensor().device()) {
+                a = tenzor::to_device(a, other.tensor().device());
+            }
+            if (a.tensor().dtype() != other.tensor().dtype()) {
+                a = tenzor::nn::variable_cast(a, other.tensor().dtype());
+            }
+        }
+    }
+
     Variable visit(const BinOpExpr& b, const Env& env) const {
         Variable lhs = eval(*b.lhs, env);
         Variable rhs = eval(*b.rhs, env);
-        // JIT-R027: use the autograd-aware to_device/variable_cast helpers
-        // (which build proper DeviceTransferBackward/TypeCastBackward
-        // nodes) instead of `Variable(a.tensor().to(...).to(...),
-        // a.requires_grad())`, which discarded grad_fn.
-        auto normalise = [&](Variable& a, Variable& other) {
-            if (a.tensor().numel() == 1 &&
-                (a.tensor().dtype() != other.tensor().dtype() ||
-                 a.tensor().device() != other.tensor().device())) {
-                if (a.tensor().device() != other.tensor().device()) {
-                    a = tenzor::to_device(a, other.tensor().device());
-                }
-                if (a.tensor().dtype() != other.tensor().dtype()) {
-                    a = tenzor::nn::variable_cast(a, other.tensor().dtype());
-                }
-            }
-        };
-        normalise(lhs, rhs);
-        normalise(rhs, lhs);
+        normalise_scalar_operand(lhs, rhs);
+        normalise_scalar_operand(rhs, lhs);
 
         // JIT-R027: use the Variable-level operator overloads (autograd-
         // aware) instead of operating on .tensor() and manually
@@ -915,6 +912,13 @@ private:
     Variable visit(const CmpOpExpr& c, const Env& env) const {
         Variable lhs = eval(*c.lhs, env);
         Variable rhs = eval(*c.rhs, env);
+        // JIT-R146: mirror visit(BinOpExpr)'s scalar-operand normalisation --
+        // without this, a scalar operand (e.g. a literal or reduction result)
+        // on a different device/dtype from its non-scalar sibling reaches
+        // dispatch<Lt/Gt> unreconciled and throws a device-mismatch error,
+        // even though the analogous arithmetic form (lhs + rhs) would work.
+        normalise_scalar_operand(lhs, rhs);
+        normalise_scalar_operand(rhs, lhs);
         Tensor out;
         if (c.op == '<')      out = tenzor::lt(lhs.tensor(), rhs.tensor());
         else                  out = tenzor::gt(lhs.tensor(), rhs.tensor());

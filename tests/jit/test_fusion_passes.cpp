@@ -816,6 +816,51 @@ auto build_layernorm_like(Graph& g, const Device& dev, bool full_layernorm)
     dv_o->set_node(dv); g.add_node(dv);
     g.set_inputs({x}); g.set_outputs({dv_o});
 }
+
+// JIT-R166 regression fixture: builds Mean -> Sub -> Pow -> Mean -> Add(eps)
+// -> Div(sub_o, add_o), i.e. dividing the centered input by (variance + eps)
+// DIRECTLY with the Sqrt step omitted entirely -- not a real LayerNorm (which
+// divides by the standard deviation sqrt(variance + eps)). This satisfies the
+// old "Div present" guard alone; the fix requires a Sqrt/Rsqrt to also be
+// present in the matched chain.
+auto build_layernorm_no_sqrt(Graph& g, const Device& dev) -> void {
+    const std::vector<int64_t> shape = {2, 3, 4};
+    const std::vector<int64_t> red = {2, 3, 1};
+    auto x = g.create_value("x", shape, DType::Float32, dev);
+    auto epsc = g.create_node(OpType::Constant, "eps");
+    auto epsc_o = g.create_value("epsv", {1}, DType::Float32, dev);
+    epsc->add_output(epsc_o); epsc_o->set_node(epsc);
+    epsc->set_tensor_attr("value", ::tenzor::full({1}, 1e-5F, DType::Float32));
+    g.add_node(epsc);
+    auto m1 = g.create_node(OpType::Mean, "mean1");
+    auto m1_o = g.create_value("m1", red, DType::Float32, dev);
+    m1->add_input(x); m1->add_output(m1_o); m1_o->set_node(m1);
+    m1->set_int_attr("dim", -1); m1->set_bool_attr("keepdim", true);
+    g.add_node(m1);
+    auto sub = g.create_node(OpType::Sub, "sub");
+    auto sub_o = g.create_value("sub", shape, DType::Float32, dev);
+    sub->add_input(x); sub->add_input(m1_o); sub->add_output(sub_o);
+    sub_o->set_node(sub); g.add_node(sub);
+    auto pw = g.create_node(OpType::Pow, "pow");
+    auto pw_o = g.create_value("pow", shape, DType::Float32, dev);
+    pw->add_input(sub_o); pw->add_output(pw_o); pw_o->set_node(pw);
+    pw->set_attr("exponent", 2.0); g.add_node(pw);
+    auto m2 = g.create_node(OpType::Mean, "mean2");
+    auto m2_o = g.create_value("m2", red, DType::Float32, dev);
+    m2->add_input(pw_o); m2->add_output(m2_o); m2_o->set_node(m2);
+    m2->set_int_attr("dim", -1); m2->set_bool_attr("keepdim", true);
+    g.add_node(m2);
+    auto add = g.create_node(OpType::Add, "addeps");
+    auto add_o = g.create_value("addeps", red, DType::Float32, dev);
+    add->add_input(m2_o); add->add_input(epsc_o); add->add_output(add_o);
+    add_o->set_node(add); g.add_node(add);
+    // No Sqrt node -- divide the centered input by (variance + eps) directly.
+    auto dv = g.create_node(OpType::Div, "div");
+    auto dv_o = g.create_value("div", shape, DType::Float32, dev);
+    dv->add_input(sub_o); dv->add_input(add_o); dv->add_output(dv_o);
+    dv_o->set_node(dv); g.add_node(dv);
+    g.set_inputs({x}); g.set_outputs({dv_o});
+}
 }  // namespace
 
 TEST_F(FusionPassesTest, Softmax_NonLastAxisNotFused) {
@@ -855,6 +900,18 @@ TEST_F(FusionPassesTest, LayerNorm_FullStillFused) {
     EXPECT_TRUE(has_kind(matches, FusionKind::LayerNorm))
         << "a full LayerNorm (with normalizing Div) must still fuse (guard "
            "over-rejected)";
+}
+
+TEST_F(FusionPassesTest, LayerNorm_DivWithoutSqrtNotFused) {
+    Graph graph;
+    build_layernorm_no_sqrt(graph, device_);
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(graph);
+    EXPECT_FALSE(has_kind(matches, FusionKind::LayerNorm))
+        << "a Div present with no Sqrt/Rsqrt anywhere in the chain (dividing "
+           "by variance+eps directly, not by the standard deviation) must "
+           "NOT fuse as LayerNorm (JIT-R166) -- the old guard only checked "
+           "for Div presence, not that the divisor was actually a sqrt";
 }
 
 // ============================================================================

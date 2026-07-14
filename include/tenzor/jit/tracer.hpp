@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include "../core/tensor.hpp"
 #include "../core/jit_hooks.hpp"  // OpId / OpAttributes fwd decls for record_inplace
@@ -837,6 +838,21 @@ private:
     /// differ only in strides (e.g. a square-matrix transpose), silently
     /// dropping the view op from the dataflow.
     std::unordered_map<std::string, std::string> tensor_id_map_;
+    /// JIT-R148: fingerprints genuinely remapped by record_inplace() (an
+    /// actual in-place mutation), tracked SEPARATELY from tensor_id_map_'s
+    /// general "current mapping" state. trace_if's assert_no_inplace_on_
+    /// shared previously inferred "was this shared tensor mutated in-place"
+    /// by diffing tensor_id_map_ before/after a branch -- but
+    /// register_new_tensor (used by ANY freshly-computed op output, not just
+    /// record_inplace) unconditionally overwrites tensor_id_map_[fingerprint]
+    /// too. If an unrelated tensor from before the branch is freed and a
+    /// branch's ordinary (non-in-place) op output happens to land at the same
+    /// address with matching dtype/shape/strides/device (same fingerprint),
+    /// that diff-based check misidentified it as an in-place mutation and
+    /// aborted the trace. This set records ONLY fingerprints record_inplace()
+    /// itself remapped, so the check can ask the precise question instead of
+    /// inferring it indirectly.
+    std::unordered_set<std::string> inplace_remapped_fingerprints_;
     /// Phase 6.4: retain the actual Tensor (not just metadata) for
     /// every tensor seen during tracing. end_trace() uses this to
     /// capture module parameters as graph constants that live inside

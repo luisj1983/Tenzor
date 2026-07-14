@@ -29,11 +29,24 @@ void main() {
 
     uint base_idx = batch_idx * params.normalized_shape;
 
-    // Step 1: Compute sum of squares
+    // JIT-R164: Kahan (compensated) summation for the per-thread serial
+    // accumulation -- this is the dominant error source (up to
+    // normalized_shape/WORKGROUP_SIZE terms per thread), unlike the final
+    // log2(WORKGROUP_SIZE)-step tree reduction below, which has too few
+    // additions to need compensation. GLSL has no portable native double
+    // without gating on VK_KHR_shader_float64 (not all devices support it);
+    // Kahan summation is the portable fix, and is the same technique this
+    // codebase's own CPU/CUDA codegen already uses for Sum/Mean/Softmax
+    // reductions (extended_codegen.cpp), not a stopgap workaround.
     float local_sum_sq = 0.0;
+    float c = 0.0;  // running compensation for low-order bits lost to rounding
     for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float val = input_data[base_idx + i];
-        local_sum_sq += val * val;
+        float term = val * val;
+        float y = term - c;
+        float t = local_sum_sq + y;
+        c = (t - local_sum_sq) - y;
+        local_sum_sq = t;
     }
     shared_sum_sq[tid] = local_sum_sq;
     barrier();

@@ -9,6 +9,14 @@ namespace tenzor {
 namespace jit {
 
 // ============================================================================
+// tensor_condition_to_bool
+// ============================================================================
+
+auto tensor_condition_to_bool(const Tensor& condition) -> bool {
+    return condition.to(Device::cpu()).to(DType::Float64).item<double>() != 0.0;
+}
+
+// ============================================================================
 // cond (multi-output)
 // ============================================================================
 
@@ -27,15 +35,11 @@ auto cond(const Tensor& condition,
                                args);
     }
 
-    // Eager mode: evaluate condition and call appropriate branch. Move to CPU
-    // BEFORE the cast: casting on the device lets some backends (e.g. ROCm)
-    // canonicalize a NaN condition to 0, flipping the taken branch vs CPU
-    // (NaN != 0 is true). A host-side cast keeps NaN as NaN so the branch choice
-    // is identical across all backends. WIDEN to Float64 rather than narrowing to
-    // Float32: a nonzero Float64 condition below the Float32 denormal floor
-    // (e.g. 1e-40) would underflow to 0.0f and wrongly take the else-branch.
-    bool cond_val =
-        condition.to(Device::cpu()).to(DType::Float64).item<double>() != 0.0;
+    // Eager mode: evaluate condition and call appropriate branch.
+    // tensor_condition_to_bool's doc comment explains the CPU-first,
+    // Float64-widen cast order this shares with while_loop(), the scripted
+    // `if` (script.cpp), and the compiled-graph interpreter (graph.cpp).
+    bool cond_val = tensor_condition_to_bool(condition);
 
     if (cond_val) {
         return then_fn(args);
@@ -95,13 +99,11 @@ auto while_loop(int64_t max_iter,
     std::vector<Variable> state = carried;
 
     for (int64_t i = 0; i < max_iter; ++i) {
-        // Check condition
+        // Check condition. tensor_condition_to_bool (see cond()) applies the
+        // same host-side, Float64-widening cast so a NaN or denormal-small
+        // predicate can't flip this loop's exit decision vs CPU.
         Tensor cond_result = cond_fn(state);
-        // Host-side widening cast (see cond()): a device-side cast can
-        // canonicalize a NaN loop predicate to 0 on some backends, exiting the
-        // loop early vs CPU (NaN == 0 is false → continue). Widen to Float64 so a
-        // tiny nonzero Float64 predicate does not underflow to 0 and exit early.
-        if (cond_result.to(Device::cpu()).to(DType::Float64).item<double>() == 0.0) {
+        if (!tensor_condition_to_bool(cond_result)) {
             break;
         }
 

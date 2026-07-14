@@ -172,31 +172,41 @@ static void fused_rms_norm_f32(
         float* out_ptr = output + b * norm_size;
 
 #ifdef __AVX512F__
-        // AVX-512 path: 16 floats at a time
-        // First pass: compute sum of squares
-        __m512 sum_sq_vec = _mm512_setzero_ps();
-        int64_t i = 0;
-
-        for (; i + 16 <= norm_size; i += 16) {
-            _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 64), _MM_HINT_T0);
-            __m512 x = _mm512_loadu_ps(in_ptr + i);
-            sum_sq_vec = _mm512_fmadd_ps(x, x, sum_sq_vec);
+        // AVX-512 path: 16 floats at a time for the normalize pass below.
+        // JIT-R154: the sum-of-squares accumulation itself uses AVX2-double
+        // (AVX-512F implies AVX2 on every real CPU) to accumulate in double,
+        // matching CPU's double-accumulating fused_rms_norm_kernel/CUDA/ROCm/
+        // MLIR -- a float accumulator here drifted from all of those for
+        // large normalized_shape, silently diverging eager-CPU-inference from
+        // JIT-compiled-CPU (which always takes the double-accumulating path).
+        double sum_sq_d = 0.0;
+        {
+            __m256d acc = _mm256_setzero_pd();
+            int64_t i = 0;
+            for (; i + 4 <= norm_size; i += 4) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 64), _MM_HINT_T0);
+                __m128 xf = _mm_loadu_ps(in_ptr + i);
+                __m256d xd = _mm256_cvtps_pd(xf);
+                acc = _mm256_fmadd_pd(xd, xd, acc);
+            }
+            __m128d hi = _mm256_extractf128_pd(acc, 1);
+            __m128d lo = _mm256_castpd256_pd128(acc);
+            __m128d s = _mm_add_pd(lo, hi);
+            s = _mm_hadd_pd(s, s);
+            sum_sq_d = _mm_cvtsd_f64(s);
+            for (; i < norm_size; i++) {
+                double v = static_cast<double>(in_ptr[i]);
+                sum_sq_d += v * v;
+            }
         }
 
-        float sum_sq = _mm512_reduce_add_ps(sum_sq_vec);
-
-        // Handle remainder
-        for (; i < norm_size; i++) {
-            sum_sq += in_ptr[i] * in_ptr[i];
-        }
-
-        float rms = std::sqrt(sum_sq * inv_n + eps);
-        float rrms = 1.0f / rms;
+        double rms_d = std::sqrt(sum_sq_d * static_cast<double>(inv_n) + static_cast<double>(eps));
+        float rrms = static_cast<float>(1.0 / rms_d);
         rrms_out[b] = rrms;
 
         // Second pass: normalize and apply weight
         __m512 rrms_v = _mm512_set1_ps(rrms);
-        i = 0;
+        int64_t i = 0;
 
         for (; i + 16 <= norm_size; i += 16) {
             _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 64), _MM_HINT_T0);
@@ -213,37 +223,37 @@ static void fused_rms_norm_f32(
         }
 
 #elif defined(__AVX2__)
-        // AVX2 path: 8 floats at a time
-        __m256 sum_sq_vec = _mm256_setzero_ps();
-        int64_t i = 0;
-
-        // First pass: compute sum of squares
-        for (; i + 8 <= norm_size; i += 8) {
-            _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 32), _MM_HINT_T0);
-            __m256 x = _mm256_loadu_ps(in_ptr + i);
-            sum_sq_vec = _mm256_fmadd_ps(x, x, sum_sq_vec);
+        // AVX2 path: 8 floats at a time for the normalize pass below.
+        // JIT-R154: sum-of-squares accumulates in double via AVX2-double
+        // (see the AVX-512 branch's identical comment above).
+        double sum_sq_d = 0.0;
+        {
+            __m256d acc = _mm256_setzero_pd();
+            int64_t i = 0;
+            for (; i + 4 <= norm_size; i += 4) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 32), _MM_HINT_T0);
+                __m128 xf = _mm_loadu_ps(in_ptr + i);
+                __m256d xd = _mm256_cvtps_pd(xf);
+                acc = _mm256_fmadd_pd(xd, xd, acc);
+            }
+            __m128d hi = _mm256_extractf128_pd(acc, 1);
+            __m128d lo = _mm256_castpd256_pd128(acc);
+            __m128d s = _mm_add_pd(lo, hi);
+            s = _mm_hadd_pd(s, s);
+            sum_sq_d = _mm_cvtsd_f64(s);
+            for (; i < norm_size; i++) {
+                double v = static_cast<double>(in_ptr[i]);
+                sum_sq_d += v * v;
+            }
         }
 
-        // Horizontal sum for AVX2
-        __m128 sum_lo = _mm256_castps256_ps128(sum_sq_vec);
-        __m128 sum_hi = _mm256_extractf128_ps(sum_sq_vec, 1);
-        __m128 sum128 = _mm_add_ps(sum_lo, sum_hi);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        float sum_sq = _mm_cvtss_f32(sum128);
-
-        // Handle remainder
-        for (; i < norm_size; i++) {
-            sum_sq += in_ptr[i] * in_ptr[i];
-        }
-
-        float rms = std::sqrt(sum_sq * inv_n + eps);
-        float rrms = 1.0f / rms;
+        double rms_d = std::sqrt(sum_sq_d * static_cast<double>(inv_n) + static_cast<double>(eps));
+        float rrms = static_cast<float>(1.0 / rms_d);
         rrms_out[b] = rrms;
 
         // Second pass: normalize and apply weight
         __m256 rrms_v = _mm256_set1_ps(rrms);
-        i = 0;
+        int64_t i = 0;
 
         for (; i + 8 <= norm_size; i += 8) {
             _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + 32), _MM_HINT_T0);
@@ -261,13 +271,15 @@ static void fused_rms_norm_f32(
 
 #else
         // Scalar fallback
-        float sum_sq = 0.0f;
+        // JIT-R154: accumulate in double (see the AVX-512 branch's comment above).
+        double sum_sq_d = 0.0;
         for (int64_t i = 0; i < norm_size; i++) {
-            sum_sq += in_ptr[i] * in_ptr[i];
+            double v = static_cast<double>(in_ptr[i]);
+            sum_sq_d += v * v;
         }
 
-        float rms = std::sqrt(sum_sq * inv_n + eps);
-        float rrms = 1.0f / rms;
+        double rms_d = std::sqrt(sum_sq_d * static_cast<double>(inv_n) + static_cast<double>(eps));
+        float rrms = static_cast<float>(1.0 / rms_d);
         rrms_out[b] = rrms;
 
         for (int64_t i = 0; i < norm_size; i++) {
@@ -2190,12 +2202,17 @@ auto RMSNorm::forward_impl(const Variable& input_orig) -> Variable {
             const int nthreads = get_optimal_threads();
             #pragma omp parallel for num_threads(nthreads)
             for (int64_t b = 0; b < batch_size; b++) {
-                float sum_sq = 0.0f;
+                // JIT-R154: accumulate in double (see fused_rms_norm_f32's
+                // identical fix for the x86_64 SIMD paths above) -- this
+                // non-x86_64 (e.g. ARM) fallback had the same float-
+                // accumulator drift.
+                double sum_sq = 0.0;
                 for (int64_t i = 0; i < N; i++) {
-                    float val = input_data[b * N + i];
+                    double val = static_cast<double>(input_data[b * N + i]);
                     sum_sq += val * val;
                 }
-                float rrms = 1.0f / std::sqrt(sum_sq / N + static_cast<float>(eps_));
+                float rrms = static_cast<float>(
+                    1.0 / std::sqrt(sum_sq / static_cast<double>(N) + static_cast<double>(eps_)));
                 rrms_scratch[b] = rrms;
 
                 for (int64_t i = 0; i < N; i++) {

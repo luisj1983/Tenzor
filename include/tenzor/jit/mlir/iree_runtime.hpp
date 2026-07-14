@@ -194,6 +194,20 @@ auto detect_rocm_gfx_arch(int device_index) -> std::string;
 auto remap_hip_visible_device_index(int hip_index,
                                      const char* hip_visible_devices) -> int;
 
+/// Computes the device-selection-env-var portion of the process-lifetime HAL
+/// device cache key (shared_iree_hal_device) / default-device-probe cache key
+/// (iree_can_initialize_default_device) for the given driver. Physical GPU
+/// selection for "hip"/"cuda" is controlled by HIP_VISIBLE_DEVICES /
+/// CUDA_VISIBLE_DEVICES; for "vulkan" it's controlled by VK_ICD_FILENAMES
+/// (which ICD, hence which GPU(s), gets enumerated), MESA_VK_DEVICE_SELECT
+/// (Mesa's device-select layer), and DRI_PRIME (Mesa's discrete-vs-integrated
+/// switch on hybrid-graphics laptops) -- NOT CUDA_VISIBLE_DEVICES, which has
+/// no bearing on Vulkan device selection (JIT-R141). Any other driver (the
+/// CPU task-queue drivers local-sync/local-task) has no device-remapping env
+/// var and returns an empty string. Exposed for direct unit testing of the
+/// cache-key derivation without requiring the corresponding GPU hardware.
+auto device_selection_env_key(const std::string& driver) -> std::string;
+
 /// Force the shared IREE runtime instance / HAL device cache teardown that
 /// normally only runs once, via std::atexit, at real process exit. Exposed
 /// purely so a test can deterministically exercise the exact teardown-vs-

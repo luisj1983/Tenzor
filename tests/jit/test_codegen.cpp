@@ -246,6 +246,38 @@ TEST(Codegen, ExecuteFusedF32ExpAllBackends) {
     }
 }
 
+// JIT-R142: Float64 fusion must use the double-precision math intrinsics
+// (exp, not expf) and unsuffixed literals (compute_type()/codegen.cpp's
+// dedicated Float64 branch) and actually get COMPILED by NVRTC/HIPRTC on
+// real hardware -- unlike ExecuteFusedF32ExpAllBackends's Float32 (and the
+// Float16/BFloat16 chain below), no test in this file ever ran an
+// all-double kernel through the real device compiler before this.
+TEST(Codegen, ExecuteFusedF64ExpAllBackends) {
+    initialize();
+    auto devs = available_gpu_devices();
+    if (devs.empty()) SKIP_OR_FAIL_NO_GPU();
+
+    auto group = build_fusion({
+        {ElemOp::Exp, 0, -1, 0.0},
+        {ElemOp::MulScalar, -1, -1, 0.5},
+    }, 1, DType::Float64);
+
+    std::vector<double> in(1024);
+    for (size_t i = 0; i < in.size(); ++i) in[i] = -2.0 + 4.0 * (i / 1024.0);
+    Tensor cpu = from_data(in.data(), {1024});
+
+    for (const auto& dev : devs) {
+        Tensor gpu = cpu.to(dev);
+        auto out = execute_fused(group, {gpu}).to(Device::cpu()).contiguous();
+        const double* o = out.data<double>();
+        for (size_t i = 0; i < in.size(); ++i) {
+            double ref = std::exp(in[i]) * 0.5;
+            EXPECT_NEAR(o[i], ref, 1e-12 + 1e-12 * std::abs(ref))
+                << dev.to_string() << " i=" << i;
+        }
+    }
+}
+
 // Float16 / BFloat16 fusion: load the 16-bit storage type, compute in float,
 // narrow back. The header claims Float16/BFloat16 support — this asserts it on
 // every backend. Reference uses the SAME 16-bit-rounded inputs the kernel sees.

@@ -77,6 +77,16 @@ if(TENZOR_USE_MLIR_JIT)
     tenzor_discover_tests(test_jit_r109_shared_state_teardown_race
         DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
 
+    # JIT-R168 regression, in its own executable for the same reason as the
+    # JIT-R109 test above (testing_force_shared_iree_state_cleanup() is a
+    # one-shot, permanent teardown).
+    add_executable(test_jit_r168_cache_miss_teardown_race
+        test_jit_r168_cache_miss_teardown_race.cpp)
+    target_link_libraries(test_jit_r168_cache_miss_teardown_race
+        PRIVATE tenzor_core tenzor_jit_mlir GTest::gtest_main)
+    tenzor_discover_tests(test_jit_r168_cache_miss_teardown_race
+        DISCOVERY_TIMEOUT 60 BACKENDS none LABELS "jit;mlir;iree")
+
     # Task C.1 — Elementwise ops lower to StableHLO primitives.
     add_executable(test_op_elementwise test_op_elementwise.cpp)
     target_link_libraries(test_op_elementwise

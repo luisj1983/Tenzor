@@ -2302,7 +2302,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             int64_t head_axis = nd - 3;
             int64_t hq = qs[head_axis];
             int64_t hk = k.shape()[head_axis];
-            if (hk > 0 && hq != hk && hq % hk == 0) {
+            if (hk > 0 && hq != hk) {
+                // JIT-R162: a non-divisible group size (hq % hk != 0) previously
+                // fell through this guard silently, skipping the repeat/
+                // broadcast entirely and letting Hq/Hkv reach the bmm chain
+                // below mismatched -- an invalid GQA configuration that every
+                // other backend (CUDA/ROCm/OneAPI/CPU) rejects with a clear
+                // error. Fail loudly here too instead of silently computing an
+                // undefined/wrong head-group mapping.
+                if (hq % hk != 0) {
+                    throw std::invalid_argument(
+                        "FusedAttention Vulkan: H_q must be a multiple of H_kv; got " +
+                        std::to_string(hq) + " and " + std::to_string(hk));
+                }
                 int64_t rep = hq / hk;
                 k = vk->dispatchRepeatInterleave(k, rep, head_axis);
                 v = vk->dispatchRepeatInterleave(v, rep, head_axis);

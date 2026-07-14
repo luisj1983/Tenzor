@@ -17,6 +17,8 @@
  */
 
 #include <gtest/gtest.h>
+#include <cmath>
+#include <sstream>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/compile.hpp>
 #include <tenzor/ops/linalg.hpp>
@@ -301,6 +303,249 @@ TEST(JitTraceOps, RMSNormReplayMatchesEager) {
         } catch (const std::exception& e) {
             ADD_FAILURE() << "RMSNorm threw on " << backend_name(dev)
                           << ": " << e.what();
+        }
+    }
+}
+
+// =========================================================================
+// JIT-R155: interpreter replay of a causal FlashAttention with Sq != Sk
+// (KV-cache-style cross-attention) must use bottom-right causal alignment,
+// matching eager flash_attention() and every backend kernel, instead of the
+// top-left alignment that only happens to be correct when Sq == Sk.
+// =========================================================================
+
+// Directly builds a single-node Graph (bypassing the tracer, mirroring
+// test_pattern_matcher.cpp/test_fusion_passes.cpp's pattern) so this test
+// exercises exactly Graph::execute_node's OpType::FlashAttention interpreter
+// case -- the code JIT-R155 fixes -- independent of any tracer-side behavior.
+// Regression for a tracer bug found while testing JIT-R155: tracing_
+// interceptor.cpp's generic output-registration loop called register_output
+// (whose same_view() helper immediately calls .data_ptr()/.dtype()/.device())
+// on EVERY result of a dispatch<OpId::FlashAttention> call, including the
+// auxiliary logsumexp/seed/offset outputs that run_flash_dispatch pads with
+// an EMPTY/invalid filler Tensor whenever they're not produced (i.e. any
+// inference call, is_training=false or dropout_p==0 -- the common case).
+// This crashed with "Operation on uninitialized tensor" on EVERY direct
+// trace of a plain tenzor::flash_attention(...) call, on every backend.
+// FlashAttention/FusedAttention/FlexAttention now get the same "surface only
+// the primary output" treatment LayerNorm/GroupNorm/InstanceNorm/RMSNorm
+// already had.
+TEST(JitTraceOps, FlashAttentionDirectTraceDoesNotCrashOnAuxOutputs) {
+    const float scale = 1.0f / std::sqrt(8.0f);
+    auto fn = jit::CompiledFunction::FnTypeN(
+        [scale](std::span<const Variable> ins) {
+            return tenzor::flash_attention(ins[0], ins[1], ins[2], scale, /*causal=*/true);
+        });
+
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto Q = randn({1, 2, 8, 8}, DType::Float32, dev);
+            auto K = randn({1, 2, 8, 8}, DType::Float32, dev);
+            auto V = randn({1, 2, 8, 8}, DType::Float32, dev);
+            std::vector<Variable> ins = {Variable(Q, false), Variable(K, false), Variable(V, false)};
+
+            Tensor eager = tenzor::flash_attention(ins[0], ins[1], ins[2], scale, /*causal=*/true)
+                               .tensor().to(Device::cpu());
+
+            auto compiled = jit::compile(fn);
+            (void)compiled(std::span<const Variable>(ins.data(), ins.size()));
+            dev.synchronize();
+            auto out = compiled(std::span<const Variable>(ins.data(), ins.size()))
+                           .tensor().to(Device::cpu());
+            dev.synchronize();
+
+            EXPECT_TRUE(tensors_close(eager, out, 1e-4f, 1e-4f))
+                << "direct FlashAttention trace/replay != eager on " << backend_name(dev);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "FlashAttentionDirectTraceDoesNotCrashOnAuxOutputs threw on "
+                          << backend_name(dev) << ": " << e.what();
+        }
+    }
+}
+
+// Directly builds a single-node Graph (bypassing the tracer, mirroring
+// test_pattern_matcher.cpp/test_fusion_passes.cpp's pattern) so this test
+// exercises exactly Graph::execute_node's OpType::FlashAttention interpreter
+// case -- the code JIT-R155 fixes -- independent of any tracer-side behavior.
+TEST(JitTraceOps, FlashAttentionCausalKvCacheInterpreterMatchesEager) {
+    constexpr int64_t kBatch = 1, kHeads = 2, kSq = 3, kSk = 8, kDim = 8;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(kDim));
+
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto Q = randn({kBatch, kHeads, kSq, kDim}, DType::Float32, dev);
+            auto K = randn({kBatch, kHeads, kSk, kDim}, DType::Float32, dev);
+            auto V = randn({kBatch, kHeads, kSk, kDim}, DType::Float32, dev);
+
+            Tensor eager = tenzor::flash_attention(
+                Variable(Q, false), Variable(K, false), Variable(V, false),
+                scale, /*causal=*/true).tensor().to(Device::cpu());
+
+            jit::Graph g;
+            auto qv = g.create_value("q", {kBatch, kHeads, kSq, kDim}, DType::Float32, dev);
+            auto kv = g.create_value("k", {kBatch, kHeads, kSk, kDim}, DType::Float32, dev);
+            auto vv = g.create_value("v", {kBatch, kHeads, kSk, kDim}, DType::Float32, dev);
+            auto node = g.create_node(jit::OpType::FlashAttention, "fa");
+            node->add_input(qv); node->add_input(kv); node->add_input(vv);
+            node->set_attr("scale", static_cast<double>(scale));
+            node->set_bool_attr("causal", true);
+            auto out_v = g.create_value("out", {kBatch, kHeads, kSq, kDim}, DType::Float32, dev);
+            node->add_output(out_v); out_v->set_node(node);
+            g.add_node(node);
+            g.set_inputs({qv, kv, vv});
+            g.set_outputs({out_v});
+
+            auto results = g.forward({Variable(Q, false), Variable(K, false), Variable(V, false)},
+                                      /*grad_mode=*/false);
+            ASSERT_EQ(results.size(), 1u);
+            auto out = results[0].tensor().to(Device::cpu());
+
+            EXPECT_TRUE(tensors_close(eager, out, 1e-4f, 1e-4f))
+                << "causal FlashAttention (Sq=" << kSq << ", Sk=" << kSk
+                << ") interpreter replay != eager on " << backend_name(dev)
+                << " -- interpreter causal mask alignment must be bottom-right, "
+                   "not top-left, for Sq != Sk";
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "FlashAttentionCausalKvCacheInterpreterMatchesEager threw on "
+                          << backend_name(dev) << ": " << e.what();
+        }
+    }
+}
+
+// JIT-R163: directly builds a single-node Graph with OpType::GQA (bypassing
+// the tracer, same pattern as the FlashAttention test above) so this
+// exercises exactly Graph::execute_node's new GQA interpreter case -- which
+// previously had NO execution support at all and threw unconditionally.
+// Eager reference: manual repeat_kv (unsqueeze+expand+reshape) then
+// tenzor::flash_attention, independent of the interpreter's own
+// replay_gqa_repeat_kv/replay_flash_attention_core implementation.
+TEST(JitTraceOps, GQAInterpreterMatchesEager) {
+    constexpr int64_t kBatch = 1, kHq = 4, kHkv = 2, kSq = 3, kSk = 8, kDim = 8;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(kDim));
+
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto Q = randn({kBatch, kHq, kSq, kDim}, DType::Float32, dev);
+            auto K = randn({kBatch, kHkv, kSk, kDim}, DType::Float32, dev);
+            auto V = randn({kBatch, kHkv, kSk, kDim}, DType::Float32, dev);
+
+            // Eager reference: manual repeat_kv + flash_attention.
+            constexpr int64_t G = kHq / kHkv;
+            auto repeat_kv = [&](const Tensor& x) -> Tensor {
+                auto u = tenzor::unsqueeze(x, 2);
+                auto e = tenzor::expand(u, {kBatch, kHkv, G, kSk, kDim});
+                return tenzor::reshape(e, {kBatch, kHq, kSk, kDim});
+            };
+            auto K_full = repeat_kv(K);
+            auto V_full = repeat_kv(V);
+            Tensor eager = tenzor::flash_attention(
+                Variable(Q, false), Variable(K_full, false), Variable(V_full, false),
+                scale, /*causal=*/true).tensor().to(Device::cpu());
+
+            jit::Graph g;
+            auto qv = g.create_value("q", {kBatch, kHq, kSq, kDim}, DType::Float32, dev);
+            auto kv = g.create_value("k", {kBatch, kHkv, kSk, kDim}, DType::Float32, dev);
+            auto vv = g.create_value("v", {kBatch, kHkv, kSk, kDim}, DType::Float32, dev);
+            auto node = g.create_node(jit::OpType::GQA, "gqa");
+            node->add_input(qv); node->add_input(kv); node->add_input(vv);
+            node->set_attr("scale", static_cast<double>(scale));
+            node->set_bool_attr("causal", true);
+            auto out_v = g.create_value("out", {kBatch, kHq, kSq, kDim}, DType::Float32, dev);
+            node->add_output(out_v); out_v->set_node(node);
+            g.add_node(node);
+            g.set_inputs({qv, kv, vv});
+            g.set_outputs({out_v});
+
+            auto results = g.forward({Variable(Q, false), Variable(K, false), Variable(V, false)},
+                                      /*grad_mode=*/false);
+            ASSERT_EQ(results.size(), 1u);
+            auto out = results[0].tensor().to(Device::cpu());
+
+            EXPECT_TRUE(tensors_close(eager, out, 1e-4f, 1e-4f))
+                << "GQA (Hq=" << kHq << ", Hkv=" << kHkv << ") interpreter "
+                   "replay != eager repeat_kv+flash_attention on "
+                << backend_name(dev);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "GQAInterpreterMatchesEager threw on "
+                          << backend_name(dev) << ": " << e.what();
+        }
+    }
+}
+
+// JIT-R163: directly builds a single-node Graph with OpType::RoPE, exercising
+// Graph::execute_node's new RoPE interpreter case (previously threw
+// unconditionally). Eager reference: nn::RoPE's own forward(), independent
+// of the interpreter's replay implementation; the cos/sin tables fed to the
+// graph node are computed here from RoPE's documented frequency formula
+// (theta_i = 1/base^(2i/dim)) so this ALSO cross-checks that formula against
+// nn::RoPE's internal precompute_freqs().
+TEST(JitTraceOps, RoPEInterpreterMatchesEager) {
+    constexpr int64_t kBatch = 1, kHeads = 2, kSeq = 5, kDim = 8;
+    constexpr double kBase = 10000.0;
+
+    for (const auto& dev : get_available_backends()) {
+        try {
+            auto x_t = randn({kBatch, kHeads, kSeq, kDim}, DType::Float32, dev);
+
+            nn::RoPE rope(kDim, /*max_seq_len=*/kSeq);
+            Tensor eager = rope.forward(Variable(x_t, false), /*offset=*/0)
+                               .tensor().to(Device::cpu());
+
+            // Independently computed cos/sin tables (theta_i = 1/base^(2i/dim)).
+            // OpType::RoPE's contract (dispatch_rope_apply/handle_rope_apply_*
+            // in lowering.cpp) operates on the FULL x (not x1/x2 separately) as
+            // result = x*cos_b + rotate_half(x)*sin_b, which is only equivalent
+            // to nn::RoPE's own half-split formula (out1=x1*cos-x2*sin,
+            // out2=x2*cos+x1*sin) when cos_b/sin_b are the half-width table
+            // DUPLICATED to full width (cat([cos,cos],-1)) -- so build
+            // FULL-width (kSeq, kDim) tables here, not (kSeq, kDim/2).
+            constexpr int64_t H = kDim / 2;
+            auto cos_t = zeros({kSeq, kDim}, DType::Float32, dev);
+            auto sin_t = zeros({kSeq, kDim}, DType::Float32, dev);
+            {
+                auto cos_cpu = zeros({kSeq, kDim}, DType::Float32, Device::cpu());
+                auto sin_cpu = zeros({kSeq, kDim}, DType::Float32, Device::cpu());
+                auto* cp = cos_cpu.data<float>();
+                auto* sp = sin_cpu.data<float>();
+                for (int64_t pos = 0; pos < kSeq; ++pos) {
+                    for (int64_t i = 0; i < H; ++i) {
+                        double theta = 1.0 / std::pow(kBase, (2.0 * i) / kDim);
+                        double angle = static_cast<double>(pos) * theta;
+                        const float c = static_cast<float>(std::cos(angle));
+                        const float s = static_cast<float>(std::sin(angle));
+                        cp[pos * kDim + i]     = c;
+                        cp[pos * kDim + H + i] = c;
+                        sp[pos * kDim + i]     = s;
+                        sp[pos * kDim + H + i] = s;
+                    }
+                }
+                cos_t = cos_cpu.to(dev);
+                sin_t = sin_cpu.to(dev);
+            }
+
+            jit::Graph g;
+            auto xv   = g.create_value("x", {kBatch, kHeads, kSeq, kDim}, DType::Float32, dev);
+            auto cosv = g.create_value("cos", {kSeq, kDim}, DType::Float32, dev);
+            auto sinv = g.create_value("sin", {kSeq, kDim}, DType::Float32, dev);
+            auto node = g.create_node(jit::OpType::RoPE, "rope");
+            node->add_input(xv); node->add_input(cosv); node->add_input(sinv);
+            auto out_v = g.create_value("out", {kBatch, kHeads, kSeq, kDim}, DType::Float32, dev);
+            node->add_output(out_v); out_v->set_node(node);
+            g.add_node(node);
+            g.set_inputs({xv, cosv, sinv});
+            g.set_outputs({out_v});
+
+            auto results = g.forward({Variable(x_t, false), Variable(cos_t, false),
+                                      Variable(sin_t, false)}, /*grad_mode=*/false);
+            ASSERT_EQ(results.size(), 1u);
+            auto out = results[0].tensor().to(Device::cpu());
+
+            EXPECT_TRUE(tensors_close(eager, out, 1e-4f, 1e-4f))
+                << "RoPE interpreter replay != nn::RoPE eager forward on "
+                << backend_name(dev);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "RoPEInterpreterMatchesEager threw on "
+                          << backend_name(dev) << ": " << e.what();
         }
     }
 }

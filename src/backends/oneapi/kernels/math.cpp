@@ -2398,7 +2398,15 @@ auto bmm_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 }
 
 // Square root kernel
-auto sqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto sqrt_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -2472,7 +2480,17 @@ auto sqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Negation kernel
-auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto neg_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard (neg_kernel/
+    // sqrt_kernel there) and this file's own binary-op guards
+    // (a.is_contiguous() ? a : contiguous_kernel(a, queue), used throughout
+    // this file for two-operand ops) -- this exact guard was simply missing
+    // for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -2540,7 +2558,15 @@ auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Absolute value kernel
-auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto abs_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     const int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
@@ -2614,7 +2640,15 @@ auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Natural logarithm kernel
-auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto log_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -2678,7 +2712,15 @@ auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Exponential kernel
-auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto exp_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -2745,7 +2787,10 @@ auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Power kernel
-auto pow_kernel(const Tensor& input, double exponent, sycl::queue& queue) -> Tensor {
+auto pow_kernel(const Tensor& input_in, double exponent, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     const float exponent_f = static_cast<float>(exponent);
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
@@ -2960,7 +3005,15 @@ auto dot_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 // ============================================================================
 
 // Sine kernel
-auto sin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto sin_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3027,7 +3080,15 @@ auto sin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Cosine kernel
-auto cos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto cos_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3093,7 +3154,15 @@ auto cos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Tangent kernel
-auto tan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto tan_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3137,7 +3206,15 @@ auto tan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Arc sine kernel
-auto asin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto asin_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3181,7 +3258,15 @@ auto asin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Arc cosine kernel
-auto acos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto acos_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3225,7 +3310,15 @@ auto acos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Arc tangent kernel
-auto atan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto atan_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3269,7 +3362,15 @@ auto atan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Hyperbolic sine kernel
-auto sinh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto sinh_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3313,7 +3414,15 @@ auto sinh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Hyperbolic cosine kernel
-auto cosh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto cosh_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3449,7 +3558,15 @@ auto atan2_kernel(const Tensor& y, const Tensor& x, sycl::queue& queue) -> Tenso
 // ============================================================================
 
 // Round kernel
-auto round_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto round_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3493,7 +3610,15 @@ auto round_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Floor kernel
-auto floor_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto floor_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3537,7 +3662,15 @@ auto floor_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Ceil kernel
-auto ceil_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto ceil_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3581,7 +3714,15 @@ auto ceil_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Trunc kernel
-auto trunc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto trunc_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3625,7 +3766,15 @@ auto trunc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // Reciprocal kernel
-auto reciprocal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto reciprocal_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -3673,7 +3822,10 @@ auto reciprocal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // ============================================================================
 
 // Clamp min kernel
-auto clamp_min_kernel(const Tensor& input, double min_val, sycl::queue& queue) -> Tensor {
+auto clamp_min_kernel(const Tensor& input_in, double min_val, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     const float min_val_f = static_cast<float>(min_val);
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
@@ -3737,7 +3889,10 @@ auto clamp_min_kernel(const Tensor& input, double min_val, sycl::queue& queue) -
 }
 
 // Clamp max kernel
-auto clamp_max_kernel(const Tensor& input, double max_val, sycl::queue& queue) -> Tensor {
+auto clamp_max_kernel(const Tensor& input_in, double max_val, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     const float max_val_f = static_cast<float>(max_val);
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
@@ -4507,7 +4662,15 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) 
 class HasInfNanKernelF32;
 class HasInfNanKernelF64;
 
-auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto has_inf_nan_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     // Returns a scalar Bool tensor: true if any Inf or NaN
     Tensor output({1}, DType::Bool, input.device());
     bool* out_ptr = static_cast<bool*>(const_cast<void*>(output.data_ptr()));
@@ -4744,7 +4907,15 @@ auto cumprod_kernel(const Tensor& input_raw, int64_t dim, sycl::queue& queue) ->
 // Extended Math Functions (log2, log10, log1p, exp2, expm1, erf, erfc)
 // ============================================================================
 
-auto log2_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto log2_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -4779,7 +4950,15 @@ auto log2_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto log10_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto log10_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -4814,7 +4993,15 @@ auto log10_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto log1p_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto log1p_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -4849,7 +5036,15 @@ auto log1p_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto exp2_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto exp2_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -4884,7 +5079,15 @@ auto exp2_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto expm1_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto expm1_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -4919,7 +5122,15 @@ auto expm1_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto erf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto erf_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -4954,7 +5165,15 @@ auto erf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto erfc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto erfc_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -4993,7 +5212,15 @@ auto erfc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // Bool Predicates (isnan, isinf, isfinite)
 // ============================================================================
 
-auto isnan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto isnan_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   DType::Bool, input.device());
     const int64_t numel = input.numel();
@@ -5026,7 +5253,15 @@ auto isnan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto isinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto isinf_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   DType::Bool, input.device());
     const int64_t numel = input.numel();
@@ -5059,7 +5294,15 @@ auto isinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
-auto isfinite_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto isfinite_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: get_data_ptr() is a raw pointer cast with NO stride handling
+    // -- a non-contiguous input (e.g. the result of narrow/slice/transpose)
+    // silently reads the wrong elements via straight linear indexing.
+    // Mirrors the CPU backend's identical contiguity guard and this file's
+    // own binary-op guards (a.is_contiguous() ? a : contiguous_kernel(a, queue))
+    // -- this exact guard was simply missing for the unary math kernels.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   DType::Bool, input.device());
     const int64_t numel = input.numel();
@@ -5441,7 +5684,10 @@ auto logical_or_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queu
     return output;
 }
 
-auto logical_not_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto logical_not_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   DType::Bool, input.device());
     const int64_t numel = input.numel();
@@ -5880,7 +6126,10 @@ auto imag_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return result;
 }
 
-auto angle_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto angle_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 
@@ -6166,7 +6415,10 @@ auto cross_kernel(const Tensor& a_in, const Tensor& b_in, int64_t dim, sycl::que
 struct FracKernelF32 {};
 struct FracKernelF64 {};
 
-auto frac_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto frac_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         auto f32 = input.to(DType::Float32);
         return frac_kernel(f32, queue).to(input.dtype());
@@ -6228,7 +6480,10 @@ auto heaviside_kernel(const Tensor& input_in, const Tensor& values_in, sycl::que
 struct NanToNumKernelF32 {};
 struct NanToNumKernelF64 {};
 
-auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, double neginf_v, sycl::queue& queue) -> Tensor {
+auto nan_to_num_kernel(const Tensor& input_in, double nan_v, double posinf_v, double neginf_v, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         auto f32 = input.to(DType::Float32);
         return nan_to_num_kernel(f32, nan_v, posinf_v, neginf_v, queue).to(input.dtype());
@@ -6269,7 +6524,10 @@ auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, doubl
 struct LogSigmoidKernelF32 {};
 struct LogSigmoidKernelF64 {};
 
-auto log_sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto log_sigmoid_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         auto f32 = input.to(DType::Float32);
         return log_sigmoid_kernel(f32, queue).to(input.dtype());
@@ -6378,7 +6636,10 @@ auto bitwise_xor_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& que
     } else { throw std::runtime_error("bitwise_xor: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
-auto bitwise_not_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto bitwise_not_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
     if (n == 0) return result;
@@ -6611,7 +6872,10 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
 // Rsqrt kernel: output = 1/sqrt(input)
 // ============================================================================
 
-auto rsqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto rsqrt_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -6650,7 +6914,10 @@ auto rsqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // Square kernel: output = input * input
 // ============================================================================
 
-auto square_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto square_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -6689,7 +6956,10 @@ auto square_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // Asinh kernel
 // ============================================================================
 
-auto asinh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto asinh_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -6728,7 +6998,10 @@ auto asinh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // Acosh kernel
 // ============================================================================
 
-auto acosh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto acosh_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -6767,7 +7040,10 @@ auto acosh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // Atanh kernel
 // ============================================================================
 
-auto atanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto atanh_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     const int64_t numel = input.numel();
@@ -8280,7 +8556,10 @@ class Deg2RadKernelF64;
 class Deg2RadKernelF16;
 class Deg2RadKernelBF16;
 
-auto deg2rad_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto deg2rad_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
@@ -8323,7 +8602,10 @@ class Rad2DegKernelF64;
 class Rad2DegKernelF16;
 class Rad2DegKernelBF16;
 
-auto rad2deg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto rad2deg_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
@@ -8366,7 +8648,10 @@ class LogitKernelF64;
 class LogitKernelF16;
 class LogitKernelBF16;
 
-auto logit_kernel(const Tensor& input, float eps, sycl::queue& queue) -> Tensor {
+auto logit_kernel(const Tensor& input_in, float eps, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
@@ -8427,7 +8712,10 @@ class SignbitKernelBF16;
 class SignbitKernelI32;
 class SignbitKernelI64;
 
-auto signbit_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto signbit_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor output(shape_vec, DType::Bool, input.device());
@@ -8478,7 +8766,10 @@ class IsPosInfKernelF64;
 class IsPosInfKernelF16;
 class IsPosInfKernelBF16;
 
-auto isposinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto isposinf_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor output(shape_vec, DType::Bool, input.device());
@@ -8521,7 +8812,10 @@ class IsNegInfKernelF64;
 class IsNegInfKernelF16;
 class IsNegInfKernelBF16;
 
-auto isneginf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto isneginf_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor output(shape_vec, DType::Bool, input.device());
@@ -8724,7 +9018,10 @@ class FrexpKernelF64;
 class FrexpKernelF16;
 class FrexpKernelBF16;
 
-auto frexp_kernel(const Tensor& input, sycl::queue& queue) -> std::vector<Tensor> {
+auto frexp_kernel(const Tensor& input_in, sycl::queue& queue) -> std::vector<Tensor> {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor mantissa(shape_vec, input.dtype(), input.device());
@@ -8848,7 +9145,10 @@ auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_
 // ============================================================================
 // Diagflat: flatten input, then create diagonal matrix
 // ============================================================================
-auto diagflat_kernel(const Tensor& input, int64_t offset, sycl::queue& queue) -> Tensor {
+auto diagflat_kernel(const Tensor& input_in, int64_t offset, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     // Flatten input to 1D
     int64_t N = input.numel();
     int64_t abs_offset = offset < 0 ? -offset : offset;
@@ -8892,7 +9192,10 @@ auto diagflat_kernel(const Tensor& input, int64_t offset, sycl::queue& queue) ->
 // ============================================================================
 class IsRealComplex64Tag;
 class IsRealComplex128Tag;
-auto isreal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+auto isreal_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
+    // JIT-R163: see neg_kernel's identical contiguity-guard comment.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    const Tensor& input = input_cont;
     int64_t numel = input.numel();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor output(shape_vec, DType::Bool, input.device());

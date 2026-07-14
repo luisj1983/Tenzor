@@ -95,6 +95,9 @@ protected:
         } else if (backend_name_ == "oneapi") {
             device_type = Device::Type::OneAPI;
             device_ = Device::oneapi();
+        } else if (backend_name_ == "rocm") {
+            device_type = Device::Type::ROCm;
+            device_ = Device::rocm();
         } else {
             GTEST_SKIP() << "Unknown backend: " << backend_name_;
             return;

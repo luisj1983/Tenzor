@@ -36,6 +36,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -580,6 +581,83 @@ TEST(JitRocmArch, RemapHipVisibleDeviceIndex) {
     EXPECT_EQ(tj::remap_hip_visible_device_index(-1, "1,0"), -1);
 }
 
+// JIT-R141 regression: device_selection_env_key() (the helper
+// shared_iree_hal_device()/iree_can_initialize_default_device() use to build
+// their process-lifetime cache keys) used to read CUDA_VISIBLE_DEVICES for
+// EVERY non-"hip" driver, including "vulkan" -- which has no bearing on
+// Vulkan physical-device selection. Verifies directly that "vulkan" instead
+// reflects VK_ICD_FILENAMES/MESA_VK_DEVICE_SELECT/DRI_PRIME and ignores
+// CUDA_VISIBLE_DEVICES, while "hip"/other drivers and the CPU task-queue
+// drivers keep their existing (correct) behavior.
+TEST(JitRocmArch, DeviceSelectionEnvKeyIsDriverSpecific) {
+    auto save_and_clear = [](const char* name) -> std::optional<std::string> {
+        const char* v = std::getenv(name);
+        std::optional<std::string> saved = v != nullptr ? std::optional<std::string>(v) : std::nullopt;
+        unsetenv(name);
+        return saved;
+    };
+    auto restore = [](const char* name, const std::optional<std::string>& saved) {
+        if (saved.has_value()) setenv(name, saved->c_str(), 1);
+        else unsetenv(name);
+    };
+
+    auto cuda_saved = save_and_clear("CUDA_VISIBLE_DEVICES");
+    auto hip_saved = save_and_clear("HIP_VISIBLE_DEVICES");
+    auto icd_saved = save_and_clear("VK_ICD_FILENAMES");
+    auto select_saved = save_and_clear("MESA_VK_DEVICE_SELECT");
+    auto prime_saved = save_and_clear("DRI_PRIME");
+    struct EnvGuard {
+        std::optional<std::string>&cuda, &hip, &icd, &select, &prime;
+        ~EnvGuard() {
+            if (cuda.has_value()) setenv("CUDA_VISIBLE_DEVICES", cuda->c_str(), 1); else unsetenv("CUDA_VISIBLE_DEVICES");
+            if (hip.has_value()) setenv("HIP_VISIBLE_DEVICES", hip->c_str(), 1); else unsetenv("HIP_VISIBLE_DEVICES");
+            if (icd.has_value()) setenv("VK_ICD_FILENAMES", icd->c_str(), 1); else unsetenv("VK_ICD_FILENAMES");
+            if (select.has_value()) setenv("MESA_VK_DEVICE_SELECT", select->c_str(), 1); else unsetenv("MESA_VK_DEVICE_SELECT");
+            if (prime.has_value()) setenv("DRI_PRIME", prime->c_str(), 1); else unsetenv("DRI_PRIME");
+        }
+    } guard{cuda_saved, hip_saved, icd_saved, select_saved, prime_saved};
+
+    // All relevant env vars unset: every driver's key is empty.
+    EXPECT_EQ(tj::device_selection_env_key("hip"), "");
+    EXPECT_EQ(tj::device_selection_env_key("cuda"), "");
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
+    EXPECT_EQ(tj::device_selection_env_key("local-sync"), "");
+    EXPECT_EQ(tj::device_selection_env_key("local-task"), "");
+
+    // CUDA_VISIBLE_DEVICES changes "cuda"'s key but NOT "vulkan"'s or the
+    // CPU task-queue drivers' -- this is the exact bug: pre-fix, "vulkan"
+    // also read this var.
+    setenv("CUDA_VISIBLE_DEVICES", "1", 1);
+    EXPECT_EQ(tj::device_selection_env_key("cuda"), "1");
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
+    EXPECT_EQ(tj::device_selection_env_key("local-sync"), "");
+    unsetenv("CUDA_VISIBLE_DEVICES");
+
+    // HIP_VISIBLE_DEVICES changes only "hip"'s key.
+    setenv("HIP_VISIBLE_DEVICES", "0,1", 1);
+    EXPECT_EQ(tj::device_selection_env_key("hip"), "0,1");
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
+    unsetenv("HIP_VISIBLE_DEVICES");
+
+    // Each Vulkan-relevant env var independently changes "vulkan"'s key
+    // (and only "vulkan"'s), and CUDA_VISIBLE_DEVICES set alongside them
+    // still has no effect on the Vulkan key.
+    setenv("CUDA_VISIBLE_DEVICES", "1", 1);
+    setenv("VK_ICD_FILENAMES", "/a/icd.json", 1);
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "/a/icd.json||");
+    EXPECT_EQ(tj::device_selection_env_key("cuda"), "1");
+    unsetenv("VK_ICD_FILENAMES");
+    unsetenv("CUDA_VISIBLE_DEVICES");
+
+    setenv("MESA_VK_DEVICE_SELECT", "10de:2704", 1);
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "|10de:2704|");
+    unsetenv("MESA_VK_DEVICE_SELECT");
+
+    setenv("DRI_PRIME", "1", 1);
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||1");
+    unsetenv("DRI_PRIME");
+}
+
 // JIT-R129 regression: detect_rocm_gfx_arch()'s process-lifetime cache used
 // to be keyed ONLY by HIP device_index, not by the HIP_VISIBLE_DEVICES value
 // the remap actually depends on -- so if the env var changed between two
@@ -652,12 +730,14 @@ TEST(JitRocmArch, CacheKeyRespectsHipVisibleDevicesChanges) {
 // the stale-cache-hit scenario can't be exercised with real cuda/hip
 // hardware here. shared_iree_hal_device()'s cache-key construction is
 // driver-agnostic, so this test instead exercises the SAME code path via
-// Vulkan (which this host does have an in-process driver for) and toggles
-// CUDA_VISIBLE_DEVICES (a no-op for Vulkan device SELECTION, but exactly
-// the value the fixed cache key folds in for any non-"hip" driver) between
-// two loads for the same URI/ordinal: pre-fix, the cache is keyed by
-// device_uri alone, so it unconditionally hits on the second call and
-// returns the SAME device object regardless of any env change; post-fix,
+// Vulkan (which this host does have an in-process driver for), toggling
+// MESA_VK_DEVICE_SELECT -- one of the Vulkan-relevant device-selection env
+// vars device_selection_env_key() folds into the cache key for driver ==
+// "vulkan" (JIT-R141; CUDA_VISIBLE_DEVICES has no bearing on Vulkan device
+// selection and is correctly ignored for this driver post-fix) -- between
+// two loads for the same URI/ordinal: pre-JIT-R118 fix, the cache was keyed
+// by device_uri alone, so it unconditionally hit on the second call and
+// returned the SAME device object regardless of any env change; post-fix,
 // the differing env value changes the cache key, forcing a fresh device.
 TEST(JitRocmArch, SharedHalDeviceCacheRespectsVisibleDevicesEnvChanges) {
     ensure_core_init();
@@ -695,25 +775,25 @@ TEST(JitRocmArch, SharedHalDeviceCacheRespectsVisibleDevicesEnvChanges) {
         GTEST_SKIP() << "no in-process Vulkan device available";
     }
 
-    const char* saved_raw = std::getenv("CUDA_VISIBLE_DEVICES");
+    const char* saved_raw = std::getenv("MESA_VK_DEVICE_SELECT");
     const bool had_saved = saved_raw != nullptr;
     const std::string saved = had_saved ? saved_raw : std::string{};
     struct EnvGuard {
         bool had;
         std::string val;
         ~EnvGuard() {
-            if (had) setenv("CUDA_VISIBLE_DEVICES", val.c_str(), 1);
-            else unsetenv("CUDA_VISIBLE_DEVICES");
+            if (had) setenv("MESA_VK_DEVICE_SELECT", val.c_str(), 1);
+            else unsetenv("MESA_VK_DEVICE_SELECT");
         }
     } env_guard{had_saved, saved};
 
-    unsetenv("CUDA_VISIBLE_DEVICES");
+    unsetenv("MESA_VK_DEVICE_SELECT");
     auto invoker_before =
         tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::InProcess, 0);
     const void* device_before = invoker_before->raw_device_handle_for_testing();
     ASSERT_NE(device_before, nullptr);
 
-    setenv("CUDA_VISIBLE_DEVICES", "0", 1);
+    setenv("MESA_VK_DEVICE_SELECT", "10de:0", 1);
     auto invoker_after =
         tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::InProcess, 0);
     const void* device_after = invoker_after->raw_device_handle_for_testing();

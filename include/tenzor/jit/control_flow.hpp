@@ -92,5 +92,25 @@ auto while_loop(int64_t max_iter,
                 std::function<std::vector<Variable>(const std::vector<Variable>&)> body_fn,
                 const std::vector<Variable>& carried) -> std::vector<Variable>;
 
+/**
+ * @brief Read a scalar condition tensor as a bool, matching eager cond()/
+ * while_loop() semantics identically across every backend (JIT-R151a).
+ *
+ * Moves to the host BEFORE casting: a device-side cast lets some backends
+ * (e.g. ROCm) canonicalize a NaN condition to 0, flipping the branch taken
+ * vs. a host-side read (where NaN != 0 stays true). Widens to Float64
+ * rather than narrowing to Float32: a nonzero Float64 condition below the
+ * Float32 denormal floor (e.g. 1e-40) would otherwise underflow to 0.0f
+ * and wrongly read as false.
+ *
+ * Every place that reads a condition tensor to pick a branch -- cond(),
+ * while_loop(), the scripted `if` (script.cpp), and the compiled-graph
+ * interpreter's If/Loop/GuardNode cases (graph.cpp) -- goes through this
+ * one helper, so a future refinement to the cast order/dtype only needs
+ * to change here instead of being hand-copied into each call site (the
+ * previous duplication risked exactly that kind of silent divergence).
+ */
+auto tensor_condition_to_bool(const Tensor& condition) -> bool;
+
 } // namespace jit
 } // namespace tenzor

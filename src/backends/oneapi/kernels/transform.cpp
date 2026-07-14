@@ -1881,6 +1881,8 @@ class CastF32ToI8;
 class CastI8ToF32;
 class CastF32ToBool;
 class CastBoolToF32;
+class CastF64ToBool;
+class CastBoolToF64;
 class CastI64ToF64;
 class CastF64ToI64;
 
@@ -2016,6 +2018,25 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
         float* out = get_data_ptr<float>(output);
         queue.parallel_for<CastBoolToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             out[i] = in[i] ? 1.0f : 0.0f;
+        });
+    } else if (src == DType::Float64 && dst == DType::Bool) {
+        // Direct Float64 -> Bool at native double precision. Without this
+        // case, the generic two-hop fallback below (src -> Float32 -> dst)
+        // would narrow Float64 -> Float32 FIRST, underflowing a tiny nonzero
+        // double (e.g. 1e-50, well below float32's smallest subnormal
+        // ~1.4e-45) to exactly 0.0f and reporting it as false -- silently
+        // diverging from CPU/CUDA/ROCm, which all test Float64 conditions at
+        // their own precision (JIT-R145-adjacent bug class).
+        const double* in = get_data_ptr<const double>(input);
+        bool* out = get_data_ptr<bool>(output);
+        queue.parallel_for<CastF64ToBool>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = (in[i] != 0.0);
+        });
+    } else if (src == DType::Bool && dst == DType::Float64) {
+        const bool* in = get_data_ptr<const bool>(input);
+        double* out = get_data_ptr<double>(output);
+        queue.parallel_for<CastBoolToF64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = in[i] ? 1.0 : 0.0;
         });
     } else if (src == DType::Int64 && dst == DType::Float64) {
         const int64_t* in = get_data_ptr<const int64_t>(input);

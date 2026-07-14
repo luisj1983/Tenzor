@@ -2059,14 +2059,41 @@ auto VulkanBackend::dispatchFlashAttention(
         Tensor K_c = (K.is_contiguous() && K.offset() == 0) ? K : dispatchContiguous(K);
         Tensor V_c = (V.is_contiguous() && V.offset() == 0) ? V : dispatchContiguous(V);
 
+        // JIT-R160/JIT-R161: when H_kv != H_q (GQA/MQA), broadcast K/V along
+        // the head dim BEFORE the batch_heads collapse below. Without this,
+        // reshape({q_shape[0]*q_shape[1], seq_len_k, d_k}) on a
+        // [B, H_kv, seq_len_k, d_k] tensor has a mismatched element count
+        // and throws -- mirrors the identical fix in the CUDA/ROCm/CPU/
+        // OneAPI OpId::FlashAttention registries.
+        int64_t h_q = q_shape[1];
+        int64_t h_kv = K_c.shape()[1];
+        if (h_kv != h_q) {
+            if (h_q % h_kv != 0) {
+                throw std::invalid_argument(
+                    "FlashAttention Vulkan: H_q must be a multiple of H_kv; got " +
+                    std::to_string(h_q) + " and " + std::to_string(h_kv));
+            }
+            int64_t b = q_shape[0];
+            int64_t sk = K_c.shape()[2];
+            int64_t dk_kv = K_c.shape()[3];
+            int64_t dv_kv = V_c.shape()[3];
+            int64_t reps = h_q / h_kv;
+            Tensor Ku = dispatchUnsqueeze(K_c, 2);
+            Tensor Vu = dispatchUnsqueeze(V_c, 2);
+            Tensor Ke = dispatchExpand(Ku, {b, h_kv, reps, sk, dk_kv});
+            Tensor Ve = dispatchExpand(Vu, {b, h_kv, reps, sk, dv_kv});
+            K_c = dispatchContiguous(Ke).reshape({b, h_q, sk, dk_kv});
+            V_c = dispatchContiguous(Ve).reshape({b, h_q, sk, dv_kv});
+        }
+
         batch_heads = q_shape[0] * q_shape[1];
         seq_len_q = q_shape[2];
         d_k = q_shape[3];
-        seq_len_k = K.shape()[2];
+        seq_len_k = K_c.shape()[2];
 
         q_flat = Q_c.reshape({batch_heads, seq_len_q, d_k});
         k_flat = K_c.reshape({batch_heads, seq_len_k, d_k});
-        v_flat = V_c.reshape({batch_heads, seq_len_k, V.shape()[3]});
+        v_flat = V_c.reshape({batch_heads, seq_len_k, V_c.shape()[3]});
     } else {
         batch_heads = q_shape[0];
         seq_len_q = q_shape[1];

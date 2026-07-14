@@ -2297,6 +2297,15 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         shader_name = "cast_bool_f32";
     } else if (src_dtype == DType::Float32 && target_dtype == DType::Bool) {
         shader_name = "cast_f32_bool";
+    } else if (src_dtype == DType::Float64 && target_dtype == DType::Bool) {
+        // Direct Float64 -> Bool at native double precision. A two-step
+        // Float64 -> Float32 -> Bool path (like Float64 -> Int32/Int8 below)
+        // would narrow the value FIRST, underflowing a tiny nonzero double
+        // (e.g. 1e-50, well below float32's smallest subnormal ~1.4e-45) to
+        // exactly 0.0f and reporting it as false -- silently diverging from
+        // CPU/CUDA/ROCm, which all test Float64 conditions at their own
+        // precision (the same bug class fixed for CPU/OneAPI as JIT-R145).
+        shader_name = "cast_f64_bool";
     } else if (src_dtype == DType::Bool && target_dtype == DType::Int64) {
         shader_name = "cast_bool_i64";
     } else if (src_dtype == DType::BFloat16 && target_dtype == DType::Float32) {
@@ -2344,8 +2353,14 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         // Two-step via Float32: Int32/Int64 -> Float32 -> target
         two_step = true;
     } else if ((src_dtype == DType::Float64 || src_dtype == DType::Float16) &&
-               (target_dtype == DType::Int32 || target_dtype == DType::Int8 || target_dtype == DType::Bool)) {
-        // Two-step via Float32: Float64/Float16 -> Float32 -> target
+               (target_dtype == DType::Int32 || target_dtype == DType::Int8)) {
+        // Two-step via Float32: Float64/Float16 -> Float32 -> target. (Bool
+        // is handled directly above -- Float64 -> Bool must not narrow to
+        // Float32 first, see the direct cast_f64_bool case.)
+        two_step = true;
+    } else if (src_dtype == DType::Float16 && target_dtype == DType::Bool) {
+        // Float16 -> Float32 is a lossless widen (unlike Float64 -> Float32),
+        // so the two-step path is safe here.
         two_step = true;
     } else if (src_dtype == DType::Float32 && target_dtype == DType::Int64) {
         shader_name = "cast_f32_i64";
@@ -7747,6 +7762,41 @@ auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
     int64_t T_max = log_probs.shape()[0];
     int64_t N     = log_probs.shape()[1];
     int64_t C     = log_probs.shape()[2];
+
+    // Normalize a 1-D concatenated (PyTorch-style) targets tensor into a
+    // padded 2-D [N, S_pad] layout so the (n * S_max) indexing the ctc_forward
+    // shader performs is correct. Without this, S_max was taken as the WHOLE
+    // flattened targets length (e.g. 15 for N=3 samples of length 5 each
+    // instead of 5), so the shader read targets[n * S_max + s] -- correct by
+    // coincidence for n == 0, but out-of-bounds/garbage for n >= 1. Mirrors
+    // the identical fix already applied to CUDA/ROCm/OneAPI (see
+    // src/backends/cuda/kernels/ctc.cu) and the CPU backend's native
+    // prefix-sum handling.
+    if (targets.shape().size() == 1 && N > 0) {
+        Tensor tl_cpu = target_lengths.to(Device::cpu()).contiguous();
+        Tensor tg_cpu = targets.to(Device::cpu()).contiguous();
+        const int32_t* tl = tl_cpu.data<int32_t>();
+        const int32_t* tg = tg_cpu.data<int32_t>();
+        const int64_t total = static_cast<int64_t>(tg_cpu.numel());
+        int64_t S_pad = 1;
+        for (int64_t n = 0; n < N; ++n) if (tl[n] > S_pad) S_pad = tl[n];
+        Tensor padded({N, S_pad}, DType::Int32, Device::cpu());
+        int32_t* pd = padded.data<int32_t>();
+        for (int64_t i = 0; i < N * S_pad; ++i) pd[i] = 0;  // pad positions (never read past S_n)
+        int64_t acc = 0;
+        for (int64_t n = 0; n < N; ++n) {
+            int64_t Sn = tl[n];
+            for (int64_t s = 0; s < Sn && (acc + s) < total; ++s)
+                pd[n * S_pad + s] = tg[acc + s];
+            if (Sn > 0) acc += Sn;
+        }
+        if (acc > total) {
+            throw std::invalid_argument(
+                "ctc_loss_forward (Vulkan): sum(target_lengths) exceeds the "
+                "flattened targets length");
+        }
+        targets = padded.to(targets_in.device());
+    }
 
     auto tgt_shape = targets.shape();
     int64_t S_max = (tgt_shape.size() >= 2) ? tgt_shape[1]

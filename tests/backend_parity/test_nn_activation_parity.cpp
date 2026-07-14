@@ -94,6 +94,21 @@ TEST_P(NNActivationParity, GELU_Float64) {
     }, {input}, 1e-9f, 1e-11f, "GELU_f64");
 }
 
+// JIT-R163/NEW-1: forces relu_kernel to see a non-contiguous input (a slice
+// along dim 1 that doesn't span the full extent), regression-covering the
+// ROCm relu_kernel is_contiguous() guard fix.
+TEST_P(NNActivationParity, ReLUSlicedNonContiguous) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
+
+    auto input = randn({32, 64}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        auto x = Variable(inputs[0].slice(1, 8, 40), false);
+        return nn::relu(x).tensor();
+    }, {input}, 1e-6f, 1e-8f, "ReLUSlicedNonContiguous");
+}
+
 TEST_P(NNActivationParity, Hardshrink) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");

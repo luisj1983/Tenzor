@@ -139,6 +139,16 @@ TEST_P(GradActivationParityTest, LogSigmoidBackward) {
     }, {4, 4});
 }
 
+// JIT-R163/NEW-1: slices the input before GELU so the saved forward-input
+// tensor consumed by gelu_backward_kernel is a non-contiguous view,
+// regression-covering the ROCm gelu_backward_kernel is_contiguous() guard fix.
+TEST_P(GradActivationParityTest, GELUBackwardSlicedNonContiguous) {
+    testUnaryGradient([](const Variable& x) {
+        auto x_sliced = tenzor::slice(x, 1, 2, 6);
+        return tenzor::sum(nn::gelu(x_sliced));
+    }, {4, 8});
+}
+
 TEST_P(GradActivationParityTest, HardswishBackward) {
     testUnaryGradient([](const Variable& x) {
         return tenzor::sum(nn::hardswish(x));

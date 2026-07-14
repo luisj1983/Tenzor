@@ -97,6 +97,45 @@ auto default_cache_dir(bool& is_shared_temp) -> fs::path {
 /// lock it down to owner-only (0700) and verify the current process owns it.
 /// Throws if an existing directory on the shared path is owned by another user
 /// (a sign of squatting).
+/// JIT-R167: verifies `path` is a REAL directory (not a symlink to one)
+/// owned by the current user, using lstat (which does NOT follow symlinks)
+/// rather than stat. Without this, a local attacker who knows the victim's
+/// uid can pre-create a symlink at the deterministic cache-dir path pointing
+/// at a directory the victim already owns; stat() follows the symlink and
+/// reports victim ownership (passing the "not squatted" check that's the
+/// entire point of this function), and the subsequent chmod(0700) is then
+/// applied to the symlink's TARGET, not the squatted path itself --
+/// bypassing the defense via one directory-level symlink.
+auto verify_owned_real_directory(const fs::path& path) -> void {
+    struct stat st {};
+    if (::lstat(path.c_str(), &st) != 0) {
+        throw JitCompileError(
+            "compile_mlir: cannot lstat cache dir " + path.string() + ": " +
+                std::strerror(errno),
+            {});
+    }
+    if (S_ISLNK(st.st_mode)) {
+        throw JitCompileError(
+            "compile_mlir: cache dir " + path.string() +
+                " is a symlink; refusing to trust a symlinked shared-temp "
+                "cache path (possible squatting attack)",
+            {});
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        throw JitCompileError(
+            "compile_mlir: cache dir " + path.string() +
+                " exists but is not a directory",
+            {});
+    }
+    if (st.st_uid != ::getuid()) {
+        throw JitCompileError(
+            "compile_mlir: cache dir " + path.string() +
+                " is owned by another user (uid " + std::to_string(st.st_uid) +
+                "); refusing to trust shared-temp cache",
+            {});
+    }
+}
+
 auto secure_cache_dir(const fs::path& dir, bool is_shared_temp) -> void {
     if (!is_shared_temp) {
         fs::create_directories(dir);
@@ -104,7 +143,10 @@ auto secure_cache_dir(const fs::path& dir, bool is_shared_temp) -> void {
     }
 
     // Create the per-user root first so we can chmod it to 0700 before any
-    // nested directory is exposed.
+    // nested directory is exposed. mkdir() itself is symlink-safe here (it
+    // fails with EEXIST against a pre-existing symlink rather than following
+    // it to create a directory elsewhere) -- the risk is entirely in the
+    // stat/chmod that follows, which verify_owned_real_directory closes.
     const fs::path user_root = dir.parent_path();
     if (::mkdir(user_root.c_str(), 0700) != 0 && errno != EEXIST) {
         throw JitCompileError(
@@ -112,22 +154,10 @@ auto secure_cache_dir(const fs::path& dir, bool is_shared_temp) -> void {
                 user_root.string() + ": " + std::strerror(errno),
             {});
     }
-
-    struct stat st {};
-    if (::stat(user_root.c_str(), &st) != 0) {
-        throw JitCompileError(
-            "compile_mlir: cannot stat per-user cache dir " +
-                user_root.string() + ": " + std::strerror(errno),
-            {});
-    }
-    if (st.st_uid != ::getuid()) {
-        throw JitCompileError(
-            "compile_mlir: per-user cache dir " + user_root.string() +
-                " is owned by another user (uid " + std::to_string(st.st_uid) +
-                "); refusing to trust shared-temp cache",
-            {});
-    }
+    verify_owned_real_directory(user_root);
     // Enforce owner-only permissions even if the directory pre-existed.
+    // Safe: verify_owned_real_directory already rejected a symlink above, so
+    // this chmod targets the real directory, not a symlink's target.
     ::chmod(user_root.c_str(), 0700);
 
     if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
@@ -136,18 +166,25 @@ auto secure_cache_dir(const fs::path& dir, bool is_shared_temp) -> void {
                 std::strerror(errno),
             {});
     }
+    verify_owned_real_directory(dir);
     ::chmod(dir.c_str(), 0700);
 }
 
 /// On the shared-temp fallback, verify a pre-existing cached artifact is owned
-/// by the current user before it is trusted/executed.
+/// by the current user before it is trusted/executed. JIT-R167: uses lstat
+/// (not stat) so a symlinked .vmfb path can't borrow another file's
+/// ownership to pass this check -- see verify_owned_real_directory's comment
+/// for the identical directory-level version of this attack.
 auto cache_file_is_trustworthy(const fs::path& file, bool is_shared_temp)
     -> bool {
     if (!is_shared_temp) {
         return true;
     }
     struct stat st {};
-    if (::stat(file.c_str(), &st) != 0) {
+    if (::lstat(file.c_str(), &st) != 0) {
+        return false;
+    }
+    if (S_ISLNK(st.st_mode)) {
         return false;
     }
     return st.st_uid == ::getuid();
@@ -463,7 +500,7 @@ auto compile_via_subprocess(const std::string& mlir_text,
                             const std::string& cuda_arch,
                             const std::string& vulkan_arch,
                             const fs::path& vmfb_path,
-                            const fs::path& mlir_path) -> void {
+                            const fs::path& mlir_path) -> std::string {
     const std::string& bin = ::tenzor::jit::mlir_jit::resolve_iree_compile();
     std::vector<std::string> args{
         "--iree-hal-target-backends=" + target,
@@ -566,6 +603,7 @@ auto compile_via_subprocess(const std::string& mlir_text,
     // JITs correctly onto newer GPUs -- so a cutting-edge GPU paired with a
     // not-yet-updated IREE toolchain still gets real on-device GPU codegen
     // instead of a hard failure.
+    std::string effective_cuda_arch = cuda_arch;
     if (rc != 0 && target == "cuda" && cuda_arch != "sm_80" &&
         (stderr_text.find("missing GPU target") != std::string::npos ||
          stderr_text.find("Unknown CUDA target") != std::string::npos)) {
@@ -587,6 +625,12 @@ auto compile_via_subprocess(const std::string& mlir_text,
                                          retry_stderr, vmfb_unused);
         if (rc == 0) {
             stderr_text.clear();
+            // JIT-R149: the bytecode just written to vmfb_path was compiled
+            // for sm_80, not the nominal `cuda_arch` the caller keyed
+            // vmfb_path/mlir_path on -- report this back so compile_mlir can
+            // relocate the cache entry to a key that actually matches its
+            // contents.
+            effective_cuda_arch = "sm_80";
         } else {
             stderr_text = std::move(retry_stderr);
         }
@@ -606,6 +650,7 @@ auto compile_via_subprocess(const std::string& mlir_text,
                 vmfb_path.string() + "\nstderr:\n" + stderr_text,
             mlir_path);
     }
+    return effective_cuda_arch;
 }
 
 }  // namespace
@@ -735,6 +780,74 @@ auto compute_cache_key(const std::string& mlir_text,
        << "tgt:" << target << '|'
        << "src:" << mlir_text;
     return sha256_hex(os.str());
+}
+
+// Derives the vmfb/mlir cache paths for a given target+arch combination.
+// Factored out of compile_mlir so a fallback-arch retry (JIT-R101/JIT-R127)
+// can recompute the paths for the arch ACTUALLY used to compile, and relocate
+// the cache entry there (JIT-R149) instead of leaving it filed under the
+// nominal, pre-retry arch it no longer matches.
+auto compute_vmfb_cache_paths(const std::string& mlir_text,
+                              const std::string& target,
+                              const std::string& rocm_arch,
+                              const std::string& cuda_arch,
+                              const std::string& vulkan_arch,
+                              const fs::path& cache_dir)
+    -> std::pair<fs::path, fs::path> {
+    std::string key_target =
+        (target == "rocm" && !rocm_arch.empty()) ? (target + ":" + rocm_arch)
+      : (target == "cuda" && !cuda_arch.empty()) ? (target + ":" + cuda_arch)
+      : ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty())
+            ? (target + ":" + vulkan_arch)
+      : (target == "llvm-cpu")
+            ? (target + ":" + ::tenzor::backend::get_simd_features().to_string())
+                                                 : target;
+    if (embedding_api_supported_targets().count(target) == 0) {
+        key_target += "|subver:" + iree_compile_subprocess_version();
+    }
+    const std::string key = compute_cache_key(mlir_text, key_target);
+    return {cache_dir / (key + ".vmfb"), cache_dir / (key + ".mlir")};
+}
+
+// Relocates a just-written vmfb (and re-dumps the debug .mlir) from
+// `from_vmfb`/`from_mlir` to the cache paths for `actual_cuda_arch`, when a
+// fallback-arch retry means the file's contents no longer match the key it
+// was originally written under (JIT-R149). No-op if the paths are unchanged
+// (no retry happened). Returns the path the caller should report as the
+// artifact's location.
+auto relocate_vmfb_after_cuda_arch_fallback(
+    const std::string& mlir_text, const std::string& target,
+    const std::string& rocm_arch, const std::string& vulkan_arch,
+    const std::string& actual_cuda_arch, const fs::path& cache_dir,
+    const fs::path& from_vmfb, const fs::path& from_mlir) -> fs::path {
+    auto [to_vmfb, to_mlir] = compute_vmfb_cache_paths(
+        mlir_text, target, rocm_arch, actual_cuda_arch, vulkan_arch, cache_dir);
+    if (to_vmfb == from_vmfb) {
+        return from_vmfb;  // no substitution happened
+    }
+    std::error_code ec;
+    fs::rename(from_vmfb, to_vmfb, ec);
+    if (ec) {
+        // Fall back to copy+remove: rename can fail across filesystems (an
+        // unlikely but possible cache_dir/tmp split); either way the file
+        // must end up at the arch-correct path, not silently mislabeled.
+        fs::copy_file(from_vmfb, to_vmfb, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            throw JitCompileError(
+                "failed to relocate vmfb after CUDA arch fallback (" +
+                    from_vmfb.string() + " -> " + to_vmfb.string() +
+                    "): " + ec.message(),
+                from_mlir);
+        }
+        fs::remove(from_vmfb, ec);
+    }
+    // The .mlir debug dump is identical source text regardless of arch --
+    // just re-write it at the corrected path rather than trying to move the
+    // original (which compile_mlir's caller may still reference for error
+    // messages on THIS call).
+    std::ofstream f(to_mlir, std::ios::binary | std::ios::trunc);
+    f.write(mlir_text.data(), static_cast<std::streamsize>(mlir_text.size()));
+    return to_vmfb;
 }
 
 // JIT-R127: the embedding-API compile-and-write-vmfb sequence, factored out of
@@ -1084,30 +1197,32 @@ auto compile_mlir(const std::string& mlir_text,
     // feature-dependent codegen. Fold the actual detected SIMD feature set
     // (get_simd_features().to_string(), e.g. "AVX512BF16 AVX512VNNI ... SSE2")
     // into the key so two machines with different ISAs never alias.
-    std::string key_target =
-        (target == "rocm" && !rocm_arch.empty()) ? (target + ":" + rocm_arch)
-      : (target == "cuda" && !cuda_arch.empty()) ? (target + ":" + cuda_arch)
-      : ((target == "vulkan-spirv" || target == "vulkan") && !vulkan_arch.empty())
-            ? (target + ":" + vulkan_arch)
-      : (target == "llvm-cpu")
-            ? (target + ":" + ::tenzor::backend::get_simd_features().to_string())
-                                                 : target;
-    // F002: for targets the linked libIREECompiler doesn't register (compiled by
-    // a separate iree-compile subprocess), fold that binary's version into the
-    // key so a subprocess-compiler upgrade rotates the cache.
-    if (embedding_api_supported_targets().count(target) == 0) {
-        key_target += "|subver:" + iree_compile_subprocess_version();
-    }
-    const std::string key = compute_cache_key(mlir_text, key_target);
-    const fs::path vmfb_path = cache_dir / (key + ".vmfb");
-    const fs::path mlir_path = cache_dir / (key + ".mlir");
+    const auto [vmfb_path, mlir_path] = compute_vmfb_cache_paths(
+        mlir_text, target, rocm_arch, cuda_arch, vulkan_arch, cache_dir);
 
     // Always dump the source for offline debug, even on cache hit, so that the
-    // path returned in JitCompileError exists.
+    // path returned in JitCompileError exists. JIT-R150: check for write
+    // failure (disk full, fd/quota exhaustion, a restrictive sandbox) --
+    // without this, a subsequent JitCompileError from either compile path
+    // below hands the caller a mlir_dump_path() that's missing or truncated,
+    // exactly during the failure-diagnosis scenario this dump exists for.
     {
         std::ofstream f(mlir_path, std::ios::binary | std::ios::trunc);
+        if (!f.good()) {
+            throw JitCompileError(
+                "failed to open MLIR debug dump for writing: " +
+                    mlir_path.string(),
+                mlir_path);
+        }
         f.write(mlir_text.data(),
                 static_cast<std::streamsize>(mlir_text.size()));
+        f.flush();
+        if (!f.good()) {
+            throw JitCompileError(
+                "failed to write MLIR debug dump (disk full, quota "
+                "exhausted, or restrictive sandbox?): " + mlir_path.string(),
+                mlir_path);
+        }
     }
 
     if (fs::exists(vmfb_path) && fs::file_size(vmfb_path) > 0 &&
@@ -1146,20 +1261,32 @@ auto compile_mlir(const std::string& mlir_text,
                     "Subprocess-available targets=" + available.str(),
                 mlir_path);
         }
+        std::string actual_cuda_arch = cuda_arch;
         write_vmfb_atomically(vmfb_path, cache_dir,
                               [&](const fs::path& tmp_out) {
-            compile_via_subprocess(mlir_text, target, rocm_arch, cuda_arch, vulkan_arch,
-                                   tmp_out, mlir_path);
+            actual_cuda_arch = compile_via_subprocess(
+                mlir_text, target, rocm_arch, cuda_arch, vulkan_arch,
+                tmp_out, mlir_path);
         });
         const auto compile_t1 = std::chrono::steady_clock::now();
         const double compile_ms =
             std::chrono::duration<double, std::milli>(compile_t1 - compile_t0)
                 .count();
         internal::record_compile_ms(compile_ms);
-        return CompiledArtifact{vmfb_path, target};
+        // JIT-R149: if the JIT-R101 sm_80 fallback engaged, vmfb_path's
+        // bytecode no longer matches the key it was written under -- relocate
+        // it to the key that actually reflects its contents.
+        fs::path final_vmfb_path = vmfb_path;
+        if (target == "cuda" && actual_cuda_arch != cuda_arch) {
+            final_vmfb_path = relocate_vmfb_after_cuda_arch_fallback(
+                mlir_text, target, rocm_arch, vulkan_arch, actual_cuda_arch,
+                cache_dir, vmfb_path, mlir_path);
+        }
+        return CompiledArtifact{final_vmfb_path, target};
     }
 
     std::string diag_buffer;
+    std::string actual_cuda_arch = cuda_arch;
     bool embed_ok = compile_via_embedding_api(mlir_text, target, rocm_arch,
                                               cuda_arch, vulkan_arch, vmfb_path,
                                               mlir_path, diag_buffer);
@@ -1184,6 +1311,9 @@ auto compile_mlir(const std::string& mlir_text,
                                              "sm_80", vulkan_arch, vmfb_path,
                                              mlir_path, retry_diag);
         diag_buffer = embed_ok ? std::string{} : retry_diag;
+        if (embed_ok) {
+            actual_cuda_arch = "sm_80";
+        }
     }
     if (!embed_ok) {
         throw JitCompileError(
@@ -1197,7 +1327,16 @@ auto compile_mlir(const std::string& mlir_text,
             .count();
     internal::record_compile_ms(compile_ms);
 
-    return CompiledArtifact{vmfb_path, target};
+    // JIT-R149: relocate to the arch-correct cache key if the sm_80 fallback
+    // engaged (see the subprocess branch's identical handling above).
+    fs::path final_vmfb_path = vmfb_path;
+    if (target == "cuda" && actual_cuda_arch != cuda_arch) {
+        final_vmfb_path = relocate_vmfb_after_cuda_arch_fallback(
+            mlir_text, target, rocm_arch, vulkan_arch, actual_cuda_arch,
+            cache_dir, vmfb_path, mlir_path);
+    }
+
+    return CompiledArtifact{final_vmfb_path, target};
 }
 
 }  // namespace tenzor::jit::mlir_jit

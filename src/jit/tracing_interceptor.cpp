@@ -664,7 +664,25 @@ auto make_tracing_interceptor(
             // even though it has no live dispatch call site today.
             op == OpId::LayerNorm ||
             op == OpId::FusedLayerNorm ||
-            op == OpId::RMSNorm) {
+            op == OpId::RMSNorm ||
+            // JIT-R155-adjacent: FlashAttention/FusedAttention/FlexAttention's
+            // dispatch wrappers (run_flash_dispatch/run_fused_dispatch/
+            // run_flex_dispatch in function_attention.cpp) always return a
+            // fixed-size vector, padding any auxiliary output the current
+            // call didn't produce (logsumexp L, dropout seed/offset) with an
+            // EMPTY/invalid filler Tensor -- e.g. any inference call
+            // (is_training=false) or dropout_p==0 leaves L/seed/offset
+            // invalid. Without this branch, the generic loop below called
+            // register_output on every result including those invalid
+            // fillers, and register_output's same_view() helper immediately
+            // calls .data_ptr()/.dtype()/.device() on the tensor, throwing
+            // "Operation on uninitialized tensor" -- i.e. tracing a plain
+            // inference-mode tenzor::flash_attention()/fused_attention()
+            // call directly (not via FuseAttentionPass) crashed unconditionally.
+            // Surface only the primary output, matching LayerNorm/RMSNorm above.
+            op == OpId::FlashAttention ||
+            op == OpId::FusedAttention ||
+            op == OpId::FlexAttention) {
             if (!results.empty()) {
                 output_ids.push_back(register_output(results[0]));
             }

@@ -760,11 +760,11 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
     // setenv/unsetenv across cases, or any embedding scenario mutating it
     // between JIT compiles) reuses the FIRST call's device object --
     // silently executing against the wrong physical GPU.
-    const char* visible_devices_env =
-        (driver == "hip") ? std::getenv("HIP_VISIBLE_DEVICES")
-                           : std::getenv("CUDA_VISIBLE_DEVICES");
-    const std::string cache_key =
-        device_uri + "|" + (visible_devices_env != nullptr ? visible_devices_env : "");
+    // JIT-R141: "vulkan" was falling into the CUDA_VISIBLE_DEVICES branch
+    // above, which has no bearing on Vulkan physical-device selection -- see
+    // device_selection_env_key's doc comment for the Vulkan-specific env
+    // vars folded in instead.
+    const std::string cache_key = device_uri + "|" + device_selection_env_key(driver);
 
     {
         std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
@@ -815,6 +815,23 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
     }
 
     std::lock_guard<std::mutex> guard(g_shared_iree_device_mu);
+    // JIT-R168: mirror shared_iree_runtime_instance()'s JIT-R109 already-
+    // torn-down guard. Without this, a cache MISS (a new, not-yet-seen
+    // driver/URI) racing cleanup_shared_iree_state() -- which runs
+    // concurrently since the device above was just created OUTSIDE the lock
+    // per JIT-R130 -- would try_emplace its freshly created device into the
+    // now-cleared g_shared_iree_devices map after cleanup already ran,
+    // handing the caller a "live" device that will never be released (no
+    // second cleanup pass is coming) and reintroducing exactly the
+    // dlclose-vs-background-thread teardown race JIT-R109 eliminated for
+    // the cache-HIT path.
+    if (!g_shared_iree_instance) {
+        iree_hal_device_release(device);
+        throw std::runtime_error(
+            "shared_iree_hal_device: the shared IREE runtime state has "
+            "already been torn down (process is exiting) -- cannot cache "
+            "or hand out a new device for '" + cache_key + "'");
+    }
     auto [it, inserted] = g_shared_iree_devices.try_emplace(cache_key, device);
     if (!inserted) {
         // Another thread won the race and already cached a device for this
@@ -837,6 +854,26 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
 }
 
 }  // namespace
+
+auto device_selection_env_key(const std::string& driver) -> std::string {
+    if (driver == "hip") {
+        const char* v = std::getenv("HIP_VISIBLE_DEVICES");
+        return (v != nullptr) ? v : "";
+    }
+    if (driver == "vulkan") {
+        const char* icd = std::getenv("VK_ICD_FILENAMES");
+        const char* select = std::getenv("MESA_VK_DEVICE_SELECT");
+        const char* prime = std::getenv("DRI_PRIME");
+        return std::string(icd != nullptr ? icd : "") + "|" +
+               (select != nullptr ? select : "") + "|" +
+               (prime != nullptr ? prime : "");
+    }
+    if (driver == "local-sync" || driver == "local-task") {
+        return "";
+    }
+    const char* v = std::getenv("CUDA_VISIBLE_DEVICES");
+    return (v != nullptr) ? v : "";
+}
 
 auto testing_force_shared_iree_state_cleanup() -> void {
     cleanup_shared_iree_state();
@@ -1737,11 +1774,12 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
     // e.g. probing "false" while the only GPU is hidden, then hiding a
     // DIFFERENT GPU and reusing that stale "false" even though ordinal 0 is
     // now a real, available device (or vice versa).
-    const char* visible_devices_env =
-        (driver_name == "hip") ? std::getenv("HIP_VISIBLE_DEVICES")
-                                : std::getenv("CUDA_VISIBLE_DEVICES");
-    const std::string cache_key = driver_name + "|" +
-        (visible_devices_env != nullptr ? visible_devices_env : "");
+    // JIT-R141: same Vulkan gap as shared_iree_hal_device's JIT-R118 fix --
+    // "vulkan" has no bearing from CUDA_VISIBLE_DEVICES, so fold in the
+    // Vulkan-relevant device-selection env vars instead (see
+    // device_selection_env_key's doc comment for why these three
+    // specifically).
+    const std::string cache_key = driver_name + "|" + device_selection_env_key(driver_name);
 
     // Per-driver(+visible-devices) cache: dlopen + device-create costs
     // ~30ms on a warm laptop and tests may probe the same driver dozens of
@@ -1759,9 +1797,42 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
     // resolves to a working library on hosts where /opt/rocm is corrupt.
     // No-op if TENZOR_ROCM_RUNTIME_LIB_DIR wasn't defined at build time.
     // Must be set before the iree-run-module subprocess fork+exec below
-    // and before the in-process HAL driver attempts dlopen.
+    // and before the in-process HAL driver attempts dlopen, but must NOT
+    // leak into the rest of the process afterward: setenv() here is
+    // process-wide, and anything that later shells out to another tool via
+    // plain std::system() (as opposed to compile_via_subprocess's
+    // fork-scoped unsetenv("LD_LIBRARY_PATH") before execv) would otherwise
+    // inherit the mutated path and can dlopen a same-named library shadowed
+    // by the ROCm tree instead of its own bundled dependencies. Confirmed:
+    // this exact failure mode ("Dialect 'stablehlo' not found") reproduced
+    // in tests/jit/mlir/test_op_shape.cpp's ResidualAddEmitsAndParses,
+    // which only failed when run in-process right after a ROCm-target
+    // compile. Restore the original value (or unset it if it was
+    // originally unset) once this function's dlopen-triggering work
+    // completes -- symbols already resolved via dlopen stay mapped
+    // regardless of later LD_LIBRARY_PATH changes, so restoring here is
+    // safe for the cached device this function hands back for reuse.
+    struct LdLibraryPathRestoreGuard {
+        bool active = false;
+        bool had_value = false;
+        std::string saved;
+        ~LdLibraryPathRestoreGuard() {
+            if (!active) return;
+            if (had_value) {
+                ::setenv("LD_LIBRARY_PATH", saved.c_str(), /*overwrite=*/1);
+            } else {
+                ::unsetenv("LD_LIBRARY_PATH");
+            }
+        }
+    } ld_path_guard;
 #ifdef TENZOR_ROCM_RUNTIME_LIB_DIR
     if (driver_name == "hip") {
+        if (const char* cur = std::getenv("LD_LIBRARY_PATH");
+            cur != nullptr) {
+            ld_path_guard.had_value = true;
+            ld_path_guard.saved = cur;
+        }
+        ld_path_guard.active = true;
         prepend_to_ld_library_path(TENZOR_ROCM_RUNTIME_LIB_DIR);
     }
 #endif

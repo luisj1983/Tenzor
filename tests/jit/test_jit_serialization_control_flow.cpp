@@ -349,3 +349,67 @@ TEST(JITSerializationControlFlow, GpuSerializedConstantRunsOnCpu) {
         GTEST_SKIP() << "no non-CPU backend available for GPU->CPU direction";
     }
 }
+
+// ============================================================================
+// JIT-R151b: a module saved with its constant living on ONE GPU backend
+//     (e.g. CUDA) must load and run correctly with inputs placed directly on
+//     a DIFFERENT GPU backend (e.g. ROCm) -- not routed through CPU first.
+//     ConstantIsDevicePortable/GpuSerializedConstantRunsOnCpu only ever cover
+//     CPU->all-backends and GPU->CPU; this is the missing GPU-saved-on-A,
+//     loaded-and-run-on-B direct path. write_tensor always normalizes to CPU
+//     bytes at save time regardless of source device (no arch/gfx/SPIR-V
+//     metadata is ever baked into the serialized format), so this is expected
+//     to already work -- this test exists to actually prove it on real
+//     hardware rather than leaving it as an untested assumption.
+// ============================================================================
+TEST(JITSerializationControlFlow, GpuToGpuSerializationRoundTrip) {
+    auto backends = get_available_backends();
+    std::vector<Device> non_cpu;
+    for (const auto& dev : backends) {
+        if (dev.type != Device::Type::CPU) non_cpu.push_back(dev);
+    }
+
+    if (non_cpu.size() < 2) {
+        // JIT-R129: same hard-fail escalation as GpuSerializedConstantRunsOnCpu
+        // above -- a silent skip would hide a CI box that's supposed to have
+        // 2+ GPU backends but where a driver failed to init.
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1) "
+                      "but fewer than 2 non-CPU backends are available for "
+                      "the GPU-to-GPU direction";
+        }
+        GTEST_SKIP() << "fewer than 2 non-CPU backends available for the "
+                        "GPU-to-GPU direction";
+    }
+
+    for (size_t i = 0; i < non_cpu.size(); ++i) {
+        for (size_t j = 0; j < non_cpu.size(); ++j) {
+            if (i == j) continue;
+            const Device& save_dev = non_cpu[i];
+            const Device& load_dev = non_cpu[j];
+
+            auto w_cpu = randn({2, 3}, DType::Float32, Device::cpu());
+            auto w_save_dev = w_cpu.to(save_dev);  // constant lives on save_dev at trace time
+            auto g = build_const_graph(w_save_dev);
+            const std::string path = temp_path("tz_const_gpu2gpu.graph");
+            g->save(path);  // write_tensor migrates bytes to CPU, records CPU device
+            auto loaded = Graph::load(path);
+            ASSERT_NE(loaded, nullptr);
+            EXPECT_EQ(loaded->constants().at("w").device().type, Device::Type::CPU);
+
+            SCOPED_TRACE("save_dev=" + save_dev.to_string() +
+                        " load_dev=" + load_dev.to_string());
+
+            auto x_cpu = randn({2, 3}, DType::Float32, Device::cpu());
+            Tensor eager = x_cpu + w_cpu;
+            // Run directly on load_dev -- no CPU hop in between.
+            auto out = loaded->forward({Variable(x_cpu.to(load_dev), false)});
+            ASSERT_EQ(out.size(), 1u);
+            load_dev.synchronize();
+
+            Tensor got = out[0].tensor().to(Device::cpu());
+            EXPECT_TENSORS_CLOSE(eager, got, 1e-5f, 1e-5f);
+            std::filesystem::remove(path);
+        }
+    }
+}

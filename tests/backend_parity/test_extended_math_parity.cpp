@@ -95,6 +95,18 @@ TEST_P(ExtendedMathParity, Rsqrt) {
     }, {a}, device, 1e-5f, 1e-7f, "Rsqrt");
 }
 
+// JIT-R163/NEW-1: slices the input so rsqrt_kernel sees a genuinely
+// non-contiguous tensor, regression-covering the OneAPI/ROCm/CPU
+// is_contiguous() guard fix.
+TEST_P(ExtendedMathParity, RsqrtSlicedNonContiguous) {
+
+    auto a = generate_uniform_tensor({32, 64}, 0.1f, 10.0f, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return rsqrt(inputs[0].slice(1, 8, 40));
+    }, {a}, device, 1e-5f, 1e-7f, "RsqrtSlicedNonContiguous");
+}
+
 TEST_P(ExtendedMathParity, Square) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
@@ -163,6 +175,21 @@ TEST_P(ExtendedMathParity, Frac) {
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return frac(inputs[0]);
     }, {a}, device, 1e-5f, 1e-7f, "Frac");
+}
+
+// JIT-R163/NEW-1: slices the input so frac_kernel sees a genuinely
+// non-contiguous tensor. Also serves as CPU regression coverage: CPU's own
+// frac_kernel (src/backends/cpu/kernels/math.cpp) was independently found
+// and fixed this session for the identical missing-guard bug, so this
+// exercises both the CPU and device-side fixes via the standard
+// CPU-vs-device parity helper.
+TEST_P(ExtendedMathParity, FracSlicedNonContiguous) {
+
+    auto a = randn({32, 64}, DType::Float32, Device::cpu());
+
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return frac(inputs[0].slice(1, 8, 40));
+    }, {a}, device, 1e-5f, 1e-7f, "FracSlicedNonContiguous");
 }
 
 TEST_P(ExtendedMathParity, Erfinv) {

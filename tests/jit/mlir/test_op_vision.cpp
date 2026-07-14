@@ -448,6 +448,76 @@ TEST(OpVision, MaxPool2dBFloat16CompilesAndMatches) {
     tzv_e2e::run_jit_vs_eager(fn, x, 1e-2F);
 }
 
+// JIT-R144: MaxPool2d/AvgPool2d/AdaptiveAvgPool2d lower to stablehlo.
+// reduce_window, a structurally different op from the plain stablehlo.reduce
+// that emit_reduce_with_keepdim's JIT-R119 fix protects with an
+// optimization_barrier against IREE's LLVMGPUVectorDistribute (CUDA/ROCm)
+// Float64 codegen bug -- reduce_window had zero barrier protection and zero
+// Float64 test coverage on any target before this. Fan out over every
+// available IREE target (matching every other *EndToEnd test in this file)
+// with genuine Float64 input/output (no narrowing before the eager-vs-jit
+// compare) so a real CUDA/ROCm miscompile would show up as a wrong value or
+// a hard compile failure, not be silently averaged away.
+void run_jit_vs_eager_f64(::tenzor::jit::CompiledFunction::FnType fn,
+                          const ::tenzor::Variable& x) {
+    namespace mt = ::tenzor::testing::mlir;
+    auto eager = fn(x);
+    auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu())
+                          .to(::tenzor::DType::Float64);
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jit = compiled(x);
+        mt::assert_jit_used("vision", target);
+        auto jit_cpu = jit.tensor().to(::tenzor::Device::cpu())
+                          .to(::tenzor::DType::Float64);
+        auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                        .template item<double>();
+        EXPECT_LT(diff, 1e-9) << "target=" << target << " diff=" << diff;
+    }
+}
+
+TEST(OpVision, MaxPool2dFloat64EndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::max_pool2d(x, {2, 2}, {2, 2}, {0, 0});
+    };
+    auto x_t = ::tenzor::full({1, 1, 4, 4}, 0.0, ::tenzor::DType::Float64);
+    auto* xd = x_t.data<double>();
+    for (int i = 0; i < 16; ++i) xd[i] = static_cast<double>(i);
+    ::tenzor::Variable x(x_t, false);
+    run_jit_vs_eager_f64(fn, x);
+}
+
+TEST(OpVision, AvgPool2dFloat64EndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::avg_pool2d(x, {2, 2}, {2, 2}, {0, 0});
+    };
+    auto x_t = ::tenzor::full({1, 1, 4, 4}, 0.0, ::tenzor::DType::Float64);
+    auto* xd = x_t.data<double>();
+    for (int i = 0; i < 16; ++i) xd[i] = static_cast<double>(i);
+    ::tenzor::Variable x(x_t, false);
+    run_jit_vs_eager_f64(fn, x);
+}
+
+TEST(OpVision, AdaptiveAvgPool2dFloat64EndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return tzv_e2e::F::adaptive_avg_pool2d(x, {1, 1});
+    };
+    auto x_t = ::tenzor::full({1, 2, 4, 4}, 0.0, ::tenzor::DType::Float64);
+    auto* xd = x_t.data<double>();
+    for (int i = 0; i < 32; ++i) xd[i] = static_cast<double>(i);
+    ::tenzor::Variable x(x_t, false);
+    run_jit_vs_eager_f64(fn, x);
+}
+
 // JIT-F035/F012: F16 Conv2d through the JIT across every available IREE target
 // (llvm-cpu / cuda / vulkan-spirv). The eager reference and inputs are on CPU
 // (safe), and the conv lowering must widen F16->F32 to match eager.

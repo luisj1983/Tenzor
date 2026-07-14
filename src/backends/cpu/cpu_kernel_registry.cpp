@@ -3295,7 +3295,49 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
         bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
         uint64_t seed_in = static_cast<uint64_t>(attrs.get_int(AttrKey::Seed, 0));
-        return cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2],
+
+        // JIT-R160/JIT-R161: cpu::flash_attention_forward indexes K/V using
+        // Q's OWN head count with no GQA broadcast, silently reading past
+        // the K/V buffer whenever H_kv < H_q (GQA/MQA). Mirrors the
+        // GQA/MQA broadcast CUDA's identical OpId::FlashAttention wrapper
+        // performs (cuda_kernel_registry.cpp) so CPU produces the correct
+        // result for the same call instead of silently corrupting it.
+        Tensor Ki = inputs[1], Vi = inputs[2];
+        if (inputs[0].shape().size() == 4 && inputs[1].shape().size() == 4) {
+            int64_t h = inputs[0].shape()[1];
+            int64_t h_kv = inputs[1].shape()[1];
+            if (h_kv != h) {
+                if (h % h_kv != 0) {
+                    throw std::invalid_argument(
+                        "FlashAttention CPU: H_q must be a multiple of H_kv; got " +
+                        std::to_string(h) + " and " + std::to_string(h_kv));
+                }
+                int64_t b = inputs[0].shape()[0];
+                int64_t sk = inputs[1].shape()[2];
+                int64_t dk = inputs[1].shape()[3];
+                int64_t dv = inputs[2].shape()[3];
+                int64_t reps = h / h_kv;
+                Tensor Kb = inputs[1].is_contiguous() ? inputs[1] : inputs[1].contiguous();
+                Tensor Vb = inputs[2].is_contiguous() ? inputs[2] : inputs[2].contiguous();
+                NewOpAttributes us_attrs;
+                us_attrs.set(AttrKey::Dim, static_cast<int64_t>(2));
+                Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Kb}, us_attrs)[0];
+                Tensor Vu = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Vb}, us_attrs)[0];
+                std::vector<int64_t> exp_k = {b, h_kv, reps, sk, dk};
+                std::vector<int64_t> exp_v = {b, h_kv, reps, sk, dv};
+                std::string s_k, s_v;
+                for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+                for (size_t i = 0; i < exp_v.size(); ++i) { if (i) s_v += ","; s_v += std::to_string(exp_v[i]); }
+                NewOpAttributes ek_attrs; ek_attrs.set(AttrKey::Shape, s_k);
+                NewOpAttributes ev_attrs; ev_attrs.set(AttrKey::Shape, s_v);
+                Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek_attrs)[0];
+                Tensor Ve = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Vu}, ev_attrs)[0];
+                Ki = Ke.contiguous().reshape({b, h, sk, dk});
+                Vi = Ve.contiguous().reshape({b, h, sk, dv});
+            }
+        }
+
+        return cpu::flash_attention_forward(inputs[0], Ki, Vi,
                                             scale, causal, dropout_p, is_training, seed_in);
     });
 

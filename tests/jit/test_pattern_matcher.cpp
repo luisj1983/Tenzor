@@ -348,3 +348,67 @@ TEST(PatternMatcherAffineShapeGuard, RmsNormRejectsDynamicShapeSentinelDim) {
            "match (norm_size cannot be computed), not silently absorb an "
            "operand based on a bogus 0/negative norm_size";
 }
+
+// JIT-R143 regression: match_rms_norm previously required only a Div/Mul
+// normalizing step to be present (matched.size() >= 4), with no check that a
+// Sqrt/Rsqrt actually contributed to the chain. Build the exact buggy shape:
+// Pow(x,2) -> Mean -> Add(eps) -> Mul(x, variance_eps), i.e. dividing/scaling
+// by (variance + eps) DIRECTLY with the square root step simply omitted --
+// not a real RMSNorm. Pre-fix this satisfied matched.size()==4 and would be
+// silently misabsorbed into extended_codegen's hardcoded
+// `x * rsqrt(mean_sq + eps)` kernel, computing the wrong thing.
+TEST(PatternMatcherAffineShapeGuard, RmsNormWithoutSqrtDoesNotFuse) {
+    Graph g;
+    auto dev = Device::cpu();
+    auto x = g.create_value("x", {kRows, kC}, DType::Float32, dev);
+
+    auto sq_out = g.create_value("sq", {kRows, kC}, DType::Float32, dev);
+    auto n0 = g.create_node(OpType::Pow, "sq_pow");
+    n0->add_input(x);
+    n0->set_attr("exponent", 2.0);
+    sq_out->set_node(n0);
+    n0->add_output(sq_out);
+    g.add_node(n0);
+
+    auto mean_out = g.create_value("mean", {kRows, 1}, DType::Float32, dev);
+    auto n1 = g.create_node(OpType::Mean, "mean");
+    n1->add_input(sq_out);
+    n1->set_int_attr("dim", -1);
+    n1->set_bool_attr("keepdim", true);
+    mean_out->set_node(n1);
+    n1->add_output(mean_out);
+    g.add_node(n1);
+
+    auto eps = g.create_value("eps", {}, DType::Float32, dev);
+    auto eps_out = g.create_value("mean_eps", {kRows, 1}, DType::Float32, dev);
+    auto n2 = g.create_node(OpType::Add, "add_eps");
+    n2->add_input(mean_out);
+    n2->add_input(eps);
+    eps_out->set_node(n2);
+    n2->add_output(eps_out);
+    g.add_node(n2);
+
+    // NO Sqrt/Rsqrt node here -- straight from (variance+eps) to the
+    // "normalizing" Mul, unlike every genuine RMSNorm chain in this file.
+    auto out = g.create_value("out", {kRows, kC}, DType::Float32, dev);
+    auto n3 = g.create_node(OpType::Mul, "scale");
+    n3->add_input(x);
+    n3->add_input(eps_out);
+    out->set_node(n3);
+    n3->add_output(out);
+    g.add_node(n3);
+
+    g.set_inputs({x});
+    g.set_outputs({out});
+
+    PatternMatcher matcher;
+    auto matches = matcher.find_all(g);
+    bool matched_as_rmsnorm = false;
+    for (const auto& m : matches) {
+        if (m.kind == FusionKind::RMSNorm) matched_as_rmsnorm = true;
+    }
+    EXPECT_FALSE(matched_as_rmsnorm)
+        << "a variance-scaling chain with no Sqrt/Rsqrt step must NOT fuse "
+           "as RMSNorm -- extended_codegen's fused kernel always divides by "
+           "the square root, which this graph never computes";
+}

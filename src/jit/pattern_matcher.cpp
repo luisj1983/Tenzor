@@ -601,6 +601,22 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
                      })) {
         return std::nullopt;
     }
+    // JIT-R166: the Div-presence check above only guards against a MISSING
+    // division; it does not verify the divisor is actually std = sqrt(var+eps).
+    // A chain dividing by (var+eps) directly -- i.e. Mean,Sub,Pow,Mean,Add,Div,
+    // with the Sqrt/Rsqrt step simply absent -- also satisfies "matched.size()
+    // >= 6" and "a Div is present", and would be silently misabsorbed into
+    // extended_codegen's hardcoded sqrt-based LayerNorm kernel (generate_layer_
+    // norm computes inv_std = 1/sqrt(m2/count + eps) unconditionally). Require a
+    // Sqrt or Rsqrt to also be present so the matched chain's actual arithmetic
+    // matches what the fused kernel will compute.
+    if (std::none_of(matched.begin(), matched.end(),
+                     [](const std::shared_ptr<Node>& n) {
+                         return n->op_type() == OpType::Sqrt ||
+                                n->op_type() == OpType::Rsqrt;
+                     })) {
+        return std::nullopt;
+    }
 
     // Intermediates may be consumed by MULTIPLE nodes inside the pattern — the
     // canonical LayerNorm reuses (x - mean) for both the variance branch and the
@@ -792,8 +808,13 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
         ++next;
     }
 
-    // Sqrt or Rsqrt (which is Div(1, Sqrt) or Pow(-0.5))
-    if (next < nodes.size() && nodes[next]->op_type() == OpType::Sqrt &&
+    // Sqrt, or the literal Rsqrt op (JIT-R166: previously only Sqrt was
+    // recognized here despite the comment above claiming both are matched;
+    // a genuine RMSNorm traced via the non-decomposed Rsqrt op instead of
+    // Div(1,Sqrt)/Pow(-0.5) was never absorbed, missing an otherwise-valid
+    // fusion opportunity).
+    if (next < nodes.size() &&
+        (nodes[next]->op_type() == OpType::Sqrt || nodes[next]->op_type() == OpType::Rsqrt) &&
         !used.count(nodes[next].get()) &&
         consumes_output(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
@@ -847,6 +868,24 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     }
 
     if (matched.size() < 4) return std::nullopt;
+
+    // JIT-R143: the eps-Add, Sqrt/Rsqrt, and normalizing Div/Mul steps above
+    // are each independently optional -- nothing tied them together, so a
+    // chain computing `variance = mean(x*x); variance_eps = variance + eps;
+    // y = x * variance_eps` (no square root at all -- a bug, or simply a
+    // non-RMS variance-scaling graph) could satisfy matched.size() >= 4 and
+    // be silently misabsorbed into extended_codegen's hardcoded generate_
+    // rms_norm kernel, which unconditionally computes
+    // `x * rsqrt(mean_sq + eps)` regardless of what was actually matched.
+    // Require a Sqrt or Rsqrt to actually be present in the matched chain,
+    // mirroring match_layer_norm's identical fix.
+    if (std::none_of(matched.begin(), matched.end(),
+                     [](const std::shared_ptr<Node>& n) {
+                         return n->op_type() == OpType::Sqrt ||
+                                n->op_type() == OpType::Rsqrt;
+                     })) {
+        return std::nullopt;
+    }
 
     for (size_t i = 0; i + 1 < matched.size(); ++i) {
         if (!has_single_use(matched[i])) return std::nullopt;

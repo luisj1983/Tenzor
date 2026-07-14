@@ -5922,7 +5922,12 @@ auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return logical_binary_kernel(a, b, [](bool x, bool y) { return x || y; });
 }
 
-auto logical_not_kernel(const Tensor& input) -> Tensor {
+auto logical_not_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify (see sqrt_kernel): to_bool_value() indexes via data<T>()[idx],
+    // which does not apply strides, so a non-contiguous view must be
+    // materialized first.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, DType::Bool, input.device());
     size_t n = static_cast<size_t>(input.numel());
@@ -6898,12 +6903,16 @@ auto zeta_kernel(const Tensor& x, const Tensor& q) -> Tensor {
 // New element-wise ops: Frac, Heaviside, NanToNum
 // ============================================================================
 
-auto frac_kernel(const Tensor& input) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
+auto frac_kernel(const Tensor& input_in) -> Tensor {
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto f32 = input_in.to(DType::Float32);
         auto result = frac_kernel(f32);
-        return result.to(input.dtype());
+        return result.to(input_in.dtype());
     }
+
+    // Contiguify (see neg_kernel/sqrt_kernel): data<T>() does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
@@ -6973,13 +6982,16 @@ auto heaviside_kernel(const Tensor& input, const Tensor& values) -> Tensor {
     return output;
 }
 
-auto nan_to_num_kernel(const Tensor& input, double nan_val, double posinf_val, double neginf_val) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
+auto nan_to_num_kernel(const Tensor& input_in, double nan_val, double posinf_val, double neginf_val) -> Tensor {
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto f32 = input_in.to(DType::Float32);
         auto result = nan_to_num_kernel(f32, nan_val, posinf_val, neginf_val);
-        return result.to(input.dtype());
+        return result.to(input_in.dtype());
     }
 
+    // Contiguify (see sqrt_kernel): data<T>() does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -7010,13 +7022,16 @@ auto nan_to_num_kernel(const Tensor& input, double nan_val, double posinf_val, d
 // New activations: LogSigmoid, RReLU
 // ============================================================================
 
-auto log_sigmoid_kernel(const Tensor& input) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
+auto log_sigmoid_kernel(const Tensor& input_in) -> Tensor {
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto f32 = input_in.to(DType::Float32);
         auto result = log_sigmoid_kernel(f32);
-        return result.to(input.dtype());
+        return result.to(input_in.dtype());
     }
 
+    // Contiguify (see sqrt_kernel): data<T>() does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -7247,7 +7262,10 @@ auto bitwise_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return output;
 }
 
-auto bitwise_not_kernel(const Tensor& input) -> Tensor {
+auto bitwise_not_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify (see sqrt_kernel): data<T>() does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -8607,19 +8625,31 @@ auto logit_kernel(const Tensor& input) -> Tensor {
         }, "logit");
 }
 
-auto signbit_kernel(const Tensor& input) -> Tensor {
+auto signbit_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify (see sqrt_kernel): unary_bool_kernel indexes via data<T>()[i],
+    // which does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     return unary_bool_kernel(input,
         [](float x) { return std::signbit(x); },
         [](double x) { return std::signbit(x); }, "signbit");
 }
 
-auto isposinf_kernel(const Tensor& input) -> Tensor {
+auto isposinf_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify (see sqrt_kernel): unary_bool_kernel indexes via data<T>()[i],
+    // which does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     return unary_bool_kernel(input,
         [](float x) { return std::isinf(x) && x > 0; },
         [](double x) { return std::isinf(x) && x > 0; }, "isposinf");
 }
 
-auto isneginf_kernel(const Tensor& input) -> Tensor {
+auto isneginf_kernel(const Tensor& input_in) -> Tensor {
+    // Contiguify (see sqrt_kernel): unary_bool_kernel indexes via data<T>()[i],
+    // which does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     return unary_bool_kernel(input,
         [](float x) { return std::isinf(x) && x < 0; },
         [](double x) { return std::isinf(x) && x < 0; }, "isneginf");
@@ -8652,7 +8682,10 @@ auto ldexp_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         [](double x, double n) { return std::ldexp(x, static_cast<int>(n)); }, "ldexp");
 }
 
-auto frexp_kernel(const Tensor& input) -> std::vector<Tensor> {
+auto frexp_kernel(const Tensor& input_in) -> std::vector<Tensor> {
+    // Contiguify (see sqrt_kernel): data<T>() does not apply strides.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor mantissa(shape_vec, input.dtype(), input.device());
     Tensor exponent(shape_vec, DType::Int32, input.device());

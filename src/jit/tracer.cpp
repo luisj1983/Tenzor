@@ -21,6 +21,10 @@
 namespace tenzor {
 namespace jit {
 
+// Forward declaration: defined further below, needed by record_inplace()
+// (JIT-R148) which runs earlier in this file.
+static auto tensor_fingerprint(const Tensor& tensor) -> std::string;
+
 // ============================================================================
 // OpType conversion functions
 // ============================================================================
@@ -834,6 +838,15 @@ auto Tracer::record_inplace(OpId op, Tensor& target,
     // to that new id, so every later read of `target` resolves to the post-op
     // value. Without this, the node's own output would alias its input (a
     // self-referential node) and downstream reads would see the stale value.
+    // JIT-R148: record the fingerprint being remapped in a dedicated set
+    // BEFORE calling register_new_tensor (which itself performs the same
+    // tensor_id_map_ overwrite for ANY freshly-computed tensor, not just this
+    // genuine in-place mutation) -- trace_if's assert_no_inplace_on_shared
+    // checks this set directly instead of inferring "was this mutated"
+    // indirectly from a tensor_id_map_ before/after diff, which could
+    // false-positive on an unrelated tensor coincidentally reusing a freed
+    // address with a matching fingerprint.
+    inplace_remapped_fingerprints_.insert(tensor_fingerprint(target));
     std::string new_id = register_new_tensor(target);
 
     TracedOp traced(*op_type, std::move(input_ids), {new_id});
@@ -1190,15 +1203,25 @@ auto Tracer::trace_if(const Tensor& condition,
     // the mutated tensor's fingerprint to an SSA id INSIDE the mutating branch's
     // (skipped) op range, so the other branch and every post-cond consumer
     // re-resolve that tensor to a baked constant holding post-mutation data,
-    // silently diverging from eager on every backend (JIT-F043). A functional op
-    // only ADDS new fingerprints; only record_inplace CHANGES an existing one, so
-    // a changed pre-cond entry uniquely identifies this case. Fail loudly.
+    // silently diverging from eager on every backend (JIT-F043). Fail loudly.
+    //
+    // JIT-R148: check membership in inplace_remapped_fingerprints_ (populated
+    // ONLY by record_inplace) rather than diffing tensor_id_map_ before/after.
+    // The diff-based check used to treat ANY changed pre-cond entry as proof
+    // of an in-place mutation, but register_new_tensor (used by every
+    // freshly-computed, perfectly ordinary op output, not just record_inplace)
+    // performs the exact same tensor_id_map_ overwrite -- if a tensor from
+    // before the branch was freed and a branch's ordinary op output happened
+    // to land at the same address with a matching fingerprint, the diff alone
+    // couldn't tell that apart from a genuine in-place mutation and aborted
+    // the trace on a false positive.
     const auto id_map_before = tensor_id_map_;
+    const auto inplace_before_then = inplace_remapped_fingerprints_;
     auto assert_no_inplace_on_shared =
-        [&](const char* branch) {
-            for (const auto& [fp, id] : id_map_before) {
-                auto it = tensor_id_map_.find(fp);
-                if (it != tensor_id_map_.end() && it->second != id) {
+        [&](const char* branch, const std::unordered_set<std::string>& remapped_before) {
+            for (const auto& fp : inplace_remapped_fingerprints_) {
+                if (remapped_before.count(fp)) continue;  // remapped before this branch, not by it
+                if (id_map_before.count(fp)) {
                     throw std::runtime_error(
                         std::string("jit::cond: in-place mutation of a tensor "
                         "visible outside the '") + branch + "' branch is not "
@@ -1214,14 +1237,15 @@ auto Tracer::trace_if(const Tensor& condition,
 
     // Trace the then-branch by executing it
     auto then_outputs = then_fn(inputs);
-    assert_no_inplace_on_shared("then");
+    assert_no_inplace_on_shared("then", inplace_before_then);
 
     // Record then-branch ops range
     auto then_ops_end = ops_.size();
 
     // Trace the else-branch
+    const auto inplace_before_else = inplace_remapped_fingerprints_;
     auto else_outputs = else_fn(inputs);
-    assert_no_inplace_on_shared("else");
+    assert_no_inplace_on_shared("else", inplace_before_else);
     auto else_ops_end = ops_.size();
 
     // A well-formed conditional must yield the SAME number of outputs from both

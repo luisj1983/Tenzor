@@ -63,11 +63,20 @@ void main() {
 
     uint base_idx = batch_idx * params.normalized_shape;
 
-    // Step 1: Compute sum of squares (accumulate in float32)
+    // JIT-R164: Kahan (compensated) summation for the per-thread serial
+    // accumulation -- see rms_norm.comp's identical fix for the rationale
+    // (portable across all Vulkan devices, no VK_KHR_shader_float64 gating
+    // needed; the same technique this codebase's CPU/CUDA codegen already
+    // uses for Sum/Mean/Softmax reductions).
     float local_sum_sq = 0.0;
+    float c = 0.0;
     for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float val = readF16(0, base_idx + i);
-        local_sum_sq += val * val;
+        float term = val * val;
+        float y = term - c;
+        float t = local_sum_sq + y;
+        c = (t - local_sum_sq) - y;
+        local_sum_sq = t;
     }
     shared_sum_sq[tid] = local_sum_sq;
     barrier();

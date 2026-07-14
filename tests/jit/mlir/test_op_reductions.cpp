@@ -102,6 +102,59 @@ TEST(OpReductions, MaxDim) {
     });
 }
 
+// findings.txt JIT-R151(f): the JIT-R119 F64-optimization_barrier fix for
+// plain Sum/Mean/Max (emit_reduce_with_keepdim) had zero Float64 regression
+// coverage on any target, including real CUDA/ROCm hardware -- unlike the
+// pooling half of the same gap (test_op_vision.cpp's MaxPool2dFloat64EndToEnd
+// et al., fixed alongside JIT-R144).
+TEST(OpReductions, SumFloat64) {
+    check_matches_eager("sum_f64_dim1", [](const ::tenzor::Variable& x) {
+        return ::tenzor::sum(x, /*dim=*/1, /*keepdim=*/false);
+    }, {4, 8}, 1e-9F, ::tenzor::DType::Float64);
+}
+
+TEST(OpReductions, MeanFloat64) {
+    check_matches_eager("mean_f64_dim1", [](const ::tenzor::Variable& x) {
+        return ::tenzor::mean(x, /*dim=*/1, /*keepdim=*/false);
+    }, {4, 8}, 1e-9F, ::tenzor::DType::Float64);
+}
+
+TEST(OpReductions, MaxFloat64) {
+    check_matches_eager("max_f64_dim1", [](const ::tenzor::Variable& x) {
+        return ::tenzor::max(x, /*dim=*/1, /*keepdim=*/false);
+    }, {4, 8}, 1e-9F, ::tenzor::DType::Float64);
+}
+
+// JIT-R152: Min/Prod previously had no MLIR lowering case at all (fell
+// through to the dispatch switch's `default: throw`, degrading the whole
+// compiled function to eager). handle_min/handle_prod mirror handle_max/
+// handle_sum exactly (minimum reducer w/ +inf init; multiply reducer w/ 1.0
+// init), fanned out over every available IREE target via the same
+// check_matches_eager helper as every other reduction in this file.
+TEST(OpReductions, MinDim) {
+    check_matches_eager("min_dim1", [](const ::tenzor::Variable& x) {
+        return ::tenzor::min(x, /*dim=*/1, /*keepdim=*/false);
+    });
+}
+
+TEST(OpReductions, MinAll) {
+    check_matches_eager("min_all", [](const ::tenzor::Variable& x) {
+        return ::tenzor::min(x);
+    });
+}
+
+TEST(OpReductions, ProdDim) {
+    // Small shape with values near 1.0 (via a tight randn scale) -- a
+    // product reduction over 8 arbitrary randn values can under/overflow
+    // Float32 wildly, which would make the eager-vs-jit comparison
+    // meaningless (both sides equally garbage). Shape {4, 4} keeps the
+    // reduced-dim length short enough that the product stays in a sane range
+    // for the default randn() scale.
+    check_matches_eager("prod_dim1", [](const ::tenzor::Variable& x) {
+        return ::tenzor::prod(x, /*dim=*/1, /*keepdim=*/false);
+    }, {4, 4}, 1e-4F);
+}
+
 TEST(OpReductions, SoftmaxLastDim) {
     // 5e-5 tolerance: softmax involves exp/divide which accumulate
     // slightly more error than a single elementwise op.

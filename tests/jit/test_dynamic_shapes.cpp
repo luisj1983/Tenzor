@@ -226,6 +226,72 @@ TEST(SymbolicShapeInferenceFixes, NewlyPortedShapePreservingOpsKeepDynamicDim) {
     }
 }
 
+// JIT-R147: Sign/CumSum were entirely absent from SymbolicShapeInference::
+// infer() (the production path via mark_dynamic_dims()/SymbolicTracePass),
+// silently freezing any dynamic dim downstream of one of these ops to its
+// trace-time concrete size.
+TEST(SymbolicShapeInferenceFixes, SignCumSumPreserveDynamicDim) {
+    for (auto op : {OpType::Sign, OpType::CumSum}) {
+        auto x = mk_val("x", {0, 10});
+        x->set_symbolic_shape(SymbolicShape(
+            {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+        auto node = std::make_shared<Node>(op);
+        node->add_input(x);
+        node->add_output(mk_val("y", {}));
+        SymbolicShapeInference infer;
+        auto out = infer.infer(node.get());
+        ASSERT_EQ(out.size(), 1u) << "op=" << static_cast<int>(op);
+        ASSERT_EQ(out[0].rank(), 2u) << "op=" << static_cast<int>(op);
+        EXPECT_TRUE(out[0][0].is_symbolic()) << "op=" << static_cast<int>(op);
+        EXPECT_EQ(out[0][1].value(), 10) << "op=" << static_cast<int>(op);
+    }
+}
+
+// JIT-R147: Sort produces (values, indices), both shape-preserving.
+TEST(SymbolicShapeInferenceFixes, SortPreservesDynamicDimForBothOutputs) {
+    auto x = mk_val("x", {0, 10});
+    x->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(10)}));
+    auto node = std::make_shared<Node>(OpType::Sort);
+    node->add_input(x);
+    node->add_output(mk_val("values", {}));
+    node->add_output(mk_val("indices", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 2u);
+    for (const auto& shape : out) {
+        ASSERT_EQ(shape.rank(), 2u);
+        EXPECT_TRUE(shape[0].is_symbolic());
+        EXPECT_EQ(shape[1].value(), 10);
+    }
+}
+
+// JIT-R147: GridSample's output shape combines N,C from the input feature
+// map with Hout,Wout from the grid tensor -- neither input alone determines
+// the full output shape.
+TEST(SymbolicShapeInferenceFixes, GridSampleCombinesInputAndGridShapes) {
+    auto input = mk_val("input", {0, 3, 32, 32});
+    input->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(3),
+         SymbolicDim::concrete(32), SymbolicDim::concrete(32)}));
+    auto grid = mk_val("grid", {0, 16, 16, 2});
+    grid->set_symbolic_shape(SymbolicShape(
+        {SymbolicDim::symbolic("B"), SymbolicDim::concrete(16),
+         SymbolicDim::concrete(16), SymbolicDim::concrete(2)}));
+    auto node = std::make_shared<Node>(OpType::GridSample);
+    node->add_input(input);
+    node->add_input(grid);
+    node->add_output(mk_val("y", {}));
+    SymbolicShapeInference infer;
+    auto out = infer.infer(node.get());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].rank(), 4u);
+    EXPECT_TRUE(out[0][0].is_symbolic());
+    EXPECT_EQ(out[0][1].value(), 3);
+    EXPECT_EQ(out[0][2].value(), 16);
+    EXPECT_EQ(out[0][3].value(), 16);
+}
+
 TEST(SymbolicShapeInferenceFixes, MinimumBroadcastsDynamicDim) {
     auto a = mk_val("a", {0, 10});
     a->set_symbolic_shape(SymbolicShape(

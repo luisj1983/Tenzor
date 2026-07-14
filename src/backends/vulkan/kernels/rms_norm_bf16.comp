@@ -61,11 +61,17 @@ void main() {
 
     uint base_idx = batch_idx * params.normalized_shape;
 
-    // Step 1: Compute sum of squares (accumulate in float32)
+    // JIT-R164: Kahan (compensated) summation for the per-thread serial
+    // accumulation -- see rms_norm.comp's identical fix for the rationale.
     float local_sum_sq = 0.0;
+    float c = 0.0;
     for (uint i = tid; i < params.normalized_shape; i += WORKGROUP_SIZE) {
         float val = readBF16(0, base_idx + i);
-        local_sum_sq += val * val;
+        float term = val * val;
+        float y = term - c;
+        float t = local_sum_sq + y;
+        c = (t - local_sum_sq) - y;
+        local_sum_sq = t;
     }
     shared_sum_sq[tid] = local_sum_sq;
     barrier();

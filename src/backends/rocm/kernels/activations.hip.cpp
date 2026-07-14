@@ -1448,7 +1448,12 @@ extern "C" {
 // ============================================================================
 
 // ReLU wrapper
-auto relu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto relu_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous tensor silently reads the wrong elements via straight
+    // linear indexing.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1487,7 +1492,14 @@ auto relu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 // ReLU backward wrapper
-auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+auto relu_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1569,7 +1581,14 @@ auto sigmoid_kernel(const Tensor& input_raw, hipStream_t stream) -> Tensor {
 }
 
 // Sigmoid backward wrapper
-auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+auto sigmoid_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1651,7 +1670,14 @@ auto tanh_kernel(const Tensor& input_raw, hipStream_t stream) -> Tensor {
 }
 
 // Tanh backward wrapper
-auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+auto tanh_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1692,7 +1718,11 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
 }
 
 // GELU wrapper
-auto gelu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto gelu_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1735,7 +1765,14 @@ auto gelu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 // GELU backward wrapper
-auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+auto gelu_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1780,7 +1817,11 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
 }
 
 // Leaky ReLU wrapper
-auto leaky_relu_kernel(const Tensor& input, double alpha, hipStream_t stream) -> Tensor {
+auto leaky_relu_kernel(const Tensor& input_in, double alpha, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1818,7 +1859,14 @@ auto leaky_relu_kernel(const Tensor& input, double alpha, hipStream_t stream) ->
 }
 
 // Leaky ReLU backward wrapper
-auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, hipStream_t stream) -> Tensor {
+auto leaky_relu_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, double alpha, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2168,7 +2216,11 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 // ============================================================================
 // ELU wrapper
 // ============================================================================
-auto elu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> Tensor {
+auto elu_kernel(const Tensor& input_in, float alpha, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2203,7 +2255,14 @@ auto elu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> Tensor 
 }
 
 // ELU backward wrapper
-auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, hipStream_t stream) -> Tensor {
+auto elu_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, float alpha, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2241,7 +2300,11 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
 // ============================================================================
 // SELU wrapper
 // ============================================================================
-auto selu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto selu_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2276,7 +2339,14 @@ auto selu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 // SELU backward wrapper
-auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+auto selu_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2314,7 +2384,11 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
 // ============================================================================
 // Swish wrapper
 // ============================================================================
-auto swish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto swish_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2349,7 +2423,14 @@ auto swish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 // Swish backward wrapper
-auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+auto swish_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2387,7 +2468,11 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipSt
 // ============================================================================
 // Mish wrapper
 // ============================================================================
-auto mish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto mish_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2466,7 +2551,11 @@ __global__ void hardsigmoid_forward_kernel_fp16(const __half* input, __half* out
     }
 }
 
-auto hardswish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto hardswish_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2497,7 +2586,11 @@ auto hardswish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     return result;
 }
 
-auto hardsigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+auto hardsigmoid_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2529,7 +2622,14 @@ auto hardsigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 // Mish backward wrapper
-auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+auto mish_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2567,7 +2667,11 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
 // ============================================================================
 // Softplus wrapper
 // ============================================================================
-auto softplus_kernel(const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor {
+auto softplus_kernel(const Tensor& input_in, float beta, float threshold, hipStream_t stream) -> Tensor {
+    // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
+    // a non-contiguous input silently reads the wrong elements.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -2602,7 +2706,14 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, hipStream
 }
 
 // Softplus backward wrapper
-auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor {
+auto softplus_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in, float beta, float threshold, hipStream_t stream) -> Tensor {
+    // JIT-R163: grad_output.data<T>()/input.data<T>() are raw pointers with NO
+    // stride handling -- a non-contiguous tensor silently reads the wrong
+    // elements via straight linear indexing.
+    Tensor grad_output_cont = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    const Tensor& grad_output = grad_output_cont;
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
     int64_t n = input.numel();

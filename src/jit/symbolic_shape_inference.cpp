@@ -101,6 +101,8 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         // findings.txt JIT-R118: Minimum broadcasts identically (mirrors
         // graph.cpp's infer_symbolic_types Minimum case, JIT-R064).
         case OpType::Minimum:
+        // JIT-R147: Add+ReLU epilogue broadcasts like Add.
+        case OpType::FusedAddReLU:
             return infer_elementwise(node);
 
         // Unary elementwise / shape-preserving: preserve input[0] shape.
@@ -169,7 +171,12 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         case OpType::SwapOut:
         case OpType::SwapIn:
         case OpType::LayoutConvert:
-        case OpType::LayerNorm: {
+        case OpType::LayerNorm:
+        // JIT-R147: unary; shape-preserving.
+        case OpType::Sign:
+        // JIT-R147: cumulative reduction along dim; shape-preserving (dim
+        // size is unchanged by a cumulative sum).
+        case OpType::CumSum: {
             auto input_shapes = gather_input_shapes(node);
             if (!input_shapes.empty()) {
                 return {input_shapes[0]};
@@ -185,6 +192,11 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         // JIT-R010: QuantizedConv2d shares Conv2d's shape rule exactly
         // (mirrors graph.cpp's infer_symbolic_types, JIT-026).
         case OpType::QuantizedConv2d:
+        // JIT-R147: FusedConv2dReLU/FusedConv2dBnReLU share Conv2d's exact
+        // [x, weight, ...] shape rule (same generic stride/padding attrs,
+        // same inputs[0]/inputs[1] = x/weight layout).
+        case OpType::FusedConv2dReLU:
+        case OpType::FusedConv2dBnReLU:
             return infer_conv2d(node);
 
         // JIT-R010: previously missing entirely -- fell to `default -> {}`
@@ -232,6 +244,9 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
         // [x, weight(, bias)] -> (*, out_features) rule (mirrors graph.cpp's
         // infer_symbolic_types, which groups it with QuantizedLinearStatic).
         case OpType::SparseMatMul:
+        // JIT-R147: Linear+ReLU epilogue shares Linear's exact [x, weight]
+        // shape rule.
+        case OpType::FusedLinearReLU:
             return infer_linear(node);
 
         // Rank-changing / select ops that previously fell to `default -> {}` and
@@ -636,13 +651,21 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
                 int64_t rank = static_cast<int64_t>(out_shape.rank());
                 int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
                 if (dim < 0) dim += rank;
-                if (dim < 0) dim = 0;
-                if (rank > 0 && dim >= rank) dim = rank - 1;
+                // JIT-R151b: match the concrete infer_types ground truth
+                // (graph.cpp's IndexSelect case, which uses the throwing
+                // normalize_dim_for_rank) and Graph::infer_symbolic_types'
+                // mirror of it -- an out-of-range IndexSelect dim is a
+                // malformed graph, and silently clamping to rank-1 here
+                // used to paper over that by producing a shape for the
+                // WRONG dimension instead of surfacing the bug.
+                if (dim < 0 || dim >= rank) {
+                    throw std::out_of_range("JIT graph dimension out of range");
+                }
                 SymbolicDim selected = SymbolicDim::concrete(1);
                 for (size_t i = 0; i < input_shapes[1].rank(); ++i) {
                     selected = selected * input_shapes[1][i];
                 }
-                if (rank > 0) out_shape[static_cast<size_t>(dim)] = selected;
+                out_shape[static_cast<size_t>(dim)] = selected;
                 return {std::move(out_shape)};
             }
             return {};
@@ -847,6 +870,176 @@ auto SymbolicShapeInference::infer(const Node* node) -> std::vector<SymbolicShap
             }
             return {};
         }
+
+        // ====================================================================
+        // JIT-R147: previously-missing OpTypes -- ops with a real, data-
+        // independent shape rule (mirrors graph.cpp's infer_symbolic_types()
+        // identical additions).
+        // ====================================================================
+
+        // Sort: (values, indices) -- both shape-preserving (== input[0]).
+        case OpType::Sort: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                return {input_shapes[0], input_shapes[0]};
+            }
+            return {};
+        }
+
+        // GridSample: input [N,C,Hin,Win], grid [N,Hout,Wout,2] -> [N,C,Hout,Wout].
+        case OpType::GridSample: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2 &&
+                input_shapes[0].rank() == 4 && input_shapes[1].rank() == 4) {
+                auto& in = input_shapes[0];
+                auto& grid = input_shapes[1];
+                return {SymbolicShape({in[0], in[1], grid[1], grid[2]})};
+            }
+            return {};
+        }
+
+        // AffineGrid: theta [N,2,3], "output_size" attr = {N,C,H,W} -> grid [N,H,W,2].
+        case OpType::AffineGrid: {
+            if (node->has_vec_attr("output_size")) {
+                auto sz = node->get_vec_attr("output_size");
+                if (sz.size() >= 4) {
+                    return {SymbolicShape({
+                        SymbolicDim::concrete(sz[0]), SymbolicDim::concrete(sz[2]),
+                        SymbolicDim::concrete(sz[3]), SymbolicDim::concrete(2)})};
+                }
+            }
+            return {};
+        }
+
+        // BoxIoU: [boxes1, boxes2] -> (boxes1_count, boxes2_count).
+        case OpType::BoxIoU: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2 &&
+                input_shapes[0].rank() >= 1 && input_shapes[1].rank() >= 1) {
+                return {SymbolicShape({input_shapes[0][0], input_shapes[1][0]})};
+            }
+            return {};
+        }
+
+        // ROIAlignForward: [features, rois], "output_size" attr = [h, w]
+        // -> (num_rois, C, h, w).
+        case OpType::ROIAlignForward: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2 &&
+                input_shapes[0].rank() >= 2 && input_shapes[1].rank() >= 1 &&
+                node->has_vec_attr("output_size")) {
+                auto sz = node->get_vec_attr("output_size");
+                if (sz.size() >= 2) {
+                    return {SymbolicShape({
+                        input_shapes[1][0], input_shapes[0][1],
+                        SymbolicDim::concrete(sz[0]), SymbolicDim::concrete(sz[1])})};
+                }
+            }
+            return {};
+        }
+
+        // FusedSoftmaxCrossEntropy: [logits, labels]; "reduction" attr
+        // (0=mean,1=sum,2=none) determines scalar vs per-sample shape.
+        case OpType::FusedSoftmaxCrossEntropy: {
+            auto input_shapes = gather_input_shapes(node);
+            if (input_shapes.size() >= 2) {
+                int64_t red = node->has_int_attr("reduction")
+                                  ? node->get_int_attr("reduction") : 0;
+                if (red == 2) {
+                    return {input_shapes[1]};
+                }
+                return {SymbolicShape({})};
+            }
+            return {};
+        }
+
+        // FFT/IFFT: complex-to-complex, shape-preserving unless the "n" attr
+        // overrides the transformed axis's size.
+        case OpType::FFT:
+        case OpType::IFFT: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty()) {
+                auto out_shape = input_shapes[0];
+                if (node->has_int_attr("n") && out_shape.rank() > 0) {
+                    int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : -1;
+                    int64_t rank_i = static_cast<int64_t>(out_shape.rank());
+                    size_t axis = static_cast<size_t>(dim < 0 ? rank_i + dim : dim);
+                    if (axis < out_shape.rank()) {
+                        out_shape[axis] = SymbolicDim::concrete(node->get_int_attr("n"));
+                    }
+                }
+                return {std::move(out_shape)};
+            }
+            return {};
+        }
+
+        // RFFT: real -> complex; transformed axis size becomes n_used/2+1
+        // where n_used = "n" attr if given else the input's size along dim.
+        case OpType::RFFT: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() > 0) {
+                auto out_shape = input_shapes[0];
+                int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : -1;
+                int64_t rank_i = static_cast<int64_t>(out_shape.rank());
+                size_t axis = static_cast<size_t>(dim < 0 ? rank_i + dim : dim);
+                if (axis < out_shape.rank()) {
+                    if (node->has_int_attr("n")) {
+                        out_shape[axis] = SymbolicDim::concrete(node->get_int_attr("n") / 2 + 1);
+                        return {std::move(out_shape)};
+                    }
+                    if (out_shape[axis].is_concrete()) {
+                        out_shape[axis] = SymbolicDim::concrete(out_shape[axis].value() / 2 + 1);
+                        return {std::move(out_shape)};
+                    }
+                }
+            }
+            return {};
+        }
+
+        // IRFFT: complex -> real; transformed axis size = "n" attr if given
+        // else 2*(input_size_along_dim - 1).
+        case OpType::IRFFT: {
+            auto input_shapes = gather_input_shapes(node);
+            if (!input_shapes.empty() && input_shapes[0].rank() > 0) {
+                auto out_shape = input_shapes[0];
+                int64_t dim = node->has_int_attr("dim") ? node->get_int_attr("dim") : -1;
+                int64_t rank_i = static_cast<int64_t>(out_shape.rank());
+                size_t axis = static_cast<size_t>(dim < 0 ? rank_i + dim : dim);
+                if (axis < out_shape.rank()) {
+                    if (node->has_int_attr("n")) {
+                        out_shape[axis] = SymbolicDim::concrete(node->get_int_attr("n"));
+                        return {std::move(out_shape)};
+                    }
+                    if (out_shape[axis].is_concrete()) {
+                        out_shape[axis] = SymbolicDim::concrete(2 * (out_shape[axis].value() - 1));
+                        return {std::move(out_shape)};
+                    }
+                }
+            }
+            return {};
+        }
+
+        // JIT-R147: ops with NO safe static shape rule -- see graph.cpp's
+        // infer_symbolic_types() for the detailed per-op rationale (each
+        // either has a genuinely data-dependent output size that cannot be
+        // derived from input shapes alone, or -- the Sparse* structural
+        // conversions -- doesn't fit the dense single-tensor SymbolicShape
+        // model at all). Falls through to the same `default: return {}`
+        // behavior this function already documents for unhandled ops.
+        case OpType::RepeatInterleave:
+        case OpType::Nonzero:
+        case OpType::Bincount:
+        case OpType::NMS:
+        case OpType::AnchorGenerate:
+        case OpType::CTCLossForward:
+        case OpType::SparseFromDense:
+        case OpType::SparseToDense:
+        case OpType::SparseCoalesce:
+        case OpType::SparseTranspose:
+        case OpType::SparseToCsr:
+        case OpType::SparseToCsc:
+        case OpType::SparseToBsr:
+            return {};
 
         default:
             // For unhandled ops, return empty (no inference available)

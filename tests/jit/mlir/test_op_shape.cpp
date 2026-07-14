@@ -34,6 +34,8 @@
 
 #include <gtest/gtest.h>
 
+#include "mlir_target_util.hpp"
+
 #include <fstream>
 #include <string>
 #include <vector>
@@ -235,26 +237,38 @@ TEST(OpShape, BroadcastEmitsAndParses) {
 
 namespace {
 
+// findings.txt JIT-R151(e): this helper (and therefore StackEndToEnd/
+// CatEndToEnd/BroadcastEndToEnd, its only callers) used to hardcode
+// target="llvm-cpu" instead of fanning out over every available IREE
+// target the way test_op_vision.cpp/test_op_reductions.cpp's identical
+// helpers do -- so the JIT-R120 CUDA-only transpose-bufferization-crash fix
+// (emit_transpose_barriered, lowering.cpp) had no standalone regression
+// test on the actual cuda target for ANY shape op, including the new
+// PermuteEndToEnd/TransposeEndToEnd tests below.
 void expect_jit_matches_eager(::tenzor::jit::CompiledFunction::FnType fn,
                               const ::tenzor::Variable& x,
                               float tol = 1e-5F) {
-    ::tenzor::jit::CompileConfig cfg;
-    cfg.backend = "mlir";
-    cfg.target  = "llvm-cpu";
-    auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
-
+    namespace mt = ::tenzor::testing::mlir;
+    mt::ensure_core_init();
     auto eager = fn(x);
-    ::tenzor::jit::mlir_jit::reset_cache_stats();
-    auto jit   = compiled(x);
-    EXPECT_GE(::tenzor::jit::mlir_jit::cache_stats().misses, 1u)
-        << "op did not run through IREE (silent eager fallback would make the "
-           "numeric check below vacuous; llvm-cpu)";
-
     auto eager_cpu = eager.tensor().to(::tenzor::Device::cpu());
-    auto jit_cpu   = jit.tensor().to(::tenzor::Device::cpu());
-    auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
-                    .template item<float>();
-    EXPECT_LT(diff, tol);
+
+    const auto targets = mt::available_iree_targets();
+    ASSERT_FALSE(targets.empty()) << "no IREE target available";
+    for (const auto& target : targets) {
+        ::tenzor::jit::CompileConfig cfg;
+        cfg.backend = "mlir";
+        cfg.target  = target;
+        auto compiled = ::tenzor::jit::CompiledFunction(fn, cfg);
+        mt::reset_jit_stats();
+        auto jit = compiled(x);
+        mt::assert_jit_used("shape_op", target);
+
+        auto jit_cpu = jit.tensor().to(::tenzor::Device::cpu());
+        auto diff = ::tenzor::max(::tenzor::abs(eager_cpu - jit_cpu))
+                        .template item<float>();
+        EXPECT_LT(diff, tol) << "target=" << target << " diff=" << diff;
+    }
 }
 
 }  // namespace
@@ -315,6 +329,32 @@ TEST(OpShape, BroadcastEndToEnd) {
     };
     ::tenzor::Variable x(
         ::tenzor::full({4}, 0.5F, ::tenzor::DType::Float32), false);
+    expect_jit_matches_eager(fn, x);
+}
+
+// findings.txt JIT-R151(e): no PermuteEndToEnd/TransposeEndToEnd numeric
+// test existed at all, so the JIT-R120 CUDA-only transpose-bufferization-
+// crash fix (emit_transpose_barriered, lowering.cpp) had no standalone
+// regression test on the actual cuda target -- only the (llvm-cpu-only,
+// compile-and-parse-only) PermuteEmitsAndParses/TransposeEmitsAndParses
+// tests above exercised this op at all.
+TEST(OpShape, PermuteEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return ::tenzor::permute(x, {2, 0, 1});
+    };
+    ::tenzor::Variable x(
+        ::tenzor::randn({3, 4, 5}, ::tenzor::DType::Float32), false);
+    expect_jit_matches_eager(fn, x);
+}
+
+TEST(OpShape, TransposeEndToEnd) {
+    ensure_core_init();
+    auto fn = [](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+        return x.transpose(0, 1);
+    };
+    ::tenzor::Variable x(
+        ::tenzor::randn({3, 4}, ::tenzor::DType::Float32), false);
     expect_jit_matches_eager(fn, x);
 }
 

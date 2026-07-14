@@ -8,7 +8,10 @@
  */
 
 #include <gtest/gtest.h>
+#include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <vector>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/sync_batchnorm.hpp>
 #include "../backend_test_fixture.hpp"
@@ -145,6 +148,151 @@ TEST_P(NNNormParity, RMSNorm) {
                       << ": " << e.what() << std::endl;
         }
     }
+}
+
+namespace {
+// Builds a RMSNorm input row of uniform-magnitude pseudo-random values
+// (deterministic, not dependent on global RNG state). Deliberately NOT an
+// "outlier-heavy" distribution: a few large-magnitude values dominate the
+// sum of squares and make whatever small-magnitude values are lost to
+// float32 rounding irrelevant in *relative* terms (verified empirically --
+// an outlier-heavy version of this input failed to expose the OneAPI/Vulkan
+// accumulation bugs at any practical hidden_dim). With uniform magnitude,
+// naive float32 accumulation drifts from the true sum by the standard
+// O(sqrt(hidden)) ULPs, which is what actually separates the buggy
+// float32 accumulators from a double/Kahan one at a large enough hidden_dim.
+auto make_uniform_magnitude_input(int64_t batch, int64_t hidden) -> Tensor {
+    auto t = zeros({batch, hidden}, DType::Float32, Device::cpu());
+    auto* p = t.data<float>();
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t i = 0; i < hidden; ++i) {
+            uint32_t bits = static_cast<uint32_t>((b * 2654435761u) ^ (static_cast<uint32_t>(i) * 40503u));
+            float unit = (static_cast<float>(bits & 0xFFFFu) / 65536.0f) - 0.5f;  // [-0.5, 0.5)
+            p[b * hidden + i] = unit * 2.0f;  // [-1, 1)
+        }
+    }
+    return t;
+}
+
+// Computes the "true" RMSNorm output for a single row by accumulating the
+// sum of squares in double precision (independent of any backend
+// implementation), so the expected reference cannot itself be contaminated
+// by a float32 accumulation bug in whichever backend happens to be used as
+// backends[0] in the cross-backend comparison loop.
+auto rms_norm_reference_row(const float* row, const float* weight, int64_t hidden, double eps) -> std::vector<float> {
+    double ss = 0.0;
+    for (int64_t i = 0; i < hidden; ++i) {
+        double v = static_cast<double>(row[i]);
+        ss += v * v;
+    }
+    double rrms = 1.0 / std::sqrt(ss / static_cast<double>(hidden) + eps);
+    std::vector<float> out(hidden);
+    for (int64_t i = 0; i < hidden; ++i) {
+        out[i] = static_cast<float>(static_cast<double>(row[i]) * rrms * static_cast<double>(weight[i]));
+    }
+    return out;
+}
+}  // namespace
+
+// JIT-R153/JIT-R154/JIT-R164: RMSNorm's sum-of-squares accumulation drifted
+// from a float32 accumulator to a double-accumulating reference (CPU's
+// trained/grad path, CUDA, ROCm, MLIR) in OneAPI, CPU's own no-grad
+// "ultra-fast" inference path, and Vulkan's GLSL shaders -- independently,
+// in three different implementations. The drift is the standard
+// O(sqrt(hidden)) float32 rounding error and only becomes large enough to
+// matter at a large hidden_dim, so this test uses hidden_dim=2097152 with
+// uniform-magnitude random data. Empirically on this codebase/hardware, the
+// pre-fix CPU fast path drifts by ~1e-3 (a huge, unmissable margin above the
+// ~1e-7 cross-backend noise floor); OneAPI/Vulkan's declared float32
+// accumulators happened not to show a measurable gap on this particular
+// compiler/hardware (likely FP-contraction keeping intermediate precision
+// wider than the declared type), but the source-level fix (explicit
+// double / Kahan accumulation) is still the correct, portable fix and is
+// exercised (without regressing) by this same test.
+TEST_P(NNNormParity, RMSNorm_LargeHiddenDim_AccumulationPrecision) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
+
+    constexpr int64_t kHidden = 2097152;
+    constexpr int64_t kBatch = 2;
+    constexpr double kEps = 1e-6;
+    nn::RMSNorm rms(kHidden, kEps);
+    rms.eval();
+    auto input = make_uniform_magnitude_input(kBatch, kHidden);
+    auto weight = rms.parameters()[0]->tensor().contiguous();
+
+    // Backend-independent expected output: accumulates sum-of-squares in
+    // double precision directly from the raw input, so this reference can't
+    // itself be contaminated by a float32 accumulation bug in whichever
+    // backend happens to be first in `backends` (using another backend's
+    // *output* as "ref" previously let a bug in that backend hide an
+    // equally-sized bug in the one being compared against it).
+    std::vector<float> expected(kBatch * kHidden);
+    {
+        auto* in_p = input.data<float>();
+        auto* w_p = weight.data<float>();
+        for (int64_t b = 0; b < kBatch; ++b) {
+            auto row = rms_norm_reference_row(in_p + b * kHidden, w_p, kHidden, kEps);
+            std::copy(row.begin(), row.end(), expected.begin() + b * kHidden);
+        }
+    }
+    Tensor expected_t = Tensor::from_blob(expected.data(), {kBatch, kHidden}, DType::Float32).clone();
+
+    // 1e-5 sits comfortably above the ~1e-7 cross-backend rounding noise
+    // floor and comfortably below the pre-fix CPU drift (~1e-3), giving a
+    // wide margin on both sides.
+    for (const auto& dev : backends) {
+        try {
+            nn::RMSNorm rms_dev(kHidden, kEps);
+            rms_dev.eval();
+            auto params_dst = rms_dev.parameters();
+            params_dst[0]->tensor() = weight.clone();
+            rms_dev.to(dev);
+            auto input_dev = input.to(dev);
+            auto output = rms_dev.forward(Variable(input_dev, false)).tensor();
+            dev.synchronize();
+            // Non-fatal check (not EXPECT_TENSORS_CLOSE's FAIL()) so one
+            // backend failing doesn't abort the loop before later backends
+            // are checked -- FAIL() returns from the enclosing function,
+            // which previously meant only backends[0] (always "cpu") was
+            // ever actually compared.
+            if (!tenzor::testing::tensors_close(expected_t, output, 1e-5f, 1e-5f)) {
+                float diff = tenzor::testing::max_abs_diff(expected_t, output);
+                ADD_FAILURE() << "RMSNorm (large hidden_dim) mismatch on "
+                          << backend_name(dev) << ": max abs diff=" << std::scientific << diff;
+            }
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "RMSNorm (large hidden_dim) failed on "
+                      << backend_name(dev) << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+// JIT-R154 specifically: CPU's no-grad "ultra-fast" inference path
+// (fused_rms_norm_f32) must agree with the double-accumulating trained
+// (grad-enabled) path for the same input/weights, for a large hidden_dim
+// with uniform-magnitude random data (see make_uniform_magnitude_input above).
+TEST_P(NNNormParity, RMSNorm_CpuInferenceFastPathMatchesTrainedPath) {
+    if (GetParam() != "cpu") {
+        GTEST_SKIP() << "CPU-only comparison";
+    }
+    constexpr int64_t kHidden = 2097152;
+    nn::RMSNorm rms(kHidden);
+    rms.eval();
+    auto input = make_uniform_magnitude_input(2, kHidden);
+
+    // No-grad path: takes fused_rms_norm_f32's "ultra-fast" branch.
+    auto out_no_grad = rms.forward(Variable(input, false)).tensor();
+
+    // Grad-enabled path: takes the double-accumulating fused_rms_norm_kernel
+    // branch (autograd needs saved stats).
+    auto out_grad = rms.forward(Variable(input, true)).tensor();
+
+    // See RMSNorm_LargeHiddenDim_AccumulationPrecision above for why 1e-5 is
+    // the right tolerance: the pre-fix CPU float32 accumulator drifts by
+    // ~1e-3 at this hidden_dim, far above this threshold, while the fixed
+    // double-accumulating fast path agrees with the grad path to ~1e-7.
+    EXPECT_TENSORS_CLOSE(out_no_grad, out_grad, 1e-5f, 1e-5f);
 }
 
 // ============================================================================

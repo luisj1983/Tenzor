@@ -328,6 +328,14 @@ add_parity_test(test_flex_attention_user_mod_parity test_flex_attention_user_mod
 # Wave D: Vulkan FlashAttention tiled shader native causal masking (lifts stale gate).
 add_parity_test(test_vulkan_flash_attn_causal_parity test_vulkan_flash_attn_causal_parity.cpp)
 
+# JIT-R158/JIT-R159: ROCm tiled FlashAttention kernel seq_len_q/seq_len_k mixup
+# and causal-offset tile-skip fix, for seq_len_q != seq_len_k (KV-cache) calls.
+add_parity_test(test_rocm_flash_attn_kvcache_parity test_rocm_flash_attn_kvcache_parity.cpp)
+
+# JIT-R160/JIT-R161/JIT-R162: cross-backend GQA (H_kv < H_q) consistency for a
+# direct OpId::FlashAttention/FusedAttention dispatch.
+add_parity_test(test_flash_attention_gqa_parity test_flash_attention_gqa_parity.cpp)
+
 # Wave E: CUDA fused kernels with native F16/BF16 (F32 accumulator inside kernel).
 add_parity_test(test_cuda_fused_dtype_parity test_cuda_fused_dtype_parity.cpp)
 

@@ -190,6 +190,27 @@ TEST_P(IndexingParity, Where) {
     }, {condition, x, y}, 0, 0, "Where");
 }
 
+TEST_P(IndexingParity, Where_Float64TinyCondition) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
+
+    // JIT-R145 regression: a Float64 condition tensor holding a tiny nonzero
+    // value (well below float32's smallest subnormal, ~1.4e-45) must still
+    // test as "true" on every backend. A backend that narrows the condition
+    // to Float32 before testing nonzero (instead of testing at Float64's own
+    // precision) would incorrectly underflow such a value to 0.0f and treat
+    // it as "false", diverging from every backend that tests natively.
+    std::vector<double> cond_values = {1e-50, 0.0, -1e-50, 5.0, -3.0, 0.0};
+    Tensor condition = Tensor::from_blob(cond_values.data(),
+                                        {static_cast<int64_t>(cond_values.size())},
+                                        DType::Float64).clone();
+    auto x = generate_uniform_tensor({6}, -1.0f, 1.0f, DType::Float32, Device::cpu(), 33333);
+    auto y = generate_uniform_tensor({6}, -1.0f, 1.0f, DType::Float32, Device::cpu(), 44444);
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return where(inputs[0], inputs[1], inputs[2]);
+    }, {condition, x, y}, 0, 0, "Where_Float64TinyCondition");
+}
 TEST_P(IndexingParity, Take) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");

@@ -1314,6 +1314,83 @@ auto handle_max(LoweringContext& ctx,
     ctx.bind(out_val->id(), out_name);
 }
 
+// JIT-R152: mirrors handle_max exactly, with a "minimum" reducer and a
+// +inf (rather than -inf) init literal -- Min/Prod are real, first-class
+// reduction ops (tracer.cpp/pattern_matcher.cpp/graph.cpp/compiler.cpp/the
+// ONNX exporter all handle them) that previously had no MLIR lowering case
+// at all, degrading any traced graph containing one to a full eager
+// fallback.
+auto handle_min(LoweringContext& ctx,
+                const ::tenzor::jit::Node& node,
+                std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Min expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
+                                                out_val->shape());
+    // +inf init for float (hex bit pattern); true per-dtype maximum for
+    // integers (mirrors handle_max's want_max=false case, just inverted).
+    std::string init_lit;
+    const auto d = out_val->dtype();
+    if (d == ::tenzor::DType::Float32) {
+        init_lit = "0x7F800000";  // IEEE 754 binary32 +inf
+    } else if (d == ::tenzor::DType::Float64) {
+        init_lit = "0x7FF0000000000000";  // IEEE 754 binary64 +inf
+    } else if (d == ::tenzor::DType::Float16) {
+        init_lit = "0x7C00";  // IEEE 754 binary16 +inf
+    } else if (d == ::tenzor::DType::BFloat16) {
+        init_lit = "0x7F80";  // bfloat16 +inf
+    } else if (is_float_dtype(d)) {
+        init_lit = "0x7F800000";  // fallback
+    } else {
+        init_lit = int_dtype_extreme_literal(d, /*want_max=*/true);
+    }
+    auto out_name = emit_reduce_with_keepdim(
+        ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
+        out_val->shape(), dims, keepdim, "minimum", init_lit, d);
+    ctx.bind(out_val->id(), out_name);
+}
+
+// Mirrors handle_sum exactly, with a "multiply" reducer and a 1.0 init
+// literal. F16/BF16 widen to F32 for the same reason handle_sum does --
+// products accumulate precision loss even faster than sums as the
+// reduction length grows.
+auto handle_prod(LoweringContext& ctx,
+                 const ::tenzor::jit::Node& node,
+                 std::ostream& body) -> void {
+    if (node.inputs().size() != 1 || node.outputs().size() != 1) {
+        throw std::runtime_error("GraphToMLIR: Prod expects 1 input, 1 output");
+    }
+    const auto& in_val  = node.inputs()[0];
+    const auto& out_val = node.outputs()[0];
+    auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
+                                                out_val->shape());
+    const auto d = out_val->dtype();
+    const bool widen = (d == ::tenzor::DType::Float16 ||
+                        d == ::tenzor::DType::BFloat16);
+    const auto cd = widen ? ::tenzor::DType::Float32 : d;
+    std::string in_name = ctx.name_for(in_val->id());
+    if (widen) {
+        auto conv = ctx.fresh_name();
+        emit_stablehlo_convert(body, conv, in_name, in_val->shape(), d, cd);
+        body << '\n';
+        in_name = conv;
+    }
+    auto reduced = emit_reduce_with_keepdim(
+        ctx, body, in_name, in_val->shape(),
+        out_val->shape(), dims, keepdim, "multiply",
+        scalar_literal(1.0, cd), cd);
+    std::string out_name = reduced;
+    if (widen) {
+        out_name = ctx.fresh_name();
+        emit_stablehlo_convert(body, out_name, reduced, out_val->shape(), cd, d);
+        body << '\n';
+    }
+    ctx.bind(out_val->id(), out_name);
+}
+
 auto handle_mean(LoweringContext& ctx,
                  const ::tenzor::jit::Node& node,
                  std::ostream& body) -> void {
@@ -2734,8 +2811,26 @@ auto emit_reduce_window(std::ostream& body, LoweringContext& ctx,
                         const std::vector<int64_t>& operand_shape,
                         const std::vector<int64_t>& result_shape,
                         ::tenzor::DType d) -> void {
+    // JIT-R144: mirror emit_reduce_with_keepdim's JIT-R119 barrier for
+    // stablehlo.reduce_window, its structurally-different sibling op used by
+    // MaxPool2d/AvgPool2d/AdaptiveAvgPool2d. Every OTHER stablehlo.reduce
+    // call site was audited/protected against IREE's LLVMGPUVectorDistribute
+    // (CUDA/ROCm) Float64 codegen bug, but pooling's reduce_window path was
+    // never routed through that shared protection. Applying the same
+    // unconditional-on-Float64 barrier here, centrally, fixes all three
+    // pooling ops at once and is a documented semantic no-op on every other
+    // target (including llvm-cpu, where the bug does not reproduce), so it's
+    // safe to apply even though this op's exposure was unconfirmed.
+    std::string reduce_operand = operand;
+    if (d == ::tenzor::DType::Float64) {
+        auto barriered_name = ctx.fresh_name();
+        emit_stablehlo_optimization_barrier(body, barriered_name, operand,
+                                            operand_shape, d);
+        body << '\n';
+        reduce_operand = barriered_name;
+    }
     body << '%' << result
-         << " = \"stablehlo.reduce_window\"(%" << operand << ", %"
+         << " = \"stablehlo.reduce_window\"(%" << reduce_operand << ", %"
          << init_name << ") <{window_dimensions = array<i64: ";
     for (std::size_t i = 0; i < window.size(); ++i) {
         if (i != 0) body << ", ";
@@ -5239,6 +5334,8 @@ auto GraphToMLIR::lower(const ::tenzor::jit::Graph& g) -> std::string {
             case OpType::Sum:          handle_sum(ctx, *node, body);     break;
             case OpType::Mean:         handle_mean(ctx, *node, body);    break;
             case OpType::Max:          handle_max(ctx, *node, body);     break;
+            case OpType::Min:          handle_min(ctx, *node, body);     break;
+            case OpType::Prod:         handle_prod(ctx, *node, body);    break;
             case OpType::Softmax:      handle_softmax(ctx, *node, body); break;
 
             // ── Linalg ──

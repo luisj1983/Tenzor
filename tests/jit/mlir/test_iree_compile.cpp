@@ -5,6 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -251,5 +254,159 @@ TEST(IreeCompile, CudaEmbeddingApiRetriesRejectedArchWithSm80) {
     EXPECT_GT(fs::file_size(artifact.vmfb_path), 0U);
     EXPECT_EQ(artifact.target, "cuda");
 
+    // JIT-R149: the returned vmfb actually holds sm_80 bytecode (that's what
+    // compiled), so it must be filed under the sm_80 cache key, not the
+    // rejected sm_9999 one the compile was nominally requested for -- a
+    // cache entry whose key/filename asserts "sm_9999" but contains sm_80
+    // bytecode is a cache-integrity defect even though PTX forward-compat
+    // happens to mask it functionally. Verify by compiling the SAME module
+    // directly for sm_80 against the SAME cache dir: it must be a cache HIT
+    // at the exact path the sm_9999 compile relocated to (not a fresh
+    // compile to some other path), proving the fallback compile's output was
+    // relocated to the key that actually matches its contents.
+    tj::CompileOptions sm80_opts = opts;
+    sm80_opts.cuda_arch = "sm_80";
+    tj::CompiledArtifact sm80_artifact;
+    ASSERT_NO_THROW({ sm80_artifact = tj::compile_mlir(kAddModule, sm80_opts); });
+    EXPECT_EQ(sm80_artifact.vmfb_path, artifact.vmfb_path)
+        << "sm_9999-requested compile's fallback output should be filed "
+           "under the sm_80 cache key (same path a direct sm_80 compile "
+           "resolves to), not left mislabeled under sm_9999's key";
+
     fs::remove_all(tmp);
+}
+
+// JIT-R150 regression: the "always dump the MLIR source for offline debug"
+// write had no error-checking at all -- not even f.good()/f.fail() -- so a
+// write failure (disk full, quota exhaustion, a restrictive sandbox) would
+// silently violate the comment's own claimed invariant ("so that the path
+// returned in JitCompileError exists"), handing a caller catching
+// JitCompileError a mlir_dump_path() that's missing or truncated during
+// exactly the failure-diagnosis scenario the dump exists to support.
+// Reproduced with a cache_dir made read-only after creation: the directory
+// exists (so secure_cache_dir's create_directories is a no-op) but the
+// ofstream open for the .mlir dump fails, which must now surface as a clear
+// JitCompileError instead of silently producing no file.
+TEST(IreeCompile, MlirDumpWriteFailureThrowsClearError) {
+    if (::getuid() == 0) {
+        GTEST_SKIP() << "running as root: permission bits don't block writes";
+    }
+    const fs::path tmp = make_tmp_dir();
+    ASSERT_EQ(::chmod(tmp.c_str(), 0500), 0) << "failed to make " << tmp << " read-only";
+    struct PermGuard {
+        fs::path p;
+        ~PermGuard() { ::chmod(p.c_str(), 0700); }  // restore so remove_all can clean up
+    } perm_guard{tmp};
+
+    tj::CompileOptions opts;
+    opts.target = "llvm-cpu";
+    opts.cache_dir = tmp;
+
+    // A read-only cache_dir also makes the LATER vmfb-write step fail (with
+    // its own, already-error-checked JitCompileError), so a bare
+    // EXPECT_THROW wouldn't discriminate the fix from the pre-fix silent
+    // dump-write failure -- both throw *some* JitCompileError here. What the
+    // fix specifically must do is surface the dump-write failure itself
+    // (message mentions the MLIR debug dump), before ever reaching the vmfb
+    // compile attempt.
+    bool threw = false;
+    try {
+        (void)tj::compile_mlir(kTrivialModule, opts);
+    } catch (const tj::JitCompileError& e) {
+        threw = true;
+        EXPECT_NE(std::string(e.what()).find("MLIR debug dump"), std::string::npos)
+            << "expected the error to specifically call out the MLIR debug "
+               "dump write failure, got: " << e.what();
+    }
+    EXPECT_TRUE(threw) << "expected compile_mlir to throw JitCompileError "
+                          "for a read-only cache_dir";
+
+    ::chmod(tmp.c_str(), 0700);
+    fs::remove_all(tmp);
+}
+
+// JIT-R167 regression: secure_cache_dir()/cache_file_is_trustworthy() used
+// stat() (which FOLLOWS symlinks) rather than lstat() to verify the
+// shared-temp cache dir's ownership. A local attacker who knows the
+// victim's uid can pre-create a symlink at the deterministic path
+// (<tmp>/tenzor-<uid>) pointing at a directory the victim already owns:
+// stat() follows it and reports victim ownership (passing the "not
+// squatted" check), and the subsequent chmod/mkdir then operate on the
+// symlink's TARGET -- bypassing the entire defense via one directory-level
+// symlink. Reproduced by planting exactly that symlink and confirming
+// compile_mlir (with no XDG_CACHE_HOME/HOME, forcing the shared-temp
+// fallback) now refuses it instead of silently following it.
+TEST(IreeCompile, SharedTempCacheDirRejectsSymlinkSquatting) {
+    if (::getuid() == 0) {
+        GTEST_SKIP() << "running as root: this attack targets cross-user "
+                         "ownership checks that don't apply to root";
+    }
+
+    const char* home_saved = std::getenv("HOME");
+    const bool had_home = home_saved != nullptr;
+    const std::string home_val = had_home ? home_saved : std::string{};
+    const char* xdg_saved = std::getenv("XDG_CACHE_HOME");
+    const bool had_xdg = xdg_saved != nullptr;
+    const std::string xdg_val = had_xdg ? xdg_saved : std::string{};
+    struct EnvGuard {
+        bool had_home, had_xdg;
+        std::string home_val, xdg_val;
+        ~EnvGuard() {
+            if (had_home) setenv("HOME", home_val.c_str(), 1); else unsetenv("HOME");
+            if (had_xdg) setenv("XDG_CACHE_HOME", xdg_val.c_str(), 1); else unsetenv("XDG_CACHE_HOME");
+        }
+    } env_guard{had_home, had_xdg, home_val, xdg_val};
+    unsetenv("HOME");
+    unsetenv("XDG_CACHE_HOME");
+
+    // Matches default_cache_dir()'s shared-temp derivation exactly.
+    const fs::path tenzor_root =
+        fs::temp_directory_path() / ("tenzor-" + std::to_string(::getuid()));
+
+    // Preserve any pre-existing legitimate content at this real, shared,
+    // deterministic path (e.g. from a prior real run on this machine)
+    // rather than destroying it.
+    const fs::path backup = fs::temp_directory_path() /
+        ("tenzor_r167_test_backup_" + std::to_string(::getpid()));
+    bool had_preexisting = fs::exists(tenzor_root) || fs::is_symlink(tenzor_root);
+    if (had_preexisting) {
+        fs::rename(tenzor_root, backup);
+    }
+    struct PathGuard {
+        fs::path root, backup, attacker_target;
+        bool had_preexisting;
+        ~PathGuard() {
+            std::error_code ec;
+            fs::remove_all(root, ec);       // symlink or dir this test created
+            fs::remove_all(attacker_target, ec);
+            if (had_preexisting) {
+                fs::rename(backup, root, ec);
+            }
+        }
+    } path_guard{tenzor_root, backup, {}, had_preexisting};
+
+    // Plant the attack: tenzor_root is a symlink to a directory that (in a
+    // real attack) some OTHER user already owns; here it's simply a
+    // separate directory this same test process owns, since a single test
+    // process can't fork a genuinely different uid -- what matters for this
+    // regression is that a SYMLINK sits at the deterministic path at all,
+    // which secure_cache_dir must now categorically refuse regardless of
+    // who owns what it points to.
+    const fs::path attacker_target = fs::temp_directory_path() /
+        ("tenzor_r167_attacker_target_" + std::to_string(::getpid()));
+    fs::create_directories(attacker_target);
+    path_guard.attacker_target = attacker_target;
+    ASSERT_EQ(::symlink(attacker_target.c_str(), tenzor_root.c_str()), 0)
+        << "failed to plant symlink at " << tenzor_root;
+
+    tj::CompileOptions opts;
+    opts.target = "llvm-cpu";
+    // cache_dir left empty -> default_cache_dir() -> shared-temp fallback
+    // (HOME/XDG_CACHE_HOME both unset above) -> secure_cache_dir() must
+    // reject the planted symlink.
+    EXPECT_THROW({ (void)tj::compile_mlir(kTrivialModule, opts); },
+                tj::JitCompileError)
+        << "expected compile_mlir to refuse a symlinked shared-temp cache "
+           "dir instead of silently following it into the attacker's "
+           "target directory";
 }

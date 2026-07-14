@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -227,5 +228,52 @@ TEST(JitControlFlowBackends, CondAndWhileLoopAllBackends) {
         ASSERT_EQ(res.size(), 1u);
         auto rc = res[0].tensor().to(Device::cpu());
         EXPECT_NEAR(rc.data<float>()[0], 3.0f, 1e-5f);  // three +1 increments
+    }
+}
+
+// JIT-R165: a NaN condition tensor must take the SAME branch on every
+// backend as it does on CPU -- NaN != 0.0 is true under IEEE-754, so a NaN
+// condition is "truthy" (then-branch / loop-continue). This guards the
+// CPU-first, Float64-widening cast order (control_flow.hpp's
+// tensor_condition_to_bool, shared by cond()/while_loop()/the scripted `if`/
+// the compiled-graph interpreter) against a regression where a device-side
+// cast canonicalizes NaN to 0 on some backend, silently flipping the branch
+// taken vs CPU. The existing CondAndWhileLoopAllBackends test above only
+// ever used clean 0.0f/1.0f conditions, leaving this exact class of bug
+// undetectable on GPU.
+TEST(JitControlFlowBackends, CondAndWhileLoopNanConditionAllBackends) {
+    using namespace tenzor::jit;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (const auto& dev : get_available_backends()) {
+        SCOPED_TRACE(backend_name(dev));
+        auto x = Variable(full({4}, 3.0f, DType::Float32, dev), false);
+
+        // Float64 (not Float32): tensor_condition_to_bool's CPU-first cast
+        // order matters only when the condition is a wider dtype that would
+        // otherwise be NARROWED on the device before transfer -- an
+        // already-Float32 NaN survives a same-dtype no-op cast regardless of
+        // order, so it wouldn't exercise the risk this test targets.
+        // NaN condition must take the THEN branch, matching CPU (NaN != 0).
+        auto out = cond(full({1}, nan, DType::Float64, dev),
+            [](const Variable& in) { return in + in; },          // then -> 6
+            [](const Variable& in) { return tenzor::neg(in); },  // else -> -3
+            x);
+        auto rt = out.tensor().to(Device::cpu());
+        for (int i = 0; i < 4; ++i) EXPECT_NEAR(rt.data<float>()[i], 6.0f, 1e-5f);
+
+        // A while_loop whose predicate is always NaN must run all max_iter
+        // iterations (never exit early as if NaN were falsy).
+        auto counter = Variable(full({1}, 0.0f, DType::Float32, dev), false);
+        auto res = while_loop(3,
+            [dev, nan](const std::vector<Variable>&) -> Tensor {
+                return full({1}, nan, DType::Float64, dev);
+            },
+            [dev](const std::vector<Variable>& st) -> std::vector<Variable> {
+                return {st[0] + Variable(ones({1}, DType::Float32, dev), false)};
+            },
+            {counter});
+        ASSERT_EQ(res.size(), 1u);
+        auto rc = res[0].tensor().to(Device::cpu());
+        EXPECT_NEAR(rc.data<float>()[0], 3.0f, 1e-5f);  // ran all 3 iterations
     }
 }

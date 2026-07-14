@@ -227,7 +227,28 @@ TEST(OpFlashAttentionCallback, EndToEndPluginPathMatchesEager) {
             throw;
         }
 
-        auto outs = invoker->invoke({q_t, k_t, v_t});
+        // JIT review (found via test_op_rms_norm_callback.cpp's identical
+        // gap): unlike load() above, invoke() DOES succeed in compiling/
+        // loading a plugin-enabled module for a non-CPU target -- the
+        // require_local_hal guard (iree_customcalls.cpp F005) only fires at
+        // CALL time, throwing UNIMPLEMENTED "valid only on a local (CPU)
+        // HAL". This is intentional (production always compiles with
+        // plugin_enabled=false for non-CPU targets; only THIS test forces
+        // plugin_enabled=true across every target to exercise the callback's
+        // HAL buffer marshaling), so treat it as an expected skip for that
+        // target, not a test failure.
+        std::vector<::tenzor::Tensor> outs;
+        try {
+            outs = invoker->invoke({q_t, k_t, v_t});
+        } catch (const std::exception& e) {
+            std::error_code _ec;
+            std::filesystem::remove_all(opts.cache_dir, _ec);
+            if (std::string(e.what()).find("valid only on a local (CPU) HAL") !=
+                std::string::npos) {
+                continue;
+            }
+            throw;
+        }
         ASSERT_EQ(outs.size(), 1u) << "target=" << target;
         auto diff = ::tenzor::max(::tenzor::abs(eager_out.tensor() - outs[0]))
                         .item<float>();

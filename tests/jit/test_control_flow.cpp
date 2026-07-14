@@ -61,6 +61,41 @@ TEST(JITControlFlow, TraceIfBasic) {
     tracer.clear();
 }
 
+// JIT-R148: assert_no_inplace_on_shared must still catch a GENUINE in-place
+// mutation of a tensor shared/carried across a cond() branch (no prior test
+// exercised this positive case at all -- only the false-positive fix below
+// had regression risk without this).
+TEST(JITControlFlow, TraceIfDetectsGenuineInplaceMutationOfSharedTensor) {
+    Tracer tracer;
+    tracer.start_trace();
+
+    auto x = Variable(ones({2, 3}, DType::Float32, Device::cpu()), false);
+    auto other = ones({2, 3}, DType::Float32, Device::cpu());
+    auto cond_t = ones({1}, DType::Float32, Device::cpu());
+
+    EXPECT_THROW(
+        {
+            tracer.trace_if(
+                cond_t,
+                // then branch: genuinely mutate the shared/carried input `x`
+                // in place, via the same hook dispatch_inplace uses.
+                [&](const std::vector<Variable>&) -> std::vector<Variable> {
+                    Tensor& target = x.tensor();
+                    tracer.record_inplace(OpId::AddInplace, target,
+                                          std::span<const Tensor>(&other, 1),
+                                          OpAttributes{}, nullptr);
+                    return {x};
+                },
+                [](const std::vector<Variable>& inputs) -> std::vector<Variable> {
+                    return {inputs[0]};
+                },
+                {x});
+        },
+        std::runtime_error);
+
+    tracer.clear();
+}
+
 TEST(JITControlFlow, TraceLoopBasic) {
     Tracer tracer;
     tracer.start_trace();

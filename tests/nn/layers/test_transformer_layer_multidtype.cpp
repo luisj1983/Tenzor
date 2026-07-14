@@ -94,7 +94,14 @@ TEST_P(TransformerLayerMultiDTypeTest, TransformerFull_BackwardGradPopulated) {
     Variable src = createInput({3, 2, 16}, true);
     Variable tgt = createInput({4, 2, 16}, true);
     auto out = model.forward(src, tgt);
-    sum(out).backward();
+    // Like TransformerEncoder_BackwardGradPopulated above: the full
+    // transformer also ends in a LayerNorm (affine weight=1, bias=0), so
+    // sum(out) is identically zero per row and the input gradient is
+    // mathematically 0 -- most backends only "passed" via float rounding
+    // noise happening to land >0; Vulkan's noise landed at a clean 0 and
+    // failed. Use a non-degenerate loss so this test actually exercises
+    // gradient flow.
+    sum(out * out).backward();
     ASSERT_TRUE(src.has_grad()) << device().to_string();
     ASSERT_TRUE(tgt.has_grad()) << device().to_string();
     auto gs = max(abs(src.grad()->to(Device::cpu()).to(DType::Float32)));
