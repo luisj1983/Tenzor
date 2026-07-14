@@ -207,11 +207,7 @@ auto QuantizedLinear::forward_impl(const Variable& input) -> Variable {
     // JIT-R058b: record a trace node for the common per-tensor INT8/INT8
     // static-quant configuration (weight per-tensor INT8, activation
     // per-tensor INT8) — the case OpType::QuantizedLinearStatic's convention
-    // matches exactly. Per-channel weight and INT4 remain a documented,
-    // narrower residual gap (see findings.txt): they fall through with no
-    // jit_record call, so a trace reaching them still safely freezes
-    // `output` as a constant (same as before this fix — a landmine, not a
-    // live regression).
+    // matches exactly.
     if (activation_qparams_.has_value()) {
         const auto& wparams = weight_.params();
         bool weight_per_tensor =
@@ -222,6 +218,31 @@ auto QuantizedLinear::forward_impl(const Variable& input) -> Variable {
         bool act_per_tensor =
             (activation_qparams_->scheme == QuantizationScheme::PerTensorSymmetric ||
              activation_qparams_->scheme == QuantizationScheme::PerTensorAsymmetric);
+        // JIT-R172: per-channel weight quantization (the library's DEFAULT
+        // preset — see DefaultQConfigs::default_qconfig() — and INT4)
+        // previously fell through this guard with no jit_record call and no
+        // error, so a trace silently froze `output` as a trace-time
+        // constant: every later replay call with different input data
+        // returned the first call's stale value, and this never tripped
+        // cache_stats().eager_fallbacks since it isn't a fallback -- it's a
+        // silently-wrong compiled node. QuantizedConv2d already refuses to
+        // be traced at all for the equivalent reason (see its
+        // forward_impl); apply the same fail-loudly discipline here rather
+        // than let an untraceable configuration silently corrupt a compiled
+        // graph's output.
+        if (!(weight_per_tensor && weight_int8 && act_int8 && act_per_tensor) &&
+            ::tenzor::jit::Tracer::get_instance().is_tracing()) {
+            throw std::runtime_error(
+                "QuantizedLinear::forward_impl: this weight/activation "
+                "quantization configuration (per-channel weight and/or "
+                "non-INT8 weight/activation dtype) cannot be correctly "
+                "JIT-traced -- OpType::QuantizedLinearStatic's replay node "
+                "only supports per-tensor INT8/INT8 static quantization. "
+                "Tracing it anyway would silently freeze the output as a "
+                "trace-time constant (JIT-R172). Use a per-tensor INT8 "
+                "QConfig for layers that must be JIT-compiled, or keep "
+                "this call outside jit.compile()/jit.trace().");
+        }
         if (weight_per_tensor && weight_int8 && act_int8 && act_per_tensor) {
             int64_t rows = in_features_ > 0 ? input.tensor().numel() / in_features_ : 0;
             Tensor input_2d = (input.tensor().shape().size() == 2)

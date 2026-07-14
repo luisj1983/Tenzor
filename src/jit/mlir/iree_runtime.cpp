@@ -857,8 +857,21 @@ auto shared_iree_hal_device(iree_runtime_instance_t* instance,
 
 auto device_selection_env_key(const std::string& driver) -> std::string {
     if (driver == "hip") {
-        const char* v = std::getenv("HIP_VISIBLE_DEVICES");
-        return (v != nullptr) ? v : "";
+        // JIT-R187: HIP_VISIBLE_DEVICES alone is not the whole story --
+        // find_rocm_arch_tool's own doc comment (below, and mirrored in
+        // iree_runtime.hpp) documents that the underlying HSA/KFD device
+        // enumeration ROCR_VISIBLE_DEVICES/GPU_DEVICE_ORDINAL also affects
+        // which physical GPU a given HIP ordinal binds to, independent of
+        // HIP_VISIBLE_DEVICES. Fold all three in so a process that changes
+        // either between two calls always misses this cache instead of
+        // silently reusing a device/arch answer for a now-different
+        // physical card.
+        const char* hip_v = std::getenv("HIP_VISIBLE_DEVICES");
+        const char* rocr_v = std::getenv("ROCR_VISIBLE_DEVICES");
+        const char* ord_v = std::getenv("GPU_DEVICE_ORDINAL");
+        return std::string(hip_v != nullptr ? hip_v : "") + "|" +
+               (rocr_v != nullptr ? rocr_v : "") + "|" +
+               (ord_v != nullptr ? ord_v : "");
     }
     if (driver == "vulkan") {
         const char* icd = std::getenv("VK_ICD_FILENAMES");
@@ -1704,6 +1717,15 @@ auto remap_hip_visible_device_index(int hip_index,
 auto detect_rocm_gfx_arch(int device_index) -> std::string {
     if (device_index < 0) return {};
     const char* hip_visible_devices_env = std::getenv("HIP_VISIBLE_DEVICES");
+    // JIT-R187: amdgpu-arch prints one gfx name per GPU in HSA/KFD device
+    // order -- honoring ROCR_VISIBLE_DEVICES/GPU_DEVICE_ORDINAL, but NOT
+    // HIP_VISIBLE_DEVICES (see find_rocm_arch_tool's doc comment below).
+    // Fold both of those in too, alongside HIP_VISIBLE_DEVICES, so a
+    // process that changes either between two calls always misses this
+    // cache instead of silently reusing an arch answer computed for a now-
+    // different physical GPU.
+    const char* rocr_visible_devices_env = std::getenv("ROCR_VISIBLE_DEVICES");
+    const char* gpu_device_ordinal_env = std::getenv("GPU_DEVICE_ORDINAL");
     // JIT-R129: the detected arch depends not just on device_index but on
     // HIP_VISIBLE_DEVICES's actual value (remap_hip_visible_device_index()
     // remaps `device_index` through it to a physical KFD ordinal). Caching
@@ -1716,7 +1738,9 @@ auto detect_rocm_gfx_arch(int device_index) -> std::string {
     // env value into the cache key so a changed mapping always misses.
     const std::string cache_key =
         std::to_string(device_index) + "|" +
-        (hip_visible_devices_env != nullptr ? hip_visible_devices_env : "");
+        (hip_visible_devices_env != nullptr ? hip_visible_devices_env : "") + "|" +
+        (rocr_visible_devices_env != nullptr ? rocr_visible_devices_env : "") + "|" +
+        (gpu_device_ordinal_env != nullptr ? gpu_device_ordinal_env : "");
     static std::mutex mu;
     static std::unordered_map<std::string, std::string> cache;
     {
@@ -1812,6 +1836,20 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
     // completes -- symbols already resolved via dlopen stay mapped
     // regardless of later LD_LIBRARY_PATH changes, so restoring here is
     // safe for the cached device this function hands back for reuse.
+    // JIT-R185: serialize the ENTIRE save-mutate-probe-restore window
+    // against concurrent calls -- setenv()/getenv() on LD_LIBRARY_PATH are
+    // process-wide, so two threads racing through this window could
+    // interleave: thread A saves the pre-mutation value, thread B saves
+    // what A already mutated to, and whichever restores last stomps
+    // LD_LIBRARY_PATH to a stale value relative to the other thread's
+    // still-in-flight dlopen-triggering work -- potentially re-triggering
+    // the exact stale-library dlopen bug this guard exists to prevent.
+    // Declared BEFORE ld_path_guard below so this lock is released only
+    // AFTER ld_path_guard's destructor has restored LD_LIBRARY_PATH (C++
+    // destroys function-scope locals in reverse declaration order).
+    static std::mutex ld_library_path_mu;
+    std::unique_lock<std::mutex> ld_path_lock(ld_library_path_mu, std::defer_lock);
+
     struct LdLibraryPathRestoreGuard {
         bool active = false;
         bool had_value = false;
@@ -1827,6 +1865,7 @@ auto iree_can_initialize_default_device(const std::string& driver_name)
     } ld_path_guard;
 #ifdef TENZOR_ROCM_RUNTIME_LIB_DIR
     if (driver_name == "hip") {
+        ld_path_lock.lock();
         if (const char* cur = std::getenv("LD_LIBRARY_PATH");
             cur != nullptr) {
             ld_path_guard.had_value = true;

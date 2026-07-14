@@ -590,12 +590,15 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             float a = in_ptr[2 * idx];
             float b = in_ptr[2 * idx + 1];
             float mag = sycl::hypot(a, b);
-            if (mag > 0.0f) {
-                out_ptr[2 * idx] = a / mag;
-                out_ptr[2 * idx + 1] = b / mag;
-            } else {
+            // JIT-R171: compare against zero (not `mag > 0`) so a NaN
+            // component (mag itself NaN) falls through to a/mag, correctly
+            // propagating NaN+NaNi instead of silently returning 0+0i.
+            if (mag == 0.0f) {
                 out_ptr[2 * idx] = 0.0f;
                 out_ptr[2 * idx + 1] = 0.0f;
+            } else {
+                out_ptr[2 * idx] = a / mag;
+                out_ptr[2 * idx + 1] = b / mag;
             }
         }).wait();
     }
@@ -606,12 +609,13 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             double a = in_ptr[2 * idx];
             double b = in_ptr[2 * idx + 1];
             double mag = sycl::hypot(a, b);
-            if (mag > 0.0) {
-                out_ptr[2 * idx] = a / mag;
-                out_ptr[2 * idx + 1] = b / mag;
-            } else {
+            // JIT-R171: see the Complex64 branch above.
+            if (mag == 0.0) {
                 out_ptr[2 * idx] = 0.0;
                 out_ptr[2 * idx + 1] = 0.0;
+            } else {
+                out_ptr[2 * idx] = a / mag;
+                out_ptr[2 * idx + 1] = b / mag;
             }
         }).wait();
     }

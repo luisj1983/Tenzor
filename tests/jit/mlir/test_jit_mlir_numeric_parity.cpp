@@ -32,6 +32,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <functional>
+#include <string>
 #include <vector>
 
 #include "mlir_target_util.hpp"
@@ -62,11 +64,18 @@ void require_cpu_iree() {
 // cannot run the dtype (e.g. f64 transcendentals lack a libm symbol) degrades to
 // eager, which IS the correct reference, so the numeric check still holds;
 // misses>=1 confirms a compile was attempted per target.
-void assert_parity_over_targets(const char* name,
-                                ::tenzor::jit::CompiledFunction::FnType fn,
-                                const Variable& x, const Tensor& eager,
-                                double tol,
-                                bool allow_eager_fallback = false) {
+// JIT-R182: allow_eager_fallback_for is a PER-TARGET predicate (nullptr, the
+// default, means "never allow eager fallback on any target" -- strict
+// everywhere), not a single blanket bool -- a caller that only wants to
+// exempt specific targets with a genuine, understood capability gap (e.g.
+// no F64 transcendental codegen on llvm-cpu/vulkan-spirv) can express that
+// precisely, while every OTHER target passed to the same call remains held
+// to the strict (no-fallback) check, matching what several callers' own
+// comments already claimed before this predicate existed to make it true.
+void assert_parity_over_targets(
+        const char* name, ::tenzor::jit::CompiledFunction::FnType fn,
+        const Variable& x, const Tensor& eager, double tol,
+        std::function<bool(const std::string&)> allow_eager_fallback_for = nullptr) {
     for (const auto& target : mt::available_iree_targets()) {
         ::tenzor::jit::CompileConfig cfg;
         cfg.backend = "mlir";
@@ -86,13 +95,15 @@ void assert_parity_over_targets(const char* name,
         // regression on this target (discovered via JIT-R120's real-hardware
         // re-verification: F16 SDPA on cuda failed to bufferize and fell back
         // to eager with no test-visible signal at all before this check).
-        // allow_eager_fallback exists ONLY for the narrow, already-understood
-        // case where a target genuinely lacks the dtype/op support being
-        // exercised (e.g. F64 transcendentals with no libm-equivalent
-        // codegen lowering on that target) -- eager IS the correct reference
-        // there, so the diff check still holds; it must NOT be used to
-        // paper over a genuine compile/lower/invoke failure.
-        if (!allow_eager_fallback) {
+        // allow_eager_fallback_for exists ONLY for the narrow, already-
+        // understood case where a SPECIFIC target genuinely lacks the
+        // dtype/op support being exercised (e.g. F64 transcendentals with no
+        // libm-equivalent codegen lowering on that target) -- eager IS the
+        // correct reference there, so the diff check still holds; it must
+        // NOT be used to paper over a genuine compile/lower/invoke failure,
+        // and (JIT-R182) must not blanket-exempt targets it wasn't actually
+        // verified for.
+        if (!allow_eager_fallback_for || !allow_eager_fallback_for(target)) {
             EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
                 << name << " silently fell back to eager on target=" << target
                 << " (compiled path never actually ran; the diff check below "
@@ -287,15 +298,20 @@ TEST(MlirNumericParity, Float64SoftmaxWideAxisAccumulates) {
     Variable x(x_t, /*requires_grad=*/false);
 
     const Variable eager = nn::softmax(x, -1);
-    // JIT-R120 follow-up: allow_eager_fallback=true here -- verified this
-    // test's own softmax-exp reduction genuinely has no F64 codegen lowering
-    // on llvm-cpu (no vectorized f64 exp libm-equivalent) or vulkan-spirv (no
-    // double-precision transcendental in that SPIR-V codegen path), so both
-    // fall back to eager, which IS the correct reference; this is a real
-    // capability gap, not a compile/lower/invoke regression. cuda/rocm do not
-    // fall back and are still held to the strict (no-fallback) check.
-    assert_parity_over_targets("F64 softmax wide-axis", fn, x, eager.tensor(),
-                               1e-9, /*allow_eager_fallback=*/true);
+    // JIT-R120 follow-up, tightened per JIT-R182: this test's own softmax-exp
+    // reduction genuinely has no F64 codegen lowering on llvm-cpu (no
+    // vectorized f64 exp libm-equivalent) or vulkan-spirv (no double-
+    // precision transcendental in that SPIR-V codegen path), so both fall
+    // back to eager, which IS the correct reference; this is a real
+    // capability gap, not a compile/lower/invoke regression. The predicate
+    // below exempts ONLY those two targets by name -- cuda/rocm (and any
+    // other target this host has) are NOT exempted and remain genuinely
+    // held to the strict (no-fallback) check, matching what this comment
+    // claims (previously this was a single blanket bool that silently
+    // exempted every target, contrary to the claim).
+    assert_parity_over_targets(
+        "F64 softmax wide-axis", fn, x, eager.tensor(), 1e-9,
+        [](const std::string& t) { return t == "llvm-cpu" || t == "vulkan-spirv"; });
 }
 
 // findings.txt JIT-R126: softmax's MLIR lowering (both handle_softmax and
@@ -849,6 +865,7 @@ TEST(MlirNumericParity, BatchNorm2dRunningStatsLiveViaWithBuffers_MlirBackend) {
         compiled.set_buffers(bn.buffers());
 
         auto x = randn({2, 4, 3, 3}, DType::Float32, Device::cpu()) + 1.0f;
+        mj::reset_cache_stats();
         auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
 
         EXPECT_GE(compiled.num_cached(), 1u)
@@ -856,6 +873,18 @@ TEST(MlirNumericParity, BatchNorm2dRunningStatsLiveViaWithBuffers_MlirBackend) {
                "cache a module on target=" << target << " -- the op likely "
                "graph-broke and silently fell back to eager, so replay "
                "correctness was never exercised";
+        // JIT-R180: without this, a cache-hit invocation that throws
+        // mid-invoke and silently re-runs eager (compile.cpp's mlir_invoke
+        // C2 fallback) produces a numerically IDENTICAL result to a real
+        // compiled replay, so the diff checks below would still pass even
+        // though the exact live-buffer-marshaling bug this test exists to
+        // catch had fired -- misses>=1 alone cannot distinguish "compiled
+        // and ran" from "attempted a compile, failed, and quietly ran eager".
+        EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+            << "nn::BatchNorm2d(with_buffers, backend=mlir) silently fell "
+               "back to eager on target=" << target << " -- the compiled "
+               "path never actually ran, so this test's diff checks are "
+               "vacuous for this target";
 
         // Simulate an eager EMA update happening OUTSIDE the compiled module
         // (e.g. a training step), the same way BatchNorm2dRunningStatsLive-
@@ -864,7 +893,11 @@ TEST(MlirNumericParity, BatchNorm2dRunningStatsLiveViaWithBuffers_MlirBackend) {
         ASSERT_TRUE(rm != nullptr) << "nn::BatchNorm2d has no 'running_mean' buffer";
         rm->tensor() = rm->tensor() + 5.0;
 
+        mj::reset_cache_stats();
         auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+        EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+            << "nn::BatchNorm2d(with_buffers, backend=mlir) silently fell "
+               "back to eager on the post-mutation call on target=" << target;
         auto eager_after = fn(Variable(x, false)).tensor();
 
         EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)
@@ -905,17 +938,30 @@ TEST(MlirNumericParity, LinearWeightLiveViaWithParameters_MlirBackend) {
         compiled.set_parameters({weight});
 
         auto x = ::tenzor::full({3, 3}, 2.0f, DType::Float32, Device::cpu());
+        mj::reset_cache_stats();
         auto before = compiled(Variable(x, /*requires_grad=*/false)).tensor();
 
         EXPECT_GE(compiled.num_cached(), 1u)
             << "Linear-weight closure (with_parameters, backend=mlir) did not "
                "compile/cache a module on target=" << target;
+        // JIT-R180: see the identical check/rationale in
+        // BatchNorm2dRunningStatsLiveViaWithBuffers_MlirBackend above.
+        EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+            << "Linear-weight closure (with_parameters, backend=mlir) "
+               "silently fell back to eager on target=" << target << " -- "
+               "the compiled path never actually ran, so this test's diff "
+               "checks are vacuous for this target";
 
         // Mutate the weight in place (e.g. an optimizer step) OUTSIDE the
         // compiled module.
         weight->tensor() = weight->tensor() + 10.0f;
 
+        mj::reset_cache_stats();
         auto after = compiled(Variable(x, /*requires_grad=*/false)).tensor();
+        EXPECT_EQ(mj::cache_stats().eager_fallbacks, 0u)
+            << "Linear-weight closure (with_parameters, backend=mlir) "
+               "silently fell back to eager on the post-mutation call on "
+               "target=" << target;
         auto eager_after = fn(Variable(x, false)).tensor();
 
         EXPECT_GT(max_abs_diff_f64(before, after), 1e-3)

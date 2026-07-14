@@ -2,7 +2,9 @@
 #include "../backend_test_fixture.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include <cmath>
 #include <complex>
+#include <limits>
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -157,10 +159,11 @@ TEST_P(ComplexArithmeticTest, ComplexAbs) {
 // zero-input edge cases the GPU backends' hypot-based implementations
 // already handle correctly.
 TEST_P(ComplexArithmeticTest, ComplexSign) {
-    auto a = Tensor({int64_t(3)}, DType::Complex64, device);
+    auto a = Tensor({int64_t(4)}, DType::Complex64, device);
     a.data<std::complex<float>>()[0] = {3.0f, 4.0f};   // |z|=5
     a.data<std::complex<float>>()[1] = {0.0f, 0.0f};   // zero input
     a.data<std::complex<float>>()[2] = {-1.0f, 0.0f};  // negative real axis
+    a.data<std::complex<float>>()[3] = {std::numeric_limits<float>::quiet_NaN(), 1.0f};  // NaN component
 
     auto result = sign(a).to(Device::cpu());
     ASSERT_EQ(result.dtype(), DType::Complex64);
@@ -175,12 +178,19 @@ TEST_P(ComplexArithmeticTest, ComplexSign) {
 
     EXPECT_NEAR(rp[2].real(), -1.0f, 1e-5f);
     EXPECT_NEAR(rp[2].imag(), 0.0f, 1e-5f);
+
+    // JIT-R171: a NaN component must propagate to NaN+NaNi, not silently
+    // collapse to 0+0i (mag itself is NaN, so this must NOT take the
+    // "zero magnitude" branch).
+    EXPECT_TRUE(std::isnan(rp[3].real())) << "sign() must propagate NaN, not silently return 0";
+    EXPECT_TRUE(std::isnan(rp[3].imag())) << "sign() must propagate NaN, not silently return 0";
 }
 
 TEST_P(ComplexArithmeticTest, Complex128SignMatchesFormula) {
-    auto a = Tensor({int64_t(2)}, DType::Complex128, device);
+    auto a = Tensor({int64_t(3)}, DType::Complex128, device);
     a.data<std::complex<double>>()[0] = {6.0, 8.0};   // |z|=10
     a.data<std::complex<double>>()[1] = {0.0, 0.0};
+    a.data<std::complex<double>>()[2] = {std::numeric_limits<double>::quiet_NaN(), 1.0};  // NaN component
 
     auto result = sign(a).to(Device::cpu());
     ASSERT_EQ(result.dtype(), DType::Complex128);
@@ -192,6 +202,10 @@ TEST_P(ComplexArithmeticTest, Complex128SignMatchesFormula) {
 
     EXPECT_EQ(rp[1].real(), 0.0);
     EXPECT_EQ(rp[1].imag(), 0.0);
+
+    // JIT-R171: a NaN component must propagate, not silently collapse to 0+0i.
+    EXPECT_TRUE(std::isnan(rp[2].real())) << "sign() must propagate NaN, not silently return 0";
+    EXPECT_TRUE(std::isnan(rp[2].imag())) << "sign() must propagate NaN, not silently return 0";
 }
 
 TEST_P(ComplexArithmeticTest, ComplexRealAdd) {

@@ -559,7 +559,28 @@ auto autotune_static_heuristic_block_size(int64_t numel) -> int {
 auto autotune_device_arch(int device_index, bool is_hip) -> std::string {
     static std::mutex mtx;
     static std::unordered_map<std::string, std::string> cache;
-    const std::string map_key = (is_hip ? "rocm#" : "cuda#") + std::to_string(device_index);
+    // JIT-R186: fold the visible-devices env var(s) into the cache key --
+    // AutotuneCache::make_key's own doc comment explicitly warns that two
+    // different GPU generations both enumerated at index 0 (e.g. after a
+    // CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES change between two JIT
+    // compiles in the SAME process) must not alias to the same key.
+    // Mirrors the identical fix already applied to every sibling device/arch
+    // cache in iree_runtime.cpp (shared_iree_hal_device, detect_rocm_gfx_arch,
+    // iree_can_initialize_default_device). ROCm additionally folds
+    // ROCR_VISIBLE_DEVICES/GPU_DEVICE_ORDINAL (JIT-R187): amdgpu-arch/HIP's
+    // enumeration order honors those too, not just HIP_VISIBLE_DEVICES.
+    auto env_or_empty = [](const char* name) -> std::string {
+        const char* v = std::getenv(name);
+        return v ? v : "";
+    };
+    std::string map_key = (is_hip ? "rocm#" : "cuda#") + std::to_string(device_index);
+    if (is_hip) {
+        map_key += "|hip:" + env_or_empty("HIP_VISIBLE_DEVICES");
+        map_key += "|rocr:" + env_or_empty("ROCR_VISIBLE_DEVICES");
+        map_key += "|ord:" + env_or_empty("GPU_DEVICE_ORDINAL");
+    } else {
+        map_key += "|cuda:" + env_or_empty("CUDA_VISIBLE_DEVICES");
+    }
     {
         std::lock_guard<std::mutex> lock(mtx);
         auto it = cache.find(map_key);

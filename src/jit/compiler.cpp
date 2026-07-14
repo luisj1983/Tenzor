@@ -252,20 +252,10 @@ auto CommonSubexpressionEliminationPass::compute_node_hash(const Node& node) -> 
 }
 
 namespace {
-// Ops whose result depends on hidden state (RNG draws, running statistics,
-// etc.) and therefore must NOT be deduplicated even when their inputs and
-// attributes are identical. CSE'ing two of these would silently turn two
-// independent random draws into one shared draw — the classic JIT
-// correctness bug (Phase P0 / JIT correctness fix).
-auto is_stateful_op(OpType op) -> bool {
-    switch (op) {
-        case OpType::Dropout:    // each call draws a fresh Bernoulli mask
-        case OpType::BatchNorm2d: // training-mode batch stats update + running-stat read
-            return true;
-        default:
-            return false;
-    }
-}
+// is_stateful_op(OpType) now lives in graph.hpp/graph.cpp (JIT-R175) as a
+// single shared definition -- it's used both here (CSE/LICM safety) and by
+// Graph::has_side_effecting_node() (runtime replay-safety check), so the
+// two can't drift apart on what counts as "stateful".
 }  // namespace
 
 auto CommonSubexpressionEliminationPass::nodes_equivalent(const Node& a, const Node& b) -> bool {
@@ -1730,8 +1720,15 @@ static auto is_all_zeros(const Node& node) -> bool {
         } else if (t.dtype() == DType::Float64) {
             return abs_sum.item<double>() == 0.0;
         }
-        // For integer types, try float conversion
-        return abs_sum.item<float>() == 0.0f;
+        // JIT-R201: Tensor::item<T>() throws on ANY dtype mismatch -- it
+        // does not convert -- so for Float16/BFloat16/Int8/16/32/64/Bool
+        // constants the un-converted item<float>() call below used to
+        // always throw (silently caught by the catch-all, so x+0=x/x*1=x
+        // simply never fired for those dtypes: a missed optimization, not
+        // a correctness bug, but needlessly narrow). Explicitly widen
+        // first, matching QuantizationPass::compute_scale_and_zero's
+        // existing correct idiom elsewhere in this same file.
+        return abs_sum.to(DType::Float32).item<float>() == 0.0f;
     } catch (...) {
         return false;
     }
@@ -1757,7 +1754,8 @@ static auto is_all_ones(const Node& node) -> bool {
         } else if (t.dtype() == DType::Float64) {
             return abs_sum.item<double>() == 0.0;
         }
-        return abs_sum.item<float>() == 0.0f;
+        // JIT-R201: see is_all_zeros() above for the full rationale.
+        return abs_sum.to(DType::Float32).item<float>() == 0.0f;
     } catch (...) {
         return false;
     }

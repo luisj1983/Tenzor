@@ -19,6 +19,10 @@ layout(push_constant) uniform PushConstants {
 double hypot_safe(double x, double y) {
     x = abs(x);
     y = abs(y);
+    // JIT-R171: see complex_sign.comp for the Float32 variant -- max()/min()
+    // silently discard a NaN operand on this hardware/driver instead of
+    // propagating it, so a NaN component must be handled before them.
+    if (isnan(x) || isnan(y)) return x + y;
     double mx = max(x, y);
     double mn = min(x, y);
     if (mx == 0.0) return 0.0;
@@ -32,11 +36,12 @@ void main() {
     double a = data_in[idx * 2u];
     double b = data_in[idx * 2u + 1u];
     double mag = hypot_safe(a, b);
-    if (mag > 0.0) {
-        data_out[idx * 2u]      = a / mag;
-        data_out[idx * 2u + 1u] = b / mag;
-    } else {
+    // JIT-R171: see complex_sign.comp for the Float32 variant.
+    if (mag == 0.0) {
         data_out[idx * 2u]      = 0.0;
         data_out[idx * 2u + 1u] = 0.0;
+    } else {
+        data_out[idx * 2u]      = a / mag;
+        data_out[idx * 2u + 1u] = b / mag;
     }
 }

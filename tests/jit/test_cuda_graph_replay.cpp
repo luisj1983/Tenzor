@@ -26,11 +26,13 @@
 #include <tenzor/backend/cuda_graph.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/jit/compiler.hpp>
+#include <tenzor/jit/control_flow.hpp>
 #include <tenzor/jit/tracer.hpp>
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/tenzor.hpp>
 
 #include "../backend_parity/golden_util.hpp"
+#include "../backend_parity/parity_test_utils.hpp"
 
 using namespace tenzor;
 
@@ -41,6 +43,13 @@ namespace {
 std::vector<Device> available_gpus() {
     std::vector<Device> gpus;
     for (auto type : {Device::Type::CUDA, Device::Type::ROCm}) {
+        // JIT-R181: honor TENZOR_SKIP_BACKENDS -- a dev who explicitly opts
+        // out of a known-flaky driver on this host must have that respected
+        // here too, not just by TENZOR_REQUIRE_MULTI_BACKEND's escalation.
+        if (::tenzor::testing::is_backend_skipped_by_env(
+                ::tenzor::testing::device_type_to_backend_name(type))) {
+            continue;
+        }
         auto* b = backend_registry().get_backend(type);
         if (b == nullptr || !b->is_available()) continue;
         // Only include devices whose backend registered a graph-capture factory
@@ -344,6 +353,84 @@ TEST_F(CudaGraphReplay, LayerNormSavedStatsScratchBufferDoesNotCorruptUnrelatedA
                "address was handed to an unrelated allocation while the "
                "captured graph still wrote into it every replay";
     }
+  }  // for each gpu
+}
+
+// JIT-R176: investigating whether a nested If/Loop branch's own scratch
+// tensors were pinned into an outer CUDA-graph capture surfaced a MORE
+// fundamental, previously-unknown gap on real hardware: evaluating an
+// If/Loop node's condition (tensor_condition_to_bool) does a synchronous
+// device-to-host copy, which CUDA/HIP forbid on a stream that is currently
+// being captured ("operation not permitted when stream is capturing") --
+// so a graph containing control flow could never be captured successfully
+// at all, regardless of scratch-buffer pinning. capture_cuda_graph() now
+// detects this up front (Graph::has_control_flow_node()) and refuses with
+// a clear, actionable error instead of letting that raw low-level CUDA/HIP
+// error surface partway through capture. The out_all_values threading fix
+// (Graph::forward's grad_mode/out_all_values now propagate into nested
+// If/Loop branch calls) remains in place as correct defense-in-depth for
+// whatever DOES reach a nested branch's forward() during capture (e.g. a
+// future capture-safe conditional mechanism), even though today's guard
+// means the scratch-buffer-corruption scenario itself is unreachable via
+// capture_cuda_graph() specifically.
+TEST_F(CudaGraphReplay, CaptureRefusesGraphWithControlFlow_JIT176) {
+  for (const Device& cuda : gpus_) {
+    SCOPED_TRACE("device: " + cuda.to_string());
+
+    constexpr int64_t kBatch = 8;
+    constexpr int64_t kFeat = 64;
+    // Both branches call layer_norm identically -- only the condition's
+    // truthiness matters for which branch is taken; what matters for this
+    // test is that the LayerNorm node ends up inside the If's nested
+    // subgraph rather than the top-level graph.
+    auto closure = [](const std::vector<Variable>& args) -> std::vector<Variable> {
+        Tensor true_cond = ones({1}, DType::Float32, args[0].tensor().device());
+        return jit::cond(
+            true_cond,
+            [](const std::vector<Variable>& ins) -> std::vector<Variable> {
+                return {nn::functional::layer_norm(ins[0], {kFeat})};
+            },
+            [](const std::vector<Variable>& ins) -> std::vector<Variable> {
+                return {nn::functional::layer_norm(ins[0], {kFeat})};
+            },
+            args);
+    };
+
+    Tensor x0 = full({kBatch, kFeat}, 1.0f, DType::Float32, cuda);
+    std::vector<Variable> trace_inputs = {Variable(x0, /*requires_grad=*/false)};
+
+    std::shared_ptr<jit::Graph> graph = jit::trace(closure, trace_inputs);
+    ASSERT_NE(graph, nullptr);
+    ASSERT_TRUE(graph->has_control_flow_node())
+        << "test setup error: graph must contain an If node";
+
+    // Confirm the LayerNorm node genuinely ended up INSIDE the If's nested
+    // branch subgraph, not the top-level graph -- establishes this is a
+    // genuinely nested scenario, not just a top-level If with no payload.
+    bool has_nested_layer_norm = false;
+    for (const auto& node : graph->nodes()) {
+        if (node->op_type() == jit::OpType::If) {
+            auto check_branch = [&](const std::shared_ptr<jit::Graph>& b) {
+                if (!b) return;
+                for (const auto& n : b->nodes()) {
+                    if (n->op_type() == jit::OpType::LayerNorm) has_nested_layer_norm = true;
+                }
+            };
+            check_branch(node->then_branch());
+            check_branch(node->else_branch());
+        }
+    }
+    ASSERT_TRUE(has_nested_layer_norm)
+        << "test requires the LayerNorm node to end up inside the If "
+           "branch's nested subgraph";
+
+    auto module = std::make_shared<jit::CompiledModule>(graph);
+    EXPECT_THROW(module->capture_cuda_graph({x0}), std::runtime_error)
+        << "capturing a graph containing an If/Loop node must fail with a "
+           "clear error (JIT-R176), not a raw CUDA/HIP 'stream is "
+           "capturing' error or silent scratch-buffer corruption";
+    EXPECT_FALSE(module->has_cuda_graph())
+        << "a refused capture must not leave has_cuda_graph() reporting true";
   }  // for each gpu
 }
 

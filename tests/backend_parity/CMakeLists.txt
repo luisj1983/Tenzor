@@ -336,6 +336,14 @@ add_parity_test(test_rocm_flash_attn_kvcache_parity test_rocm_flash_attn_kvcache
 # direct OpId::FlashAttention/FusedAttention dispatch.
 add_parity_test(test_flash_attention_gqa_parity test_flash_attention_gqa_parity.cpp)
 
+# JIT-R171: complex sign() must propagate NaN (not silently return 0+0i) on
+# every backend, not just CPU.
+add_parity_test(test_complex_sign_nan_parity test_complex_sign_nan_parity.cpp)
+
+# JIT-R192: native (non-MLIR) comparison-predicate kernels must agree with
+# CPU on NaN-comparison semantics across every backend.
+add_parity_test(test_logical_predicates_nan_parity test_logical_predicates_nan_parity.cpp)
+
 # Wave E: CUDA fused kernels with native F16/BF16 (F32 accumulator inside kernel).
 add_parity_test(test_cuda_fused_dtype_parity test_cuda_fused_dtype_parity.cpp)
 

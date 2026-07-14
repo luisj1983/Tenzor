@@ -18,6 +18,7 @@
 #include "tenzor/jit/mlir/iree_paths.hpp"
 #include "tenzor/jit/mlir/iree_runtime.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../../backend_parity/parity_test_utils.hpp"
 
 #include <gtest/gtest.h>
 
@@ -83,10 +84,23 @@ inline auto backend_present(const std::string& name) -> bool {
     }
 }
 
+// JIT-R181: maps an IREE target name to the Tenzor backend name
+// TENZOR_SKIP_BACKENDS uses ("vulkan-spirv" -> "vulkan"; llvm-cpu has no
+// opt-out, it's always the CPU fallback reference).
+inline auto target_skipped_by_env(const std::string& target) -> bool {
+    if (target == "llvm-cpu") return false;
+    const std::string backend_name = (target == "vulkan-spirv") ? "vulkan" : target;
+    return ::tenzor::testing::is_backend_skipped_by_env(backend_name);
+}
+
 // Is there hardware for this IREE target on the host? llvm-cpu is always yes;
 // rocm is gated on IREE being able to initialize its HIP HAL device directly
 // (it drives the GPU itself, independent of the Tenzor ROCm backend load).
+// JIT-R181: honors TENZOR_SKIP_BACKENDS -- a target explicitly opted out is
+// reported as not-present, not merely absent hardware, so callers correctly
+// skip it instead of probing/attempting it.
 inline auto target_hw_present(const std::string& target) -> bool {
+    if (target_skipped_by_env(target)) return false;
     if (target == "llvm-cpu")     return true;
     if (target == "cuda")         return backend_present("cuda");
     if (target == "rocm")
@@ -129,10 +143,17 @@ inline auto require_multi_backend_for_iree_targets() -> bool {
 // support). Always contains at least "llvm-cpu".
 inline auto available_iree_targets() -> std::vector<std::string> {
     std::vector<std::string> out;
+    bool any_non_cpu_skipped_by_env = false;
     for (const auto& t : all_iree_targets()) {
+        if (t != "llvm-cpu" && target_skipped_by_env(t)) any_non_cpu_skipped_by_env = true;
         if (target_hw_present(t) && iree_target_supported(t)) out.push_back(t);
     }
-    if (out.size() <= 1 && require_multi_backend_for_iree_targets()) {
+    // JIT-R181: TENZOR_SKIP_BACKENDS always wins over TENZOR_REQUIRE_MULTI_BACKEND
+    // per the documented contract -- if the shrink to CPU-only happened because
+    // every non-CPU target was explicitly opted out (not because the hardware/
+    // driver is genuinely missing/broken), this must not escalate to a failure.
+    if (out.size() <= 1 && require_multi_backend_for_iree_targets() &&
+        !any_non_cpu_skipped_by_env) {
         ADD_FAILURE() << "TENZOR_REQUIRE_MULTI_BACKEND=1 but available_iree_targets() "
                          "found no usable GPU IREE target (only "
                       << (out.empty() ? "none" : out.front())

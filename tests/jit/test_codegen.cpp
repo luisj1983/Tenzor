@@ -8,6 +8,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/jit/codegen.hpp>
 #include <tenzor/jit/autotune.hpp>
+#include "../backend_parity/parity_test_utils.hpp"
 #include <cmath>
 #include <filesystem>
 #include <vector>
@@ -23,6 +24,11 @@ auto available_gpu_devices() -> std::vector<Device> {
     std::vector<Device> devs;
     const std::vector<float> probe = {0.0f};
     for (const auto& dev : {Device::cuda(0), Device::rocm(0)}) {
+        // JIT-R181: honor TENZOR_SKIP_BACKENDS.
+        if (::tenzor::testing::is_backend_skipped_by_env(
+                ::tenzor::testing::device_type_to_backend_name(dev.type))) {
+            continue;
+        }
         try {
             Tensor t = from_data(probe.data(), {1}).to(dev);
             (void)t.to(Device::cpu());
@@ -35,11 +41,18 @@ auto available_gpu_devices() -> std::vector<Device> {
 
 // Honor TENZOR_REQUIRE_MULTI_BACKEND: when set, a run with NO GPU backend is a
 // hard failure (a host expected to have a GPU silently skipping GPU codegen
-// coverage hides a broken environment). Otherwise skip as before.
+// coverage hides a broken environment). JIT-R181: TENZOR_SKIP_BACKENDS always
+// wins over TENZOR_REQUIRE_MULTI_BACKEND per the documented contract -- if
+// every GPU backend was explicitly opted out via TENZOR_SKIP_BACKENDS (not
+// merely absent/broken), this must skip cleanly even under
+// TENZOR_REQUIRE_MULTI_BACKEND=1.
 #define SKIP_OR_FAIL_NO_GPU()                                                  \
     do {                                                                       \
+        const bool _all_skipped_by_env =                                       \
+            ::tenzor::testing::is_backend_skipped_by_env("cuda") &&            \
+            ::tenzor::testing::is_backend_skipped_by_env("rocm");              \
         const char* _req = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");        \
-        if (_req && *_req && *_req != '0')                                     \
+        if (!_all_skipped_by_env && _req && *_req && *_req != '0')            \
             FAIL() << "TENZOR_REQUIRE_MULTI_BACKEND set but no GPU backend "   \
                       "present for GPU codegen test";                          \
         GTEST_SKIP() << "no GPU backend present";                             \

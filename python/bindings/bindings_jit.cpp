@@ -120,6 +120,24 @@ void py_tracer_install(tenzor::jit::Tracer& self) {
     py_tracer_refresh_hooks();
 }
 
+// JIT-R196: number of OTHER tracer interceptors currently sitting above
+// `self` on the owner stack -- i.e. inner Tracer instances whose
+// start_trace() ran after self's but that have not yet been end_trace()'d
+// or clear()'d. A non-zero count means the caller is about to uninstall
+// `self` out of LIFO order; py_tracer_uninstall() below still has to pop
+// those inner interceptors too (to keep DispatchInterceptorStack
+// consistent), which silently discards whatever ops they had recorded so
+// far. Exposed so end_trace() can surface that as a loud error instead of
+// silently returning an incomplete graph for `self` AND leaving any inner
+// tracer's later end_trace()/clear() call operating on an already-popped,
+// now-nonexistent interceptor.
+std::size_t py_tracer_pending_inner_count(tenzor::jit::Tracer* self) {
+    auto& owners = py_tracer_owner_stack();
+    auto it = std::find(owners.rbegin(), owners.rend(), self);
+    if (it == owners.rend()) return 0;
+    return static_cast<std::size_t>(std::distance(owners.rbegin(), it));
+}
+
 // Remove the tracing interceptor owned by `self`, if any. To keep the LIFO
 // DispatchInterceptorStack consistent, pop every interceptor sitting above
 // `self`'s entry as well (those belong to tracers that were never properly
@@ -322,7 +340,26 @@ void register_jit(py::module_& m) {
         .def("end_trace", [](tenzor::jit::Tracer& self,
                              const std::vector<tenzor::Variable>& inputs,
                              const std::vector<tenzor::Variable>& outputs) {
+                // JIT-R196: end_trace() must be called in the exact reverse
+                // order of start_trace() (LIFO) on the same thread -- ending
+                // an OUTER tracer while an INNER one (started later) is still
+                // active would otherwise silently pop the inner tracer's
+                // interceptor too, discarding whatever ops it had recorded
+                // with no error at all. Detect and fail loudly instead;
+                // still uninstall (pop) so the interceptor stack itself
+                // isn't left in a broken state for whatever runs next.
+                const std::size_t inner = py_tracer_pending_inner_count(&self);
                 py_tracer_uninstall(&self);
+                if (inner > 0) {
+                    throw std::runtime_error(
+                        "Tracer.end_trace(): " + std::to_string(inner) +
+                        " inner Tracer instance(s) started (via start_trace()) "
+                        "after this one are still active. Ending this tracer "
+                        "now would silently discard their recorded ops. "
+                        "Tracer.start_trace()/end_trace() (and clear()) calls "
+                        "on the same thread must be properly nested: end the "
+                        "innermost tracer first.");
+                }
                 return self.end_trace(inputs, outputs);
              },
              py::arg("inputs"), py::arg("outputs"),

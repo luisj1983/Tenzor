@@ -100,6 +100,51 @@ def test_relu_traces_as_single_relu_node():
     print("  ReLU trace OK")
 
 
+def test_end_trace_out_of_lifo_order_raises_instead_of_silently_dropping_ops():
+    """JIT-R196: ending an OUTER Tracer while an INNER one (started later on
+    the same thread) is still active must raise instead of silently popping
+    the inner tracer's interceptor and discarding its recorded ops with no
+    error at all.
+    """
+    print("Testing end_trace() LIFO-violation detection...")
+
+    x1 = tz.Variable(tz.randn([2, 8]), requires_grad=False)
+    x2 = tz.Variable(tz.randn([2, 8]), requires_grad=False)
+
+    t1 = tz.jit.Tracer()
+    t2 = tz.jit.Tracer()
+    t1.start_trace()
+    t2.start_trace()  # owner stack is now [t1, t2]
+    y2 = tz.nn.relu(x2)  # recorded onto t2 (the top of the stack)
+
+    raised = False
+    try:
+        # t1 is BELOW t2 on the owner stack -- ending it now would silently
+        # pop t2's interceptor too, discarding y2's op.
+        t1.end_trace([x1], [x1])
+    except RuntimeError as e:
+        raised = True
+        print(f"  correctly raised: {e}")
+    assert raised, (
+        "Tracer.end_trace() on an outer tracer with a still-active inner "
+        "tracer must raise a RuntimeError (JIT-R196), not silently succeed "
+        "while discarding the inner tracer's recorded ops"
+    )
+
+    # The interceptor stack must still have been cleaned up (both popped) so
+    # the process isn't left with a permanently broken/leaked interceptor --
+    # start a fresh, unrelated trace and confirm it works normally.
+    t3 = tz.jit.Tracer()
+    t3.start_trace()
+    y3 = tz.nn.relu(x1)
+    graph3 = t3.end_trace([x1], [y3])
+    assert tz.jit.OpType.ReLU in {n.op_type for n in graph3.nodes()}, (
+        "tracer stack was left in a broken state after the LIFO-violation "
+        "error -- a fresh trace afterward must still record ops normally"
+    )
+    print("  end_trace() LIFO-violation detection OK")
+
+
 def main():
     print("=" * 60)
     print("audit-4 W.31: JIT trace Variable-composition regression")
@@ -109,6 +154,7 @@ def main():
     try:
         test_gelu_traces_as_single_gelu_node()
         test_relu_traces_as_single_relu_node()
+        test_end_trace_out_of_lifo_order_raises_instead_of_silently_dropping_ops()
     except AssertionError as e:
         print(f"\nFAILED: {e}")
         return 1

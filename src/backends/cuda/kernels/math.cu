@@ -689,8 +689,11 @@ __global__ void sign_kernel_complex64(const cuFloatComplex* input, cuFloatComple
         float a = cuCrealf(input[idx]);
         float b = cuCimagf(input[idx]);
         float mag = hypotf(a, b);
-        output[idx] = (mag > 0.0f) ? make_cuFloatComplex(a / mag, b / mag)
-                                   : make_cuFloatComplex(0.0f, 0.0f);
+        // JIT-R171: compare against zero (not `mag > 0`) so a NaN component
+        // (mag itself NaN) falls through to a/mag, correctly propagating
+        // NaN+NaNi instead of silently returning 0+0i -- matches CPU.
+        output[idx] = (mag == 0.0f) ? make_cuFloatComplex(0.0f, 0.0f)
+                                    : make_cuFloatComplex(a / mag, b / mag);
     }
 }
 
@@ -699,8 +702,9 @@ __global__ void sign_kernel_complex128(const cuDoubleComplex* input, cuDoubleCom
         double a = cuCreal(input[idx]);
         double b = cuCimag(input[idx]);
         double mag = hypot(a, b);
-        output[idx] = (mag > 0.0) ? make_cuDoubleComplex(a / mag, b / mag)
-                                  : make_cuDoubleComplex(0.0, 0.0);
+        // JIT-R171: see sign_kernel_complex64 above.
+        output[idx] = (mag == 0.0) ? make_cuDoubleComplex(0.0, 0.0)
+                                   : make_cuDoubleComplex(a / mag, b / mag);
     }
 }
 

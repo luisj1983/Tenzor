@@ -9,6 +9,7 @@ function raises JitNotEnabledError with a clear message.
 """
 from __future__ import annotations
 from typing import Callable, Any
+import collections
 import functools
 import inspect
 import threading
@@ -141,7 +142,14 @@ def jit(fn: Callable[..., Any] | None = None, *,
         # and forwarding only the tensor operands — instead of forwarding a
         # non-tensor to the positional-Variable-only core (which errored or
         # mis-traced the scalar as a graph input).
-        _variants: dict = {}
+        # JIT-R198: bounded, LRU-evicting cache -- an unbounded dict here grows
+        # without limit for a function called with many distinct static-
+        # argument combinations (e.g. a `dim` or sequence-length parameter
+        # that varies with user input), each one compiling and retaining its
+        # own full CompiledFunctionHandle forever. Mirrors the C++-side
+        # per-shape cache's cap (CompileConfig.max_retraces, default 8).
+        _MAX_VARIANTS = 8
+        _variants: "collections.OrderedDict" = collections.OrderedDict()
 
         # Guards the (._tz_compiled, ._tz_last_examples) pair below so a
         # concurrent reader (show_graph/show_mlir/show_stablehlo/show_iree)
@@ -181,6 +189,10 @@ def jit(fn: Callable[..., Any] | None = None, *,
                     "pass tensors for all other operands.")
             key = (len(call_args),) + tuple(_key_part(i, v) for i, v in static_items)
             variant = _variants.get(key) if cache else None
+            if variant is not None:
+                # JIT-R198: mark as most-recently-used so eviction below
+                # drops the LEAST recently used variant, not an arbitrary one.
+                _variants.move_to_end(key)
             if variant is None:
                 # JIT-R075: the get-check-set above is an unprotected race —
                 # two threads hitting the same NEW static-arg key can both
@@ -223,6 +235,11 @@ def jit(fn: Callable[..., Any] | None = None, *,
                         # ambiguity signal for show_*() even when only one
                         # real static-argument combination has ever been used.
                         if cache:
+                            # JIT-R198: evict the least-recently-used variant
+                            # BEFORE inserting the new one so _variants never
+                            # grows past _MAX_VARIANTS entries.
+                            if len(_variants) >= _MAX_VARIANTS:
+                                _variants.popitem(last=False)
                             _variants[key] = variant
             return variant, tuple(tensor_args)
 

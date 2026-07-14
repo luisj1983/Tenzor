@@ -2826,7 +2826,37 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             // still comes from `logsumexp` of the masked pre-softmax
             // scores. Backward replays with the same (seed, offset).
             if (dropout_p > 0.0f && is_training) {
-                Tensor Kt = tenzor::transpose(K, -1, -2);
+                // JIT-R170: GQA/MQA head-broadcast for K/V, mirroring the
+                // broadcast that dispatchFlashAttention performs internally
+                // for the non-dropout fast path below -- without this,
+                // H_kv != H_q throws inside broadcast_shapes() when Q/K have
+                // mismatched batch-head dims.
+                Tensor Kd = K;
+                Tensor Vd = V;
+                int64_t h = Q.shape()[1];
+                int64_t h_kv = K.shape()[1];
+                if (h_kv != h) {
+                    if (h % h_kv != 0) {
+                        throw std::invalid_argument(
+                            "FlashAttention Vulkan (dropout path): H_q must be a "
+                            "multiple of H_kv; got " + std::to_string(h) + " and " +
+                            std::to_string(h_kv));
+                    }
+                    int64_t b = Q.shape()[0];
+                    int64_t reps = h / h_kv;
+                    int64_t sk = K.shape()[2];
+                    int64_t d = K.shape()[3];
+                    int64_t dv = V.shape()[3];
+                    Tensor Kc = K.is_contiguous() ? K : K.contiguous();
+                    Tensor Vc = V.is_contiguous() ? V : V.contiguous();
+                    Tensor Ku = tenzor::unsqueeze(Kc, 2);
+                    Tensor Vu = tenzor::unsqueeze(Vc, 2);
+                    Tensor Ke = tenzor::expand(Ku, {b, h_kv, reps, sk, d});
+                    Tensor Ve = tenzor::expand(Vu, {b, h_kv, reps, sk, dv});
+                    Kd = Ke.contiguous().reshape({b, h, sk, d});
+                    Vd = Ve.contiguous().reshape({b, h, sk, dv});
+                }
+                Tensor Kt = tenzor::transpose(Kd, -1, -2);
                 Tensor scores = tenzor::matmul(Q, Kt);
                 Tensor scaled = tenzor::mul(scores, static_cast<double>(scale));
                 if (causal) {
@@ -2877,7 +2907,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 }
                 Tensor attn_dropped = tenzor::mul(attn, mask_dev);
 
-                Tensor output_comp = tenzor::matmul(attn_dropped, V);
+                Tensor output_comp = tenzor::matmul(attn_dropped, Vd);
                 Tensor lse_comp = tenzor::logsumexp(scaled, -1, /*keepdim=*/false);
                 if (lse_comp.dtype() != DType::Float32) {
                     lse_comp = lse_comp.to(DType::Float32);

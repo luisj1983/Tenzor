@@ -346,6 +346,62 @@ TEST_P(BF16Parity, Conv2dForward) {
 }
 
 // ============================================================================
+// JIT-R200: MPS BFloat16 reduction widen-narrow formula verification
+// ============================================================================
+//
+// src/backends/mps/kernels/mps_elementwise.mm's mps_sum_kernel/mps_mean_kernel/
+// mps_max_kernel now widen BFloat16 input to Float32, dispatch the reduction,
+// and narrow the result back to BFloat16 — mirroring the dispatch_binary/
+// dispatch_unary/softmax widen-narrow pattern already used elsewhere in that
+// file. That file is Objective-C++ (#import <Metal/Metal.h>) and requires the
+// Metal SDK, so it cannot be compiled or run on this Linux machine — there is
+// no MPS device to add to get_bf16_backends() above. This test instead
+// verifies the underlying formula in isolation: it reproduces the exact
+// widen-dispatch-narrow sequence against the CPU backend (which has its own,
+// independent native-BFloat16 accumulation path in cpu::sum_kernel/mean_kernel/
+// max_kernel — see src/backends/cpu/kernels/reduction.cpp) and confirms both
+// routes agree within the same BF16 tolerance test_bf16_op uses above.
+TEST(Bf16ReductionWidenNarrowFormula, MatchesNativeBf16ReferenceForSumMeanMax_JIT200) {
+    Tensor x_f32 = randn({4, 6}, DType::Float32, Device::cpu());
+    Tensor x_bf16 = x_f32.to(DType::BFloat16);
+
+    // ---- mirrors mps_{sum,mean,max}_kernel's JIT-R200 widen-narrow wrapper ----
+    auto widen_reduce_narrow = [](const Tensor& bf16_in, OpId op, int64_t dim) -> Tensor {
+        Tensor widened = bf16_in.to(DType::Float32);
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::Keepdim, false);
+        std::vector<Tensor> ins = {widened};
+        Tensor result_f32 = dispatch(op, ins, attrs)[0];
+        return result_f32.to(DType::BFloat16);
+    };
+
+    for (int64_t dim : {0, 1}) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        attrs.set(AttrKey::Keepdim, false);
+        std::vector<Tensor> ins_native = {x_bf16};
+
+        // Native CPU BFloat16 reference — an independent implementation with
+        // its own accumulation logic, NOT the widen-narrow wrapper under test.
+        Tensor sum_native = dispatch(OpId::Sum, ins_native, attrs)[0].to(DType::Float32);
+        Tensor sum_wrapped = widen_reduce_narrow(x_bf16, OpId::Sum, dim).to(DType::Float32);
+        Tensor mean_native = dispatch(OpId::Mean, ins_native, attrs)[0].to(DType::Float32);
+        Tensor mean_wrapped = widen_reduce_narrow(x_bf16, OpId::Mean, dim).to(DType::Float32);
+        Tensor max_native = dispatch(OpId::Max, ins_native, attrs)[0].to(DType::Float32);
+        Tensor max_wrapped = widen_reduce_narrow(x_bf16, OpId::Max, dim).to(DType::Float32);
+
+        SCOPED_TRACE("dim=" + std::to_string(dim));
+        EXPECT_TRUE(tensors_close(sum_native, sum_wrapped, kBF16Rtol, kBF16Atol))
+            << "Sum: max diff = " << max_abs_diff(sum_native, sum_wrapped);
+        EXPECT_TRUE(tensors_close(mean_native, mean_wrapped, kBF16Rtol, kBF16Atol))
+            << "Mean: max diff = " << max_abs_diff(mean_native, mean_wrapped);
+        EXPECT_TRUE(tensors_close(max_native, max_wrapped, kBF16Rtol, kBF16Atol))
+            << "Max: max diff = " << max_abs_diff(max_native, max_wrapped);
+    }
+}
+
+// ============================================================================
 // Custom main — initialize tenzor before any test runs.
 // ============================================================================
 

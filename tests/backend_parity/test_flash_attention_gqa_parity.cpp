@@ -21,10 +21,12 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <limits>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/backend/fast_dispatch.hpp>
 #include <tenzor/backend/op_attributes.hpp>
 #include <tenzor/ops/op_id.hpp>
+#include "parity_test_utils.hpp"
 
 using namespace tenzor;
 
@@ -40,14 +42,11 @@ auto random_f32(std::vector<int64_t> shape, Device dev) -> Tensor {
     return (dev.type == Device::Type::CPU) ? cpu : cpu.to(dev);
 }
 
+// JIT-R178: honors TENZOR_SKIP_BACKENDS (unlike the old ad hoc
+// device_available()), so an explicit opt-out for a known-flaky driver on
+// this host is actually respected by this file.
 bool device_available(Device dev) {
-    try {
-        auto t = zeros({1}, DType::Float32, dev);
-        (void)t;
-        return true;
-    } catch (...) {
-        return false;
-    }
+    return tenzor::testing::is_backend_available(dev.type, dev.index);
 }
 
 std::string device_name(const Device& d) {
@@ -59,6 +58,65 @@ std::string device_name(const Device& d) {
         case Device::Type::OneAPI: return "oneapi";
         default: return "other";
     }
+}
+
+// JIT-R191: independent ground truth for causal GQA/MQA attention, computed
+// directly from raw pointers in double precision -- does NOT call
+// OpId::FlashAttention, tenzor::matmul, or tenzor::softmax, so it cannot
+// share a bug with any backend's attention kernel (a systemic group-mapping
+// error common to every backend would previously have passed undetected
+// when the reference was just "whichever backend ran first").
+// Head-grouping convention matches replay_gqa_repeat_kv /
+// dispatch_gqa (Hkv-major, G-minor): query head hq maps to kv head
+// hq / (Hq/Hkv). Causal alignment is bottom-right: kj > qi + (Sk - Sq) is
+// masked out, matching every backend's flash_attention forward.
+std::vector<float> naive_gqa_attention_reference(
+    const float* Q, const float* K, const float* V,
+    int64_t B, int64_t Hq, int64_t Hkv, int64_t Sq, int64_t Sk, int64_t D,
+    double scale, bool causal) {
+    const int64_t reps = Hq / Hkv;
+    const int64_t causal_offset = Sk - Sq;
+    std::vector<float> out(static_cast<size_t>(B * Hq * Sq * D), 0.0f);
+    std::vector<double> scores(static_cast<size_t>(Sk));
+    for (int64_t b = 0; b < B; ++b) {
+        for (int64_t hq = 0; hq < Hq; ++hq) {
+            const int64_t hkv = hq / reps;
+            for (int64_t qi = 0; qi < Sq; ++qi) {
+                const float* q_row = Q + ((b * Hq + hq) * Sq + qi) * D;
+                double max_score = -std::numeric_limits<double>::infinity();
+                for (int64_t kj = 0; kj < Sk; ++kj) {
+                    if (causal && kj > qi + causal_offset) {
+                        scores[static_cast<size_t>(kj)] = -std::numeric_limits<double>::infinity();
+                        continue;
+                    }
+                    const float* k_row = K + ((b * Hkv + hkv) * Sk + kj) * D;
+                    double dot = 0.0;
+                    for (int64_t d = 0; d < D; ++d) {
+                        dot += static_cast<double>(q_row[d]) * static_cast<double>(k_row[d]);
+                    }
+                    double s = dot * scale;
+                    scores[static_cast<size_t>(kj)] = s;
+                    if (s > max_score) max_score = s;
+                }
+                double sum = 0.0;
+                for (int64_t kj = 0; kj < Sk; ++kj) {
+                    double w = std::exp(scores[static_cast<size_t>(kj)] - max_score);
+                    scores[static_cast<size_t>(kj)] = w;
+                    sum += w;
+                }
+                float* out_row = out.data() + ((b * Hq + hq) * Sq + qi) * D;
+                for (int64_t kj = 0; kj < Sk; ++kj) {
+                    double w = scores[static_cast<size_t>(kj)] / sum;
+                    if (w == 0.0) continue;
+                    const float* v_row = V + ((b * Hkv + hkv) * Sk + kj) * D;
+                    for (int64_t d = 0; d < D; ++d) {
+                        out_row[d] += static_cast<float>(w * static_cast<double>(v_row[d]));
+                    }
+                }
+            }
+        }
+    }
+    return out;
 }
 
 class FlashAttentionGqaParity : public ::testing::Test {
@@ -104,31 +162,94 @@ TEST_F(FlashAttentionGqaParity, DirectGqaCallAgreesAcrossBackends) {
         }
     }
 
-    ASSERT_GE(results.size(), 2u) << "need at least 2 backends to compare";
-    const auto& [ref_name, ref_out] = results[0];
-    for (size_t i = 1; i < results.size(); ++i) {
-        const auto& [name, out] = results[i];
-        ASSERT_EQ(ref_out.shape().size(), out.shape().size())
-            << ref_name << " vs " << name;
-        for (size_t d = 0; d < ref_out.shape().size(); ++d) {
-            EXPECT_EQ(ref_out.shape()[d], out.shape()[d])
-                << ref_name << " vs " << name << " dim " << d;
+    if (results.empty()) {
+        if (tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "No backend produced a result for GQA FlashAttention parity check "
+                       "(TENZOR_REQUIRE_MULTI_BACKEND=1)";
         }
-        auto* rp = ref_out.data<float>();
+        GTEST_SKIP() << "No backend available to test GQA FlashAttention parity";
+    }
+
+    // JIT-R191: compare every available backend against an independent,
+    // op-dispatch-free ground truth (not against whichever backend happened
+    // to run first) -- a systemic group-mapping error shared by every
+    // backend would otherwise pass undetected.
+    auto ref_vec = naive_gqa_attention_reference(
+        Q_cpu.data<float>(), K_cpu.data<float>(), V_cpu.data<float>(),
+        kBatch, kHq, kHkv, kSeq, kSeq, kDim,
+        1.0 / std::sqrt(static_cast<double>(kDim)), /*causal=*/true);
+
+    for (const auto& [name, out] : results) {
+        ASSERT_EQ(out.numel(), static_cast<int64_t>(ref_vec.size())) << name;
         auto* op = out.data<float>();
-        for (int64_t k = 0; k < ref_out.numel(); ++k) {
-            EXPECT_NEAR(rp[k], op[k], 5e-3f)
-                << ref_name << " vs " << name << " elem " << k;
+        for (int64_t k = 0; k < out.numel(); ++k) {
+            EXPECT_NEAR(ref_vec[static_cast<size_t>(k)], op[k], 5e-3f)
+                << name << " vs naive reference, elem " << k;
         }
+    }
+}
+
+// JIT-R169/JIT-R170: OneAPI and Vulkan's FlashAttention dropout+training
+// composed-ops branch previously bypassed the GQA K/V head-broadcast that
+// the non-dropout fast path applies, so H_kv < H_q (real GQA, not MQA) threw
+// "Shapes are not broadcastable" instead of computing attention. This test
+// exercises exactly that combination (dropout_p > 0, is_training = true,
+// H_kv=2 < H_q=4) on every backend that implements a real dropout path and
+// verifies: (a) it no longer throws, (b) OneAPI and Vulkan -- which share
+// the same Philox counter convention documented in their kernel comments --
+// produce numerically consistent output for the same fixed RNG seed.
+TEST_F(FlashAttentionGqaParity, DropoutTrainingGqaDoesNotThrowAndAgreesAcrossBackends) {
+    constexpr int64_t kBatch = 1, kHq = 4, kHkv = 2, kSeq = 8, kDim = 16;
+    auto Q_cpu = random_f32({kBatch, kHq, kSeq, kDim}, Device::cpu());
+    auto K_cpu = random_f32({kBatch, kHkv, kSeq, kDim}, Device::cpu());
+    auto V_cpu = random_f32({kBatch, kHkv, kSeq, kDim}, Device::cpu());
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Scale, static_cast<double>(1.0 / std::sqrt(static_cast<double>(kDim))));
+    attrs.set(AttrKey::Causal, true);
+    attrs.set(AttrKey::DropoutP, 0.2);
+    attrs.set(AttrKey::IsTraining, true);
+    attrs.set(AttrKey::Seed, static_cast<int64_t>(0x5EED));
+
+    std::vector<Device> devices = {Device::oneapi(0), Device::vulkan(0)};
+    std::vector<std::pair<std::string, Tensor>> results;
+
+    for (const auto& dev : devices) {
+        if (!device_available(dev)) continue;
+        auto Q_d = Q_cpu.to(dev);
+        auto K_d = K_cpu.to(dev);
+        auto V_d = V_cpu.to(dev);
+        std::vector<Tensor> ins = {Q_d, K_d, V_d};
+        std::vector<Tensor> outs;
+        EXPECT_NO_THROW({ outs = dispatch(OpId::FlashAttention, ins, attrs); })
+            << "Dropout+training GQA FlashAttention on " << device_name(dev)
+            << " must not throw (JIT-R169/JIT-R170 regression)";
+        if (outs.empty()) continue;
+        ASSERT_EQ(outs[0].shape().size(), 4u) << device_name(dev);
+        EXPECT_EQ(outs[0].shape()[0], kBatch) << device_name(dev);
+        EXPECT_EQ(outs[0].shape()[1], kHq) << device_name(dev);
+        EXPECT_EQ(outs[0].shape()[2], kSeq) << device_name(dev);
+        EXPECT_EQ(outs[0].shape()[3], kDim) << device_name(dev);
+        results.emplace_back(device_name(dev), outs[0].to(Device::cpu()));
+    }
+
+    if (results.size() < 2) {
+        GTEST_SKIP() << "Need both OneAPI and Vulkan to cross-check the shared Philox "
+                        "dropout convention; only " << results.size() << " available";
+    }
+    const auto& [ref_name, ref_out] = results[0];
+    const auto& [name, out] = results[1];
+    auto* rp = ref_out.data<float>();
+    auto* op = out.data<float>();
+    for (int64_t k = 0; k < ref_out.numel(); ++k) {
+        EXPECT_NEAR(rp[k], op[k], 5e-3f) << ref_name << " vs " << name << " elem " << k;
     }
 }
 
 // JIT-R162: Vulkan's OpId::FusedAttention with a non-divisible group size
 // (H_q % H_kv != 0) must throw a clear error, not silently proceed.
 TEST_F(FlashAttentionGqaParity, VulkanFusedAttentionRejectsNonDivisibleGroupSize) {
-    if (!device_available(Device::vulkan(0))) {
-        GTEST_SKIP() << "Vulkan not available";
-    }
+    REQUIRE_BACKEND_OR_SKIP("vulkan");
     constexpr int64_t kBatch = 1, kHq = 5, kHkv = 2, kSeq = 4, kDim = 8;  // 5 % 2 != 0
     auto Q = random_f32({kBatch, kHq, kSeq, kDim}, Device::vulkan(0));
     auto K = random_f32({kBatch, kHkv, kSeq, kDim}, Device::vulkan(0));
@@ -142,4 +263,78 @@ TEST_F(FlashAttentionGqaParity, VulkanFusedAttentionRejectsNonDivisibleGroupSize
     EXPECT_THROW(
         { auto outs = dispatch(OpId::FusedAttention, inputs, attrs); },
         std::exception);
+}
+
+// JIT-R197: src/backends/mps/kernels/mps_attention.mm's dead-code
+// mps_flash_attention_forward now applies the same GQA/MQA K/V head-broadcast
+// (unsqueeze(2)->expand->contiguous->reshape) as the CUDA/ROCm/OneAPI/Vulkan
+// OpId::FlashAttention registrations above. That file is Objective-C++
+// (#import <Metal/Metal.h>) and cannot be compiled or run on this Linux
+// machine -- there is no Apple/Metal SDK available, so no MPS-specific gtest
+// binary can exist here. This test isolates and re-executes the EXACT same
+// Tensor-level expression sequence against plain CPU tensors (no MPS/Metal
+// involved at all) to verify the formula itself is correct: it must match
+// nn::GroupedQueryAttention::repeat_kv's canonical Variable-level broadcast
+// (src/nn/layers/gqa_attention.cpp) element-for-element. This is the
+// strongest verification physically possible for that fix without an
+// Apple/macOS toolchain.
+TEST_F(FlashAttentionGqaParity, MpsHostBroadcastFormulaMatchesCanonicalRepeatKv_JIT197) {
+    const int64_t b = 2, h_kv = 2, reps = 3, h = h_kv * reps, sk = 5, d = 4, dv = 6;
+
+    Tensor K = tenzor::randn({b, h_kv, sk, d}, DType::Float32, Device::cpu());
+    Tensor V = tenzor::randn({b, h_kv, sk, dv}, DType::Float32, Device::cpu());
+
+    // ---- verbatim copy of mps_attention.mm's mps_flash_attention_forward
+    // GQA broadcast block ----
+    Tensor Kc = K.is_contiguous() ? K : K.contiguous();
+    Tensor Vc = V.is_contiguous() ? V : V.contiguous();
+    Tensor Ku = Kc.unsqueeze(2);
+    Tensor Vu = Vc.unsqueeze(2);
+    Tensor Ke = Ku.expand({b, h_kv, reps, sk, d});
+    Tensor Ve = Vu.expand({b, h_kv, reps, sk, dv});
+    Tensor Kb = Ke.contiguous().reshape({b, h, sk, d});
+    Tensor Vb = Ve.contiguous().reshape({b, h, sk, dv});
+    // ---- end verbatim copy ----
+
+    ASSERT_EQ(Kb.shape()[0], b);
+    ASSERT_EQ(Kb.shape()[1], h);
+    ASSERT_EQ(Kb.shape()[2], sk);
+    ASSERT_EQ(Kb.shape()[3], d);
+    ASSERT_EQ(Vb.shape()[1], h);
+    ASSERT_EQ(Vb.shape()[3], dv);
+
+    const float* k_src = K.data<float>();
+    const float* v_src = V.data<float>();
+    const float* k_out = Kb.data<float>();
+    const float* v_out = Vb.data<float>();
+
+    // Reference: nn::GroupedQueryAttention::repeat_kv's row-major
+    // (h_kv, reps) -> h collapse means flat head index `hi` maps to
+    // kv-head `hi / reps` -- each kv head's block repeats `reps` times
+    // consecutively (kv0,kv0,kv0, kv1,kv1,kv1, ...).
+    for (int64_t bi = 0; bi < b; ++bi) {
+        for (int64_t hi = 0; hi < h; ++hi) {
+            int64_t kv_head = hi / reps;
+            for (int64_t si = 0; si < sk; ++si) {
+                for (int64_t di = 0; di < d; ++di) {
+                    int64_t src_idx = ((bi * h_kv + kv_head) * sk + si) * d + di;
+                    int64_t out_idx = ((bi * h + hi) * sk + si) * d + di;
+                    EXPECT_FLOAT_EQ(k_out[out_idx], k_src[src_idx])
+                        << "K mismatch b=" << bi << " h=" << hi << " s=" << si << " d=" << di;
+                }
+                for (int64_t di = 0; di < dv; ++di) {
+                    int64_t src_idx = ((bi * h_kv + kv_head) * sk + si) * dv + di;
+                    int64_t out_idx = ((bi * h + hi) * sk + si) * dv + di;
+                    EXPECT_FLOAT_EQ(v_out[out_idx], v_src[src_idx])
+                        << "V mismatch b=" << bi << " h=" << hi << " s=" << si << " d=" << di;
+                }
+            }
+        }
+    }
+
+    // Note: nn::GroupedQueryAttention::repeat_kv (src/nn/layers/gqa_attention.cpp)
+    // implements the identical formula but is a private member, so it isn't
+    // directly callable here; the manual element-by-element reference above
+    // (matching its documented row-major (h_kv, reps)->h collapse convention)
+    // serves as the independent ground truth instead.
 }

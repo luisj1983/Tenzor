@@ -87,6 +87,59 @@ TEST(CompileTest, CompileFreeFunctionWorks) {
     EXPECT_EQ(compiled.num_cached(), 0);
 }
 
+// JIT-R195: dump_graph()/dump_mlir()/dump_stablehlo() previously called
+// trace_single_input_graph() unconditionally, re-running fn_ (and any real
+// side effects it has) even when a prior real invocation already traced and
+// cached this exact shape. Verify calling dump_graph() AFTER a real
+// invocation reuses the cached graph instead of tracing again.
+TEST(CompileTest, DumpGraphReusesCacheInsteadOfRetracing_JIT195) {
+    auto counter = std::make_shared<int>(0);
+    auto fn = [counter](const Variable& x) -> Variable {
+        ++(*counter);
+        return x + x;
+    };
+    auto compiled = compile(fn);
+    Tensor x = full({4}, 2.0f, DType::Float32, Device::cpu());
+
+    (void)compiled(Variable(x, false));  // real invocation: fn_ runs once
+    EXPECT_EQ(*counter, 1);
+    ASSERT_GE(compiled.num_cached(), 1u)
+        << "test setup error: the real invocation must have cached a "
+           "compiled module for dump_graph to find";
+
+    const std::string graph_text = compiled.dump_graph(Variable(x, false));
+    EXPECT_EQ(*counter, 1)
+        << "dump_graph() re-ran fn_ after a prior real invocation already "
+           "cached this shape (JIT-R195) -- introspection must not silently "
+           "re-execute side effects";
+    EXPECT_FALSE(graph_text.empty());
+    EXPECT_NE(graph_text, "<empty graph>\n");
+
+    // Calling dump_graph() again must also not re-trace.
+    (void)compiled.dump_graph(Variable(x, false));
+    EXPECT_EQ(*counter, 1);
+}
+
+// JIT-R195 companion: dump_graph() called BEFORE any real invocation (no
+// cache entry exists yet) is the FIRST execution of fn_, not a re-run, so it
+// must still run fn_ exactly once (not zero, not twice) and produce a real,
+// usable graph.
+TEST(CompileTest, DumpGraphTracesExactlyOnceOnFirstCall_JIT195) {
+    auto counter = std::make_shared<int>(0);
+    auto fn = [counter](const Variable& x) -> Variable {
+        ++(*counter);
+        return x + x;
+    };
+    auto compiled = compile(fn);
+    Tensor x = full({4}, 2.0f, DType::Float32, Device::cpu());
+
+    const std::string graph_text = compiled.dump_graph(Variable(x, false));
+    EXPECT_EQ(*counter, 1)
+        << "dump_graph() as the FIRST call must trace fn_ exactly once";
+    EXPECT_FALSE(graph_text.empty());
+    EXPECT_NE(graph_text, "<empty graph>\n");
+}
+
 // JIT-F027: @tz.jit / tz.compile must install the in-place op hook so an
 // in-place mutation inside the compiled function is recorded into the graph, not
 // silently dropped. Pre-fix, the compiled replay returned the PRE-mutation value.

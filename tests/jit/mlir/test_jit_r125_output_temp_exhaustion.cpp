@@ -29,10 +29,26 @@
 #include <random>
 #include <string>
 
+#include <cstdlib>
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+namespace {
+// JIT-R190: reuse the established TENZOR_REQUIRE_MULTI_BACKEND env-var
+// contract's "false-confidence shape" -- a hardened/sandboxed CI runner
+// without unprivileged user namespaces would otherwise silently SKIP this
+// regression test forever with zero signal, the same problem the
+// TENZOR_REQUIRE_MULTI_BACKEND=1 convention exists to prevent for missing
+// GPU backends. This isn't a backend-availability check, but the env var's
+// intent ("this environment is supposed to support the precondition this
+// test needs; escalate instead of silently skipping") applies identically.
+bool require_multi_backend_env() {
+    const char* v = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
+    return v && *v && *v != '0';
+}
+}  // namespace
 
 namespace {
 
@@ -80,6 +96,14 @@ TEST(JitR125OutputTempExhaustion, MultiOutputSubprocessThrowsWhenLaterOutputTemp
     const uid_t outer_uid = ::getuid();
     const gid_t outer_gid = ::getgid();
     if (::unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) {
+        if (require_multi_backend_env()) {
+            FAIL() << "TENZOR_REQUIRE_MULTI_BACKEND=1 but user/mount "
+                      "namespaces are unavailable in this environment "
+                      "(errno=" << errno << ") -- cannot deterministically "
+                      "force the partial mkstemps failure this regression "
+                      "test exists to cover; a silent skip would hide that "
+                      "this environment is missing an expected capability.";
+        }
         GTEST_SKIP() << "user/mount namespaces unavailable in this "
                         "environment -- cannot deterministically force a "
                         "partial mkstemps failure (errno=" << errno << ")";
@@ -102,6 +126,14 @@ TEST(JitR125OutputTempExhaustion, MultiOutputSubprocessThrowsWhenLaterOutputTemp
     fs::create_directories(constrained_dir);
     if (::mount("tmpfs", constrained_dir.c_str(), "tmpfs", 0,
                 "size=1m,nr_inodes=2,mode=1777") != 0) {
+        if (require_multi_backend_env()) {
+            FAIL() << "TENZOR_REQUIRE_MULTI_BACKEND=1 but a constrained "
+                      "tmpfs mount is unavailable in this environment "
+                      "(errno=" << errno << ") -- cannot deterministically "
+                      "force the partial mkstemps failure this regression "
+                      "test exists to cover; a silent skip would hide that "
+                      "this environment is missing an expected capability.";
+        }
         GTEST_SKIP() << "tmpfs mount unavailable in this environment -- "
                         "cannot deterministically force a partial mkstemps "
                         "failure (errno=" << errno << ")";

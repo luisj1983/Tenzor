@@ -371,6 +371,70 @@ auto Graph::get_value(const std::string& id) const -> std::shared_ptr<Value> {
     return it != values_.end() ? it->second : nullptr;
 }
 
+auto is_stateful_op(OpType op) -> bool {
+    switch (op) {
+        case OpType::Dropout:     // each call draws a fresh Bernoulli mask
+        case OpType::BatchNorm2d: // training-mode batch stats update + running-stat read
+        // JIT-R202: RReLU(training=true) draws a fresh per-call random slope
+        // exactly like Dropout's Bernoulli mask (see graph.cpp's own
+        // JIT-R084 comment on its interpreter case) -- CSE'ing/hoisting two
+        // such nodes would silently collapse independent random draws into
+        // one shared draw, the same bug class this switch exists to
+        // prevent for Dropout/BatchNorm2d. Currently harmless in practice
+        // (RReLU(training=true) replay is unconditionally refused
+        // elsewhere), but must not silently become live the moment that
+        // changes without this entry already being here.
+        case OpType::RReLU:
+            return true;
+        default:
+            return false;
+    }
+}
+
+auto Graph::has_control_flow_node() const -> bool {
+    for (const auto& node : nodes_) {
+        if (node->op_type() == OpType::If || node->op_type() == OpType::Loop) {
+            return true;
+        }
+        if (const auto& then_g = node->then_branch()) {
+            if (then_g->has_control_flow_node()) return true;
+        }
+        if (const auto& else_g = node->else_branch()) {
+            if (else_g->has_control_flow_node()) return true;
+        }
+        if (const auto& body_g = node->body()) {
+            if (body_g->has_control_flow_node()) return true;
+        }
+    }
+    return false;
+}
+
+auto Graph::has_side_effecting_node() const -> bool {
+    for (const auto& node : nodes_) {
+        // JIT-R148/JIT-R175: record_inplace() tags every node it creates
+        // with this marker (see tracer.cpp) -- a genuine traced in-place
+        // mutation, regardless of OpType.
+        if (node->has_int_attr("jit_was_inplace") &&
+            node->get_int_attr("jit_was_inplace") != 0) {
+            return true;
+        }
+        if (is_stateful_op(node->op_type()) &&
+            node->has_bool_attr("training") && node->get_bool_attr("training")) {
+            return true;
+        }
+        if (const auto& then_g = node->then_branch()) {
+            if (then_g->has_side_effecting_node()) return true;
+        }
+        if (const auto& else_g = node->else_branch()) {
+            if (else_g->has_side_effecting_node()) return true;
+        }
+        if (const auto& body_g = node->body()) {
+            if (body_g->has_side_effecting_node()) return true;
+        }
+    }
+    return false;
+}
+
 auto Graph::add_node(std::shared_ptr<Node> node) -> void {
     nodes_.push_back(node);
 }
@@ -3282,7 +3346,7 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
     // them twice per external call. Stop as soon as a guard trips: everything
     // strictly after it in topological order is about to be thrown away anyway.
     for (const auto& node : nodes_) {
-        execute_node(node, value_map, grad_mode);
+        execute_node(node, value_map, grad_mode, out_all_values);
         if (needs_retrace_) break;
     }
 
@@ -3713,7 +3777,8 @@ auto replay_gqa_repeat_kv(const Variable& x, int64_t Hq, int64_t Hkv) -> Variabl
 
 auto Graph::execute_node(const std::shared_ptr<Node>& node,
                          std::unordered_map<std::string, Variable>& value_map,
-                         bool grad_mode) const -> void {
+                         bool grad_mode,
+                         std::vector<Variable>* out_all_values) const -> void {
     // Get input variables
     std::vector<Variable> input_vars;
     for (const auto& input : node->inputs()) {
@@ -5522,16 +5587,21 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 bool cond = tensor_condition_to_bool(input_vars[0].tensor());
                 auto& branch = cond ? node->then_branch() : node->else_branch();
                 if (branch) {
-                    // Pass remaining inputs to the chosen branch
+                    // Pass remaining inputs to the chosen branch. JIT-R176:
+                    // thread out_all_values through so the branch's own
+                    // scratch/intermediate tensors get pinned into the SAME
+                    // vector an outer CUDA/HIP graph capture relies on,
+                    // instead of being dropped when the branch's nested
+                    // forward() call reaches its own fold step.
                     std::vector<Variable> branch_inputs(input_vars.begin() + 1, input_vars.end());
-                    auto branch_outputs = branch->forward(branch_inputs, grad_mode);
+                    auto branch_outputs = branch->forward(branch_inputs, grad_mode, out_all_values);
                     for (auto& out : branch_outputs) {
                         outputs.push_back(std::move(out));
                     }
                 } else if (cond) {
                     // then_branch must exist (checked above), else_branch optional
                     auto branch_inputs = std::vector<Variable>(input_vars.begin() + 1, input_vars.end());
-                    auto branch_outputs = node->then_branch()->forward(branch_inputs, grad_mode);
+                    auto branch_outputs = node->then_branch()->forward(branch_inputs, grad_mode, out_all_values);
                     for (auto& out : branch_outputs) {
                         outputs.push_back(std::move(out));
                     }
@@ -6085,7 +6155,11 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                         body_inputs.push_back(c);
                     }
 
-                    auto body_outputs = node->body()->forward(body_inputs, grad_mode);
+                    // JIT-R176: thread out_all_values through so the body's
+                    // own scratch/intermediate tensors get pinned into the
+                    // SAME vector an outer CUDA/HIP graph capture relies on
+                    // (see the If case above for the full rationale).
+                    auto body_outputs = node->body()->forward(body_inputs, grad_mode, out_all_values);
 
                     // body_outputs[0] = new condition, rest = updated carried values
                     if (!body_outputs.empty()) {

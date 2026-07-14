@@ -96,6 +96,58 @@ TEST(JITControlFlow, TraceIfDetectsGenuineInplaceMutationOfSharedTensor) {
     tracer.clear();
 }
 
+// JIT-R174: Tracer::clear() previously left inplace_remapped_fingerprints_
+// unreset, so a fingerprint left over from an EARLIER, unrelated trace on
+// the same thread could mask a genuine in-place mutation in a LATER trace
+// that happens to touch a same-fingerprint (ptr#dtype#shape#strides#device)
+// tensor. This is thread_local production state
+// (Tracer::get_instance()) -- unlike every other test in this file, which
+// uses a fresh stack-local `Tracer` per test and so never exercises
+// cross-trace persistence at all. Reproduced deterministically (no reliance
+// on the allocator coincidentally reusing a freed address) by reusing the
+// exact same tensor object across two separate, sequential traces.
+TEST(JITControlFlow, ClearResetsInplaceFingerprintsAcrossSeparateTraces_JIT174) {
+    auto& tracer = Tracer::get_instance();
+    tracer.clear();  // clean slate regardless of test execution order
+
+    auto shared = Variable(ones({2, 3}, DType::Float32, Device::cpu()), false);
+    auto other = ones({2, 3}, DType::Float32, Device::cpu());
+
+    // Trace #1: a completely unrelated trace that happens to in-place-
+    // mutate `shared`, populating inplace_remapped_fingerprints_.
+    tracer.start_trace();
+    tracer.record_inplace(OpId::AddInplace, shared.tensor(),
+                          std::span<const Tensor>(&other, 1), OpAttributes{}, nullptr);
+    tracer.clear();
+
+    // Trace #2: a brand-new, separate trace. `shared`'s fingerprint must NOT
+    // still be considered "already remapped before this branch" just
+    // because trace #1 (now over) remapped it.
+    tracer.start_trace();
+    auto cond_t2 = ones({1}, DType::Float32, Device::cpu());
+    EXPECT_THROW(
+        {
+            tracer.trace_if(
+                cond_t2,
+                [&](const std::vector<Variable>&) -> std::vector<Variable> {
+                    tracer.record_inplace(OpId::AddInplace, shared.tensor(),
+                                          std::span<const Tensor>(&other, 1),
+                                          OpAttributes{}, nullptr);
+                    return {shared};
+                },
+                [](const std::vector<Variable>& inputs) -> std::vector<Variable> {
+                    return {inputs[0]};
+                },
+                {shared});
+        },
+        std::runtime_error)
+        << "a fresh trace must detect a genuine in-place mutation even "
+           "though an EARLIER, unrelated trace on this thread already "
+           "remapped a same-fingerprint tensor (JIT-R174)";
+
+    tracer.clear();
+}
+
 TEST(JITControlFlow, TraceLoopBasic) {
     Tracer tracer;
     tracer.start_trace();

@@ -293,6 +293,28 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
                 // Re-execute with the cached graph.
                 results = graph_->forward({input});
             } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+                // JIT-R193: the graph_->forward() call above may have
+                // executed a side-effecting prefix node for real before the
+                // ShapeGuard tripped and stopped it (Graph::forward() only
+                // breaks AT the trip, not before it -- see JIT-R015).
+                // Retracing here calls the ORIGINAL source module's
+                // forward() again in full; if that prefix already fired a
+                // real side effect (a training-mode Dropout/BatchNorm2d, or
+                // a genuine in-place mutation), this would double-execute
+                // it. Refuse rather than risk that silently, matching the
+                // established "fail loudly instead of producing wrong
+                // numerics" discipline (see also JIT-R175's identical
+                // reasoning for compile.cpp's cache-hit catch).
+                if (graph_->has_side_effecting_node()) {
+                    throw std::runtime_error(
+                        "CompiledModule: a ShapeGuard mismatch triggered a "
+                        "retrace, but the current graph contains a side-"
+                        "effecting node (in-place mutation, or training-mode "
+                        "Dropout/BatchNorm2d) that may already have executed "
+                        "for real before the guard tripped. Retracing would "
+                        "risk re-running that side effect a second time "
+                        "(JIT-R193). Cannot safely continue.");
+                }
                 Variable traced_output;
                 auto retraced = CompiledModule::trace_capturing(source_module_, input, &traced_output);
                 // Mirror THIS module's optimization state onto the retraced
@@ -503,6 +525,22 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
                 graph_ = it->second;
                 results = graph_->forward(inputs);
             } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+                // JIT-R193: see the single-input overload above for the
+                // full rationale -- refuse to retrace (which re-runs
+                // retrace_fn_/source_module_'s forward in full) if the
+                // partially-executed graph_ may already have fired a real
+                // side effect before the ShapeGuard that triggered this
+                // retrace tripped.
+                if (graph_->has_side_effecting_node()) {
+                    throw std::runtime_error(
+                        "CompiledModule: a ShapeGuard mismatch triggered a "
+                        "retrace, but the current graph contains a side-"
+                        "effecting node (in-place mutation, or training-mode "
+                        "Dropout/BatchNorm2d) that may already have executed "
+                        "for real before the guard tripped. Retracing would "
+                        "risk re-running that side effect a second time "
+                        "(JIT-R193). Cannot safely continue.");
+                }
                 std::vector<Variable> traced_outputs;
                 std::shared_ptr<CompiledModule> retraced;
                 if (retrace_fn_) {
@@ -853,6 +891,26 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
 
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
+    }
+
+    // JIT-R176: a graph containing an If/Loop node evaluates its condition
+    // via tensor_condition_to_bool(), which does a synchronous device-to-
+    // host copy -- illegal on a stream that is currently being captured
+    // ("operation not permitted when stream is capturing"). Refuse up front
+    // with a clear, actionable error instead of letting that raw low-level
+    // CUDA/HIP error surface partway through capture (verified against real
+    // CUDA hardware: capturing a graph with a device-resident If condition
+    // throws exactly that error today; there is no capture-safe way to
+    // evaluate a device-resident branch condition without a GPU-side
+    // conditional-graph-node mechanism this codebase does not implement).
+    if (graph_->has_control_flow_node()) {
+        throw std::runtime_error(
+            "capture_cuda_graph: this graph contains an If/Loop node. "
+            "Evaluating a device-resident branch condition requires a "
+            "synchronous device-to-host read, which CUDA/HIP forbid on a "
+            "stream that is being captured -- such a graph can never be "
+            "captured. Do not use reduce-overhead/CUDA-graph capture for a "
+            "traced function containing jit::cond()/jit::while_loop().");
     }
 
     // Invalidate any existing captured graph

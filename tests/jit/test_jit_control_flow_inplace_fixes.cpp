@@ -149,6 +149,45 @@ TEST(JitInplaceTrace, InplaceMutationAppliedOnReplayAllBackends) {
     }
 }
 
+// JIT-R175: Graph::has_side_effecting_node() must detect a genuine traced
+// in-place mutation (used by CompiledFunction::operator()'s cache-hit catch
+// block to decide whether a mid-replay failure can safely fall back to
+// eager re-execution, or must be escalated to avoid double-applying a side
+// effect that already fired for real before the failure).
+TEST(JitInplaceTrace, GraphHasSideEffectingNodeDetectsInplaceMutation_JIT175) {
+    Tensor one = ones({4}, DType::Float32, Device::cpu());
+
+    // A graph with NO in-place mutation must report false.
+    {
+        auto fn = [&one](const std::vector<Variable>& ins) -> std::vector<Variable> {
+            Tensor z = ins[0].tensor() + one;
+            return {Variable(z, false)};
+        };
+        Variable xv(full({4}, 2.0f, DType::Float32, Device::cpu()), false);
+        auto graph = jit::trace(fn, {xv});
+        ASSERT_NE(graph, nullptr);
+        EXPECT_FALSE(graph->has_side_effecting_node())
+            << "a graph with no in-place mutation must not be flagged as "
+               "side-effecting";
+    }
+
+    // A graph WITH a genuine in-place mutation must report true.
+    {
+        auto fn = [&one](const std::vector<Variable>& ins) -> std::vector<Variable> {
+            Tensor y = ins[0].tensor() + one;
+            tenzor::add_(y, one);  // in-place mutation
+            Tensor z = y + one;
+            return {Variable(z, false)};
+        };
+        Variable xv(full({4}, 2.0f, DType::Float32, Device::cpu()), false);
+        auto graph = jit::trace(fn, {xv});
+        ASSERT_NE(graph, nullptr);
+        EXPECT_TRUE(graph->has_side_effecting_node())
+            << "a graph containing a traced in-place mutation must be "
+               "flagged as side-effecting (JIT-R175)";
+    }
+}
+
 // ---------------------------------------------------------------------------
 // M8b: an in-place op that mutates a CAPTURED CONSTANT LEAF must bake that
 // leaf's PRE-mutation value. The tracer reuses the leaf's pre-op value id as

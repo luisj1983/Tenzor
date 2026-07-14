@@ -15,6 +15,8 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace tj = ::tenzor::jit::mlir_jit;
 namespace fs = std::filesystem;
@@ -273,6 +275,29 @@ TEST(IreeCompile, CudaEmbeddingApiRetriesRejectedArchWithSm80) {
            "under the sm_80 cache key (same path a direct sm_80 compile "
            "resolves to), not left mislabeled under sm_9999's key";
 
+    // JIT-R173 regression: the FIRST sm_9999 call above left the nominal
+    // (sm_9999) cache key permanently empty after relocating its output to
+    // the sm_80 key -- without the JIT-R173 fix, EVERY subsequent sm_9999
+    // call would probe only that now-permanently-empty nominal key, miss,
+    // and redo the whole failing-nominal-attempt + sm_80-retry +
+    // re-relocation every single time, never hitting cache. Verify a SECOND
+    // call with the exact original (nominal sm_9999) options returns the
+    // same relocated artifact WITHOUT spending any real compile time --
+    // total_compile_ms only increases on an actual compile_mlir cache miss
+    // that reaches the real compile path (see record_compile_ms call
+    // sites), so a near-zero delta here proves this hit the relocated
+    // sm_80 cache directly instead of recompiling.
+    tj::reset_cache_stats();
+    tj::CompiledArtifact artifact2;
+    ASSERT_NO_THROW({ artifact2 = tj::compile_mlir(kAddModule, opts); });
+    EXPECT_EQ(artifact2.vmfb_path, artifact.vmfb_path)
+        << "repeat sm_9999 compile must resolve to the same relocated "
+           "sm_80-keyed vmfb, not a fresh path";
+    EXPECT_LT(tj::cache_stats().total_compile_ms, 1.0)
+        << "repeat sm_9999 compile for the SAME graph must hit the "
+           "relocated sm_80 cache directly (JIT-R173), not redo the "
+           "failing nominal-arch attempt + sm_80 retry on every call";
+
     fs::remove_all(tmp);
 }
 
@@ -409,4 +434,52 @@ TEST(IreeCompile, SharedTempCacheDirRejectsSymlinkSquatting) {
         << "expected compile_mlir to refuse a symlinked shared-temp cache "
            "dir instead of silently following it into the attacker's "
            "target directory";
+}
+
+// JIT-R188: the IreeCompilerInflightGuard added around every real embedding-
+// API call site (embedding_api_supported_targets, iree_compiler_version,
+// compile_via_embedding_api) must not introduce a deadlock or incorrectly
+// serialize concurrent compiles under normal operation (no shutdown in
+// progress) -- only the actual process-exit race it targets should ever
+// throw/block. Several threads compile DISTINCT modules concurrently on
+// llvm-cpu (which uses the embedding API) and each also queries
+// iree_compiler_version()/embedding_api_supported_targets() concurrently;
+// all must complete successfully with no exception, hang, or crash.
+TEST(IreeCompile, ConcurrentEmbeddingApiCallsDoNotDeadlock) {
+    const fs::path tmp = make_tmp_dir();
+    constexpr int kThreads = 8;
+    std::vector<std::thread> threads;
+    std::vector<bool> ok(kThreads, false);
+    std::vector<std::string> errors(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&, i] {
+            try {
+                std::ostringstream mod;
+                mod << "module {\n"
+                    << "  func.func @main(%arg0: tensor<" << (i + 1)
+                    << "xf32>) -> tensor<" << (i + 1) << "xf32> {\n"
+                    << "    %0 = stablehlo.add %arg0, %arg0 : tensor<"
+                    << (i + 1) << "xf32>\n"
+                    << "    return %0 : tensor<" << (i + 1) << "xf32>\n"
+                    << "  }\n}\n";
+                tj::CompileOptions opts;
+                opts.target = "llvm-cpu";
+                opts.cache_dir = tmp;
+                auto artifact = tj::compile_mlir(mod.str(), opts);
+                (void)tj::iree_compiler_version();
+                ok[i] = fs::exists(artifact.vmfb_path) &&
+                        fs::file_size(artifact.vmfb_path) > 0;
+                if (!ok[i]) errors[i] = "empty or missing vmfb";
+            } catch (const std::exception& e) {
+                errors[i] = e.what();
+            }
+        });
+    }
+    for (auto& t : threads) t.join();
+    for (int i = 0; i < kThreads; ++i) {
+        EXPECT_TRUE(ok[i]) << "thread " << i << " failed: " << errors[i];
+    }
+
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
 }

@@ -1571,6 +1571,77 @@ TEST_F(JITCompilerTest, AlgebraicSimplification_MulOne) {
     EXPECT_TRUE(changed) << "AlgebraicSimplification did not simplify x * 1";
 }
 
+// JIT-R201: is_all_zeros()/is_all_ones() previously called item<float>()
+// directly on a non-Float32/Float64 constant tensor without first converting
+// to Float32 -- Tensor::item<T>() throws on ANY dtype mismatch rather than
+// converting, so this silently caught exception meant x+0=x/x*1=x never
+// fired for Float16/BFloat16/Int8/16/32/64/Bool constants (always fails
+// safe -- a missed optimization, not a correctness bug -- but needlessly
+// narrow). Verify the fix with a Float16 constant.
+TEST_F(JITCompilerTest, AlgebraicSimplification_AddZero_Float16Constant) {
+    Graph graph;
+
+    auto input = graph.create_value("input", {2, 3}, DType::Float16, device_);
+    auto zero = graph.create_value("zero", {2, 3}, DType::Float16, device_);
+    auto output = graph.create_value("output", {2, 3}, DType::Float16, device_);
+
+    auto zero_node = graph.create_node(OpType::Constant, "zero");
+    zero_node->add_output(zero);
+    zero->set_node(zero_node);
+    zero_node->set_tensor_attr("value", zeros({2, 3}, DType::Float16, device_));
+
+    auto add = graph.create_node(OpType::Add, "add");
+    add->add_input(input);
+    add->add_input(zero);
+    add->add_output(output);
+    output->set_node(add);
+
+    graph.add_node(zero_node);
+    graph.add_node(add);
+    graph.set_inputs({input});
+    graph.set_outputs({output});
+
+    AlgebraicSimplificationPass pass;
+    bool changed = pass.run(graph);
+
+    EXPECT_TRUE(changed)
+        << "AlgebraicSimplification did not simplify x + 0 for a Float16 "
+           "constant (JIT-R201) -- item<float>() likely threw without "
+           "converting first";
+}
+
+TEST_F(JITCompilerTest, AlgebraicSimplification_MulOne_Int32Constant) {
+    Graph graph;
+
+    auto input = graph.create_value("input", {2, 3}, DType::Int32, device_);
+    auto one = graph.create_value("one", {2, 3}, DType::Int32, device_);
+    auto output = graph.create_value("output", {2, 3}, DType::Int32, device_);
+
+    auto one_node = graph.create_node(OpType::Constant, "one");
+    one_node->add_output(one);
+    one->set_node(one_node);
+    one_node->set_tensor_attr("value", ones({2, 3}, DType::Int32, device_));
+
+    auto mul = graph.create_node(OpType::Mul, "mul");
+    mul->add_input(input);
+    mul->add_input(one);
+    mul->add_output(output);
+    output->set_node(mul);
+
+    graph.add_node(one_node);
+    graph.add_node(mul);
+    graph.set_inputs({input});
+    graph.set_outputs({output});
+
+    AlgebraicSimplificationPass pass;
+    bool changed = pass.run(graph);
+
+    EXPECT_TRUE(changed)
+        << "AlgebraicSimplification did not simplify x * 1 for an Int32 "
+           "constant (JIT-R201) -- item<float>() likely threw without "
+           "converting first";
+}
+
 TEST_F(JITCompilerTest, AlgebraicSimplification_PassName) {
     AlgebraicSimplificationPass pass;
     EXPECT_EQ(pass.name(), "AlgebraicSimplification");

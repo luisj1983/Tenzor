@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -46,6 +47,44 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// JIT-R188: coordinates ireeCompilerGlobalShutdown() (run via std::atexit,
+// below) against any embedding-API call still in flight on another thread --
+// same shape as the JIT-R109/R168 shared-runtime-state teardown races, just
+// on the compile side rather than the runtime/invoke side. A single global
+// mutex held for the ENTIRE duration of a compile would serialize every
+// concurrent compile process-wide (an unacceptable performance regression,
+// and the opposite of what JIT-R130 deliberately moved OUT of a lock on the
+// device-creation side) -- so this uses a reference-counted "in-flight"
+// drain instead: the atexit handler marks shutdown started and WAITS for
+// every in-flight call to finish before actually tearing down, while new
+// calls that arrive after shutdown has started are refused with a clear
+// error instead of racing the real ireeCompilerGlobalShutdown() call.
+std::mutex g_iree_compiler_mu;
+std::condition_variable g_iree_compiler_cv;
+int g_iree_compiler_inflight = 0;
+bool g_iree_compiler_shutdown_started = false;
+
+// RAII: acquire for the duration of any real embedding-API usage (session/
+// invocation creation, pipeline runs, target enumeration, version query).
+struct IreeCompilerInflightGuard {
+    IreeCompilerInflightGuard() {
+        std::lock_guard<std::mutex> lock(g_iree_compiler_mu);
+        if (g_iree_compiler_shutdown_started) {
+            throw JitCompileError(
+                "IREE Compiler embedding API: global shutdown already "
+                "started (process is exiting) -- refusing to start a new "
+                "embedding-API call", {});
+        }
+        ++g_iree_compiler_inflight;
+    }
+    ~IreeCompilerInflightGuard() {
+        std::lock_guard<std::mutex> lock(g_iree_compiler_mu);
+        if (--g_iree_compiler_inflight == 0) {
+            g_iree_compiler_cv.notify_all();
+        }
+    }
+};
+
 // One-time global init/shutdown of the IREE compiler API. The embedding API
 // requires ireeCompilerGlobalInitialize before any other call; shutdown is
 // registered to run at exit so multiple compile_mlir calls share state.
@@ -53,7 +92,12 @@ auto ensure_global_init() -> void {
     static std::once_flag flag;
     std::call_once(flag, []() {
         ireeCompilerGlobalInitialize();
-        std::atexit([]() { ireeCompilerGlobalShutdown(); });
+        std::atexit([]() {
+            std::unique_lock<std::mutex> lock(g_iree_compiler_mu);
+            g_iree_compiler_shutdown_started = true;
+            g_iree_compiler_cv.wait(lock, [] { return g_iree_compiler_inflight == 0; });
+            ireeCompilerGlobalShutdown();
+        });
     });
 }
 
@@ -294,6 +338,7 @@ struct CompilerError {
 auto embedding_api_supported_targets() -> const std::set<std::string>& {
     static const std::set<std::string> cached = []() {
         ensure_global_init();
+        IreeCompilerInflightGuard inflight_guard;  // JIT-R188
         std::set<std::string> out;
         struct Ctx {
             std::set<std::string>* out;
@@ -729,6 +774,7 @@ auto record_eager_fallback() -> void {
 
 auto iree_compiler_version() -> std::string {
     ensure_global_init();
+    IreeCompilerInflightGuard inflight_guard;  // JIT-R188
     const char* rev = ireeCompilerGetRevision();
     std::string rev_s = rev ? std::string(rev) : std::string{};
     // Some IREE builds leave the revision empty. Fold in the embedding API
@@ -845,8 +891,29 @@ auto relocate_vmfb_after_cuda_arch_fallback(
     // just re-write it at the corrected path rather than trying to move the
     // original (which compile_mlir's caller may still reference for error
     // messages on THIS call).
-    std::ofstream f(to_mlir, std::ios::binary | std::ios::trunc);
-    f.write(mlir_text.data(), static_cast<std::streamsize>(mlir_text.size()));
+    // JIT-R189: mirror the JIT-R150 disk-full guard applied to the original
+    // dump in compile_mlir() -- without this, a disk-full/quota/sandbox
+    // condition here silently leaves a missing or truncated debug dump at
+    // exactly the path a later JitCompileError would reference during
+    // failure diagnosis, with no exception raised to signal the write
+    // itself failed.
+    {
+        std::ofstream f(to_mlir, std::ios::binary | std::ios::trunc);
+        if (!f.good()) {
+            throw JitCompileError(
+                "failed to open relocated MLIR debug dump for writing: " +
+                    to_mlir.string(),
+                to_mlir);
+        }
+        f.write(mlir_text.data(), static_cast<std::streamsize>(mlir_text.size()));
+        f.flush();
+        if (!f.good()) {
+            throw JitCompileError(
+                "failed to write relocated MLIR debug dump (disk full, "
+                "quota exhausted, or restrictive sandbox?): " + to_mlir.string(),
+                to_mlir);
+        }
+    }
     return to_vmfb;
 }
 
@@ -877,6 +944,11 @@ auto compile_via_embedding_api(const std::string& mlir_text,
                                const fs::path& vmfb_path,
                                const fs::path& mlir_path,
                                std::string& pipeline_diag) -> bool {
+    // JIT-R188: guard against ireeCompilerGlobalShutdown() (registered via
+    // std::atexit in ensure_global_init(), already called by every caller of
+    // this function) tearing down process-wide compiler state while this
+    // call is still using it on another thread.
+    IreeCompilerInflightGuard inflight_guard;
     iree_compiler_session_t* session = ireeCompilerSessionCreate();
     if (session == nullptr) {
         throw JitCompileError(
@@ -1229,6 +1301,29 @@ auto compile_mlir(const std::string& mlir_text,
         cache_file_is_trustworthy(vmfb_path, is_shared_temp) &&
         vmfb_has_valid_magic(vmfb_path)) {
         return CompiledArtifact{vmfb_path, target};
+    }
+
+    // JIT-R173: if an earlier call for this SAME mlir_text already
+    // discovered that `cuda_arch` needs the sm_80 PTX-forward-compat
+    // fallback on this toolchain (JIT-R101/JIT-R127) and relocated its vmfb
+    // to the sm_80-keyed path (JIT-R149), check that path too before
+    // declaring a miss and redoing the (always-failing, for this
+    // arch+toolchain) nominal-arch compile attempt. Whether `cuda_arch` is
+    // supported by the linked NVPTX backend is a toolchain/arch fact, not an
+    // MLIR-content fact -- once JIT-R149 relocated this exact graph's vmfb
+    // out from under the nominal key, that key is permanently empty for the
+    // life of this toolchain install, so every later call for the SAME
+    // graph must fall through to the relocated path instead of re-probing
+    // (and re-missing) the now-permanently-empty nominal key.
+    if (target == "cuda" && cuda_arch != "sm_80") {
+        auto [fallback_vmfb, fallback_mlir] = compute_vmfb_cache_paths(
+            mlir_text, target, rocm_arch, "sm_80", vulkan_arch, cache_dir);
+        (void)fallback_mlir;
+        if (fs::exists(fallback_vmfb) && fs::file_size(fallback_vmfb) > 0 &&
+            cache_file_is_trustworthy(fallback_vmfb, is_shared_temp) &&
+            vmfb_has_valid_magic(fallback_vmfb)) {
+            return CompiledArtifact{fallback_vmfb, target};
+        }
     }
 
     // Cache miss — measure the actual compile time end-to-end so that

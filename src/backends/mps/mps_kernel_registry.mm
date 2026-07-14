@@ -1760,43 +1760,20 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
 
     // Attention
     //
-    // audit A.11 (MPS): Float64 attention is unsupported on the Metal backend.
-    // The Metal Shading Language specification (see Apple "Metal Shading
-    // Language Specification", section "Data Types" / "Scalar Data Types")
-    // defines no `double` type — only `half` (FP16) and `float` (FP32) are
-    // available to compute shaders, and there is no MSL FP64 extension on any
-    // shipping Apple silicon GPU. The project rule forbids both CPU fallbacks
-    // for GPU backends and Float32 upcasts, so the only honest response when
-    // a user invokes FlashAttention with Float64 tensors on an MPS device is
-    // to throw immediately at dispatch. All non-Float64 dtypes continue to
-    // route through the existing Accelerate-based path (shared memory, no
-    // GPU round-trip on Apple Silicon).
-    auto mps_attention_throw_on_f64 = [&](OpId op) {
-        table.register_kernel(op, [op](std::span<const Tensor> inputs,
-                                       const OpAttributes& attrs) {
-            if (!inputs.empty() && inputs[0].dtype() == DType::Float64) {
-                throw std::runtime_error(
-                    "MPS FlashAttention: Metal Shading Language does not "
-                    "support Float64 (no `double` type per Apple's MSL "
-                    "specification, \"Scalar Data Types\"). This is a "
-                    "platform limitation, not a Tenzor bug. Use a different "
-                    "backend (CPU, CUDA, ROCm, OneAPI, or Vulkan with "
-                    "shaderFloat64) for Float64 attention.");
-            }
-            auto dev = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-            auto cpu_result = dispatch(op, cpu_inputs, attrs);
-            std::vector<Tensor> gpu_result;
-            gpu_result.reserve(cpu_result.size());
-            for (auto& t : cpu_result) gpu_result.push_back(t.to(dev));
-            return gpu_result;
-        });
-    };
-    mps_attention_throw_on_f64(OpId::FlashAttention);
-    mps_attention_throw_on_f64(OpId::FlashAttentionBackward);
-    mps_attention_throw_on_f64(OpId::FusedAttention);
+    // FlashAttention/FlashAttentionBackward/FusedAttention route through the
+    // same CPU round-trip (Accelerate via shared memory on Apple Silicon,
+    // effectively free thanks to unified memory) as every sibling op in this
+    // file. Float64 works fine here -- the dispatched CPU kernel handles it
+    // directly and no Metal-side compute (with its lack of an MSL `double`
+    // type) is ever involved in this dispatch path.
+    // (JIT-R199: this previously had a bespoke wrapper that threw on Float64
+    // citing an MSL double-support rationale that does not apply to a
+    // CPU-round-trip dispatch -- removed for consistency with
+    // NestedAttention/FlexAttentionBackward/GatherRelativePositionBias below,
+    // which always ran Float64 through this same path.)
+    mps_accelerate_multi(OpId::FlashAttention);
+    mps_accelerate_multi(OpId::FlashAttentionBackward);
+    mps_accelerate_multi(OpId::FusedAttention);
     mps_accelerate_multi(OpId::GatherRelativePositionBias);
 
     // Embedding backward

@@ -820,8 +820,11 @@ __global__ void sign_kernel_complex64(const hipFloatComplex* input, hipFloatComp
         float a = hipCrealf(input[idx]);
         float b = hipCimagf(input[idx]);
         float mag = hypotf(a, b);
-        output[idx] = (mag > 0.0f) ? make_hipFloatComplex(a / mag, b / mag)
-                                   : make_hipFloatComplex(0.0f, 0.0f);
+        // JIT-R171: compare against zero (not `mag > 0`) so a NaN component
+        // (mag itself NaN) falls through to a/mag, correctly propagating
+        // NaN+NaNi instead of silently returning 0+0i -- matches CPU.
+        output[idx] = (mag == 0.0f) ? make_hipFloatComplex(0.0f, 0.0f)
+                                    : make_hipFloatComplex(a / mag, b / mag);
     }
 }
 
@@ -830,8 +833,9 @@ __global__ void sign_kernel_complex128(const hipDoubleComplex* input, hipDoubleC
         double a = hipCreal(input[idx]);
         double b = hipCimag(input[idx]);
         double mag = hypot(a, b);
-        output[idx] = (mag > 0.0) ? make_hipDoubleComplex(a / mag, b / mag)
-                                  : make_hipDoubleComplex(0.0, 0.0);
+        // JIT-R171: see sign_kernel_complex64 above.
+        output[idx] = (mag == 0.0) ? make_hipDoubleComplex(0.0, 0.0)
+                                   : make_hipDoubleComplex(a / mag, b / mag);
     }
 }
 

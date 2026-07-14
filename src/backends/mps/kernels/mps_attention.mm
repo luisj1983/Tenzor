@@ -130,16 +130,47 @@ Tensor mps_flash_attention_forward(const Tensor& Q, const Tensor& K, const Tenso
     auto q_shape = Q.shape();
     // Support both 3D (BH, N, d) and 4D (B, H, N, d) layouts
     int64_t batch_heads, seq_len_q, head_dim, seq_len_k;
+    Tensor Kb = K, Vb = V;
     if (q_shape.size() == 4) {
         batch_heads = q_shape[0] * q_shape[1];
         seq_len_q = q_shape[2];
         head_dim = q_shape[3];
-        seq_len_k = K.shape()[2];
+        // JIT-R197: GQA/MQA head-broadcast for K/V, mirroring the fix already
+        // applied to the CUDA/ROCm/OneAPI/Vulkan OpId::FlashAttention
+        // registrations. The Metal kernel below shares a single `bh` grid
+        // index across Q and K/V buffers, so without materializing K/V up to
+        // Q's head count first, H_kv != H_q would have the kernel read K/V
+        // buffers using a stride derived from H_q heads while the buffer
+        // itself only holds H_kv heads worth of data (out-of-bounds / wrong
+        // data for every kv-group after the first).
+        int64_t h = q_shape[1];
+        int64_t h_kv = K.shape()[1];
+        if (h_kv != h) {
+            if (h % h_kv != 0) {
+                throw std::invalid_argument(
+                    "MPS FlashAttention: H_q must be a multiple of H_kv; got " +
+                    std::to_string(h) + " and " + std::to_string(h_kv));
+            }
+            int64_t b = q_shape[0];
+            int64_t reps = h / h_kv;
+            int64_t sk = K.shape()[2];
+            int64_t d = K.shape()[3];
+            int64_t dv = V.shape()[3];
+            Tensor Kc = K.is_contiguous() ? K : K.contiguous();
+            Tensor Vc = V.is_contiguous() ? V : V.contiguous();
+            Tensor Ku = Kc.unsqueeze(2);
+            Tensor Vu = Vc.unsqueeze(2);
+            Tensor Ke = Ku.expand({b, h_kv, reps, sk, d});
+            Tensor Ve = Vu.expand({b, h_kv, reps, sk, dv});
+            Kb = Ke.contiguous().reshape({b, h, sk, d});
+            Vb = Ve.contiguous().reshape({b, h, sk, dv});
+        }
+        seq_len_k = Kb.shape()[2];
     } else {
         batch_heads = q_shape[0];
         seq_len_q = q_shape[1];
         head_dim = q_shape[2];
-        seq_len_k = K.shape()[1];
+        seq_len_k = Kb.shape()[1];
     }
 
     // Output same shape as Q
@@ -156,8 +187,8 @@ Tensor mps_flash_attention_forward(const Tensor& Q, const Tensor& K, const Tenso
 
     auto pipeline = get_attn_pipeline(attn_shader_for_dtype("flash_attention_forward", Q.dtype()));
     id<MTLBuffer> buf_q = get_attn_buffer(Q);
-    id<MTLBuffer> buf_k = get_attn_buffer(K);
-    id<MTLBuffer> buf_v = get_attn_buffer(V);
+    id<MTLBuffer> buf_k = get_attn_buffer(Kb);
+    id<MTLBuffer> buf_v = get_attn_buffer(Vb);
     id<MTLBuffer> buf_out = get_attn_buffer(output);
 
     id<MTLCommandBuffer> cmd = [g_attn_queue commandBuffer];
@@ -194,6 +225,15 @@ std::vector<Tensor> mps_flash_attention_backward(const Tensor& dO, const Tensor&
                                                    const Tensor& K, const Tensor& V,
                                                    const Tensor& O,
                                                    float scale, bool causal) {
+    // JIT-R197: no GQA head-broadcast here, matching the established
+    // CUDA/ROCm/OneAPI/Vulkan OpId::FlashAttentionBackward precedent -- those
+    // registrations assume K/V already carry Q's head count. Backward is
+    // only ever invoked with the Q-head-width K/V that forward itself was
+    // called with (repeat_kv already materializes GQA/MQA to full H before
+    // any flash/composed path per src/nn/layers/gqa_attention.cpp and the
+    // composed_attention_backward head-count assertion in
+    // src/autograd/function_attention.cpp); no other backend reduces dK/dV
+    // from a broadcast width back down to H_kv here either.
     ensure_attn_initialized();
 
     auto q_shape = Q.shape();

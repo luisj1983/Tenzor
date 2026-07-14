@@ -945,6 +945,14 @@ static Tensor dispatch_reduce_all(const std::string& shader_name,
 Tensor mps_sum_kernel_impl(const Tensor& input, int64_t dim, bool keepdim);
 
 Tensor mps_sum_kernel(const Tensor& input, int64_t dim, bool keepdim) {
+    // JIT-R200: BFloat16 has no dedicated Metal reduce shader variant; widen
+    // to Float32, compute, narrow back (mirrors dispatch_binary/dispatch_unary
+    // elsewhere in this file). BF16->F32 is exact so this changes nothing
+    // about the reduction's numeric domain.
+    if (input.dtype() == DType::BFloat16) {
+        return mps_sum_kernel(input.to(DType::Float32), dim, keepdim)
+            .to(DType::BFloat16);
+    }
     // H: non-contiguous → materialize on-device via .contiguous() (no CPU
     // round-trip). Permute non-last dim to last on-device then recurse.
     if (!input.is_contiguous()) {
@@ -992,6 +1000,14 @@ Tensor mps_sum_kernel_impl(const Tensor& input, int64_t dim, bool keepdim) {
 Tensor mps_mean_kernel_impl(const Tensor& input, int64_t dim, bool keepdim);
 
 Tensor mps_mean_kernel(const Tensor& input, int64_t dim, bool keepdim) {
+    // JIT-R200: BFloat16 has no dedicated Metal reduce shader variant; widen
+    // to Float32, compute, narrow back (mirrors dispatch_binary/dispatch_unary
+    // elsewhere in this file). BF16->F32 is exact so this changes nothing
+    // about the reduction's numeric domain.
+    if (input.dtype() == DType::BFloat16) {
+        return mps_mean_kernel(input.to(DType::Float32), dim, keepdim)
+            .to(DType::BFloat16);
+    }
     // H: non-contiguous → .contiguous() on-device. Non-last-dim → permute
     // on-device. Both replace the prior CPU round-trip.
     if (!input.is_contiguous()) {
@@ -1037,6 +1053,14 @@ Tensor mps_mean_kernel_impl(const Tensor& input, int64_t dim, bool keepdim) {
 
 Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
                       Tensor& out_indices) {
+    // JIT-R200: BFloat16 has no dedicated Metal reduce shader variant; widen
+    // to Float32, compute, narrow values back (mirrors mps_sum_kernel/
+    // mps_mean_kernel above). BF16->F32 is exact and order-preserving, so
+    // out_indices (computed on the widened tensor) is unaffected.
+    if (input.dtype() == DType::BFloat16) {
+        return mps_max_kernel(input.to(DType::Float32), dim, keepdim, out_indices)
+            .to(DType::BFloat16);
+    }
     // H: handle non-contiguous + non-last-dim on-device via permute+recurse.
     if (!input.is_contiguous()) {
         return mps_max_kernel(input.contiguous(), dim, keepdim, out_indices);

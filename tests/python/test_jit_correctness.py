@@ -277,5 +277,28 @@ def test_jit_static_arg_value_key_and_rejects_nonprimitive():
         h(x, C(1))
 
 
+def test_jit_static_arg_variant_cache_is_bounded():
+    """JIT-R198: @tz.jit's per-static-argument compiled-variant cache must
+    evict the least-recently-used variant once it exceeds a bounded size
+    (mirroring the C++-side per-shape cache's cap), not grow without limit
+    for a function called with many distinct static-argument combinations
+    (e.g. a sequence-length parameter that varies with user input)."""
+    x = tz.randn([4, 8])
+
+    @tz.jit
+    def g(x, n):
+        return tz.sum(x, n % 2)
+
+    num_calls = 20
+    for n in range(num_calls):
+        assert _allclose(g(x, n), tz.sum(x, n % 2))
+
+    assert len(g._tz_variants) <= 8, (
+        f"@tz.jit's compiled-variant cache grew to {len(g._tz_variants)} "
+        f"entries after {num_calls} distinct static-argument values -- it "
+        "must be bounded (JIT-R198), not grow without limit"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))

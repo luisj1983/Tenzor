@@ -372,10 +372,21 @@ inline std::vector<std::string> get_available_backend_names_all_devices() {
  * Usage:
  *   REQUIRE_BACKEND_OR_SKIP("cuda");
  */
+// JIT-R181: TENZOR_SKIP_BACKENDS always wins over TENZOR_REQUIRE_MULTI_BACKEND
+// per the documented contract -- is_backend_name_available() already returns
+// false for BOTH "genuinely absent/broken" and "explicitly opted out via
+// TENZOR_SKIP_BACKENDS", so escalating to FAIL() unconditionally on any
+// false result would incorrectly fail a run where the user deliberately
+// excluded this exact backend (e.g. to route around the documented AMD-
+// driver fragility on this host), even though that opt-out is exactly what
+// TENZOR_SKIP_BACKENDS exists for. Check is_backend_skipped_by_env()
+// separately so an explicit opt-out always skips cleanly, never escalates.
 #define REQUIRE_BACKEND_OR_SKIP(name)                                          \
     do {                                                                      \
         if (!::tenzor::testing::is_backend_name_available(name)) {            \
-            if (::tenzor::testing::golden::require_multi_backend()) {         \
+            const bool _skipped_by_env = ::tenzor::testing::is_backend_skipped_by_env( \
+                ::tenzor::testing::parse_backend_name(name));                 \
+            if (!_skipped_by_env && ::tenzor::testing::golden::require_multi_backend()) { \
                 FAIL() << (name) << " required by TENZOR_REQUIRE_MULTI_BACKEND" \
                           " but unavailable";                                 \
             }                                                                 \

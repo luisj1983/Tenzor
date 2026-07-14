@@ -19,6 +19,7 @@
 #include "tenzor/jit/mlir/lowering.hpp"
 #endif
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -137,17 +138,54 @@ auto classify_vulkan_target(const std::string& vendor_lower,
             name_lower.find(" mi3") != std::string::npos) {
             return {};
         }
-        // No RX-series or Instinct marketing number matched at all -- this
-        // is the case an integrated APU (e.g. "AMD Radeon 890M Graphics",
-        // which carries no RX number) falls into. Fall back to "rdna3",
-        // empirically verified working on this review's actual RDNA3.5
-        // (gfx1150) integrated GPU, so it isn't left with no signal at all.
-        // This default intentionally does NOT apply to the Polaris/GCN4 or
-        // CDNA/Instinct cases above, nor to any OTHER unrecognized-but-RX-
-        // numbered card (handled just below) -- only to genuinely RX/
-        // Instinct-number-less AMD hardware.
+        // JIT-R184: pre-RDNA GCN5 (Vega-based) integrated GPUs (e.g. "AMD
+        // Radeon Vega 8 Graphics", "AMD Radeon Vega 3 Graphics" -- common on
+        // Ryzen 2000-5000G desktop/laptop APUs, still in the field) carry no
+        // RX number either, but are an entirely different architecture
+        // family from RDNA (notably wavefront width: GCN is wave64, RDNA
+        // defaults to wave32). Never guess an RDNA target for these --
+        // must be checked before the mobile-APU "M-series" pattern below,
+        // since a Vega part's model number does not follow that pattern
+        // anyway, but checking explicitly here makes the exclusion robust
+        // to future Vega SKU naming.
+        if (name_lower.find("vega") != std::string::npos) {
+            return {};
+        }
+        // No RX-series or Instinct marketing number matched. Mobile
+        // integrated APUs still carry a reliable "Radeon <3-digit>M
+        // Graphics" marketing number whose FIRST digit encodes the RDNA
+        // generation: 6xxM = RDNA2 (Rembrandt, Ryzen 6000 mobile), 7xxM =
+        // RDNA3 (Phoenix, Ryzen 7040 mobile), 8xxM = RDNA3.5 (Strix Point/
+        // Halo, Ryzen AI 300 mobile) -- IREE has no distinct rdna3.5
+        // profile, and "rdna3" is empirically verified working on real
+        // Strix Point (890M / gfx1150) hardware, so 8xx maps to rdna3 too.
+        // Previously this whole "no RX number" branch defaulted straight to
+        // "rdna3" regardless of generation, silently misclassifying genuine
+        // RDNA2 mobile APUs (e.g. "AMD Radeon 680M Graphics", "AMD Radeon
+        // 660M") the same way.
+        auto matches_mobile_apu_m_series = [&](char gen_digit) -> bool {
+            for (std::size_t p = 0; p + 3 < name_lower.size(); ++p) {
+                if (name_lower[p] != gen_digit) continue;
+                if (!std::isdigit(static_cast<unsigned char>(name_lower[p + 1]))) continue;
+                if (!std::isdigit(static_cast<unsigned char>(name_lower[p + 2]))) continue;
+                if (name_lower[p + 3] != 'm') continue;
+                bool left_ok = (p == 0) ||
+                    !std::isalnum(static_cast<unsigned char>(name_lower[p - 1]));
+                bool right_ok = (p + 4 >= name_lower.size()) ||
+                    !std::isalnum(static_cast<unsigned char>(name_lower[p + 4]));
+                if (left_ok && right_ok) return true;
+            }
+            return false;
+        };
+        if (matches_mobile_apu_m_series('8')) return "rdna3";
+        if (matches_mobile_apu_m_series('7')) return "rdna3";
+        if (matches_mobile_apu_m_series('6')) return "rdna2";
         if (name_lower.find("rx ") == std::string::npos) {
-            return "rdna3";
+            // Genuinely no RX number AND no recognized mobile-APU M-series
+            // pattern either -- prefer the safe empty default over a
+            // confidently wrong guess (matching the NVIDIA/Intel pattern)
+            // rather than blindly assuming the newest RDNA generation.
+            return {};
         }
         // An "rx" token IS present (so this isn't the no-signal iGPU case
         // above) but didn't match any known 4-digit RDNA generation -- e.g.
@@ -188,6 +226,10 @@ auto classify_vulkan_target(const std::string& vendor_lower,
 struct MlirCacheEntry {
     std::shared_ptr<::tenzor::jit::mlir_jit::IreeInvoker> invoker;
     std::vector<::tenzor::jit::mlir_jit::ParamBufferLeafArg> leaf_args;
+    // JIT-R195: retained so dump_graph/dump_mlir/dump_stablehlo/dump_iree can
+    // introspect the ALREADY-traced graph for this shape instead of tracing
+    // (and re-running fn_'s side effects) a second time.
+    std::shared_ptr<::tenzor::jit::Graph> graph;
 };
 
 struct MlirInvokerCache {
@@ -561,6 +603,38 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
             return outs[0];
         } catch (const std::exception& e) {
             if (jit_strict_mode_enabled(config_.strict)) throw;
+            // JIT-R175: a cache-hit replay failure part-way through
+            // compiled_module->forward() (or the CUDA-graph capture/replay
+            // branch above) may already have executed real, side-effecting
+            // nodes -- a genuine traced in-place mutation, or a training-
+            // mode Dropout/BatchNorm2d -- before the node that threw. Unlike
+            // a cache MISS (where fn_ is guaranteed not to have run yet),
+            // falling back to fn_(inputs) here would re-execute those same
+            // side effects a second time (a double RNG draw, a double
+            // running-stat update, or reading an already-mutated input a
+            // second time) even though fn_ itself has never run this call.
+            // Graph::has_side_effecting_node() is a static, sound (if
+            // conservative) property of the compiled graph: if it contains
+            // no such node anywhere, NOTHING observable could have fired
+            // before the failure, so eager fallback is genuinely safe; if
+            // it does, we can't cheaply prove the failure happened before
+            // all of them, so fail loudly instead of risking a silent
+            // double-execution -- matching this codebase's established
+            // "fail loudly instead of producing wrong numerics" discipline
+            // (RoPE/KVCache/WindowAttention/QuantizedLinear/Dropout-replay).
+            if (compiled_module->graph() &&
+                compiled_module->graph()->has_side_effecting_node()) {
+                throw std::runtime_error(
+                    "JIT cache-hit replay failed after this graph may already "
+                    "have executed a side-effecting node (in-place mutation, "
+                    "or training-mode Dropout/BatchNorm2d): " +
+                    std::string(e.what()) +
+                    ". Refusing to fall back to eager re-execution, which "
+                    "would risk applying that side effect a second time "
+                    "(JIT-R175). Set backend/config to avoid the underlying "
+                    "failure, or keep this call outside jit.compile()/"
+                    "jit.trace() if it cannot be made replay-safe.");
+            }
             TENZOR_LOG_WARN(
                 "JIT cache-hit replay failed ({} backend, target={}): {}. "
                 "Falling back to eager execution.",
@@ -1079,20 +1153,65 @@ auto trace_single_input_graph(CompiledFunction::FnTypeN& fn,
 // Debug / introspection APIs (Group F.1 — show_graph)
 // ============================================================================
 
+// JIT-R195: see the doc comment on the declaration (compile.hpp) for the
+// full rationale -- reuse an already-cached graph for this exact shape
+// (from either cache_ or mlir_cache_, whichever a prior real invocation
+// populated) instead of unconditionally re-tracing (which would silently
+// re-run fn_'s side effects a second time).
+auto CompiledFunction::get_or_trace_graph_for_dump(
+    std::span<const Variable> inputs) -> std::shared_ptr<Graph> {
+    const auto key = shape_key(inputs, /*grad_variant=*/false);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_.find(key);
+        if (it != cache_.end() && it->second && it->second->graph()) {
+            // Both cache_ and mlir_cache_ store a graph that trace_and_
+            // compile()/mlir_invoke_impl() already ran through
+            // Compiler::optimize() (in-place) before caching it -- return it
+            // AS-IS. Re-running optimize() on it here would mutate the SAME
+            // shared_ptr<Graph> object the live CompiledModule/invoker still
+            // uses for real invocations (not a harmless no-op in general --
+            // passes are not all guaranteed idempotent against a second
+            // application), which would be a new, worse bug than the one
+            // this fix addresses.
+            return it->second->graph();
+        }
+#ifdef TENZOR_HAS_MLIR_JIT
+        if (mlir_cache_) {
+            auto mit = mlir_cache_->invokers.find(key);
+            if (mit != mlir_cache_->invokers.end() && mit->second.graph) {
+                return mit->second.graph;
+            }
+        }
+#endif
+    }
+    // No cached entry for this shape yet -- fn_ has never run for it, so
+    // tracing here is the FIRST real invocation, not a re-run. Apply the
+    // SAME optimize-if-enabled step trace_and_compile()/mlir_invoke_impl()
+    // apply before caching, so a freshly-traced dump graph is optimized
+    // exactly like a cached one would be (callers must not re-apply it).
+    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
+    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot);
+    if (graph && graph->num_nodes() > 0 && config_.enable_fusion) {
+        Compiler compiler(true);
+        compiler.optimize(*graph);
+    }
+    return graph;
+}
+
 auto CompiledFunction::dump_graph(const Variable& input) -> std::string {
     const Variable arr[1] = {input};
     return dump_graph(std::span<const Variable>(arr, 1));
 }
 
 auto CompiledFunction::dump_graph(std::span<const Variable> inputs) -> std::string {
-    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
-    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot);
+    // get_or_trace_graph_for_dump() already applies the enable_fusion
+    // optimize step exactly once (for a freshly-traced graph) or returns an
+    // already-optimized cached graph AS-IS -- do not re-optimize here (see
+    // its doc comment for why that would be unsafe on a cache hit).
+    auto graph = get_or_trace_graph_for_dump(inputs);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph>\n";
-    }
-    if (config_.enable_fusion) {
-        Compiler compiler(true);
-        compiler.optimize(*graph);
     }
     return graph->to_string();
 }
@@ -1640,7 +1759,7 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
         if (mlir_cache_->invokers.size() <
             static_cast<size_t>(config_.max_retraces)) {
             mlir_cache_->invokers.emplace(
-                key, mlir_detail::MlirCacheEntry{std::move(invoker), leaf_args});
+                key, mlir_detail::MlirCacheEntry{std::move(invoker), leaf_args, graph});
         } else {
             // Hit the per-function cache ceiling — count this insertion
             // attempt as an eviction (the new shape's invoker is dropped on
@@ -1662,14 +1781,11 @@ auto CompiledFunction::dump_mlir(const Variable& input) -> std::string {
 
 auto CompiledFunction::dump_mlir(std::span<const Variable> inputs) -> std::string {
     namespace mj = ::tenzor::jit::mlir_jit;
-    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
-    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot);
+    // See dump_graph()'s comment: get_or_trace_graph_for_dump() already
+    // applies enable_fusion optimization exactly once; do not repeat it here.
+    auto graph = get_or_trace_graph_for_dump(inputs);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph: nothing to lower>\n";
-    }
-    if (config_.enable_fusion) {
-        Compiler compiler(true);
-        compiler.optimize(*graph);
     }
     mj::GraphToMLIR lowerer;
     lowerer.set_plugin_enabled(true);
@@ -1683,14 +1799,11 @@ auto CompiledFunction::dump_stablehlo(const Variable& input) -> std::string {
 
 auto CompiledFunction::dump_stablehlo(std::span<const Variable> inputs) -> std::string {
     namespace mj = ::tenzor::jit::mlir_jit;
-    auto [params_snapshot, buffers_snapshot] = snapshot_params_buffers();
-    auto graph = trace_single_input_graph(fn_, inputs, params_snapshot, buffers_snapshot);
+    // See dump_graph()'s comment: get_or_trace_graph_for_dump() already
+    // applies enable_fusion optimization exactly once; do not repeat it here.
+    auto graph = get_or_trace_graph_for_dump(inputs);
     if (!graph || graph->num_nodes() == 0) {
         return "<empty graph: nothing to lower>\n";
-    }
-    if (config_.enable_fusion) {
-        Compiler compiler(true);
-        compiler.optimize(*graph);
     }
     mj::GraphToMLIR lowerer;
     // The defining difference vs. dump_mlir: expand all `tenzor.*` custom_call

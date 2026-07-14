@@ -26,6 +26,12 @@ layout(push_constant) uniform PushConstants {
 float hypot_safe(float x, float y) {
     x = abs(x);
     y = abs(y);
+    // JIT-R171: max()/min() silently discard a NaN operand on this
+    // hardware/driver (returning the other, finite operand instead of NaN),
+    // which would make `mag` finite even when a component is NaN --
+    // defeating the caller's `mag == 0.0` NaN-propagation check below.
+    // Plain addition has no such special case and reliably yields NaN.
+    if (isnan(x) || isnan(y)) return x + y;
     float mx = max(x, y);
     float mn = min(x, y);
     if (mx == 0.0) return 0.0;
@@ -39,11 +45,14 @@ void main() {
     float a = data_in[idx * 2u];
     float b = data_in[idx * 2u + 1u];
     float mag = hypot_safe(a, b);
-    if (mag > 0.0) {
-        data_out[idx * 2u]      = a / mag;
-        data_out[idx * 2u + 1u] = b / mag;
-    } else {
+    // JIT-R171: compare against zero (not `mag > 0`) so a NaN component
+    // (mag itself NaN) falls through to a/mag, correctly propagating
+    // NaN+NaNi instead of silently returning 0+0i -- matches CPU.
+    if (mag == 0.0) {
         data_out[idx * 2u]      = 0.0;
         data_out[idx * 2u + 1u] = 0.0;
+    } else {
+        data_out[idx * 2u]      = a / mag;
+        data_out[idx * 2u + 1u] = b / mag;
     }
 }

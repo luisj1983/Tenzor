@@ -30,6 +30,18 @@ class Value;
 enum class OpType;
 
 /**
+ * @brief Whether an OpType's result depends on hidden state (RNG draws,
+ * running statistics, etc.) and therefore must not be deduplicated,
+ * hoisted, or silently re-executed independently of its position in the
+ * graph -- CSE'ing/LICM'ing/replaying two of these independently would
+ * silently turn two independent random draws or stat updates into one
+ * shared/duplicated effect. Single shared definition (see JIT-R175) so
+ * compiler passes and runtime replay-safety checks can't drift apart on
+ * what counts as "stateful".
+ */
+auto is_stateful_op(OpType op) -> bool;
+
+/**
  * @brief Represents a value (tensor) in the IR graph.
  *
  * Values flow along edges between nodes. Each value has a unique ID,
@@ -578,6 +590,40 @@ public:
     auto nodes() const -> const std::vector<std::shared_ptr<Node>>& { return nodes_; }
 
     /**
+     * @brief JIT-R175: whether this graph (including nested If/Loop branch
+     * and body subgraphs) contains any node whose execution has an
+     * observable side effect beyond its declared outputs -- a genuine
+     * traced in-place mutation (record_inplace(), marked via the
+     * "jit_was_inplace" attribute), or a stateful op (is_stateful_op(),
+     * e.g. training-mode Dropout/BatchNorm2d) run in training mode. Used to
+     * decide whether a mid-replay failure can safely fall back to eager
+     * re-execution of the original function (no side effect has fired yet
+     * anywhere in the graph) or must instead be escalated, since falling
+     * back after a real side effect already occurred would double-apply it
+     * (double RNG draw, double running-stat update, a mutated input read
+     * twice with different values) rather than just wasting a retry.
+     *
+     * @return true if any node (recursively) is side-effecting
+     */
+    auto has_side_effecting_node() const -> bool;
+
+    /**
+     * @brief JIT-R176: whether this graph (including nested If/Loop branch
+     * and body subgraphs) contains any If or Loop node -- i.e. any node
+     * whose execution requires evaluating a device-resident condition
+     * tensor via tensor_condition_to_bool(), which does a synchronous
+     * device-to-host copy. That copy is illegal on a stream that is
+     * currently being captured for a CUDA/HIP graph ("operation not
+     * permitted when stream is capturing"), so a graph containing control
+     * flow can never be captured today -- capture_cuda_graph() uses this to
+     * fail with a clear, actionable error instead of letting a raw
+     * low-level CUDA/HIP error surface partway through capture.
+     *
+     * @return true if any node (recursively) is an If or Loop
+     */
+    auto has_control_flow_node() const -> bool;
+
+    /**
      * @brief Get input values.
      *
      * @return Vector of graph inputs
@@ -1012,10 +1058,24 @@ private:
      *
      * @param node Node to execute
      * @param value_map Runtime value map
+     * @param grad_mode Whether to execute the differentiable replay path
+     * @param out_all_values JIT-R176: forwarded to a nested If/Loop branch's
+     * own Graph::forward() call so ITS intermediates and
+     * capture_scratch_tensors_ get folded into the SAME vector the outer
+     * capture pins, instead of being silently dropped when the branch's own
+     * forward() call (previously always the 2-arg, out_all_values=nullptr
+     * overload) reaches its own end-of-call fold step. Without this, a
+     * LayerNorm/RMSNorm/MaxPool2d/EmbeddingBag(max)/CTCLossForward/
+     * FusedSoftmaxCrossEntropy node's undeclared auxiliary output inside an
+     * If/Loop branch/body was freed back to the allocator the instant the
+     * nested forward() call returned, while a CUDA/HIP graph capture of the
+     * OUTER graph still expected a future replay to write into that exact
+     * address.
      */
     auto execute_node(const std::shared_ptr<Node>& node,
                       std::unordered_map<std::string, Variable>& value_map,
-                      bool grad_mode = false) const -> void;
+                      bool grad_mode = false,
+                      std::vector<Variable>* out_all_values = nullptr) const -> void;
 
     /// Place a tensor-attr-backed node payload on the current replay device
     /// (set by forward()). No-op for a fresh trace whose attrs already live on

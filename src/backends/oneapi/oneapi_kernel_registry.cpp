@@ -3427,8 +3427,37 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             // Math: O = (dropout_p_keyed(softmax((Q @ K^T) * scale [+ mask], -1))) @ V
             if (dropout_p > 0.0f && is_training) {
                 const Tensor& Q = inputs[0];
-                const Tensor& K = inputs[1];
-                const Tensor& V = inputs[2];
+                Tensor K = inputs[1];
+                Tensor V = inputs[2];
+                // JIT-R169: GQA/MQA head-broadcast for K/V, mirroring the
+                // non-dropout path below (JIT-R160/JIT-R161) -- without this,
+                // H_kv != H_q throws inside broadcast_shapes() when Q/K have
+                // mismatched batch-head dims.
+                if (Q.shape().size() == 4 && K.shape().size() == 4) {
+                    int64_t h = Q.shape()[1];
+                    int64_t h_kv = K.shape()[1];
+                    if (h_kv != h) {
+                        if (h % h_kv != 0) {
+                            throw std::invalid_argument(
+                                "FlashAttention OneAPI (dropout path): H_q must be a "
+                                "multiple of H_kv; got " + std::to_string(h) + " and " +
+                                std::to_string(h_kv));
+                        }
+                        int64_t b = Q.shape()[0];
+                        int64_t reps = h / h_kv;
+                        int64_t sk = K.shape()[2];
+                        int64_t d = K.shape()[3];
+                        int64_t dv = V.shape()[3];
+                        Tensor Kc = K.is_contiguous() ? K : K.contiguous();
+                        Tensor Vc = V.is_contiguous() ? V : V.contiguous();
+                        Tensor Ku = tenzor::unsqueeze(Kc, 2);
+                        Tensor Vu = tenzor::unsqueeze(Vc, 2);
+                        Tensor Ke = tenzor::expand(Ku, {b, h_kv, reps, sk, d});
+                        Tensor Ve = tenzor::expand(Vu, {b, h_kv, reps, sk, dv});
+                        K = Ke.contiguous().reshape({b, h, sk, d});
+                        V = Ve.contiguous().reshape({b, h, sk, dv});
+                    }
+                }
                 Tensor Kt = tenzor::transpose(K, -1, -2);
                 Tensor scores = tenzor::matmul(Q, Kt);
                 Tensor scaled = tenzor::mul(scores, static_cast<double>(scale));

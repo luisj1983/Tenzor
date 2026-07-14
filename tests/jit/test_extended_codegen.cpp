@@ -11,6 +11,7 @@
 #include <tenzor/jit/compiler.hpp>
 #include <tenzor/jit/graph.hpp>
 #include <tenzor/jit/tracer.hpp>
+#include "../backend_parity/parity_test_utils.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -33,6 +34,11 @@ auto available_gpu_devices() -> std::vector<Device> {
     std::vector<Device> devs;
     const std::vector<float> probe = {0.0f};
     for (const auto& dev : {Device::cuda(0), Device::rocm(0)}) {
+        // JIT-R181: honor TENZOR_SKIP_BACKENDS.
+        if (::tenzor::testing::is_backend_skipped_by_env(
+                ::tenzor::testing::device_type_to_backend_name(dev.type))) {
+            continue;
+        }
         try {
             Tensor t = from_data(probe.data(), {1}).to(dev);
             (void)t.to(Device::cpu());

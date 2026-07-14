@@ -35,6 +35,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
 
+#include "../../backend_parity/parity_test_utils.hpp"
+
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -87,6 +89,16 @@ TEST(JitR168CacheMissTeardownRace, CacheMissRacingCleanupDoesNotLeakOrCrash) {
     try {
         artifact = tj::compile_mlir(mlir, opts);
     } catch (const std::exception& e) {
+        // JIT-R177: escalate to FAIL() under TENZOR_REQUIRE_MULTI_BACKEND=1
+        // instead of a bare skip with no signal -- a CI host that's supposed
+        // to have Vulkan but whose driver silently failed would otherwise
+        // report this dedicated cache-miss/teardown-race regression test as
+        // a clean SKIPPED, with zero indication the race is actually
+        // uncovered on that run.
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "Vulkan IREE target required by "
+                      "TENZOR_REQUIRE_MULTI_BACKEND but not available: " << e.what();
+        }
         GTEST_SKIP() << "no Vulkan IREE target available: " << e.what();
     }
 
@@ -97,9 +109,17 @@ TEST(JitR168CacheMissTeardownRace, CacheMissRacingCleanupDoesNotLeakOrCrash) {
     try {
         probe = tj::IreeInvoker::load(artifact, tj::IreeInvoker::Mode::InProcess, 0);
     } catch (const std::exception& e) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "in-process Vulkan device required by "
+                      "TENZOR_REQUIRE_MULTI_BACKEND but not available: " << e.what();
+        }
         GTEST_SKIP() << "no in-process Vulkan device available: " << e.what();
     }
     if (!probe || probe->raw_device_handle_for_testing() == nullptr) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "in-process Vulkan device required by "
+                      "TENZOR_REQUIRE_MULTI_BACKEND but not available";
+        }
         GTEST_SKIP() << "no in-process Vulkan device available";
     }
     probe.reset();

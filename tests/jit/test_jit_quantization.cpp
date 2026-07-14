@@ -282,6 +282,85 @@ TEST(JITQuantization, SparseMatMulCrossBackend) {
     }
 }
 
+// JIT-R172: nn::quantization::QuantizedLinear with per-channel weight
+// quantization (the library's DEFAULT QConfig preset — see
+// DefaultQConfigs::default_qconfig()) previously fell through
+// forward_impl's trace-node-recording guard with no jit_record call and no
+// error, so a trace silently froze the layer's output as a trace-time
+// constant: every later replay call with different input data returned the
+// first call's stale value. This never tripped cache_stats().eager_fallbacks
+// since it isn't a fallback -- it's a silently-wrong compiled node. Verify
+// it now fails loudly at trace time instead, matching QuantizedConv2d's
+// established "refuse to trace" discipline for configurations that can't be
+// correctly traced.
+TEST(JITQuantization, PerChannelQuantizedLinearRefusesTrace_JIT172) {
+    const int64_t kIn = 8, kOut = 4;
+
+    Tensor w_scale({kOut}, DType::Float32, Device::cpu());
+    Tensor w_zp({kOut}, DType::Int32, Device::cpu());
+    {
+        float* sd = w_scale.data<float>();
+        int32_t* zd = w_zp.data<int32_t>();
+        for (int64_t i = 0; i < kOut; ++i) {
+            sd[i] = 0.05f + 0.01f * static_cast<float>(i);  // genuinely distinct per-channel scales
+            zd[i] = 0;
+        }
+    }
+    nn::quantization::QuantizationParams weight_qparams(
+        w_scale, w_zp, nn::quantization::QuantDType::INT8,
+        nn::quantization::QuantizationScheme::PerChannelSymmetric);
+    nn::quantization::QuantizedLinear layer(kIn, kOut, weight_qparams);
+
+    Tensor wq({kOut, kIn}, DType::Int8, Device::cpu());
+    {
+        int8_t* wd = wq.data<int8_t>();
+        for (int64_t i = 0; i < wq.numel(); ++i) {
+            wd[i] = static_cast<int8_t>((i % 7) - 3);
+        }
+    }
+    layer.set_weight(nn::quantization::QuantizedTensor(wq, weight_qparams));
+
+    // Static (calibrated) per-tensor INT8 activation quantization -- this
+    // bug is specifically about the WEIGHT scheme, so keep the activation
+    // side in the normally-supported per-tensor configuration.
+    Tensor act_scale = tenzor::full({1}, 0.1, DType::Float32, Device::cpu());
+    Tensor act_zp = tenzor::full({1}, 0.0, DType::Int32, Device::cpu());
+    layer.set_activation_qparams(nn::quantization::QuantizationParams(
+        act_scale, act_zp, nn::quantization::QuantDType::INT8,
+        nn::quantization::QuantizationScheme::PerTensorSymmetric));
+
+    auto input = randn({2, kIn}, DType::Float32, Device::cpu());
+
+    auto& tracer = ::tenzor::jit::Tracer::get_instance();
+    tracer.start_trace();
+    bool threw = false;
+    std::string what;
+    try {
+        Variable x(input, /*requires_grad=*/false);
+        layer.forward(x);
+    } catch (const std::exception& e) {
+        threw = true;
+        what = e.what();
+    }
+    tracer.clear();  // reset tracer state for subsequent tests regardless of outcome
+
+    EXPECT_TRUE(threw) << "Per-channel-weight QuantizedLinear must refuse to "
+                           "JIT-trace (JIT-R172), not silently freeze its output "
+                           "as a stale trace-time constant";
+    if (threw) {
+        EXPECT_NE(what.find("JIT-R172"), std::string::npos) << what;
+    }
+
+    // Sanity: the identical layer/config still works fine OUTSIDE a trace --
+    // this bug is specifically about tracing, not about per-channel
+    // inference itself (correct and covered by
+    // PerChannelQuantizedLinearMatchesCpu_JIT041 below).
+    EXPECT_NO_THROW({
+        Variable x(input, /*requires_grad=*/false);
+        layer.forward(x);
+    });
+}
+
 int main(int argc, char** argv) {
     tenzor::initialize();
     ::testing::InitGoogleTest(&argc, argv);

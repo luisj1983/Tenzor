@@ -362,6 +362,17 @@ private:
     static auto shape_key(std::span<const Variable> inputs,
                           bool grad_variant = false) -> std::string;
 
+    /// JIT-R195: return an already-cached Graph for this exact input shape
+    /// (checking BOTH cache_ and mlir_cache_, whichever this CompiledFunction
+    /// has actually populated via a prior real invocation) without running
+    /// fn_ again; only traces (running fn_ for real, exactly once) if no
+    /// cached entry exists yet for this shape. Used by dump_graph/dump_mlir/
+    /// dump_stablehlo/dump_iree so calling one of them after the function has
+    /// already been invoked normally does not silently re-run fn_'s side
+    /// effects a second time.
+    auto get_or_trace_graph_for_dump(std::span<const Variable> inputs)
+        -> std::shared_ptr<Graph>;
+
     /// True if any declared parameter requires grad (drives the grad path even
     /// when the explicit inputs do not). Caller holds mutex_.
     auto any_parameter_requires_grad() const -> bool;

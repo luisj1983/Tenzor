@@ -850,6 +850,11 @@ auto Tracer::record_inplace(OpId op, Tensor& target,
     std::string new_id = register_new_tensor(target);
 
     TracedOp traced(*op_type, std::move(input_ids), {new_id});
+    // JIT-R175: mark this node as a genuine in-place mutation so
+    // Graph::has_side_effecting_node() can detect it purely from the
+    // compiled graph's node attributes (OpType alone can't distinguish an
+    // in-place-derived node from an ordinary one of the same OpType).
+    traced.int_attrs["jit_was_inplace"] = 1;
     // Carry the scalar attrs the functional replay may need.
     // Store at full double precision (attrs are double now; JIT-F057) so a
     // Float64 graph's clamp bounds / slope are not truncated through float.
@@ -1015,6 +1020,17 @@ auto Tracer::clear() -> void {
     buffer_storage_index_.clear();
     next_tensor_id_ = 0;
     graph_break_count_ = 0;
+    // JIT-R174: without this, a fingerprint (ptr#dtype#shape#strides#device)
+    // left over from an EARLIER, unrelated trace on this thread could still
+    // be "present" when trace_if's assert_no_inplace_on_shared snapshots
+    // this set for a brand-new trace, silently masking a genuine in-place
+    // mutation of a same-fingerprint tensor whose storage address the
+    // allocator happened to reuse (an ordinary, already-acknowledged
+    // allocator behavior elsewhere in this file, e.g. trace_loop's
+    // max_iter_tensor using register_new_tensor for exactly this reason).
+    // This set is per-trace bookkeeping, not cross-trace state, so it must
+    // be reset alongside everything else clear() resets.
+    inplace_remapped_fingerprints_.clear();
     // clear() is the tracer's full reset — it stops tracing too, so
     // TracingGuard's destructor leaves the global tracer in a clean
     // state for the next guard. The Tracer API contract is:

@@ -39,6 +39,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -459,10 +460,34 @@ TEST(JitVulkanArch, ClassifyVulkanTargetCoversAllKnownGenerations) {
     EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 6800 xt"), "rdna2");
     EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon rx 5700 xt"), "rdna1");
     EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon 890m graphics"), "rdna3")
-        << "an APU with no RX-series marketing number must fall back to the "
-           "verified-working default, not an empty/unresolved target";
+        << "Strix Point/Halo (RDNA3.5) 8xxM mobile APU -- no distinct IREE "
+           "rdna3.5 profile exists, rdna3 is the verified-working stand-in";
     EXPECT_EQ(tjd::classify_vulkan_target("radeon", "amd radeon 890m graphics"), "rdna3")
         << "vendor string may report 'radeon' rather than 'amd'";
+
+    // JIT-R184 regression: a device with no RX-series number used to fall
+    // through to a single blanket "rdna3" regardless of actual generation,
+    // silently misclassifying genuine RDNA2 mobile APUs (Rembrandt, Ryzen
+    // 6000-series, marketed as "Radeon 6xxM Graphics") the same way as the
+    // RDNA3.5 case above. The mobile-APU "M-series" marketing number's
+    // FIRST digit must now select the correct generation instead.
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon 680m graphics"), "rdna2")
+        << "Rembrandt (RDNA2) 6xxM mobile APU must not be misclassified as rdna3";
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon 660m graphics"), "rdna2");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon 780m graphics"), "rdna3")
+        << "Phoenix (RDNA3) 7xxM mobile APU";
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon 760m graphics"), "rdna3");
+
+    // JIT-R184 regression: pre-RDNA GCN5 (Vega-based) integrated GPUs (Ryzen
+    // 2000-5000G desktop/laptop APUs, still in the field) also carry no
+    // RX-series number, but are an entirely different architecture family
+    // from RDNA (notably wavefront width: GCN is wave64, RDNA defaults to
+    // wave32) -- must fall through to the safe empty default like NVIDIA/
+    // Intel do for anything unrecognized, NOT the RDNA iGPU catch-all.
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon vega 8 graphics"), "")
+        << "pre-RDNA GCN5 Vega iGPU must not receive an RDNA target guess";
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon vega 3 graphics"), "");
+    EXPECT_EQ(tjd::classify_vulkan_target("amd", "amd radeon vega 11 graphics"), "");
 
     // JIT-R112 regression: a bare "rx 5" substring used to match BOTH the
     // intended RDNA1 "RX 5000-series" (4-digit) AND the unrelated pre-RDNA
@@ -606,38 +631,65 @@ TEST(JitRocmArch, DeviceSelectionEnvKeyIsDriverSpecific) {
     auto icd_saved = save_and_clear("VK_ICD_FILENAMES");
     auto select_saved = save_and_clear("MESA_VK_DEVICE_SELECT");
     auto prime_saved = save_and_clear("DRI_PRIME");
+    auto rocr_saved = save_and_clear("ROCR_VISIBLE_DEVICES");
+    auto ordinal_saved = save_and_clear("GPU_DEVICE_ORDINAL");
     struct EnvGuard {
-        std::optional<std::string>&cuda, &hip, &icd, &select, &prime;
+        std::optional<std::string>&cuda, &hip, &icd, &select, &prime, &rocr, &ordinal;
         ~EnvGuard() {
             if (cuda.has_value()) setenv("CUDA_VISIBLE_DEVICES", cuda->c_str(), 1); else unsetenv("CUDA_VISIBLE_DEVICES");
             if (hip.has_value()) setenv("HIP_VISIBLE_DEVICES", hip->c_str(), 1); else unsetenv("HIP_VISIBLE_DEVICES");
             if (icd.has_value()) setenv("VK_ICD_FILENAMES", icd->c_str(), 1); else unsetenv("VK_ICD_FILENAMES");
             if (select.has_value()) setenv("MESA_VK_DEVICE_SELECT", select->c_str(), 1); else unsetenv("MESA_VK_DEVICE_SELECT");
             if (prime.has_value()) setenv("DRI_PRIME", prime->c_str(), 1); else unsetenv("DRI_PRIME");
+            if (rocr.has_value()) setenv("ROCR_VISIBLE_DEVICES", rocr->c_str(), 1); else unsetenv("ROCR_VISIBLE_DEVICES");
+            if (ordinal.has_value()) setenv("GPU_DEVICE_ORDINAL", ordinal->c_str(), 1); else unsetenv("GPU_DEVICE_ORDINAL");
         }
-    } guard{cuda_saved, hip_saved, icd_saved, select_saved, prime_saved};
+    } guard{cuda_saved, hip_saved, icd_saved, select_saved, prime_saved, rocr_saved, ordinal_saved};
 
-    // All relevant env vars unset: every driver's key is empty.
-    EXPECT_EQ(tj::device_selection_env_key("hip"), "");
+    // All relevant env vars unset: every driver's key is empty. JIT-R187:
+    // "hip" is now a 3-component key (HIP_VISIBLE_DEVICES|
+    // ROCR_VISIBLE_DEVICES|GPU_DEVICE_ORDINAL), mirroring "vulkan"'s
+    // existing 3-component format, so it's "||" rather than "" even with
+    // everything unset.
+    EXPECT_EQ(tj::device_selection_env_key("hip"), "||");
     EXPECT_EQ(tj::device_selection_env_key("cuda"), "");
     EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
     EXPECT_EQ(tj::device_selection_env_key("local-sync"), "");
     EXPECT_EQ(tj::device_selection_env_key("local-task"), "");
 
-    // CUDA_VISIBLE_DEVICES changes "cuda"'s key but NOT "vulkan"'s or the
-    // CPU task-queue drivers' -- this is the exact bug: pre-fix, "vulkan"
-    // also read this var.
+    // CUDA_VISIBLE_DEVICES changes "cuda"'s key but NOT "vulkan"'s, "hip"'s,
+    // or the CPU task-queue drivers' -- this is the exact bug: pre-fix,
+    // "vulkan" also read this var.
     setenv("CUDA_VISIBLE_DEVICES", "1", 1);
     EXPECT_EQ(tj::device_selection_env_key("cuda"), "1");
     EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
+    EXPECT_EQ(tj::device_selection_env_key("hip"), "||");
     EXPECT_EQ(tj::device_selection_env_key("local-sync"), "");
     unsetenv("CUDA_VISIBLE_DEVICES");
 
-    // HIP_VISIBLE_DEVICES changes only "hip"'s key.
+    // HIP_VISIBLE_DEVICES changes only "hip"'s key (and only its first
+    // component).
     setenv("HIP_VISIBLE_DEVICES", "0,1", 1);
-    EXPECT_EQ(tj::device_selection_env_key("hip"), "0,1");
+    EXPECT_EQ(tj::device_selection_env_key("hip"), "0,1||");
     EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
     unsetenv("HIP_VISIBLE_DEVICES");
+
+    // JIT-R187: ROCR_VISIBLE_DEVICES and GPU_DEVICE_ORDINAL each
+    // independently change "hip"'s key (second/third component) and only
+    // "hip"'s -- amdgpu-arch's HSA/KFD enumeration is documented to honor
+    // these two (not HIP_VISIBLE_DEVICES), so a process that changes either
+    // between two calls must not have this cache silently reuse a stale
+    // answer computed for a different physical GPU.
+    setenv("ROCR_VISIBLE_DEVICES", "0", 1);
+    EXPECT_EQ(tj::device_selection_env_key("hip"), "|0|");
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
+    EXPECT_EQ(tj::device_selection_env_key("cuda"), "");
+    unsetenv("ROCR_VISIBLE_DEVICES");
+
+    setenv("GPU_DEVICE_ORDINAL", "0", 1);
+    EXPECT_EQ(tj::device_selection_env_key("hip"), "||0");
+    EXPECT_EQ(tj::device_selection_env_key("vulkan"), "||");
+    unsetenv("GPU_DEVICE_ORDINAL");
 
     // Each Vulkan-relevant env var independently changes "vulkan"'s key
     // (and only "vulkan"'s), and CUDA_VISIBLE_DEVICES set alongside them
@@ -851,6 +903,88 @@ TEST(JitRocmArch, CanInitializeDefaultDeviceCacheRespectsHipVisibleDevicesChange
            "iree_can_initialize_default_device(\"hip\") should now report "
            "false -- true means the cache incorrectly reused the pre-remap "
            "availability answer instead of re-probing under the new value";
+}
+
+// JIT-R185 regression: iree_can_initialize_default_device("hip")'s
+// LD_LIBRARY_PATH save-mutate-probe-restore window (only active on a genuine
+// cache miss) previously had no mutex, so two threads racing through it
+// could interleave their save/restore, leaving LD_LIBRARY_PATH stomped to a
+// stale value once both finished. A single dedicated "mutator" thread
+// continuously invalidates the per-HIP_VISIBLE_DEVICES answer cache (setenv
+// is not safe to call concurrently from multiple threads, so only this one
+// thread ever touches HIP_VISIBLE_DEVICES -- mirrors
+// test_jit_r168_cache_miss_teardown_race.cpp's identical rationale) while
+// several "prober" threads concurrently call the function -- each prober
+// touches only LD_LIBRARY_PATH (via the function itself), never
+// HIP_VISIBLE_DEVICES, so this is race-free with respect to the mutator.
+// Asserts LD_LIBRARY_PATH is back to its EXACT original value once every
+// thread has finished, proving no save/restore interleaving corrupted it.
+TEST(JitRocmArch, ConcurrentCanInitializeDefaultDeviceDoesNotCorruptLdLibraryPath) {
+    ensure_core_init();
+    if (!tj::iree_can_initialize_default_device("hip")) {
+        if (::tenzor::testing::golden::require_multi_backend()) {
+            FAIL() << "ROCm/HIP device required by TENZOR_REQUIRE_MULTI_BACKEND "
+                      "but unavailable";
+        }
+        GTEST_SKIP() << "no ROCm/HIP device";
+    }
+
+    const char* saved_raw = std::getenv("HIP_VISIBLE_DEVICES");
+    const bool had_saved = saved_raw != nullptr;
+    const std::string saved = had_saved ? saved_raw : std::string{};
+    const char* saved_ld_raw = std::getenv("LD_LIBRARY_PATH");
+    const bool had_saved_ld = saved_ld_raw != nullptr;
+    const std::string saved_ld = had_saved_ld ? saved_ld_raw : std::string{};
+    struct EnvGuard {
+        bool had_hip; std::string val_hip;
+        bool had_ld; std::string val_ld;
+        ~EnvGuard() {
+            if (had_hip) setenv("HIP_VISIBLE_DEVICES", val_hip.c_str(), 1);
+            else unsetenv("HIP_VISIBLE_DEVICES");
+            if (had_ld) setenv("LD_LIBRARY_PATH", val_ld.c_str(), 1);
+            else unsetenv("LD_LIBRARY_PATH");
+        }
+    } env_guard{had_saved, saved, had_saved_ld, saved_ld};
+
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> counter{0};
+    std::thread mutator([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            const uint64_t i = counter.fetch_add(1, std::memory_order_relaxed);
+            setenv("HIP_VISIBLE_DEVICES", std::to_string(i % 3).c_str(), 1);
+        }
+    });
+
+    constexpr int kThreads = 8;
+    std::vector<std::thread> probers;
+    for (int i = 0; i < kThreads; ++i) {
+        probers.emplace_back([&] {
+            for (int j = 0; j < 200; ++j) {
+                (void)tj::iree_can_initialize_default_device("hip");
+            }
+        });
+    }
+    for (auto& t : probers) t.join();
+    stop.store(true, std::memory_order_relaxed);
+    mutator.join();
+
+    // Restore HIP_VISIBLE_DEVICES to what it was BEFORE the mutator's churn
+    // so the LD_LIBRARY_PATH check below reflects a clean, known env state.
+    if (had_saved) setenv("HIP_VISIBLE_DEVICES", saved.c_str(), 1);
+    else unsetenv("HIP_VISIBLE_DEVICES");
+
+    const char* ld_now = std::getenv("LD_LIBRARY_PATH");
+    const bool ld_now_has_value = ld_now != nullptr;
+    EXPECT_EQ(ld_now_has_value, had_saved_ld)
+        << "LD_LIBRARY_PATH presence changed after concurrent "
+           "iree_can_initialize_default_device(\"hip\") calls (JIT-R185)";
+    if (ld_now_has_value && had_saved_ld) {
+        EXPECT_EQ(std::string(ld_now), saved_ld)
+            << "LD_LIBRARY_PATH was left mutated after concurrent "
+               "iree_can_initialize_default_device(\"hip\") calls -- a "
+               "save/restore interleaving stomped it to a stale value "
+               "(JIT-R185)";
+    }
 }
 
 // ── Fix #3: a graph break / empty trace makes trace_and_compile() return
