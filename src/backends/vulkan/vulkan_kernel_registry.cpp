@@ -82,6 +82,58 @@ static int64_t vulkan_extract_normalized_size(const OpAttributes& attrs, const T
     return fallback.shape().back();
 }
 
+namespace {
+// dispatchNanVar/dispatchNanStd ignore AttrKey::Dim/Keepdim and always
+// full-reduce; jvp_adapter_nanvar/nanstd (jvp_rules.cpp) call
+// tenzor::dispatch(OpId::NanVar, {x.primal()}, attrs) directly inside
+// forward-mode AD, so tenzor::jvp(f, ...) where f calls nanvar(x, dim=k)
+// genuinely reaches this wrapper. Mirrors ROCm's rocm_compose_nanvar
+// (rocm_kernel_registry.cpp) verbatim, using only backend-agnostic
+// tenzor:: ops so it works identically here.
+Tensor vulkan_compose_nanvar(const Tensor& x_in, int64_t dim, bool keepdim,
+                              int64_t correction) {
+    bool narrow = (x_in.dtype() == DType::Float16 ||
+                   x_in.dtype() == DType::BFloat16);
+    Tensor x = narrow ? x_in.to(DType::Float32) : x_in;
+
+    bool full_reduce = (dim == std::numeric_limits<int64_t>::min());
+    Tensor work = x;
+    if (full_reduce) {
+        work = tenzor::reshape(x.contiguous(), std::vector<int64_t>{x.numel()});
+        dim = 0;
+    }
+
+    Tensor mask = tenzor::isnan(work);
+    Tensor valid = tenzor::logical_not(mask).to(work.dtype());
+    Tensor cleaned = tenzor::where(mask, tenzor::zeros_like(work), work);
+
+    Tensor count_kd = tenzor::sum(valid, dim, /*keepdim=*/true);
+    Tensor one_kd = tenzor::ones_like(count_kd);
+    Tensor safe_count = tenzor::where(tenzor::gt(count_kd, tenzor::zeros_like(count_kd)),
+                                      count_kd, one_kd);
+    Tensor numer = tenzor::sum(cleaned, dim, /*keepdim=*/true);
+    Tensor mean_kd = tenzor::div(numer, safe_count);
+
+    Tensor diff = tenzor::sub(work, mean_kd);
+    Tensor diff_valid = tenzor::where(mask, tenzor::zeros_like(diff), diff);
+    Tensor sq = tenzor::mul(diff_valid, diff_valid);
+    Tensor sum_sq = tenzor::sum(sq, dim, keepdim);
+
+    Tensor count = tenzor::sum(valid, dim, keepdim);
+    Tensor corr = tenzor::full(
+        std::vector<int64_t>(count.shape().begin(), count.shape().end()),
+        static_cast<double>(correction), count.dtype(), count.device());
+    Tensor denom = tenzor::sub(count, corr);
+    Tensor safe_denom = tenzor::where(tenzor::gt(denom, tenzor::zeros_like(denom)),
+                                      denom, tenzor::ones_like(denom));
+    Tensor var = tenzor::div(sum_sq, safe_denom);
+    var = tenzor::where(tenzor::gt(denom, tenzor::zeros_like(denom)),
+                        var, tenzor::zeros_like(var));
+
+    return narrow ? var.to(x_in.dtype()) : var;
+}
+} // namespace
+
 /**
  * @brief Register all Vulkan kernels with the dispatch table.
  *
@@ -508,8 +560,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // AUTOGRAD-R047: -1 is a legitimate "last axis" value, so it cannot
+        // double as the "no dim supplied -> squeeze all" sentinel (that
+        // collision is exactly why CUDA carries a comment about a prior -1
+        // bug). Match CPU/CUDA/ROCm/OneAPI/MPS's sentinel exactly.
         return std::vector<Tensor>{get_vulkan_backend()->dispatchSqueeze(inputs[0],
-            attrs.get_int(AttrKey::Dim, -1))};
+            attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min()))};
     });
 
     table.register_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -970,6 +1026,34 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         const Tensor* bias_ptr = inputs.size() >= 3 ? &inputs[2] : nullptr;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConvTranspose2dForward(
             inputs[0], inputs[1], bias_ptr, attrs)};
+    });
+
+    // ConvTranspose1dForward: mirror CPU/CUDA — unsqueeze [N,C,L] -> [N,C,1,L],
+    // run the 2-D transpose conv (via generic dispatch, reusing this backend's
+    // own already-correct ConvTranspose2dForward above), squeeze back. Closes
+    // the JIT-graph capability gap (src/jit/graph.cpp's ConvTranspose case
+    // dispatches OpId::ConvTranspose1dForward for 1-D nodes; only CPU/CUDA had
+    // it registered).
+    table.register_kernel(OpId::ConvTranspose1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<Tensor> in2d = {inputs[0].unsqueeze(2), inputs[1].unsqueeze(2)};
+        if (inputs.size() > 2) in2d.push_back(inputs[2]);
+        NewOpAttributes attrs2d;
+        attrs2d.set(AttrKey::StrideH, int64_t{1});
+        attrs2d.set(AttrKey::StrideW, stride);
+        attrs2d.set(AttrKey::PaddingH, int64_t{0});
+        attrs2d.set(AttrKey::PaddingW, padding);
+        attrs2d.set(AttrKey::OutputPaddingH, int64_t{0});
+        attrs2d.set(AttrKey::OutputPaddingW, output_padding);
+        attrs2d.set(AttrKey::DilationH, int64_t{1});
+        attrs2d.set(AttrKey::DilationW, dilation);
+        attrs2d.set(AttrKey::Groups, groups);
+        auto result_4d = tenzor::dispatch(OpId::ConvTranspose2dForward, in2d, attrs2d)[0];
+        return std::vector<Tensor>{result_4d.squeeze(2)};
     });
 
     // ========================================================================
@@ -1468,9 +1552,29 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Slice/Split/Chunk/Flatten Operations
     // ========================================================================
     table.register_single_output_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto starts = attrs.get_int_list(AttrKey::Starts);
-        auto ends = attrs.get_int_list(AttrKey::Ends);
-        auto steps = attrs.get_int_list(AttrKey::Steps);
+        // AUTOGRAD-R046: support both the multi-dim (Starts/Ends/Steps lists)
+        // and single-dim (Dim/Start/End/Step scalars) attribute formats,
+        // matching CPU/CUDA. SliceBackward::saved_attributes() emits only the
+        // singular keys, so a backward/JIT/vmap re-dispatch of OpId::Slice
+        // here previously read an empty Starts list and sliced with empty
+        // ranges. dispatchSlice is natively multi-dim only; build a full
+        // per-dim starts/ends/steps vector from the singular format (mirrors
+        // the CUDA kernel's defaulting exactly).
+        if (attrs.has(AttrKey::Starts)) {
+            auto starts = attrs.get_int_list(AttrKey::Starts);
+            auto ends = attrs.get_int_list(AttrKey::Ends);
+            auto steps = attrs.get_int_list(AttrKey::Steps);
+            return get_vulkan_backend()->dispatchSlice(inputs[0], starts, ends, steps);
+        }
+        int64_t ndim = inputs[0].ndim();
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        if (dim < 0) dim += ndim;
+        int64_t start = attrs.get_int(AttrKey::Start, 0);
+        int64_t end = attrs.get_int(AttrKey::End, -1);
+        int64_t step = attrs.get_int(AttrKey::Step, 1);
+        std::vector<int64_t> starts(ndim, 0), ends(ndim), steps(ndim, 1);
+        for (int64_t d = 0; d < ndim; ++d) ends[d] = inputs[0].shape()[d];
+        if (ndim > 0) { starts[dim] = start; ends[dim] = end; steps[dim] = step; }
         return get_vulkan_backend()->dispatchSlice(inputs[0], starts, ends, steps);
     });
 
@@ -1676,16 +1780,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
-        bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
         // bias (inputs[3]) and mask (inputs[4]) are optional; std::span has
         // no bounds checking and indexing past size() crashed (no-mask form).
+        // Mask presence is inferred purely from tensor presence/emptiness,
+        // matching CPU/CUDA/ROCm/OneAPI (none of which read AttrKey::UseMask
+        // at all) — previously ANDed with AttrKey::UseMask here only, a
+        // cross-backend contract divergence for any future direct-dispatch
+        // caller that decouples the two signals (AUTOGRAD-R025).
         Tensor empty_t = Tensor({0}, inputs[0].dtype(), inputs[0].device());
         const Tensor& dcf_bias = inputs.size() > 3 ? inputs[3] : empty_t;
         const Tensor& dcf_mask = inputs.size() > 4 ? inputs[4] : empty_t;
+        bool use_mask = inputs.size() > 4 && inputs[4].numel() > 0;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dForward(
             inputs[0], inputs[1], inputs[2], dcf_bias, dcf_mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
-            groups, offset_groups, use_mask && inputs.size() > 4)};
+            groups, offset_groups, use_mask)};
     });
 
     // DeformableConv2dBackwardInput — inputs: {grad_output, input, offset, weight, mask}
@@ -1693,30 +1802,34 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::DeformableConv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
-        bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
-        // mask (inputs[4]) is optional (no-mask form passes 4 inputs).
+        // mask (inputs[4]) is optional (no-mask form passes 4 inputs). Mask
+        // presence inferred purely from tensor presence/emptiness — see
+        // DeformableConv2dForward's comment above (AUTOGRAD-R025).
         Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
         const Tensor& dcb_mask = inputs.size() > 4 ? inputs[4] : empty_t;
+        bool use_mask = inputs.size() > 4 && inputs[4].numel() > 0;
         return get_vulkan_backend()->dispatchDeformableConv2dBackwardInput(
             inputs[0], inputs[1], inputs[2], inputs[3], dcb_mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
-            groups, offset_groups, use_mask && inputs.size() > 4);
+            groups, offset_groups, use_mask);
     });
 
     // DeformableConv2dBackwardWeight — inputs: {grad_output, input, offset, mask}
     table.register_kernel(OpId::DeformableConv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
-        bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         // mask (inputs[3]) is optional; std::span has no bounds checking and
-        // indexing past size() crashed on the no-mask call form.
+        // indexing past size() crashed on the no-mask call form. Mask
+        // presence inferred purely from tensor presence/emptiness — see
+        // DeformableConv2dForward's comment above (AUTOGRAD-R025).
         Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
         const Tensor& mask = inputs.size() > 3 ? inputs[3] : empty_t;
+        bool use_mask = inputs.size() > 3 && inputs[3].numel() > 0;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dBackwardWeight(
             inputs[0], inputs[1], inputs[2], mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
-            groups, offset_groups, use_mask && inputs.size() > 3, weight_shape)};
+            groups, offset_groups, use_mask, weight_shape)};
     });
 
     // DeformableConv2dBackwardBias — reuse regular conv2d bias backward (channel-wise sum)
@@ -2360,6 +2473,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             scores = vk->dispatchWhere(mask, vk->dispatchExpand(neg_inf, sc), scores);
         }
 
+        // Per docs/internals/attention-contract.md, Outputs=(output,
+        // logsumexp). Computed from `scores` (post-scale, post-causal-mask,
+        // pre-softmax) before it's discarded, mirroring OneAPI's composed-
+        // path FusedAttention wrapper — the previous 1-tuple return silently
+        // disabled the fast fused-kernel backward path.
+        Tensor lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
+
         auto attn_weights = vk->dispatchSoftmax(scores, -1);
         auto output = vk->dispatchBmm(attn_weights, v);
 
@@ -2368,8 +2488,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             out_shape.push_back(Sq);
             out_shape.push_back(output.shape().back());
             output = vk->dispatchReshape(output, out_shape);
+
+            std::vector<int64_t> lse_shape = lead_dims;
+            lse_shape.push_back(Sq);
+            lse = vk->dispatchReshape(lse, lse_shape);
         }
-        return std::vector<Tensor>{output};
+        return std::vector<Tensor>{output, lse};
     });
 
     // ========================================================================
@@ -3056,7 +3180,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-            if (score_mod_id == 0 || score_mod_id == 1) {
+            // AUTOGRAD-R027: dispatchFlashAttention has no block_mask
+            // parameter and would silently ignore one if present — only take
+            // this shortcut when none was supplied.
+            if ((score_mod_id == 0 || score_mod_id == 1) &&
+                !attrs.get_bool(AttrKey::HasBlockMask, false)) {
                 bool causal = (score_mod_id == 1);
                 // Phase 1.5 made dispatchFlashAttention return {output, lse}
                 // — the fused shader emits per-row logsumexp directly
@@ -3080,14 +3208,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
             // ScoreModId 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
             // sliding_window_sym, user_lambda) and user-registered functors
-            // (>= 8) go through the shared, device-agnostic composed-ops
-            // forward. The tenzor:: ops inside dispatch to Vulkan automatically
-            // (Q/K/V live on Vulkan), so Vulkan runs bit-for-bit the same math
-            // as the CPU reference and every other backend (F018/F019/F023/
-            // F024). This also unifies the mask sentinel to where(-inf) (was an
-            // additive outside*neg_inf that produced 0*-inf = NaN at kept
-            // positions, F020).
-            if (score_mod_id >= 2) {
+            // (>= 8), or ScoreModId 0/1 with block_mask present, go through
+            // the shared, device-agnostic composed-ops forward. The tenzor::
+            // ops inside dispatch to Vulkan automatically (Q/K/V live on
+            // Vulkan), so Vulkan runs bit-for-bit the same math as the CPU
+            // reference and every other backend (F018/F019/F023/F024). This
+            // also unifies the mask sentinel to where(-inf) (was an additive
+            // outside*neg_inf that produced 0*-inf = NaN at kept positions,
+            // F020).
+            if (score_mod_id >= 0) {
                 return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
             }
 
@@ -3103,8 +3232,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-            // ScoreModId 0/1: route to fused FlashAttention backward.
-            if (score_mod_id == 0 || score_mod_id == 1) {
+            // ScoreModId 0/1: route to fused FlashAttention backward — but
+            // only when neither block_mask nor relpos_bias is present
+            // (AUTOGRAD-R027: FlashAttentionBackward's wrapper reads
+            // inputs[5]=L, inputs[6]=philox_seed, inputs[7]=philox_offset by
+            // fixed position and would silently misinterpret block_mask/
+            // relpos_bias as those; HasBlockMask/HasRelposBias are set
+            // explicitly by the dispatch call site, not inferred from
+            // inputs.size() which is ambiguous for independently-optional
+            // trailing slots). Fall through to the composed backward, which
+            // handles all optionals correctly, otherwise.
+            const bool has_extra_tensor = attrs.get_bool(AttrKey::HasBlockMask, false) ||
+                                          attrs.get_bool(AttrKey::HasRelposBias, false);
+            if ((score_mod_id == 0 || score_mod_id == 1) && !has_extra_tensor) {
                 bool causal = (score_mod_id == 1);
                 OpAttributes bwd_attrs;
                 bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
@@ -3113,8 +3253,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
             }
 
-            // ScoreModId >= 2 (built-ins 2-7 and user functors >= 8) — composed backward.
-            if (score_mod_id >= 2) {
+            // ScoreModId >= 2 (built-ins 2-7 and user functors >= 8), or
+            // ScoreModId 0/1 with block_mask/relpos_bias present — composed backward.
+            if (score_mod_id >= 0) {
                 // ScoreModId 2-7 and user functors (>= 8): shared,
                 // device-agnostic composed backward (replays forward, softmax
                 // chain rule). Same helper as the CPU reference and every other
@@ -3216,7 +3357,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::IRFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         int64_t actual_dim = dim < 0 ? dim + inputs[0].ndim() : dim;
-        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[actual_dim]);
+        // Default output length is 2*(shape[dim]-1) — the standard one-sided-
+        // spectrum reconstruction formula (a length-N real signal's rfft has
+        // N/2+1 bins, so irfft's default inverts that: N = 2*(bins-1)) —
+        // matching CPU/CUDA/ROCm/OneAPI. This previously defaulted to
+        // shape[actual_dim] itself (the bin count, not the reconstructed
+        // signal length): a 5-bin spectrum from an original length-8 signal
+        // defaulted to n=5 here vs n=8 on every other backend (AUTOGRAD-R029).
+        int64_t n = attrs.get_int(AttrKey::N, 2 * (inputs[0].shape()[actual_dim] - 1));
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return get_vulkan_backend()->dispatchIRFFT(inputs[0], dim, n, norm);
     });
@@ -3786,8 +3934,20 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // Native Vulkan Aminmax (returns 2 tensors: min, max)
-    table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-        auto [min_t, max_t] = get_vulkan_backend()->dispatchAminmax(inputs[0]);
+    table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // dispatchAminmax has no dim parameter (always full-tensor
+        // reduction); ops/reduction.cpp's aminmax(x, dim=k) is a live,
+        // ordinary eager-API call site that sets AttrKey::Dim, so the
+        // caller-requested per-axis reduction was being silently ignored.
+        // Compose the dim-aware path from Min/Max (both already dim-aware
+        // on this backend); fall through to the native full-reduction
+        // kernel when no dim is requested.
+        if (!attrs.has(AttrKey::Dim)) {
+            auto [min_t, max_t] = get_vulkan_backend()->dispatchAminmax(inputs[0]);
+            return {min_t, max_t};
+        }
+        Tensor min_t = tenzor::dispatch(OpId::Min, inputs, attrs)[0];
+        Tensor max_t = tenzor::dispatch(OpId::Max, inputs, attrs)[0];
         return {min_t, max_t};
     });
     // Native Vulkan ScatterReduce
@@ -3859,9 +4019,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             if (dim < 0) dim += ndim;
             int64_t dim_size = input.shape()[dim];
 
+            // AUTOGRAD-R046 side-fix: `end += dim_size + 1` was an off-by-one
+            // (matches the previously-fixed CUDA bug this test regresses
+            // for) — end=-1 on a size-4 dim must resolve to 3 (stop before
+            // the last element), not 4. Match CPU/CUDA's fully-clamped
+            // negative-index normalization exactly.
             if (start < 0) start += dim_size;
-            if (end < 0) end += dim_size + 1;
+            if (end < 0) end += dim_size;
             if (start < 0) start = 0;
+            if (start > dim_size) start = dim_size;
+            if (end < 0) end = 0;
             if (end > dim_size) end = dim_size;
             if (step <= 0) step = 1;
 
@@ -4431,13 +4598,23 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Phase: NaN-aware reductions — NanVar, NanStd
     // ========================================================================
     table.register_single_output_kernel(OpId::NanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         int64_t correction = attrs.get_int(AttrKey::Correction, 1);
-        return get_vulkan_backend()->dispatchNanVar(inputs[0], correction);
+        if (dim == std::numeric_limits<int64_t>::min()) {
+            return get_vulkan_backend()->dispatchNanVar(inputs[0], correction);
+        }
+        return vulkan_compose_nanvar(inputs[0], dim, keepdim, correction);
     });
 
     table.register_single_output_kernel(OpId::NanStd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         int64_t correction = attrs.get_int(AttrKey::Correction, 1);
-        return get_vulkan_backend()->dispatchNanStd(inputs[0], correction);
+        if (dim == std::numeric_limits<int64_t>::min()) {
+            return get_vulkan_backend()->dispatchNanStd(inputs[0], correction);
+        }
+        return tenzor::sqrt(vulkan_compose_nanvar(inputs[0], dim, keepdim, correction));
     });
 
     // =========================================================================

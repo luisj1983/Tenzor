@@ -624,20 +624,23 @@ TEST_P(GradCheckMissingTest, Inv) {
 }
 
 TEST_P(GradCheckMissingTest, Cholesky) {
-    // Tracked as J9: gradcheck fails on every backend including CPU. An
-    // attempted fix using the Murray 2016 (L^T grad + grad^T L) symmetrization
-    // made things worse, suggesting the divergence is subtler than the
-    // obvious formula swap — likely how gradcheck handles the upper-triangle
-    // perturbations of an SPD matrix (cholesky is only defined on symmetric
-    // PD inputs, but gradcheck perturbs all entries independently).
-    // Skipped to keep the suite green; bug itself is tracked loudly.
-    SKIP_WITH_REASON(SkipReason::KnownBug,
-        "Cholesky backward gradcheck open (J9)");
-
+    // J9 root cause confirmed: cholesky() is only defined on symmetric PD
+    // inputs, but gradcheck's numerical_gradient perturbs each entry (i,j)
+    // independently — for i != j that breaks symmetry (moves x_ij without
+    // the matching x_ji), which the analytic CholeskyBackward formula does
+    // not (and cannot) account for. Wrap the tested function with a
+    // differentiable symmetrize step, the same well-posedness fix
+    // CholeskyInverse (above) applies via tril(): perturbing v_ij alone
+    // now shifts BOTH sym_ij and sym_ji by 0.5*eps (sym = (v + v^T)/2 is
+    // symmetric by construction at every perturbation step), so the
+    // finite-difference and analytic gradients are comparing the same
+    // well-posed function.
     auto x_t = make_spd(4, /*eps=*/0.5).to(Device::cpu());
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable {
-        return tenzor::cholesky(v, /*upper=*/false);
+        auto vt = tenzor::transpose(v, -2, -1);
+        auto sym = (v + vt) * 0.5;
+        return tenzor::cholesky(sym, /*upper=*/false);
     };
     EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
         << "cholesky gradcheck failed on " << device.to_string();
@@ -926,7 +929,12 @@ TEST_P(GradCheckMissingTest, EigvalshGradcheck) {
     auto spd = make_spd(4);
     Variable x(spd, /*requires_grad=*/true);
     auto f = [&](const Variable& v) -> Variable {
-        return ::tenzor::eigvalsh(v);
+        // J9-class fix (see Cholesky above): eigvalsh() is only defined on
+        // symmetric inputs; gradcheck perturbs entries independently, so
+        // wrap with a differentiable symmetrize step for a well-posed check.
+        auto vt = tenzor::transpose(v, -2, -1);
+        auto sym = (v + vt) * 0.5;
+        return ::tenzor::eigvalsh(sym);
     };
     EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
         << "eigvalsh gradcheck failed";

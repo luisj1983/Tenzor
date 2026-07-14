@@ -169,6 +169,36 @@ auto Variable::set_grad(Tensor gradient) -> void {
     }
 }
 
+auto Variable::accumulate_grad(Tensor gradient) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot accumulate grad of uninitialized Variable");
+    }
+    // V.4: accumulate in the promoted dtype of (existing, incoming) rather
+    // than downcasting the incoming grad to the existing storage dtype
+    // first — mirrors BackwardEngine's accumulate_unlocked().
+    auto do_accumulate = [&]() {
+        if (impl_->grad_.has_value()) {
+            auto existing_grad = impl_->grad_.value();
+            DType target = promote_types(existing_grad.dtype(), gradient.dtype());
+            if (existing_grad.dtype() != target) {
+                existing_grad = existing_grad.to(target);
+            }
+            if (gradient.dtype() != target) {
+                gradient = gradient.to(target);
+            }
+            impl_->grad_ = existing_grad + gradient;
+        } else {
+            impl_->grad_ = std::move(gradient);
+        }
+    };
+    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(*impl_->grad_mutex_);
+        do_accumulate();
+    } else {
+        do_accumulate();
+    }
+}
+
 auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph, bool create_graph) -> void {
     if (!impl_) {
         throw std::runtime_error("Cannot call backward on uninitialized Variable");

@@ -68,24 +68,24 @@ auto has_batching_rule(OpId op_id) -> bool;
  * vmap prepends a batch axis, the user's `dim` refers to a position in the
  * *unbatched* view, not in the batched tensor we hand to the kernel.
  *
- * The returned rule:
- *   1. Probes the user function on a single batch slice to recover the
- *      forward `OpId` and `OpAttributes` (via `Function::saved_attributes()`,
- *      wired in audit A.4).
- *   2. Reads the saved dim from `dim_attr_key`. Normalises a negative dim
- *      against the *unbatched* ndim. If `dim >= batch_dim`, shifts to
- *      `dim + 1` so the batched call hits the user's intended axis.
- *   3. Dispatches the op directly on the full batched input with the
- *      rebuilt attributes, returning the batched output as a `Variable`.
+ * AUTOGRAD-R037: an earlier version of this rule fixed that by probing the
+ * user function on a single slice to recover the forward `OpId`/attributes,
+ * shifting the saved `dim` past the batch axis, and redispatching directly
+ * on the full batched input for an O(1) call. That fast path was REMOVED
+ * (see the "graph-severing fix" audit note in vmap.cpp) because rewrapping
+ * the raw dispatch result as `Variable(output, requires_grad)` carried no
+ * `grad_fn`, silently severing autograd for every dim-carrying op routed
+ * through this rule. The returned rule now unconditionally delegates to
+ * `vmap_loop_and_stack`, which calls the user's `func` once per batch slice
+ * (so `dim_attr_key` never needs to be read or shifted — each slice already
+ * sees the correct unbatched axis) and stitches the per-slice results back
+ * together with Variable-level `unsqueeze`/`cat`, preserving the grad_fn
+ * chain at the cost of O(B) sequential dispatches instead of O(1).
  *
- * If the saved attributes carry no dim entry (e.g. full reduction), the
- * rule falls back to loop-and-stack — there's no single-axis shift that
- * preserves per-sample full reductions.
- *
- * @param dim_attr_key The AttrKey under which the op stores its dim (the
- *                     common case is `AttrKey::Dim`; supplied as an arg so
- *                     future ops using a different key can reuse the
- *                     factory without forking the body).
+ * @param dim_attr_key Unused by the current implementation; retained in the
+ *                     signature for source compatibility with existing
+ *                     registration call sites (all of which pass
+ *                     `AttrKey::Dim`).
  */
 auto dim_shifted_passthrough(AttrKey dim_attr_key) -> BatchingRule;
 

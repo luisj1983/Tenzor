@@ -331,7 +331,7 @@ inline fe::DataType_t to_cudnn_dtype(DType dt) {
 // Reshapes 4D BHSD inputs to 3D (B*H, S, D) for the custom flash kernel.
 // Honors causal so the fallback produces contract-equivalent output to the
 // cuDNN graph path (audit C4 — cuDNN call had no causal, fallback didn't either).
-Tensor fused_attention_fallback(const Tensor& Q, const Tensor& K, const Tensor& V, float scale, bool causal) {
+std::pair<Tensor, Tensor> fused_attention_fallback(const Tensor& Q, const Tensor& K, const Tensor& V, float scale, bool causal) {
     auto q_shape = Q.shape();
     bool is_4d = (q_shape.size() == 4);
     Tensor Q3 = Q, K3 = K, V3 = V;
@@ -345,8 +345,9 @@ Tensor fused_attention_fallback(const Tensor& Q, const Tensor& K, const Tensor& 
     auto [output, lse] = fused_attention_cuda(Q3, K3, V3, scale, causal, 0.0f, 0u);
     if (is_4d) {
         output = output.reshape({q_shape[0], q_shape[1], q_shape[2], q_shape[3]});
+        lse = lse.reshape({q_shape[0], q_shape[1], q_shape[2]});
     }
-    return output;
+    return {output, lse};
 }
 }  // namespace
 
@@ -420,9 +421,15 @@ auto create_sdpa_graph(
     // its mask-fusion path). Previously this was hardcoded false, so any
     // caller asking for causal MHA on CUDA in eval mode silently got
     // non-causal output (audit C4/M5).
+    //
+    // set_generate_stats(true): per docs/internals/attention-contract.md,
+    // FusedAttention's Outputs=(output,logsumexp) — Stats IS that logsumexp
+    // tensor. It was previously disabled, silently violating the contract
+    // and disabling the fast fused-kernel backward path for the cuDNN SDPA
+    // path specifically.
     auto sdpa_options = fe::graph::SDPA_attributes()
         .set_name("flash_attention")
-        .set_generate_stats(false)
+        .set_generate_stats(true)
         .set_attn_scale(attn_scale)
         .set_causal_mask(causal);
 
@@ -435,6 +442,17 @@ auto create_sdpa_graph(
      .set_dim(o_dim)
      .set_stride(o_stride)
      .set_data_type(io_dtype);
+
+    // Mark Stats (logsumexp) tensor. cuDNN's SDPA Stats output is shaped
+    // [batch, num_heads, seq_len_q, 1] and always FP32 regardless of I/O
+    // dtype (the softmax accumulation dtype).
+    std::vector<int64_t> stats_dim = {batch, num_heads, seq_len_q, 1};
+    std::vector<int64_t> stats_stride = {num_heads * seq_len_q, seq_len_q, 1, 1};
+    Stats->set_output(true)
+         .set_uid(static_cast<int64_t>(TensorUID::Stats))
+         .set_dim(stats_dim)
+         .set_stride(stats_stride)
+         .set_data_type(fe::DataType_t::FLOAT);
 
     // Build the graph with heuristic mode A (fastest)
     auto status = graph->validate();
@@ -490,7 +508,7 @@ auto cudnn_sdpa_forward(
     float scale,
     bool causal,
     cudaStream_t stream
-) -> Tensor {
+) -> std::pair<Tensor, Tensor> {
     // Per docs/internals/attention-contract.md, the host helper must enforce
     // contiguity at entry — cuDNN's stride descriptors are computed assuming
     // contiguous BHSD layout in compute_strides() below; a permuted view of
@@ -612,12 +630,17 @@ auto cudnn_sdpa_forward(
 
     // Output dtype matches input (cuDNN frontend honors set_io_data_type).
     Tensor o_output(q_shape_vec, Q.dtype(), Q.device());
+    // Stats (logsumexp) is always FP32, shaped [batch, num_heads, seq_len_q]
+    // (the trailing size-1 dim from the cuDNN descriptor is dropped here —
+    // matches the custom flash kernel's own lse shape convention).
+    Tensor stats_output(std::vector<int64_t>{batch, num_heads, seq_len_q}, DType::Float32, Q.device());
 
     std::unordered_map<int64_t, void*> variant_pack;
     variant_pack[static_cast<int64_t>(TensorUID::Q)] = const_cast<void*>(Q.data_ptr());
     variant_pack[static_cast<int64_t>(TensorUID::K)] = const_cast<void*>(K.data_ptr());
     variant_pack[static_cast<int64_t>(TensorUID::V)] = const_cast<void*>(V.data_ptr());
     variant_pack[static_cast<int64_t>(TensorUID::O)] = o_output.data_ptr();
+    variant_pack[static_cast<int64_t>(TensorUID::Stats)] = stats_output.data_ptr();
 
     auto status = cache_entry.graph->execute(handle, variant_pack, workspace);
     if (!status.is_good()) {
@@ -627,7 +650,7 @@ auto cudnn_sdpa_forward(
         return fused_attention_fallback(Q, K, V, scale, causal);
     }
 
-    return o_output;
+    return {o_output, stats_output};
 }
 
 /**

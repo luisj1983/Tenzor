@@ -1022,10 +1022,19 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
         return dispatchUnaryOp(op_name, input_in);
     }
 
-    // The trig shader indexes the buffer linearly (storage order); a
-    // non-contiguous / offset input (sliced/transposed view) would be read in
-    // the wrong order. Materialize a contiguous copy first.
-    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    // The trig shader indexes the buffer linearly (storage order) from
+    // element 0, with no per-binding byte offset plumbed into the descriptor
+    // or push constants. A sliced/narrowed view can be stride-contiguous
+    // (is_contiguous() == true) while still carrying a non-zero storage
+    // offset() — `.contiguous()` alone is then a no-op and leaves that raw
+    // offset bound directly into a STORAGE_BUFFER descriptor, which Vulkan
+    // requires be a multiple of minStorageBufferOffsetAlignment (fails loud
+    // in vulkan_backend.cpp otherwise). Use dispatchContiguous, which
+    // materializes a contiguous, zero-offset copy whenever either condition
+    // holds, mirroring dispatchUnaryOp/dispatchBinaryOp.
+    Tensor input = (input_in.offset() != 0 || !input_in.is_contiguous())
+                       ? dispatchContiguous(input_in)
+                       : input_in;
 
     // Map operation name to opcode (see trigonometric.comp shader)
     // 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan

@@ -364,6 +364,18 @@ auto gradcheck_detailed(
         if (eps < 5e-4) eps = 5e-4;
         if (atol < 5e-4) atol = 5e-4;
     }
+    // AUTOGRAD-R034: half precision needs a proportionally larger step AND
+    // absolute-tolerance floor than Float32 — it carries only ~3 decimal
+    // digits, so the FD noise floor is larger, not smaller. numerical_gradient
+    // already applies a 1e-2 eps floor for Float16/BFloat16 internally (see
+    // ~line 114 above); mirror that same 1e-2 floor here for both eps and
+    // atol so a future half-precision gradcheck caller gets the same
+    // FD-necessity floor Float32 already gets, instead of silently having
+    // none.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        if (eps < 1e-2) eps = 1e-2;
+        if (atol < 1e-2) atol = 1e-2;
+    }
 
     try {
         // Compute numerical gradient FIRST so we have it even if analytical fails
@@ -563,6 +575,27 @@ auto gradgradcheck_detailed(
         return result;
     }
 
+    // Same explicit real-floating-dtype whitelist as numerical_gradient
+    // (first-order path, ~line 103). Without this, the unconditional
+    // input.tensor().to(DType::Float64) cast below silently narrows a
+    // Complex64/128 input to its real component (Tensor::to + the Vulkan
+    // cast_complex_real.comp kernel both implement, not reject, this cast)
+    // instead of rejecting it outright — a future complex second-order
+    // gradcheck test would get a silently-wrong pass/fail rather than a
+    // clear error.
+    {
+        const DType gg_input_dtype = input.tensor().dtype();
+        const bool gg_is_f32  = (gg_input_dtype == DType::Float32);
+        const bool gg_is_f64  = (gg_input_dtype == DType::Float64);
+        const bool gg_is_f16  = (gg_input_dtype == DType::Float16);
+        const bool gg_is_bf16 = (gg_input_dtype == DType::BFloat16);
+        if (!gg_is_f32 && !gg_is_f64 && !gg_is_f16 && !gg_is_bf16) {
+            throw std::runtime_error(
+                "gradgradcheck_detailed supports real floating dtypes "
+                "(Float64/Float32/Float16/BFloat16)");
+        }
+    }
+
     // Second-derivative verification strategy
     // -----------------------------------------
     // `hessian()` computes each column as a Float64 central-difference
@@ -754,10 +787,25 @@ auto gradgradcheck_detailed(
                 }
             }
         } else if (n >= 2) {
+            // AUTOGRAD-R032: spread the sampled rows evenly across the full
+            // [0, n-2] range instead of always starting at i=0 — the old
+            // "for i, for j" loop let the inner loop over j for i=0 alone
+            // exhaust the entire kMaxPairs budget whenever n > kMaxPairs+1,
+            // so the outer loop never advanced past i=0 and a
+            // backward-of-backward bug confined to interactions among
+            // higher indices would never be caught.
             const int64_t kMaxPairs = 32;
+            const int64_t rows_to_sample = std::min<int64_t>(n - 1, kMaxPairs);
+            const int64_t pairs_per_row = std::max<int64_t>(1, kMaxPairs / rows_to_sample);
             int64_t pairs_checked = 0;
-            for (int64_t i = 0; i < n && pairs_checked < kMaxPairs; ++i) {
-                for (int64_t j = i + 1; j < n && pairs_checked < kMaxPairs; ++j) {
+            for (int64_t r = 0; r < rows_to_sample && pairs_checked < kMaxPairs; ++r) {
+                const int64_t i = (rows_to_sample > 1)
+                    ? (r * (n - 2)) / (rows_to_sample - 1)
+                    : 0;
+                int64_t cols_checked = 0;
+                for (int64_t j = i + 1;
+                     j < n && cols_checked < pairs_per_row && pairs_checked < kMaxPairs;
+                     ++j) {
                     double h_ij, h_ji;
                     if (H.dtype() == DType::Float32) {
                         h_ij = static_cast<double>(H_cpu.data<float>()[i * n + j]);
@@ -776,6 +824,7 @@ auto gradgradcheck_detailed(
                             result.fail_indices.push_back(i * n + j);
                         }
                     }
+                    ++cols_checked;
                     ++pairs_checked;
                 }
             }

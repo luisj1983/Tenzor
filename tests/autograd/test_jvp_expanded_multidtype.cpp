@@ -47,9 +47,27 @@ protected:
     Tensor numerical_jvp(std::function<Tensor(const Tensor&)> fn,
                          const Tensor& primal, const Tensor& tangent,
                          double eps = 1e-4) {
-        auto f_plus = fn(tenzor::add(primal, tenzor::mul(tangent, eps)));
-        auto f_minus = fn(tenzor::sub(primal, tenzor::mul(tangent, eps)));
-        return tenzor::mul(tenzor::sub(f_plus, f_minus), 0.5 / eps);
+        // Evaluate f_plus/f_minus in Float64, not just their final
+        // subtraction: f_plus and f_minus are O(1) values differing by only
+        // O(eps), so each already carries ~1e-7 ABSOLUTE rounding error from
+        // its own Float32 internal computation chain (max/sub/exp/sum/log/...
+        // for log_softmax) by the time it's produced -- relative to the
+        // O(eps)=O(1e-4) true difference, that is already a ~1e-3 relative
+        // error, so subtracting in higher precision afterward cannot recover
+        // it (confirmed: staging only the final subtraction in Float64 left
+        // the observed Vulkan/Float32 log_softmax mismatch byte-identical).
+        // The FD reference must be computed end-to-end in Float64 to be
+        // meaningfully more accurate than the Float32 analytical JVP it
+        // checks, matching gradcheck.cpp's established widen-for-FD-
+        // precision pattern. fn's composed Tensor ops are dtype-generic, so
+        // this just exercises the same kernels one precision tier up.
+        const DType orig_dtype = primal.dtype();
+        auto primal64 = primal.to(DType::Float64);
+        auto tangent64 = tangent.to(DType::Float64);
+        auto f_plus = fn(tenzor::add(primal64, tenzor::mul(tangent64, eps)));
+        auto f_minus = fn(tenzor::sub(primal64, tenzor::mul(tangent64, eps)));
+        auto diff = tenzor::sub(f_plus.to(DType::Float64), f_minus.to(DType::Float64));
+        return tenzor::mul(diff, 0.5 / eps).to(orig_dtype);
     }
 
     // Check JVP against numerical with dtype-aware tolerance
@@ -217,21 +235,25 @@ TEST_P(JVPExpandedMultiDTypeTest, Softmax) {
 
 TEST_P(JVPExpandedMultiDTypeTest, LogSoftmax) {
     skipIfHalf();
+    // d(log_softmax)_i = dt_i - sum_j(softmax(x)_j * dt_j); the subtracted
+    // term is a per-row scalar, not per-i, so summing the tangent over the
+    // row does NOT generally vanish (that invariant only holds for uniform
+    // softmax / constant dt) — sum_i(dy_i) = sum(dt) - K*sum_j(s_j*dt_j),
+    // which is nonzero for a generic random x/dt. Verify against a real
+    // numerical (finite-difference) JVP instead, matching the Softmax test
+    // immediately above.
     auto p = tenzor::mul(tenzor::randn({2, 4}, dtype(), device()), 0.5f);
     auto t = tenzor::randn({2, 4}, dtype(), device());
     auto result = jvp_log_softmax(DualTensor(p, t), /*dim=*/1);
-    // Verify tangent shape
     EXPECT_EQ(result.tangent().shape()[0], 2);
     EXPECT_EQ(result.tangent().shape()[1], 4);
-    // log_softmax tangent rows should sum to ~0
-    auto t_sum = tenzor::sum(result.tangent(), 1, false).to(Device::cpu()).to(DType::Float32);
-    auto* ts = t_sum.data<float>();
-    float tol = std::max(atol() * 10.0f, 0.01f);
-    for (int i = 0; i < 2; ++i) {
-        EXPECT_NEAR(ts[i], 0.0f, tol)
-            << "LogSoftmax tangent row " << i << " doesn't sum to ~0 on "
-            << device().to_string();
-    }
+    auto expected = numerical_jvp([](const Tensor& x) {
+        auto m = tenzor::max(x, 1, true);
+        auto e = tenzor::exp(tenzor::sub(x, m));
+        auto se = tenzor::sum(e, 1, true);
+        return tenzor::sub(x, tenzor::add(tenzor::log(se), m));
+    }, p, t);
+    check_jvp(result.tangent(), expected, "log_softmax");
 }
 
 // =========================================================================

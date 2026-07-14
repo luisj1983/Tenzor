@@ -1636,6 +1636,9 @@ auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_
     }
     if (hop_length <= 0) hop_length = n_fft / 4;
     if (win_length <= 0) win_length = n_fft;
+    if (win_length > n_fft) {
+        throw std::runtime_error("istft: win_length must be <= n_fft");
+    }
 
     // Input shape: (..., freq_bins, num_frames)
     auto in_shape = input.shape();

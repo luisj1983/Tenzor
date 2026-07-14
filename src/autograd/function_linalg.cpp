@@ -1522,6 +1522,16 @@ auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
                 process_batch(g_cpu.data<std::complex<float>>());
             } else if (g_cpu.dtype() == DType::Complex128) {
                 process_batch(g_cpu.data<std::complex<double>>());
+            } else if (g_cpu.dtype() == DType::Float16) {
+                // process_batch is a pure element-swap (no arithmetic), so it
+                // can run directly on the native Float16 buffer — no need to
+                // widen to Float32 first. Tensor::data<T>() throws on a dtype
+                // mismatch (not an unchecked reinterpret), so this dtype must
+                // be dispatched explicitly rather than falling into the
+                // `else` branch below, which assumed Float32.
+                process_batch(g_cpu.data<Float16>());
+            } else if (g_cpu.dtype() == DType::BFloat16) {
+                process_batch(g_cpu.data<BFloat16>());
             } else {
                 process_batch(g_cpu.data<float>());
             }
@@ -1660,9 +1670,18 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
 
                     // Build slice Pt with (Pt M)[r] = M[src[r]], i.e.
                     // Pt[r, src[r]] = 1. Reproduces do_swap exactly (= P^T).
+                    // Float16/BFloat16 have no implicit int conversion (their
+                    // only value constructor is `explicit T(float)`), unlike
+                    // float/double/complex, so they need an explicit cast.
+                    using PtElem = std::remove_pointer_t<decltype(pd)>;
                     auto* pslice = pd + b * slice_elems;
                     for (int64_t r = 0; r < Nn; ++r) {
-                        pslice[r * Nn + src[r]] = 1;
+                        if constexpr (std::is_same_v<PtElem, Float16> ||
+                                      std::is_same_v<PtElem, BFloat16>) {
+                            pslice[r * Nn + src[r]] = PtElem(1.0f);
+                        } else {
+                            pslice[r * Nn + src[r]] = 1;
+                        }
                     }
                 }
             };
@@ -1673,6 +1692,14 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
                 build_pt(pt.data<std::complex<float>>());
             } else if (L_t.dtype() == DType::Complex128) {
                 build_pt(pt.data<std::complex<double>>());
+            } else if (L_t.dtype() == DType::Float16) {
+                // See the analogous dispatch in LUBackward::backward — pt was
+                // allocated at L_t.dtype(), so Float16/BFloat16 must be
+                // dispatched explicitly rather than falling into the `else`
+                // branch below, which assumed Float32.
+                build_pt(pt.data<Float16>());
+            } else if (L_t.dtype() == DType::BFloat16) {
+                build_pt(pt.data<BFloat16>());
             } else {
                 build_pt(pt.data<float>());
             }

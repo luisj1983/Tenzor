@@ -142,6 +142,7 @@ inline Device::Type nameToDeviceType(const std::string& name) {
     if (name == "vulkan") return Device::Type::Vulkan;
     if (name == "oneapi") return Device::Type::OneAPI;
     if (name == "rocm") return Device::Type::ROCm;
+    if (name == "mps") return Device::Type::MPS;
     throw std::runtime_error("Unknown backend name: " + name);
 }
 
@@ -303,6 +304,9 @@ inline std::vector<std::string> getAvailableBackends() {
     if (isBackendAvailable(Device::Type::ROCm)) {
         backends.push_back("rocm");
     }
+    if (isBackendAvailable(Device::Type::MPS)) {
+        backends.push_back("mps");
+    }
 
     return backends;
 }
@@ -325,6 +329,7 @@ inline std::vector<std::string> getAvailableBackendsWithDevices() {
         {"oneapi", Device::Type::OneAPI},
         {"vulkan", Device::Type::Vulkan},
         {"rocm", Device::Type::ROCm},
+        {"mps", Device::Type::MPS},
     };
 
     for (const auto& [name, type] : backends) {
@@ -988,7 +993,7 @@ inline bool MultiDTypeTest::initialized_ = false;
  * deliberate act, not a silent auto-discovery.
  */
 #define STANDARD_BACKENDS \
-    ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm")
+    ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm", "mps")
 
 /**
  * @brief All backends — same as STANDARD_BACKENDS for now; reserved for a
@@ -997,7 +1002,7 @@ inline bool MultiDTypeTest::initialized_ = false;
  * backend loading.
  */
 #define ALL_BACKENDS \
-    ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm")
+    ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm", "mps")
 
 /**
  * @brief Generate all combinations of backends and dtypes

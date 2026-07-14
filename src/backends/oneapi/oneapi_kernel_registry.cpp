@@ -2230,6 +2230,35 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                                                       dilation[0], dilation[1], groups, get_q(inputs))};
         });
 
+    // ConvTranspose1dForward: mirror CPU/CUDA — unsqueeze [N,C,L] -> [N,C,1,L],
+    // run the 2-D transpose conv (via generic dispatch, reusing this backend's
+    // own already-correct ConvTranspose2dForward above), squeeze back. Closes
+    // the JIT-graph capability gap (src/jit/graph.cpp's ConvTranspose case
+    // dispatches OpId::ConvTranspose1dForward for 1-D nodes; only CPU/CUDA had
+    // it registered).
+    table.register_kernel(OpId::ConvTranspose1dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+            int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            std::vector<Tensor> in2d = {inputs[0].unsqueeze(2), inputs[1].unsqueeze(2)};
+            if (inputs.size() > 2) in2d.push_back(inputs[2]);
+            NewOpAttributes attrs2d;
+            attrs2d.set(AttrKey::StrideH, int64_t{1});
+            attrs2d.set(AttrKey::StrideW, stride);
+            attrs2d.set(AttrKey::PaddingH, int64_t{0});
+            attrs2d.set(AttrKey::PaddingW, padding);
+            attrs2d.set(AttrKey::OutputPaddingH, int64_t{0});
+            attrs2d.set(AttrKey::OutputPaddingW, output_padding);
+            attrs2d.set(AttrKey::DilationH, int64_t{1});
+            attrs2d.set(AttrKey::DilationW, dilation);
+            attrs2d.set(AttrKey::Groups, groups);
+            auto result_4d = tenzor::dispatch(OpId::ConvTranspose2dForward, in2d, attrs2d)[0];
+            return {result_4d.squeeze(2)};
+        });
+
     // F.11: Conv3d/ConvT3d on OneAPI take std::vector<int64_t> per axis.
     // Use the canonical per-axis vector helpers from attr_macros.hpp.
 
@@ -3845,7 +3874,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // AUTOGRAD-R027: FusedAttention has no block_mask parameter and would
+        // silently ignore one if present — only take this shortcut when none
+        // was supplied.
+        if ((score_mod_id == 0 || score_mod_id == 1) &&
+            !attrs.get_bool(AttrKey::HasBlockMask, false)) {
             bool causal = (score_mod_id == 1);
             OpAttributes fa_attrs;
             fa_attrs.set(AttrKey::Scale, static_cast<double>(scale));
@@ -3855,13 +3888,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         }
 
         // ScoreModId 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
-        // sliding_window_sym, user_lambda) and user-registered functors (>= 8)
-        // go through the shared, device-agnostic composed-ops forward. The
-        // tenzor:: ops inside dispatch to OneAPI automatically (Q/K/V live on
-        // OneAPI), so OneAPI runs bit-for-bit the same math as the CPU
-        // reference and every other backend (F018/F019/F023/F024). This also
-        // fixes the user-functor path that previously returned an empty LSE.
-        if (score_mod_id >= 2) {
+        // sliding_window_sym, user_lambda) and user-registered functors (>= 8),
+        // or ScoreModId 0/1 with block_mask present, go through the shared,
+        // device-agnostic composed-ops forward. The tenzor:: ops inside
+        // dispatch to OneAPI automatically (Q/K/V live on OneAPI), so OneAPI
+        // runs bit-for-bit the same math as the CPU reference and every other
+        // backend (F018/F019/F023/F024). This also fixes the user-functor
+        // path that previously returned an empty LSE.
+        if (score_mod_id >= 0) {
             return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
         }
 
@@ -3876,10 +3910,19 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
         // F14: identity (0) and causal (1) — route to FlashAttention backward
-        // (a fused path exists). Sliding-window (2) and user-registered
-        // functors (>=3) flow through a composed-ops backward via existing
-        // bmm/softmax-backward primitives.
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // (a fused path exists), but only when neither block_mask nor
+        // relpos_bias is present (AUTOGRAD-R027: FlashAttentionBackward's
+        // wrapper reads inputs[5]=L, inputs[6]=philox_seed,
+        // inputs[7]=philox_offset by fixed position and would silently
+        // misinterpret block_mask/relpos_bias as those; HasBlockMask/
+        // HasRelposBias are set explicitly by the dispatch call site, not
+        // inferred from inputs.size() which is ambiguous for independently-
+        // optional trailing slots). Sliding-window (2) and user-registered
+        // functors (>=3) always flow through the composed-ops backward via
+        // existing bmm/softmax-backward primitives.
+        const bool has_extra_tensor = attrs.get_bool(AttrKey::HasBlockMask, false) ||
+                                      attrs.get_bool(AttrKey::HasRelposBias, false);
+        if ((score_mod_id == 0 || score_mod_id == 1) && !has_extra_tensor) {
             bool causal = (score_mod_id == 1);
             OpAttributes bwd_attrs;
             bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
@@ -3888,7 +3931,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         }
 
-        if (score_mod_id >= 2) {
+        if (score_mod_id >= 0) {
             // ScoreModId 2-7 and user functors (>= 8): shared, device-agnostic
             // composed backward (replays forward, softmax-attention chain rule).
             // Same helper as the CPU reference and every other backend, so
@@ -4240,9 +4283,30 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Slice,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto starts = attrs.get_int_list(AttrKey::Starts);
-            auto ends = attrs.get_int_list(AttrKey::Ends);
-            auto steps = attrs.get_int_list(AttrKey::Steps);
+            // AUTOGRAD-R046: support both the multi-dim (Starts/Ends/Steps
+            // lists) and single-dim (Dim/Start/End/Step scalars) attribute
+            // formats, matching CPU/CUDA. SliceBackward::saved_attributes()
+            // emits only the singular keys, so a backward/JIT/vmap
+            // re-dispatch here previously read an empty Starts list and
+            // sliced with empty ranges. oneapi::slice_kernel is natively
+            // multi-dim only; build a full per-dim starts/ends/steps vector
+            // from the singular format (mirrors the CUDA kernel's
+            // defaulting exactly).
+            if (attrs.has(AttrKey::Starts)) {
+                auto starts = attrs.get_int_list(AttrKey::Starts);
+                auto ends = attrs.get_int_list(AttrKey::Ends);
+                auto steps = attrs.get_int_list(AttrKey::Steps);
+                return oneapi::slice_kernel(inputs[0], starts, ends, steps, get_q(inputs));
+            }
+            int64_t ndim = inputs[0].ndim();
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            if (dim < 0) dim += ndim;
+            int64_t start = attrs.get_int(AttrKey::Start, 0);
+            int64_t end = attrs.get_int(AttrKey::End, -1);
+            int64_t step = attrs.get_int(AttrKey::Step, 1);
+            std::vector<int64_t> starts(ndim, 0), ends(ndim), steps(ndim, 1);
+            for (int64_t d = 0; d < ndim; ++d) ends[d] = inputs[0].shape()[d];
+            if (ndim > 0) { starts[dim] = start; ends[dim] = end; steps[dim] = step; }
             return oneapi::slice_kernel(inputs[0], starts, ends, steps, get_q(inputs));
         });
 
@@ -5846,9 +5910,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             if (dim < 0) dim += ndim;
             int64_t dim_size = output.shape()[dim];
 
+            // AUTOGRAD-R046 side-fix: `end += dim_size + 1` was an off-by-one
+            // (matches the previously-fixed CUDA bug this test regresses
+            // for) — end=-1 on a size-4 dim must resolve to 3 (stop before
+            // the last element), not 4. Match CPU/CUDA's fully-clamped
+            // negative-index normalization exactly.
             if (start < 0) start += dim_size;
-            if (end < 0) end += dim_size + 1;
+            if (end < 0) end += dim_size;
             if (start < 0) start = 0;
+            if (start > dim_size) start = dim_size;
+            if (end < 0) end = 0;
             if (end > dim_size) end = dim_size;
 
             auto dst_slice = output.slice(dim, start, end, step);

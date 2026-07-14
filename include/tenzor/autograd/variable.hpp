@@ -88,10 +88,27 @@ struct VariableImpl {
         if (this != &other) {
             // Lock both mutexes to prevent race during grad_mutex_ reassignment.
             // Use std::lock to avoid deadlock if two assignments happen concurrently.
+            //
+            // AUTOGRAD-R042: `this != &other` only rejects literal
+            // self-assignment. It does NOT catch the case where `this` and
+            // `other` are distinct VariableImpl instances that already share
+            // the same underlying grad_mutex_ (e.g. `this` was
+            // copy-constructed from `other`, or both were copy-constructed
+            // from a common source — the copy constructor above shares
+            // grad_mutex_ by design). std::lock(lock1, lock2) on two
+            // std::unique_lock objects wrapping the SAME non-recursive
+            // std::mutex self-deadlocks: it is not two distinct locks that
+            // happen to protect the same data, it is one lock acquired
+            // twice. Lock once in that case.
             auto old_mutex = grad_mutex_;
             std::unique_lock<std::mutex> lock1(*old_mutex, std::defer_lock);
-            std::unique_lock<std::mutex> lock2(*other.grad_mutex_, std::defer_lock);
-            std::lock(lock1, lock2);
+            std::unique_lock<std::mutex> lock2;
+            if (old_mutex == other.grad_mutex_) {
+                lock1.lock();
+            } else {
+                lock2 = std::unique_lock<std::mutex>(*other.grad_mutex_, std::defer_lock);
+                std::lock(lock1, lock2);
+            }
 
             data_ = other.data_;
             grad_ = other.grad_;
@@ -357,6 +374,20 @@ public:
      * @param gradient Tensor to set as gradient
      */
     auto set_grad(Tensor gradient) -> void;
+
+    /**
+     * @brief Accumulate a gradient into this variable's existing .grad(),
+     * matching the standard accumulate contract (existing + incoming).
+     *
+     * Unlike set_grad() (unconditional overwrite), repeated calls sum into
+     * the existing gradient — the same semantics every other leaf/
+     * retain_grad Variable gets when reached mid-graph during backward().
+     * Promotes to the wider of (existing, incoming) dtype before adding,
+     * mirroring the engine's own accumulate_unlocked(). Thread-safe.
+     *
+     * @param gradient Tensor to accumulate into the existing gradient
+     */
+    auto accumulate_grad(Tensor gradient) -> void;
 
     /**
      * @brief Check if variable has a sparse gradient.

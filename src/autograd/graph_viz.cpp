@@ -75,10 +75,16 @@ auto make_dot(const Variable& root,
             }
         }
 
-        // Show input variables as leaf nodes
+        // Show input variables as leaf nodes. Key by tensor storage identity
+        // (data_ptr()), not `&input_var` — that address is the loop
+        // reference's own stack slot, which differs across every Function
+        // that shares the same underlying leaf Variable (e.g. a weight fed
+        // to multiple ops), so the same leaf rendered as duplicate ellipse
+        // nodes instead of one shared node. Mirrors the param_names fix
+        // above (AUTOGRAD-R033).
         for (auto& input_var : fn->input_variables()) {
             if (!input_var.grad_fn() && input_var.requires_grad()) {
-                uintptr_t var_id = reinterpret_cast<uintptr_t>(&input_var);
+                uintptr_t var_id = reinterpret_cast<uintptr_t>(input_var.tensor().data_ptr());
                 std::string label = "param";
 
                 // Check if this is a named parameter (keyed by storage identity)

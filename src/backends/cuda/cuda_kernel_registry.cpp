@@ -1124,6 +1124,59 @@ namespace nn::quantization::kernels {
     ) -> void;
 } // namespace nn::quantization::kernels
 
+namespace {
+// cuda::nanvar_dispatch/nanstd_dispatch (math.cu) ignore AttrKey::Dim/Keepdim
+// and always full-reduce; ops/reduction.cpp's nanvar()/nanstd() never
+// dispatch this OpId directly, but jvp_adapter_nanvar/nanstd
+// (jvp_rules.cpp) call tenzor::dispatch(OpId::NanVar, {x.primal()}, attrs)
+// directly inside forward-mode AD, so tenzor::jvp(f, ...) where f calls
+// nanvar(x, dim=k) genuinely reaches this wrapper. Mirrors ROCm's
+// rocm_compose_nanvar (rocm_kernel_registry.cpp) verbatim, using only
+// backend-agnostic tenzor:: ops so it works identically here.
+Tensor cuda_compose_nanvar(const Tensor& x_in, int64_t dim, bool keepdim,
+                            int64_t correction) {
+    bool narrow = (x_in.dtype() == DType::Float16 ||
+                   x_in.dtype() == DType::BFloat16);
+    Tensor x = narrow ? x_in.to(DType::Float32) : x_in;
+
+    bool full_reduce = (dim == std::numeric_limits<int64_t>::min());
+    Tensor work = x;
+    if (full_reduce) {
+        work = tenzor::reshape(x.contiguous(), std::vector<int64_t>{x.numel()});
+        dim = 0;
+    }
+
+    Tensor mask = tenzor::isnan(work);
+    Tensor valid = tenzor::logical_not(mask).to(work.dtype());
+    Tensor cleaned = tenzor::where(mask, tenzor::zeros_like(work), work);
+
+    Tensor count_kd = tenzor::sum(valid, dim, /*keepdim=*/true);
+    Tensor one_kd = tenzor::ones_like(count_kd);
+    Tensor safe_count = tenzor::where(tenzor::gt(count_kd, tenzor::zeros_like(count_kd)),
+                                      count_kd, one_kd);
+    Tensor numer = tenzor::sum(cleaned, dim, /*keepdim=*/true);
+    Tensor mean_kd = tenzor::div(numer, safe_count);
+
+    Tensor diff = tenzor::sub(work, mean_kd);
+    Tensor diff_valid = tenzor::where(mask, tenzor::zeros_like(diff), diff);
+    Tensor sq = tenzor::mul(diff_valid, diff_valid);
+    Tensor sum_sq = tenzor::sum(sq, dim, keepdim);
+
+    Tensor count = tenzor::sum(valid, dim, keepdim);
+    Tensor corr = tenzor::full(
+        std::vector<int64_t>(count.shape().begin(), count.shape().end()),
+        static_cast<double>(correction), count.dtype(), count.device());
+    Tensor denom = tenzor::sub(count, corr);
+    Tensor safe_denom = tenzor::where(tenzor::gt(denom, tenzor::zeros_like(denom)),
+                                      denom, tenzor::ones_like(denom));
+    Tensor var = tenzor::div(sum_sq, safe_denom);
+    var = tenzor::where(tenzor::gt(denom, tenzor::zeros_like(denom)),
+                        var, tenzor::zeros_like(var));
+
+    return narrow ? var.to(x_in.dtype()) : var;
+}
+} // namespace
+
 /**
  * @brief Register all CUDA kernels with the dispatch table.
  */
@@ -1930,13 +1983,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 // Matches CPU/OneAPI/ROCm.
                 scores = tenzor::where(mask.to(DType::Bool), neg_inf, scores);
             }
+            // Per docs/internals/attention-contract.md, Outputs=(output,
+            // logsumexp). Computed from `scores` (post-scale, post-causal-
+            // mask, pre-softmax) before it's discarded, mirroring OneAPI's
+            // composed-path FusedAttention wrapper.
+            Tensor lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
             NewOpAttributes sm_attrs;
             sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
             std::vector<Tensor> sm_in = {scores};
             Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
             Tensor out = tenzor::bmm(probs, V3);
-            if (is4d) out = tenzor::reshape(out, std::vector<int64_t>{b, h, sq, dv});
-            return std::vector<Tensor>{out};
+            if (is4d) {
+                out = tenzor::reshape(out, std::vector<int64_t>{b, h, sq, dv});
+                lse = tenzor::reshape(lse, std::vector<int64_t>{b, h, sq});
+            }
+            return std::vector<Tensor>{out, lse};
         }
 
 #ifdef TENZOR_HAS_CUDNN_FRONTEND
@@ -1950,8 +2011,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             // is ordered with the output's consumers on the same stream. When no
             // explicit stream is provided, nullptr selects the default stream.
             cudaStream_t sdpa_stream = get_cuda_stream(attrs);
-            auto output = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale, causal_attr, sdpa_stream);
-            return std::vector<Tensor>{output};
+            auto [output, lse] = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale, causal_attr, sdpa_stream);
+            return std::vector<Tensor>{output, lse};
         }
 #endif
 
@@ -2005,10 +2066,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             Tensor K3 = Kc.reshape({b * h, sk, d});
             Tensor V3 = Vc.reshape({b * h, sk, d_v});
             auto [out3, lse3] = cuda::fused_attention_cuda(Q3, K3, V3, scale, causal_attr, 0.0f, 0u);
-            return std::vector<Tensor>{out3.reshape({b, h, sq, d_v})};
+            // Per docs/internals/attention-contract.md, Outputs=(output,
+            // logsumexp); fused_attention_cuda already computes lse3 — it was
+            // being discarded here, which silently disabled the fast fused-
+            // kernel backward path (run_fused_dispatch pads the missing 2nd
+            // output and falls back to the slow composed-ops backward).
+            return std::vector<Tensor>{out3.reshape({b, h, sq, d_v}), lse3.reshape({b, h, sq})};
         }
         auto [output, lse] = cuda::fused_attention_cuda(Qi, Ki, Vi, scale, causal_attr, 0.0f, 0u);
-        return std::vector<Tensor>{output};
+        return std::vector<Tensor>{output, lse};
     });
 
     // =========================================================================
@@ -2360,8 +2426,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-        // ScoreModId 0/1 reduce to FusedAttention.
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // ScoreModId 0/1 reduce to FusedAttention — but only when no
+        // block_mask was supplied (AUTOGRAD-R027: fused_attention_cuda has no
+        // block_mask parameter and would silently ignore one if present).
+        if ((score_mod_id == 0 || score_mod_id == 1) &&
+            !attrs.get_bool(AttrKey::HasBlockMask, false)) {
             bool causal = (score_mod_id == 1);
             const Tensor& Qi = inputs[0];
             const Tensor& Ki = inputs[1];
@@ -2414,12 +2483,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         }
 
         // ScoreModId 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
-        // sliding_window_sym, user_lambda) and user-registered functors (>= 8)
-        // go through the shared, device-agnostic composed-ops forward. The
-        // tenzor:: ops inside dispatch to CUDA automatically (Q/K/V live on
-        // CUDA), so CUDA runs bit-for-bit the same math as the CPU reference
-        // and every other backend (F018/F019/F023/F024).
-        if (score_mod_id >= 2) {
+        // sliding_window_sym, user_lambda) and user-registered functors (>= 8),
+        // or ScoreModId 0/1 with block_mask present, go through the shared,
+        // device-agnostic composed-ops forward. The tenzor:: ops inside
+        // dispatch to CUDA automatically (Q/K/V live on CUDA), so CUDA runs
+        // bit-for-bit the same math as the CPU reference and every other
+        // backend (F018/F019/F023/F024).
+        if (score_mod_id >= 0) {
             return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
         }
 
@@ -2437,7 +2507,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // backward when applicable. Sliding-window (2) and user-registered
         // functors (>= 3) flow through a composed-ops backward (same pattern
         // as F14 OneAPI).
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // AUTOGRAD-R027: FlexAttentionBackward's canonical input order is
+        // [dO,Q,K,V,O,(L?),(block_mask?),(relpos_bias?)], each optional
+        // independently — NOT disambiguable from inputs.size() alone (see
+        // try_flex_backward_or_throw in function_attention.cpp). The fused
+        // kernel below and FlashAttentionBackward's wrapper (which reads
+        // inputs[5]=L, inputs[6]=philox_seed, inputs[7]=philox_offset by
+        // fixed position) would silently misinterpret block_mask/relpos_bias
+        // as philox seed/offset state, so only take either fast path when
+        // HasBlockMask/HasRelposBias (set explicitly by the dispatch call
+        // site) confirm neither is present.
+        const bool has_extra_tensor = attrs.get_bool(AttrKey::HasBlockMask, false) ||
+                                      attrs.get_bool(AttrKey::HasRelposBias, false);
+        if ((score_mod_id == 0 || score_mod_id == 1) && !has_extra_tensor) {
             bool causal = (score_mod_id == 1);
             const Tensor& dO = inputs[0], &Q = inputs[1], &K = inputs[2], &V = inputs[3], &O = inputs[4];
             int64_t head_dim = Q.shape().back();
@@ -2453,10 +2535,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         }
 
-        if (score_mod_id >= 2) {
-            // ScoreModId 2-7 and user functors (>= 8): shared, device-agnostic
-            // composed backward (replays forward, softmax-attention chain rule).
-            // Same helper as the CPU reference and every other backend, so
+        if (score_mod_id >= 0) {
+            // ScoreModId 2-7 and user functors (>= 8), or ScoreModId 0/1 with
+            // block_mask/relpos_bias present: shared, device-agnostic composed
+            // backward (replays forward, softmax-attention chain rule). Same
+            // helper as the CPU reference and every other backend, so
             // forward/backward stay mutually consistent (F018/F023/F024).
             return tenzor::nn::flex_attention_score_mod_backward(inputs, attrs);
         }
@@ -5706,8 +5789,26 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         if (!flat.is_contiguous()) flat = flat.contiguous();
         return cuda::diag_kernel(flat, offset, get_cuda_stream(attrs));
     });
-    table.register_single_output_kernel(OpId::NanVar, cuda::nanvar_dispatch);
-    table.register_single_output_kernel(OpId::NanStd, cuda::nanstd_dispatch);
+    table.register_single_output_kernel(OpId::NanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        bool full_reduce = (dim == std::numeric_limits<int64_t>::min());
+        if (full_reduce && (correction == 0 || correction == 1)) {
+            return cuda::nanvar_dispatch(inputs, attrs);
+        }
+        return cuda_compose_nanvar(inputs[0], dim, keepdim, correction);
+    });
+    table.register_single_output_kernel(OpId::NanStd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        bool full_reduce = (dim == std::numeric_limits<int64_t>::min());
+        if (full_reduce && (correction == 0 || correction == 1)) {
+            return cuda::nanstd_dispatch(inputs, attrs);
+        }
+        return tenzor::sqrt(cuda_compose_nanvar(inputs[0], dim, keepdim, correction));
+    });
 
     // =========================================================================
     // New math operations (OpId 680-688)

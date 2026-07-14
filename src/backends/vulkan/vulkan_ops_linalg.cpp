@@ -15,6 +15,27 @@ static constexpr int64_t TILED_BLOCK_SIZE = 32;        // panel width for blocke
 // must not exceed 256 or the load/store loops read/write out of bounds (UB).
 static constexpr int64_t MAX_BLOCKED_LINALG_SIZE = 256;
 
+// AUTOGRAD-R044: Vulkan linalg supports Float32/Float64/Float16 natively
+// (BFloat16 is upcast to Float32 by the caller before reaching these
+// dispatch functions). Every dtype branch below is a plain
+// `is_f64 ? ... : is_f16 ? ... : "..._f32_shader"` ternary, so anything
+// that is NOT f64/f16 — including Complex64/Complex128 — silently falls
+// through to the Float32 shader instead of being rejected, unlike ROCm's
+// validate_linalg_dtype (src/backends/rocm/kernels/linalg.hip.cpp) which
+// throws a named error. Currently unreachable in practice (complex inputs
+// are shuttled to CPU by try_gpu_dispatch before any GPU backend is
+// reached, src/ops/linalg.cpp), but a defense-in-depth gap if that routing
+// ever changes. Mirror ROCm's guard here.
+static void validate_linalg_dtype(const Tensor& t, const std::string& op_name) {
+    auto dt = t.dtype();
+    if (dt != DType::Float32 && dt != DType::Float64 && dt != DType::Float16) {
+        throw std::invalid_argument(
+            "linalg::" + op_name + ": unsupported dtype " +
+            std::string(dtype_name(dt)) +
+            " on Vulkan. Supported: Float32, Float64, Float16.");
+    }
+}
+
 // =============================================================================
 // Linear Algebra Operations — Native Vulkan shaders for small matrices,
 // tiled blocked algorithms for medium matrices (33-256)
@@ -785,6 +806,7 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> Tensor {
+    validate_linalg_dtype(input, "cholesky");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -855,6 +877,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor> {
+    validate_linalg_dtype(input, "qr");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -930,6 +953,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -> std::vector<Tensor> {
+    validate_linalg_dtype(input, "svd");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -1303,6 +1327,7 @@ void VulkanBackend::runBlockedHessenberg(Tensor& A, Tensor& tau, int64_t n,
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tensor> {
+    validate_linalg_dtype(input, "eigh");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -1402,6 +1427,7 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor> {
+    validate_linalg_dtype(input, "eig");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -3431,6 +3457,11 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
 
 auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor& B,
                                                    bool upper, bool unitriangular) -> Tensor {
+    // AUTOGRAD-R044: reject unsupported dtypes (notably Complex64/128) up
+    // front. Without this, the widen-and-recurse branch below would call
+    // `A.to(DType::Float32)` on a complex tensor, which silently narrows to
+    // the real component instead of failing loud.
+    validate_linalg_dtype(A, "solve_triangular");
     // Half-precision dtypes widen to Float32; Float64 uses a dedicated shader
     // to keep double precision through cholesky_inverse backward.
     if (A.dtype() != DType::Float32 && A.dtype() != DType::Float64) {

@@ -238,10 +238,10 @@ enum class OpId : uint16_t {
     DeformableConv2dBackwardWeight,  // Backward w.r.t. weight
     DeformableConv2dBackwardBias,    // Backward w.r.t. bias (channel sum)
     // CC.5: dispatch surface for the 1D / 3D depthwise-conv fast paths
-    // (groups == in_channels). Sibling to DepthwiseConv2d=175. Backend
-    // kernels are a follow-up — for now every backend registry installs a
-    // throw-not-implemented handler so accidental dispatch fails loudly
-    // instead of silently miscomputing.
+    // (groups == in_channels). Sibling to DepthwiseConv2d=175. All 6 backend
+    // registries install real, working, input-order-consistent kernels
+    // (AUTOGRAD-R054 — this comment previously claimed a throw-not-
+    // implemented placeholder, which is no longer accurate).
     DepthwiseConv1d = 188,
     DepthwiseConv3d = 189,
 

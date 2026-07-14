@@ -277,11 +277,21 @@ auto MaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 }
 
 // MedianBackward implementation
-auto MedianBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    int64_t dim = dim_.value_or(-1);
-    auto [values, indices] = ::tenzor::median(inputs[0].tensor(), dim, keepdim_);
-    save_for_backward({inputs[0].tensor(), values});
-    return {Variable(values, true)};
+//
+// forward() previously resolved dim_.value_or(-1) locally for its own
+// median() call but never updated the dim_ member — a real forward/backward
+// semantic mismatch if ever hit with dim_==nullopt on a >1D tensor:
+// value_or(-1) means "reduce along the last axis" here, but backward()'s
+// own !dim_.has_value() branch means "global full-tensor reduction" — a
+// different result for anything but a 1D input. The only production
+// construction site (ops.cpp) always resolves dim to a concrete value
+// before constructing this Function and never calls forward() directly
+// (bypassing it entirely, per every sibling reduction Function in this
+// file — see MinBackward/StdBackward/VarBackward/ProdBackward/
+// LogSumExpBackward::forward in function_reduction_ext.cpp). Throw here
+// too instead of leaving latently-wrong logic for a future direct caller.
+auto MedianBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("MedianBackward::forward should not be called directly");
 }
 
 auto MedianBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
@@ -434,12 +444,11 @@ auto MedianBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     }
 }
 
-// ModeBackward implementation
-auto ModeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
-    int64_t dim = dim_.value_or(-1);
-    auto [values, indices] = ::tenzor::mode(inputs[0].tensor(), dim, keepdim_);
-    save_for_backward({inputs[0].tensor(), values});
-    return {Variable(values, true)};
+// ModeBackward implementation — see MedianBackward::forward's comment above
+// for the identical forward/backward dim_==nullopt mismatch this guards
+// against.
+auto ModeBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("ModeBackward::forward should not be called directly");
 }
 
 auto ModeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {

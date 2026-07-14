@@ -258,7 +258,11 @@ TEST_P(GradientParityBackendTest, BatchNormBackward) {
     bn.to(Device::cpu());
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = bn.forward(x_cpu);
-    auto loss_cpu = tenzor::sum(out_cpu);
+    // sum(out) is degenerate: affine=true with weight=ones/bias=zeros
+    // normalizes to exactly zero mean, so the true gradient is 0
+    // identically — sum(out*out) exercises the real gradient (mirrors the
+    // GradNNParityTest fix for the same normalization-layer test class).
+    auto loss_cpu = tenzor::sum(out_cpu * out_cpu);
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
@@ -276,11 +280,11 @@ TEST_P(GradientParityBackendTest, BatchNormBackward) {
 
     auto x_dev = Variable(input_data.to(device), true);
     auto out_dev = bn_dev.forward(x_dev);
-    auto loss_dev = tenzor::sum(out_dev);
+    auto loss_dev = tenzor::sum(out_dev * out_dev);
     loss_dev.backward();
     device.synchronize();
 
-    ASSERT_TRUE(x_dev.has_grad());
+    EXPECT_GRAD_FLOWS(x_dev);
     compareGradientWithCPU(x_cpu.grad().value(), x_dev.grad().value(),
                            1e-5f, 1e-3f);
 }

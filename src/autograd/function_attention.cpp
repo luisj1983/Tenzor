@@ -358,17 +358,28 @@ auto try_flex_backward_or_throw(const Tensor& dO,
     // The trailing optionals are disambiguated upstream by save-time boolean
     // predicates (has_lse, and has_block_mask_) in FlexAttentionBackward::backward
     // — NOT by vector size or slot position. See the A-01 decode there.
+    const bool has_block_mask = block_mask.is_valid() && block_mask.shape().size() > 0;
+    const bool has_relpos_bias = relpos_bias.is_valid() && relpos_bias.shape().size() > 0;
     std::vector<Tensor> bwd_inputs = {dO, Q, K, V, O};
     if (L.is_valid() && L.shape().size() > 0) bwd_inputs.push_back(L);
-    if (block_mask.is_valid() && block_mask.shape().size() > 0) bwd_inputs.push_back(block_mask);
+    if (has_block_mask) bwd_inputs.push_back(block_mask);
     // R8 fix: relpos_bias (id 3) is appended LAST, matching exactly what
     // flex_attention_score_mod_backward reads (inputs.back() for id 3). The
     // builder previously never appended a bias, so the backward helper aliased
     // L / block_mask as the bias and produced wrong gradients.
-    if (relpos_bias.is_valid() && relpos_bias.shape().size() > 0) bwd_inputs.push_back(relpos_bias);
+    if (has_relpos_bias) bwd_inputs.push_back(relpos_bias);
     OpAttributes bwd_attrs;
     bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
     bwd_attrs.set(AttrKey::ScoreModId, static_cast<int64_t>(score_mod_id));
+    // AUTOGRAD-R027: explicit presence flags, NOT inferred from bwd_inputs.size()
+    // (independently-optional trailing slots make size ambiguous — see the A-03
+    // comment above). Backend wrappers use these to decide whether their
+    // score_mod_id∈{0,1} fast path (FlashAttentionBackward's wrapper, which reads
+    // inputs[5]=L, inputs[6]=philox_seed, inputs[7]=philox_offset by fixed
+    // position) is safe to take without misinterpreting block_mask/relpos_bias
+    // as philox seed/offset state.
+    bwd_attrs.set(AttrKey::HasBlockMask, has_block_mask);
+    bwd_attrs.set(AttrKey::HasRelposBias, has_relpos_bias);
     // Same built-in score-mod parameters as the forward so the replayed scores
     // (and thus the gradients) match the forward exactly.
     if (window_size > 0) bwd_attrs.set(AttrKey::WindowSize, static_cast<int64_t>(window_size));
@@ -459,7 +470,13 @@ auto FusedAttentionBackward::backward(std::vector<Tensor> grad_outputs) -> std::
 auto FlexAttentionBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     TENZOR_CHECK(inputs.size() >= 3, "FlexAttentionBackward::forward expects at least 3 inputs (Q, K, V)");
     Tensor block_mask = has_block_mask_ && inputs.size() > 3 ? inputs[3].tensor() : Tensor{};
-    return {flex_attention(inputs[0], inputs[1], inputs[2], scale_, score_mod_id_, block_mask)};
+    // AUTOGRAD-R036: pass the saved score_mod parameters through — omitting
+    // them silently degraded a recomputed sliding-window/prefix-lm/relpos_bias
+    // forward to defaults (window_size=0, prefix_length=0, no bias), unlike
+    // the sibling FlashAttentionBackward/FusedAttentionBackward::forward(),
+    // which recompute with their full saved parameter set.
+    return {flex_attention(inputs[0], inputs[1], inputs[2], scale_, score_mod_id_,
+                           block_mask, window_size_, prefix_length_, relpos_bias_)};
 }
 
 auto FlexAttentionBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
@@ -760,11 +777,19 @@ auto run_flex_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V,
     // relevant to score_mod_id, so setting a value harmlessly no-ops otherwise.
     if (window_size > 0) attrs.set(AttrKey::WindowSize, static_cast<int64_t>(window_size));
     if (prefix_length > 0) attrs.set(AttrKey::PrefixLength, static_cast<int64_t>(prefix_length));
+    const bool has_block_mask = block_mask.is_valid() && block_mask.shape().size() > 0;
+    const bool has_relpos_bias = relpos_bias.is_valid() && relpos_bias.shape().size() > 0;
+    // AUTOGRAD-R027: surface presence explicitly so backend wrappers can
+    // decide whether their score_mod_id∈{0,1} fast path (which forwards the
+    // raw input span positionally) is safe to take, instead of guessing from
+    // inputs.size() — see try_flex_backward_or_throw's identical rationale.
+    attrs.set(AttrKey::HasBlockMask, has_block_mask);
+    attrs.set(AttrKey::HasRelposBias, has_relpos_bias);
     std::vector<Tensor> inputs = {Q, K, V};
-    if (block_mask.is_valid() && block_mask.shape().size() > 0) inputs.push_back(block_mask);
+    if (has_block_mask) inputs.push_back(block_mask);
     // relpos_bias (id 3) is appended LAST so the forward helper's contract holds
     // in both cases: inputs[3] when there is no block_mask, else inputs.back().
-    if (relpos_bias.is_valid() && relpos_bias.shape().size() > 0) inputs.push_back(relpos_bias);
+    if (has_relpos_bias) inputs.push_back(relpos_bias);
     std::vector<Tensor> outs = dispatch<OpId::FlexAttention>(inputs, attrs);
     while (outs.size() < 2) outs.emplace_back();
     return outs;

@@ -321,7 +321,14 @@ TEST_P(GradCheckMultiBackendTest, LayerNorm) {
     }
     auto x = Variable(randn({2, 4}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
-        return tenzor::sum(nn::functional::layer_norm(v, std::vector<int64_t>{4}));
+        // sum(out) is degenerate: affine=true with weight=ones/bias=zeros
+        // normalizes to exactly zero mean, so the true gradient is 0
+        // identically — a fully-disconnected/no-op kernel would be
+        // indistinguishable. sum(out*out) exercises the real gradient
+        // (mirrors the fix applied to the analogous GradNNParityTest
+        // normalization tests in test_grad_nn_parity.cpp).
+        auto out = nn::functional::layer_norm(v, std::vector<int64_t>{4});
+        return tenzor::sum(out * out);
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
@@ -842,7 +849,10 @@ TEST_P(GradCheckMultiBackendTest, InstanceNorm1d) {
     in.to(dtype());
     auto x = Variable(randn({2, C, 5}, dtype(), device()), true);
     auto f = [&in](const Variable& v) -> Variable {
-        return tenzor::sum(in.forward(v));
+        // sum(out) is degenerate for affine=true normalization (zero-mean
+        // by construction) — see LayerNorm's comment above.
+        auto out = in.forward(v);
+        return tenzor::sum(out * out);
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "instance_norm1d gradcheck failed on " << device().to_string();
@@ -859,7 +869,10 @@ TEST_P(GradCheckMultiBackendTest, InstanceNorm2d) {
     in.to(dtype());
     auto x = Variable(randn({2, C, 3, 3}, dtype(), device()), true);
     auto f = [&in](const Variable& v) -> Variable {
-        return tenzor::sum(in.forward(v));
+        // sum(out) is degenerate for affine=true normalization (zero-mean
+        // by construction) — see LayerNorm's comment above.
+        auto out = in.forward(v);
+        return tenzor::sum(out * out);
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "instance_norm2d gradcheck failed on " << device().to_string();
@@ -876,7 +889,10 @@ TEST_P(GradCheckMultiBackendTest, InstanceNorm3d) {
     in.to(dtype());
     auto x = Variable(randn({2, C, 2, 2, 2}, dtype(), device()), true);
     auto f = [&in](const Variable& v) -> Variable {
-        return tenzor::sum(in.forward(v));
+        // sum(out) is degenerate for affine=true normalization (zero-mean
+        // by construction) — see LayerNorm's comment above.
+        auto out = in.forward(v);
+        return tenzor::sum(out * out);
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "instance_norm3d gradcheck failed on " << device().to_string();
@@ -902,7 +918,10 @@ TEST_P(GradCheckMultiBackendTest, SyncBatchNorm) {
     sbn.to(dtype());
     auto x = Variable(randn({2, C, 3, 3}, dtype(), device()), true);
     auto f = [&sbn](const Variable& v) -> Variable {
-        return tenzor::sum(sbn.forward(v));
+        // sum(out) is degenerate for affine=true normalization (zero-mean
+        // by construction) — see LayerNorm's comment above.
+        auto out = sbn.forward(v);
+        return tenzor::sum(out * out);
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "sync_batch_norm gradcheck failed on " << device().to_string();
@@ -1348,8 +1367,26 @@ TEST_P(GradCheckMultiBackendTest, GroupNorm) {
     if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // 1 batch × 4 channels × 3×3, group into 2 groups of 2 channels.
     auto x = Variable(randn({1, 4, 3, 3}, dtype(), device()), true);
-    auto f = [](const Variable& v) -> Variable {
-        return tenzor::sum(nn::functional::group_norm(v, /*num_groups=*/2));
+    // sum(out) is degenerate: GroupNorm normalizes to exactly zero mean per
+    // group regardless of affine params, so the true gradient is 0
+    // identically — see LayerNorm's comment above. sum(out*out) is ALSO a
+    // weak choice here specifically: GroupNorm additionally constructs
+    // approximately unit-VARIANCE output, so sum(out^2)/N ~= 1 to leading
+    // order regardless of the input — d(sum(out^2))/dx is a second-order
+    // (small) effect, not a robust first-order signal, and at Float32 (loss
+    // magnitude ~numel, true FD numerator ~1e-6) that pushed the finite
+    // difference below Float32's rounding floor on OneAPI's particular
+    // reduction order (verified: OneAPI's ANALYTIC backward independently
+    // matches the CPU analytic backward to 1e-7 — this was a gradcheck
+    // numerical-precision artifact, not a real kernel bug). Use a linear
+    // functional against a FIXED (non-self-referential) weight instead —
+    // sum(out * w) has no such invariance and gives a genuine first-order
+    // signal at a well-conditioned magnitude. Captured by value so both
+    // perturbed evaluations in a central-difference step see the same w.
+    auto w = randn({1, 4, 3, 3}, dtype(), device());
+    auto f = [w](const Variable& v) -> Variable {
+        auto out = nn::functional::group_norm(v, /*num_groups=*/2);
+        return tenzor::sum(out * Variable(w, false));
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
         << "group_norm gradcheck failed on " << device().to_string();

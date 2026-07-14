@@ -470,7 +470,13 @@ auto jvp_hardswish(const DualTensor& x) -> DualTensor {
 auto jvp_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
     // s = softmax(p, dim)
     // ds = s * (dt - sum(s * dt, dim, keepdim=true))
-    auto p = x.primal();
+    // Widen Float16/BFloat16 to Float32 for the reduction-heavy softmax chain
+    // (catastrophic cancellation in the exp/sum), mirroring the reverse-mode
+    // SoftmaxBackward's own widen-then-narrow and NestedSoftmaxBackward.
+    const DType orig_dtype = x.primal().dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    auto p = widen ? x.primal().to(DType::Float32) : x.primal();
+    auto dt = widen ? x.tangent().to(DType::Float32) : x.tangent();
     // Compute softmax manually: exp(x - max) / sum(exp(x - max))
     auto max_val = tenzor::max(p, dim, /*keepdim=*/true);
     auto shifted = tenzor::sub(p, max_val);
@@ -478,9 +484,13 @@ auto jvp_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
     auto sum_exp = tenzor::sum(exp_shifted, dim, /*keepdim=*/true);
     auto s = tenzor::div(exp_shifted, sum_exp);
 
-    auto s_dt = tenzor::mul(s, x.tangent());
+    auto s_dt = tenzor::mul(s, dt);
     auto sum_s_dt = tenzor::sum(s_dt, dim, /*keepdim=*/true);
-    auto tangent = tenzor::mul(s, tenzor::sub(x.tangent(), sum_s_dt));
+    auto tangent = tenzor::mul(s, tenzor::sub(dt, sum_s_dt));
+    if (widen) {
+        s = s.to(orig_dtype);
+        tangent = tangent.to(orig_dtype);
+    }
     return DualTensor(std::move(s), std::move(tangent));
 }
 
@@ -488,7 +498,11 @@ auto jvp_log_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
     // log_softmax(x) = x - log(sum(exp(x), dim))
     // d(log_softmax)_i = dt_i - d(logsumexp) = dt_i - sum_j(softmax(x)_j * dt_j)
     // (the subtracted term is a per-row scalar, broadcast along dim)
-    auto p = x.primal();
+    // Widen Float16/BFloat16 to Float32 — see jvp_softmax.
+    const DType orig_dtype = x.primal().dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    auto p = widen ? x.primal().to(DType::Float32) : x.primal();
+    auto dt = widen ? x.tangent().to(DType::Float32) : x.tangent();
     auto max_val = tenzor::max(p, dim, /*keepdim=*/true);
     auto shifted = tenzor::sub(p, max_val);
     auto exp_shifted = tenzor::exp(shifted);
@@ -497,9 +511,13 @@ auto jvp_log_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
     auto primal = tenzor::sub(p, log_sum_exp);
     auto s = tenzor::div(exp_shifted, sum_exp);  // softmax
 
-    auto s_dt = tenzor::mul(s, x.tangent());
+    auto s_dt = tenzor::mul(s, dt);
     auto sum_s_dt = tenzor::sum(s_dt, dim, /*keepdim=*/true);
-    auto tangent = tenzor::sub(x.tangent(), sum_s_dt);
+    auto tangent = tenzor::sub(dt, sum_s_dt);
+    if (widen) {
+        primal = primal.to(orig_dtype);
+        tangent = tangent.to(orig_dtype);
+    }
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
@@ -1731,9 +1749,17 @@ auto jvp_sdpa_forward(const DualTensor& Q,
                       const DualTensor& V,
                       double scale,
                       bool causal) -> DualTensor {
-    const Tensor& Qp = Q.primal();   const Tensor& Qt = Q.tangent();
-    const Tensor& Kp = K.primal();   const Tensor& Kt = K.tangent();
-    const Tensor& Vp = V.primal();   const Tensor& Vt = V.tangent();
+    // Widen Float16/BFloat16 to Float32 for the softmax reduction chain
+    // (catastrophic cancellation), mirroring the reverse-mode
+    // FlashAttentionBackward/NestedAttentionBackward's own widen-then-narrow.
+    const DType orig_dtype = Q.primal().dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor Qp = widen ? Q.primal().to(DType::Float32) : Q.primal();
+    Tensor Qt = widen ? Q.tangent().to(DType::Float32) : Q.tangent();
+    Tensor Kp = widen ? K.primal().to(DType::Float32) : K.primal();
+    Tensor Kt = widen ? K.tangent().to(DType::Float32) : K.tangent();
+    Tensor Vp = widen ? V.primal().to(DType::Float32) : V.primal();
+    Tensor Vt = widen ? V.tangent().to(DType::Float32) : V.tangent();
 
     // K^T over the last two dims.
     int64_t ndim_K = static_cast<int64_t>(Kp.shape().size());
@@ -1794,6 +1820,10 @@ auto jvp_sdpa_forward(const DualTensor& Q,
     auto y   = tenzor::matmul(P,   Vp);
     auto y_t = tenzor::add(tenzor::matmul(P_t, Vp),
                            tenzor::matmul(P,   Vt));
+    if (widen) {
+        y   = y.to(orig_dtype);
+        y_t = y_t.to(orig_dtype);
+    }
     return DualTensor(std::move(y), std::move(y_t));
 }
 
@@ -1806,8 +1836,12 @@ auto jvp_sdpa_forward(const DualTensor& Q,
 auto jvp_fused_softmax_cross_entropy(const DualTensor& logits,
                                      const Tensor& targets,
                                      const std::string& reduction) -> DualTensor {
-    const Tensor& X  = logits.primal();
-    const Tensor& dX = logits.tangent();
+    // Widen Float16/BFloat16 to Float32 for the softmax/logsumexp reduction
+    // chain (catastrophic cancellation), mirroring jvp_softmax/jvp_log_softmax.
+    const DType orig_dtype = logits.primal().dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor X  = widen ? logits.primal().to(DType::Float32) : logits.primal();
+    Tensor dX = widen ? logits.tangent().to(DType::Float32) : logits.tangent();
 
     // Stable softmax across the last dim (class dim).
     int64_t last_dim = -1;
@@ -1847,6 +1881,10 @@ auto jvp_fused_softmax_cross_entropy(const DualTensor& logits,
         // "none" (or anything else): return per-sample.
         primal_out  = std::move(per_loss);
         tangent_out = std::move(per_tan);
+    }
+    if (widen) {
+        primal_out  = primal_out.to(orig_dtype);
+        tangent_out = tangent_out.to(orig_dtype);
     }
     return DualTensor(std::move(primal_out), std::move(tangent_out));
 }
@@ -3157,18 +3195,29 @@ JvpMultiResult jvp_adapter_layer_norm(std::span<const Tensor> primals,
         throw std::runtime_error(
             "jvp_adapter_layer_norm: expected 3 inputs (x, gamma, beta)");
     }
-    const Tensor& x     = primals[0];
-    const Tensor& gamma = primals[1];
-    const Tensor& beta  = primals[2];
+    // Widen Float16/BFloat16 to Float32 for the reduction-heavy mean/variance
+    // chain (catastrophic cancellation in (x-mean)^2), mirroring
+    // NestedLayerNormBackward's own widen-then-narrow and the reverse-mode
+    // LayerNormBackward kernels.
+    const DType orig_dtype = primals[0].dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor x     = widen ? primals[0].to(DType::Float32) : primals[0];
+    Tensor gamma = widen ? primals[1].to(DType::Float32) : primals[1];
+    Tensor beta  = widen ? primals[2].to(DType::Float32) : primals[2];
 
     auto zeros_like_or = [](const Tensor& t, const Tensor& tan) -> Tensor {
         if (tan.numel() != 0) return tan;
         auto sh = std::vector<int64_t>(t.shape().begin(), t.shape().end());
         return tenzor::zeros(sh, t.dtype(), t.device());
     };
-    Tensor dx     = zeros_like_or(x,     tangents[0]);
-    Tensor dgamma = zeros_like_or(gamma, tangents[1]);
-    Tensor dbeta  = zeros_like_or(beta,  tangents[2]);
+    Tensor dx     = zeros_like_or(primals[0], tangents[0]);
+    Tensor dgamma = zeros_like_or(primals[1], tangents[1]);
+    Tensor dbeta  = zeros_like_or(primals[2], tangents[2]);
+    if (widen) {
+        dx     = dx.to(DType::Float32);
+        dgamma = dgamma.to(DType::Float32);
+        dbeta  = dbeta.to(DType::Float32);
+    }
 
     double eps = attrs.get_float(AttrKey::Eps, 1e-5);
 
@@ -3228,6 +3277,15 @@ JvpMultiResult jvp_adapter_layer_norm(std::span<const Tensor> primals,
     // returned by the backend matches x with the last K dims collapsed
     // to size 1 (and *not* squeezed), per the existing contract; keep
     // keepdim=true layout for compatibility with both styles.
+    if (widen) {
+        y     = y.to(orig_dtype);
+        dy    = dy.to(orig_dtype);
+        mean  = mean.to(orig_dtype);
+        rstd  = rstd.to(orig_dtype);
+        dmean = dmean.to(orig_dtype);
+        drstd = drstd.to(orig_dtype);
+    }
+
     JvpMultiResult result;
     result.primals  = { std::move(y), mean,  rstd  };
     result.tangents = { std::move(dy), dmean, std::move(drstd) };
@@ -7112,9 +7170,17 @@ JvpMultiResult jvp_adapter_batchnorm2d_fused_training_s15(
     // We dispatch the kernel once to get the canonical primal outputs
     auto outs = tenzor::dispatch(OpId::BatchNorm2dFusedTraining,
         std::vector<Tensor>(primals.begin(), primals.end()), attrs);
-    // Build a closed-form JVP via composition of primitive ops.
-    const Tensor& x = primals[0];
-    auto dx = tangent_or_zeros(x, tangents[0]);
+    // Build a closed-form JVP via composition of primitive ops. Widen
+    // Float16/BFloat16 to Float32 for the reduction-heavy mean/variance
+    // chain (catastrophic cancellation in (x-mean)^2), mirroring the
+    // reverse-mode BatchNorm backward kernels; only the composed tangent
+    // (dy) needs narrowing back — the primal outputs come from the real
+    // kernel dispatch above and are already in the native dtype.
+    const DType orig_dtype = primals[0].dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor x = widen ? primals[0].to(DType::Float32) : primals[0];
+    auto dx = tangent_or_zeros(primals[0], tangents[0]);
+    if (widen) dx = dx.to(DType::Float32);
     // weight / bias slots (if present) carry their own tangents.
     Tensor weight = (primals.size() > 1) ? primals[1] : Tensor();
     Tensor bias   = (primals.size() > 2) ? primals[2] : Tensor();
@@ -7122,6 +7188,12 @@ JvpMultiResult jvp_adapter_batchnorm2d_fused_training_s15(
         tangent_or_zeros(weight, tangents[1]) : Tensor();
     Tensor dbias = (primals.size() > 2 && tangents.size() > 2) ?
         tangent_or_zeros(bias, tangents[2]) : Tensor();
+    if (widen) {
+        if (weight.numel() != 0) weight = weight.to(DType::Float32);
+        if (bias.numel() != 0) bias = bias.to(DType::Float32);
+        if (dweight.numel() != 0) dweight = dweight.to(DType::Float32);
+        if (dbias.numel() != 0) dbias = dbias.to(DType::Float32);
+    }
     double eps = attrs.get_float(AttrKey::Eps, 1e-5);
 
     // x is [N, C, H, W]. Reduce over dims [0, 2, 3] for per-channel mean/var.
@@ -7164,6 +7236,10 @@ JvpMultiResult jvp_adapter_batchnorm2d_fused_training_s15(
                 std::vector<int64_t>{1, dbias.shape()[0], 1, 1});
             dy = tenzor::add(dy, db_view);
         }
+    }
+
+    if (widen) {
+        dy = dy.to(orig_dtype);
     }
 
     // outs may be {y, save_mean, save_invstd} (or other ordering); we
@@ -7218,12 +7294,22 @@ JvpMultiResult jvp_adapter_group_norm_s15(std::span<const Tensor> primals,
         throw std::runtime_error(
             "jvp_adapter_group_norm_s15: expected 3 inputs (x, gamma, beta)");
     }
-    const Tensor& x     = primals[0];
-    const Tensor& gamma = primals[1];
-    const Tensor& beta  = primals[2];
-    Tensor dx     = jvp_zeros_like_or(x,     tangents[0]);
-    Tensor dgamma = jvp_zeros_like_or(gamma, tangents[1]);
-    Tensor dbeta  = jvp_zeros_like_or(beta,  tangents[2]);
+    // Widen Float16/BFloat16 to Float32 for the reduction-heavy mean/variance
+    // chain (catastrophic cancellation in (x-mean)^2), mirroring
+    // NestedLayerNormBackward's own widen-then-narrow and jvp_adapter_layer_norm.
+    const DType orig_dtype = primals[0].dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor x     = widen ? primals[0].to(DType::Float32) : primals[0];
+    Tensor gamma = widen ? primals[1].to(DType::Float32) : primals[1];
+    Tensor beta  = widen ? primals[2].to(DType::Float32) : primals[2];
+    Tensor dx     = jvp_zeros_like_or(primals[0], tangents[0]);
+    Tensor dgamma = jvp_zeros_like_or(primals[1], tangents[1]);
+    Tensor dbeta  = jvp_zeros_like_or(primals[2], tangents[2]);
+    if (widen) {
+        dx     = dx.to(DType::Float32);
+        dgamma = dgamma.to(DType::Float32);
+        dbeta  = dbeta.to(DType::Float32);
+    }
 
     double eps = attrs.get_float(AttrKey::Eps, 1e-5);
     int64_t G = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
@@ -7281,6 +7367,15 @@ JvpMultiResult jvp_adapter_group_norm_s15(std::span<const Tensor> primals,
     auto rstd_ng  = tenzor::reshape(rstd,  ng_shape);
     auto dmean_ng = tenzor::reshape(dmean, ng_shape);
     auto drstd_ng = tenzor::reshape(drstd, ng_shape);
+
+    if (widen) {
+        y        = y.to(orig_dtype);
+        dy       = dy.to(orig_dtype);
+        mean_ng  = mean_ng.to(orig_dtype);
+        rstd_ng  = rstd_ng.to(orig_dtype);
+        dmean_ng = dmean_ng.to(orig_dtype);
+        drstd_ng = drstd_ng.to(orig_dtype);
+    }
 
     JvpMultiResult result;
     result.primals  = { std::move(y),  std::move(mean_ng),  std::move(rstd_ng)  };

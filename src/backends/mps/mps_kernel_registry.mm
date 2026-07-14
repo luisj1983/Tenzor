@@ -614,9 +614,14 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        // AUTOGRAD-R048: OpId::Max returns {values} only on every other
+        // backend (CPU/CUDA/ROCm/OneAPI/Vulkan); mps_max_kernel computes
+        // indices as an intrinsic byproduct of the reduction (kept, since
+        // dropping it would need a separate kernel path), but the extra
+        // element must not leak into this OpId's return contract.
         Tensor indices;
         auto values = mps_max_kernel(inputs[0], dim, keepdim, indices);
-        return std::vector<Tensor>{values, indices};
+        return std::vector<Tensor>{values};
     });
 
     // Shape operations — zero-copy metadata ops (no GPU→CPU→GPU roundtrip)
@@ -937,7 +942,11 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
 
     table.register_single_output_kernel(OpId::Norm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            float p = static_cast<float>(attrs.get_float(AttrKey::Order, 2.0));
+            // ops/reduction.cpp's norm() sets AttrKey::P (AttrKey::Order is
+            // set only by Polygamma, math.cpp:690, never by Norm); reading
+            // Order here always fell through to the 2.0 default, silently
+            // ignoring any requested p != 2.
+            float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
             bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return mps_norm_kernel(inputs[0], p, dim, keepdim);
@@ -1102,6 +1111,25 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         });
     table.register_single_output_kernel(OpId::Slice,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // AUTOGRAD-R046: support both the multi-dim (Starts/Ends/Steps
+            // lists) and single-dim (Dim/Start/End/Step scalars) attribute
+            // formats, matching CPU/CUDA. mps_slice_kernel is natively
+            // single-dim only, so the list format is composed by applying
+            // it once per dimension (mirrors cpu::slice_multi_kernel's
+            // composition exactly, including its short-list end/step
+            // defaulting).
+            if (attrs.has(AttrKey::Starts)) {
+                auto starts = attrs.get_int_list(AttrKey::Starts);
+                auto ends = attrs.get_int_list(AttrKey::Ends);
+                auto steps = attrs.get_int_list(AttrKey::Steps);
+                Tensor result = inputs[0];
+                for (size_t d = 0; d < starts.size(); ++d) {
+                    const int64_t end = (d < ends.size()) ? ends[d] : result.shape()[static_cast<int64_t>(d)];
+                    const int64_t step = (d < steps.size()) ? steps[d] : 1;
+                    result = mps_slice_kernel(result, static_cast<int64_t>(d), starts[d], end, step);
+                }
+                return result;
+            }
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             int64_t start = attrs.get_int(AttrKey::Start, 0);
             int64_t end = attrs.get_int(AttrKey::End, -1);
@@ -1581,6 +1609,14 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::LinalgCholesky);
     mps_accelerate_single(OpId::LinalgLUSolve);
 
+    // Conj — CPU/CUDA/ROCm/Vulkan/OneAPI all register this; MPS previously
+    // didn't at all, so every complex-dtype linalg backward that calls
+    // adjoint()/conj() (Det/Inv/Solve/Cholesky/Svd/Eigh/LUBackward) threw
+    // "kernel for Conj not found" as soon as it reached an MPS-device
+    // tensor (complex-dtype linalg forward already shuttles through CPU
+    // via try_gpu_dispatch, so this is genuinely reachable).
+    mps_accelerate_single(OpId::Conj);
+
     // Sparse SpMM/SpMV — native Metal compute shaders (see sparse.metal).
     // Reads CSR (crow_indices, col_indices, values) + dense input, writes
     // dense output via the GPU command queue. No CPU dispatch.
@@ -1675,6 +1711,12 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_multi(OpId::Conv3dBackwardInput);
     mps_accelerate_multi(OpId::Conv3dBackwardWeight);
     mps_accelerate_multi(OpId::ConvTranspose2dForward);
+    // ConvTranspose1dForward: CPU already registers this (unsqueeze/squeeze
+    // 2D-lowering); MPS had no registration at all, a real gap for the
+    // JIT-graph ConvTranspose replay path (src/jit/graph.cpp dispatches this
+    // OpId directly for 1-D nodes) — not covered by the ordinary eager
+    // nn::ConvTranspose1d layer, which never reaches this OpId.
+    mps_accelerate_multi(OpId::ConvTranspose1dForward);
     mps_accelerate_multi(OpId::ConvTranspose3dForward);
     mps_accelerate_multi(OpId::ConvTranspose3dBackwardBias);
     mps_accelerate_multi(OpId::ConvTranspose3dBackwardInput);
@@ -1716,8 +1758,17 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         });
     table.register_kernel(OpId::InstanceNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            // inputs: [grad_output, input, mean_saved, rstd_saved, weight]
-            return mps_instancenorm_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
+            // inputs: [grad_output, input, weight, mean, rstd] — order set by
+            // the autograd InstanceNormBackward call sites (normalization.cpp,
+            // "InstanceNormBackward: inputs [grad_output, input, weight, mean,
+            // rstd]"). mps_instancenorm_backward's own signature is
+            // (grad_output, input, mean_saved, rstd_saved, weight), so it needs
+            // reindexing here — mirrors cpu_kernel_registry.cpp's
+            // OpId::InstanceNormBackward wrapper, which does the same
+            // inputs[3]/inputs[4]/inputs[2] reindex. The previous direct
+            // passthrough silently rotated weight->mean_saved,
+            // mean->rstd_saved, rstd->weight.
+            return mps_instancenorm_backward(inputs[0], inputs[1], inputs[3], inputs[4], inputs[2]);
         });
     mps_accelerate_multi(OpId::LayerNorm);
     mps_accelerate_multi(OpId::LayerNormBackward);
@@ -1734,8 +1785,15 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         });
     table.register_kernel(OpId::RMSNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            // inputs: [grad_output, input, weight, rrms]
-            return mps_rmsnorm_backward(inputs[0], inputs[1], inputs[2], inputs[3]);
+            // inputs: [grad_output, input, rrms, weight] — order set by the
+            // autograd RMSNormBackward (normalization.cpp: "inputs_vec = {go,
+            // inp, rm, wt}"). mps_rmsnorm_backward's own signature is
+            // (grad_output, input, weight, rrms), so weight=inputs[3],
+            // rrms=inputs[2] — mirrors cpu_kernel_registry.cpp's
+            // OpId::RMSNormBackward wrapper, which documents this exact same
+            // scramble having previously been fixed there. The previous direct
+            // passthrough here silently swapped weight and rrms.
+            return mps_rmsnorm_backward(inputs[0], inputs[1], inputs[3], inputs[2]);
         });
 
     // CTC Loss — log-domain forward-backward DP
@@ -1774,6 +1832,12 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_multi(OpId::FlashAttention);
     mps_accelerate_multi(OpId::FlashAttentionBackward);
     mps_accelerate_multi(OpId::FusedAttention);
+    // FlexAttention (forward) was missing here — a copy/paste omission from
+    // this trio — while OpId::FlexAttentionBackward was registered below,
+    // making the backward registration permanently unreachable dead code
+    // (forward always threw "kernel not found" first, so no Variable with a
+    // FlexAttentionBackward grad_fn could ever exist on this device).
+    mps_accelerate_multi(OpId::FlexAttention);
     mps_accelerate_multi(OpId::GatherRelativePositionBias);
 
     // Embedding backward
@@ -2066,10 +2130,20 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::LogicalOr);
     mps_accelerate_single(OpId::LogicalXor);
     mps_accelerate_single(OpId::Logit);
+    // AUTOGRAD-R045: Ndtr (normal CDF) had no MPS registration at all while
+    // every other backend has one, and the closely related LogNdtr right
+    // below already uses this same CPU-roundtrip accelerator — an
+    // accidental gap, not an intentional omission.
+    mps_accelerate_single(OpId::Ndtr);
     mps_accelerate_single(OpId::LogNdtr);
     mps_accelerate_single(OpId::LogSigmoid);
     mps_accelerate_single(OpId::MaskedSelect);
-    mps_accelerate_single(OpId::MatMul);
+    // NOTE: no mps_accelerate_single(OpId::MatMul) here — a native
+    // mps_matmul_kernel is already registered above (TENZOR_REGISTER_
+    // BINARY_SINGLE_KERNEL), so mps_accelerate_single would be a silent
+    // no-op (it only registers when the table has no kernel for the op
+    // yet). mps_matmul_kernel itself now shuttles unsupported dtypes
+    // (Float64, Complex64/128) through CPU internally.
     mps_accelerate_single(OpId::Maximum);
     mps_accelerate_single(OpId::MelScale);
     mps_accelerate_single(OpId::MFCC);

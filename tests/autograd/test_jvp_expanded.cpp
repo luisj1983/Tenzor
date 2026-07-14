@@ -186,21 +186,25 @@ TEST_P(JVPExpanded, Softmax) {
 }
 
 TEST_P(JVPExpanded, LogSoftmax) {
-    // Use small values for numerical stability
+    // d(log_softmax)_i = dt_i - sum_j(softmax(x)_j * dt_j); the subtracted
+    // term is a per-row scalar, not per-i, so summing the tangent over the
+    // row does NOT generally vanish (that invariant only holds for uniform
+    // softmax / constant dt) — sum_i(dy_i) = sum(dt) - K*sum_j(s_j*dt_j),
+    // which is nonzero for a generic random x/dt. Verify against a real
+    // numerical (finite-difference) JVP instead, matching the Softmax test
+    // immediately above.
     auto p = tenzor::mul(tenzor::randn({2, 4}, DType::Float32, device), 0.5f);
     auto t = tenzor::randn({2, 4}, DType::Float32, device);
     auto result = jvp_log_softmax(DualTensor(p, t), /*dim=*/1);
-    // Verify tangent shape is correct and that primal matches log_softmax
     EXPECT_EQ(result.tangent().shape()[0], 2);
     EXPECT_EQ(result.tangent().shape()[1], 4);
-    // Verify tangent rows sum to 0 (log_softmax tangent property)
-    auto t_sum = tenzor::sum(result.tangent(), 1, false).cpu();
-    auto* ts = t_sum.data<float>();
-    // log_softmax tangent: dt - s * sum(dt), so sum = sum(dt) - sum(s)*sum(dt) = sum(dt)*(1-1) = 0
-    // Actually sum(tangent) = sum(dt) - sum(s * sum(dt,dim)) = sum(dt) - sum(dt) = 0
-    for (int i = 0; i < 2; ++i) {
-        EXPECT_NEAR(ts[i], 0.0f, 0.01f) << "LogSoftmax tangent row " << i << " doesn't sum to ~0";
-    }
+    auto expected = numerical_jvp([](const Tensor& x) {
+        auto m = tenzor::max(x, 1, true);
+        auto e = tenzor::exp(tenzor::sub(x, m));
+        auto se = tenzor::sum(e, 1, true);
+        return tenzor::sub(x, tenzor::add(tenzor::log(se), m));
+    }, p, t);
+    check_jvp(result.tangent(), expected, "log_softmax");
 }
 
 // =========================================================================

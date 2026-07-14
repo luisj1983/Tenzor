@@ -479,7 +479,14 @@ auto VulkanBackend::dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor 
     std::vector<int64_t> new_shape;
     std::vector<int64_t> new_strides;
 
-    if (dim < 0) {
+    // AUTOGRAD-R047: the sentinel for "no dim supplied -> squeeze all" must
+    // be a value that cannot also be a legitimate (possibly negative) axis
+    // index. The previous `dim < 0` check treated EVERY negative dim,
+    // including -1 (last axis), as squeeze-all, silently ignoring a
+    // specific requested axis; it also made the negative-dim normalization
+    // below dead code, since the else-branch could only ever see dim >= 0.
+    // Matches cpu::squeeze_kernel's SQUEEZE_ALL contract exactly.
+    if (dim == std::numeric_limits<int64_t>::min()) {
         // Squeeze all dimensions of size 1
         for (int64_t i = 0; i < ndim; i++) {
             if (input_shape[i] != 1) {
@@ -494,9 +501,10 @@ auto VulkanBackend::dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor 
             throw std::invalid_argument("Squeeze: dimension out of range");
         }
 
-        // Squeeze specific dimension
+        // Squeeze specific dimension. PyTorch leaves a non-size-1 axis
+        // untouched rather than throwing (mirrors cpu::squeeze_kernel).
         if (input_shape[dim] != 1) {
-            throw std::invalid_argument("Squeeze: dimension size must be 1");
+            return input;
         }
 
         for (int64_t i = 0; i < ndim; i++) {

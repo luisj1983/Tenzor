@@ -1366,12 +1366,24 @@ auto pow(const Variable& input, double exponent) -> Variable {
     // `0^b == 0` for `b > 0`. The underlying tensor `pow(t, double)` does
     // honour C99 pow semantics on most backends, but exponent == 0 also
     // needs ones_like even when the input contains NaN/Inf entries (per
-    // IEEE 754 and PyTorch). Short-circuit those two scalar cases here so
+    // IEEE 754 and PyTorch). Short-circuit the VALUE computation here so
     // the result is unambiguous across every backend.
+    //
+    // AUTOGRAD-R043: the result must still be graph-connected to `input`.
+    // Returning a fully detached `Variable(ones, false)` made any loss
+    // depending solely on x.pow(0) end up with requires_grad()==false —
+    // x.grad() then stayed nullopt instead of being populated with an
+    // all-zero gradient, unlike PyTorch and unlike the symmetric
+    // pow(double, Variable) overload below (which already routes its
+    // equivalent zero-base case through Variable ops). Route through the
+    // normal PowBackward wiring instead — its backward()/
+    // backward_with_variables() already special-case exp_val==0.0 to
+    // return exact zeros (avoiding the NaN the general n*x^(n-1) formula
+    // would produce at x==0) — only the VALUE lambda is overridden here to
+    // bypass potentially NaN/Inf-inconsistent backend pow(t,0) kernels.
     if (exponent == 0.0) {
-        // 0-d exponent: result is identically 1 for every input element.
-        auto ones = tenzor::ones_like(input.tensor());
-        return Variable(ones, false);
+        return unary_autograd_with_param<PowBackward>(input, exponent,
+            [](const Tensor& t) { return tenzor::ones_like(t); });
     }
     return unary_autograd_with_param<PowBackward>(input, exponent,
         [exponent](const Tensor& t) { return tenzor::pow(t, exponent); });
@@ -3084,6 +3096,11 @@ auto logaddexp(const Variable& a, const Variable& b) -> Variable {
 
     auto grad_fn = std::make_shared<LogAddExpBackward>();
     grad_fn->save_for_backward({a.tensor(), b.tensor()});
+    // GG.1: also save the input Variables so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({a, b});
+    }
     grad_fn->input_shape_a_ = std::vector<int64_t>(a.shape().begin(), a.shape().end());
     grad_fn->input_shape_b_ = std::vector<int64_t>(b.shape().begin(), b.shape().end());
 
@@ -3110,6 +3127,11 @@ auto logaddexp2(const Variable& a, const Variable& b) -> Variable {
 
     auto grad_fn = std::make_shared<LogAddExp2Backward>();
     grad_fn->save_for_backward({a.tensor(), b.tensor(), result_tensor});
+    // GG.1: also save the input Variables so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({a, b});
+    }
     grad_fn->input_shape_a_ = std::vector<int64_t>(a.shape().begin(), a.shape().end());
     grad_fn->input_shape_b_ = std::vector<int64_t>(b.shape().begin(), b.shape().end());
 
@@ -3136,6 +3158,11 @@ auto xlogy(const Variable& x, const Variable& y) -> Variable {
 
     auto grad_fn = std::make_shared<XLogYBackward>();
     grad_fn->save_for_backward({x.tensor(), y.tensor()});
+    // GG.1: also save the input Variables so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({x, y});
+    }
     grad_fn->input_shape_x_ = std::vector<int64_t>(x.shape().begin(), x.shape().end());
     grad_fn->input_shape_y_ = std::vector<int64_t>(y.shape().begin(), y.shape().end());
 
@@ -3232,6 +3259,11 @@ auto log_ndtr(const Variable& input) -> Variable {
     auto result = tenzor::log_ndtr(input.tensor());
     auto grad_fn = std::make_shared<LogNdtrBackward>();
     grad_fn->save_for_backward({input.tensor(), result});  // Save both input and output
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -3245,6 +3277,11 @@ auto multigammaln(const Variable& input, int64_t p) -> Variable {
     }
     auto grad_fn = std::make_shared<MultigammalnBackward>(p);
     grad_fn->save_for_backward({input.tensor()});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     auto result = tenzor::multigammaln(input.tensor(), p);
@@ -3263,6 +3300,11 @@ auto cosine_similarity(const Variable& x1, const Variable& x2,
 
     auto grad_fn = std::make_shared<CosineSimilarityBackward>(dim, eps);
     grad_fn->save_for_backward({x1.tensor(), x2.tensor(), result_tensor});
+    // GG.1: also save the input Variables so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({x1, x2});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs = {x1.grad_fn(), x2.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
@@ -3286,6 +3328,11 @@ auto renorm(const Variable& input, double p, int64_t dim, double maxnorm) -> Var
 
     auto grad_fn = std::make_shared<RenormBackward>(p, dim, maxnorm);
     grad_fn->save_for_backward({input.tensor(), result_tensor});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -3303,6 +3350,11 @@ auto cholesky_inverse(const Variable& input, bool upper) -> Variable {
 
     auto grad_fn = std::make_shared<CholeskyInverseBackward>(upper);
     grad_fn->save_for_backward({input.tensor(), result_tensor});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -3323,6 +3375,11 @@ auto ldl_factor(const Variable& input) -> std::tuple<Variable, Variable> {
     // A = L D L^T, plus the pivots so backward can detect Bunch-Kaufman
     // pivoting (the no-pivoting adjoint is invalid for permuted factors).
     grad_fn->save_for_backward({input.tensor(), LD_tensor, pivots_tensor});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -3396,6 +3453,13 @@ auto tensorinv(const Variable& input, int64_t ind) -> Variable {
 
     auto grad_fn = std::make_shared<TensorInvBackward>(ind);
     grad_fn->save_for_backward({result_tensor});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // recompute Y = tensorinv(X) via the Variable-level free function,
+    // keeping the graph connected back through X (the saved output tensor
+    // alone has no such connection).
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -3413,6 +3477,14 @@ auto tensorsolve(const Variable& A, const Variable& B) -> Variable {
 
     auto grad_fn = std::make_shared<TensorSolveBackward>();
     grad_fn->save_for_backward({A.tensor(), B.tensor(), result_tensor});
+    // GG.1: also save A (the only input the local Jacobian genuinely
+    // depends on — tensorsolve is linear in B, so grad_B needs no B
+    // dependence) so backward_with_variables can recompute X = tensorsolve
+    // (A, B) via the Variable-level free function and stay graph-connected
+    // back through A.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({A});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs = {A.grad_fn(), B.grad_fn()};
     grad_fn->set_next_functions(next_funcs);
@@ -3437,6 +3509,11 @@ auto vector_norm(const Variable& input, double ord,
 
     auto grad_fn = std::make_shared<LinalgVectorNormBackward>(ord, dim, keepdim);
     grad_fn->save_for_backward({input.tensor(), result_tensor});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -3454,6 +3531,11 @@ auto matrix_norm(const Variable& input, double ord) -> Variable {
 
     auto grad_fn = std::make_shared<LinalgMatrixNormBackward>(ord);
     grad_fn->save_for_backward({input.tensor(), result_tensor});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -3471,6 +3553,11 @@ auto vecdot(const Variable& a, const Variable& b, int64_t dim) -> Variable {
 
     auto grad_fn = std::make_shared<LinalgVecdotBackward>(dim);
     grad_fn->save_for_backward({a.tensor(), b.tensor()});
+    // GG.1: also save the input Variables so backward_with_variables can
+    // walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({a, b});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs = {a.grad_fn(), b.grad_fn()};
     grad_fn->set_next_functions(next_funcs);

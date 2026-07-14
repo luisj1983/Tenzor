@@ -303,12 +303,17 @@ TEST_P(GradNNParityTest, BatchNorm2dBackward) {
     bn.to(Device::cpu());
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = bn.forward(x_cpu);
-    auto loss_cpu = tenzor::sum(out_cpu);
+    // sum(out) is degenerate for BatchNorm in train mode: affine=true with
+    // weight=ones/bias=zeros normalizes to exactly zero mean, so the true
+    // gradient is 0 identically — a broken backward kernel would pass
+    // identically to a correct one. sum(out*out) exercises the real
+    // gradient (mirrors test_gradient_parity.cpp::SoftmaxBackward's fix).
+    auto loss_cpu = tenzor::sum(out_cpu * out_cpu);
     loss_cpu.backward();
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -323,11 +328,11 @@ TEST_P(GradNNParityTest, BatchNorm2dBackward) {
 
     auto x_dev = Variable(input_data.to(device), true);
     auto out_dev = bn_dev.forward(x_dev);
-    auto loss_dev = tenzor::sum(out_dev);
+    auto loss_dev = tenzor::sum(out_dev * out_dev);
     loss_dev.backward();
     device.synchronize();
 
-    ASSERT_TRUE(x_dev.has_grad());
+    EXPECT_GRAD_FLOWS(x_dev);
     compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
 }
 
@@ -338,12 +343,15 @@ TEST_P(GradNNParityTest, LayerNormBackward) {
     ln.to(Device::cpu());
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = ln.forward(x_cpu);
-    auto loss_cpu = tenzor::sum(out_cpu);
+    // sum(out) is degenerate: affine=true with weight=ones/bias=zeros
+    // normalizes to exactly zero mean, so the true gradient is 0
+    // identically — sum(out*out) exercises the real gradient.
+    auto loss_cpu = tenzor::sum(out_cpu * out_cpu);
     loss_cpu.backward();
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -356,11 +364,11 @@ TEST_P(GradNNParityTest, LayerNormBackward) {
 
     auto x_dev = Variable(input_data.to(device), true);
     auto out_dev = ln_dev.forward(x_dev);
-    auto loss_dev = tenzor::sum(out_dev);
+    auto loss_dev = tenzor::sum(out_dev * out_dev);
     loss_dev.backward();
     device.synchronize();
 
-    ASSERT_TRUE(x_dev.has_grad());
+    EXPECT_GRAD_FLOWS(x_dev);
     compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
 }
 
@@ -433,12 +441,15 @@ TEST_P(GradNNParityTest, GroupNormBackward) {
     gn.to(Device::cpu());
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = gn.forward(x_cpu);
-    auto loss_cpu = tenzor::sum(out_cpu);
+    // sum(out) is degenerate: affine=true with weight=ones/bias=zeros
+    // normalizes to exactly zero mean, so the true gradient is 0
+    // identically — sum(out*out) exercises the real gradient.
+    auto loss_cpu = tenzor::sum(out_cpu * out_cpu);
     loss_cpu.backward();
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -451,11 +462,11 @@ TEST_P(GradNNParityTest, GroupNormBackward) {
 
     auto x_dev = Variable(input_data.to(device), true);
     auto out_dev = gn_dev.forward(x_dev);
-    auto loss_dev = tenzor::sum(out_dev);
+    auto loss_dev = tenzor::sum(out_dev * out_dev);
     loss_dev.backward();
     device.synchronize();
 
-    ASSERT_TRUE(x_dev.has_grad());
+    EXPECT_GRAD_FLOWS(x_dev);
     compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
 }
 
@@ -580,12 +591,15 @@ TEST_P(GradNNParityTest, InstanceNormBackward) {
     in.to(Device::cpu());
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = in.forward(x_cpu);
-    auto loss_cpu = tenzor::sum(out_cpu);
+    // sum(out) is degenerate: affine=true with weight=ones/bias=zeros
+    // normalizes to exactly zero mean, so the true gradient is 0
+    // identically — sum(out*out) exercises the real gradient.
+    auto loss_cpu = tenzor::sum(out_cpu * out_cpu);
     loss_cpu.backward();
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -598,11 +612,11 @@ TEST_P(GradNNParityTest, InstanceNormBackward) {
 
     auto x_dev = Variable(input_data.to(device), true);
     auto out_dev = in_dev.forward(x_dev);
-    auto loss_dev = tenzor::sum(out_dev);
+    auto loss_dev = tenzor::sum(out_dev * out_dev);
     loss_dev.backward();
     device.synchronize();
 
-    ASSERT_TRUE(x_dev.has_grad());
+    EXPECT_GRAD_FLOWS(x_dev);
     compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
 }
 

@@ -172,9 +172,11 @@ auto flash_attention_backward_cuda(
  * Provides up to 2x speedup over separate BMM operations.
  *
  * Implements the FusedAttention contract from docs/internals/attention-contract.md.
- * Note: returns Tensor for transitional compatibility; M4 will move this to
- * std::pair<Tensor, Tensor> once cuDNN graph is configured with set_generate_stats(true)
- * and callers (cuda_kernel_registry.cpp:1660) are updated together.
+ * Per docs/internals/attention-contract.md, Outputs=(output, logsumexp) —
+ * the cuDNN graph is configured with set_generate_stats(true) so the Stats
+ * tensor (LSE, FP32) is materialized alongside the output, matching every
+ * other backend's FusedAttention contract instead of silently disabling the
+ * fast fused-kernel backward path.
  *
  * @param Q Query tensor [batch, num_heads, seq_len_q, head_dim] (forced contiguous)
  * @param K Key tensor [batch, num_heads, seq_len_k, head_dim] (forced contiguous)
@@ -185,7 +187,8 @@ auto flash_attention_backward_cuda(
  *               If nullptr, the default stream is used. Must match the stream on
  *               which the output is subsequently consumed to avoid a read-before-
  *               write race on the returned tensor.
- * @return Output tensor with same shape as Q
+ * @return {output, logsumexp} — output has same shape as Q; logsumexp is
+ *         Float32 shaped [batch, num_heads, seq_len_q].
  */
 auto cudnn_sdpa_forward(
     const Tensor& Q,
@@ -194,7 +197,7 @@ auto cudnn_sdpa_forward(
     float scale,
     bool causal = false,
     cudaStream_t stream = nullptr
-) -> Tensor;
+) -> std::pair<Tensor, Tensor>;
 
 /**
  * @brief Check if cuDNN SDPA is supported for the given configuration

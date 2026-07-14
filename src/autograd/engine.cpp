@@ -329,7 +329,12 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // ones_like(loss) and defeated the retains_grad diagnostic. The backward
     // traversal is seeded from the local `seed` below, so it is unaffected.
     if (!root.grad_fn() || root.is_leaf() || root.retains_grad()) {
-        root.set_grad(seed);
+        // Accumulate (not overwrite): every OTHER leaf/retain_grad Variable
+        // reached mid-graph goes through accumulate_unlocked() (existing +
+        // incoming); a leaf/retain_grad ROOT must follow the same contract
+        // so repeated .backward() calls without an intervening zero_grad()
+        // sum instead of silently dropping the earlier gradient.
+        root.accumulate_grad(seed);
     }
 
     // If no grad_fn, this is a leaf variable, nothing to backprop
@@ -431,6 +436,21 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
 
             const auto& accum_grads = get_accumulated_grads(function.get());
             if (accum_grads.empty()) {
+                // AUTOGRAD-R041: this Function is otherwise reachable (it
+                // survived topological sort) but no gradient actually flows
+                // to it (e.g. a sibling backward() returned fewer gradients
+                // than next_functions() entries). It still holds saved
+                // tensors/Variables/op-specific state from forward, exactly
+                // like every function processed below — run the same
+                // !retain_graph cleanup here before skipping, so this
+                // Function's memory is released at the same point in the
+                // pass as everyone else's instead of lingering until this
+                // whole execute() call's cleanup_graph().
+                if (!retain_graph) {
+                    function->release_saved_tensors();
+                    function->clear_saved_variables();
+                    function->release_op_specific_state();
+                }
                 continue;  // No gradient flows to this function
             }
 
@@ -995,7 +1015,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         // execute()); a non-leaf root stays None. Backprop is seeded from
         // root_seeds below, so gating this does not affect the traversal.
         if (!r->grad_fn() || r->is_leaf() || r->retains_grad()) {
-            r->set_grad(root_seeds[key]);
+            // Accumulate (not overwrite) — see execute()'s identical fix.
+            r->accumulate_grad(root_seeds[key]);
         }
     }
 
@@ -1101,6 +1122,21 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             std::vector<Tensor> grad_outputs;
             const auto& accum_grads = get_accumulated_grads(function.get());
             if (accum_grads.empty()) {
+                // AUTOGRAD-R041: this Function is otherwise reachable (it
+                // survived topological sort) but no gradient actually flows
+                // to it (e.g. a sibling backward() returned fewer gradients
+                // than next_functions() entries). It still holds saved
+                // tensors/Variables/op-specific state from forward, exactly
+                // like every function processed below — run the same
+                // !retain_graph cleanup here before skipping, so this
+                // Function's memory is released at the same point in the
+                // pass as everyone else's instead of lingering until this
+                // whole execute() call's cleanup_graph().
+                if (!retain_graph) {
+                    function->release_saved_tensors();
+                    function->clear_saved_variables();
+                    function->release_op_specific_state();
+                }
                 continue;  // No gradient flows to this function
             }
 

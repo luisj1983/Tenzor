@@ -2225,7 +2225,19 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             Tensor K3 = Kc.reshape({b * h, sk, d});
             Tensor V3 = Vc.reshape({b * h, sk, d_v});
             auto [out3, lse3] = rocm::fused_attention_hip(Q3, K3, V3, scale, causal, 0.0f, 0u);
-            return std::vector<Tensor>{out3.reshape({b, h, sq, d_v}), lse3};
+            // lse3 is shaped [batch_heads, seq_q] (matches the input Q3
+            // collapse); reshape to [b, h, sq] so it's consistent with the
+            // 4D output's own reshape instead of leaking the flattened
+            // batch_heads axis — found while fixing the 1-tuple/2-tuple
+            // FusedAttention contract violation (this backend was one of
+            // the two that already returned lse, just with the wrong shape
+            // on the 4D/GQA path). fused_attention_hip's composed-ops
+            // fallback (unsupported head_dim) deliberately returns an
+            // invalid/default Tensor for lse3 ("LSE not surfaced by the
+            // composed path" — run_fused_dispatch pads/gates on this), so
+            // only reshape when it's actually a real tensor.
+            Tensor lse_out = lse3.is_valid() ? lse3.reshape({b, h, sq}) : lse3;
+            return std::vector<Tensor>{out3.reshape({b, h, sq, d_v}), lse_out};
         }
         auto [output, lse] = rocm::fused_attention_hip(Qi, Ki, Vi, scale, causal, 0.0f, 0u);
         return std::vector<Tensor>{output, lse};
@@ -2571,20 +2583,25 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // AUTOGRAD-R027: fused_attention_hip has no block_mask parameter and
+        // would silently ignore one if present — only take this shortcut when
+        // none was supplied.
+        if ((score_mod_id == 0 || score_mod_id == 1) &&
+            !attrs.get_bool(AttrKey::HasBlockMask, false)) {
             bool causal = (score_mod_id == 1);
             auto [output, lse] = rocm::fused_attention_hip(inputs[0], inputs[1], inputs[2], scale, causal);
             return std::vector<Tensor>{output, lse};
         }
 
         // ScoreModId 2-7 (sliding_window, relpos_bias, alibi, prefix_lm,
-        // sliding_window_sym, user_lambda) and user-registered functors (>= 8)
-        // go through the shared, device-agnostic composed-ops forward. The
-        // tenzor:: ops inside dispatch to ROCm automatically (Q/K/V live on
-        // ROCm), so ROCm runs bit-for-bit the same math as the CPU reference
-        // and every other backend (F018/F019/F023/F024). This also unifies the
-        // mask sentinel to where(-inf) (was an additive -1e30 approximation).
-        if (score_mod_id >= 2) {
+        // sliding_window_sym, user_lambda) and user-registered functors (>= 8),
+        // or ScoreModId 0/1 with block_mask present, go through the shared,
+        // device-agnostic composed-ops forward. The tenzor:: ops inside
+        // dispatch to ROCm automatically (Q/K/V live on ROCm), so ROCm runs
+        // bit-for-bit the same math as the CPU reference and every other
+        // backend (F018/F019/F023/F024). This also unifies the mask sentinel
+        // to where(-inf) (was an additive -1e30 approximation).
+        if (score_mod_id >= 0) {
             return tenzor::nn::flex_attention_score_mod_forward(inputs, attrs);
         }
 
@@ -2599,8 +2616,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-        // ScoreModId 0/1: route to fused FlashAttention backward.
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // ScoreModId 0/1: route to fused FlashAttention backward — but only
+        // when neither block_mask nor relpos_bias is present (AUTOGRAD-R027:
+        // FlashAttentionBackward's wrapper reads inputs[5]=L,
+        // inputs[6]=philox_seed, inputs[7]=philox_offset by fixed position
+        // and would silently misinterpret block_mask/relpos_bias as those;
+        // HasBlockMask/HasRelposBias are set explicitly by the dispatch call
+        // site in function_attention.cpp, not inferred from inputs.size()
+        // which is ambiguous for independently-optional trailing slots).
+        const bool has_extra_tensor = attrs.get_bool(AttrKey::HasBlockMask, false) ||
+                                      attrs.get_bool(AttrKey::HasRelposBias, false);
+        if ((score_mod_id == 0 || score_mod_id == 1) && !has_extra_tensor) {
             bool causal = (score_mod_id == 1);
             OpAttributes bwd_attrs;
             bwd_attrs.set(AttrKey::Scale, static_cast<double>(scale));
@@ -2609,8 +2635,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return tenzor::dispatch(OpId::FlashAttentionBackward, bwd_inputs, bwd_attrs);
         }
 
-        // ScoreModId >= 2 (built-ins 2-7 and user functors >= 8) — composed backward.
-        if (score_mod_id >= 2) {
+        // ScoreModId >= 2 (built-ins 2-7 and user functors >= 8), or
+        // ScoreModId 0/1 with block_mask/relpos_bias present — composed backward.
+        if (score_mod_id >= 0) {
             // ScoreModId 2-7 and user functors (>= 8): shared, device-agnostic
             // composed backward (replays forward, softmax-attention chain rule).
             // Same helper as the CPU reference and every other backend, so
@@ -2910,65 +2937,51 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::FFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // Read the transform axes from AttrKey::Dims (default: last two),
+        // matching CPU/CUDA/OneAPI/Vulkan (AUTOGRAD-R028) — this backend
+        // previously hardcoded the last two dims unconditionally and read
+        // signal lengths from AttrKey::Shape (a key no other backend uses
+        // here), silently transforming the wrong axes for any non-default
+        // dims= argument.
         int64_t ndim = inputs[0].ndim();
-        std::vector<int64_t> dims = {ndim - 2, ndim - 1};
-        std::vector<int64_t> n_vec = {
-            inputs[0].shape()[dims[0]],
-            inputs[0].shape()[dims[1]]
-        };
-        auto attr_n = attrs.get_int_list(AttrKey::Shape);
-        if (!attr_n.empty() && attr_n.size() >= 2) {
-            n_vec[0] = attr_n[0];
-            n_vec[1] = attr_n[1];
-        }
+        std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) dims = {ndim - 2, ndim - 1};
+        for (auto& d : dims) if (d < 0) d += ndim;
+        std::vector<int64_t> n_vec(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) n_vec[i] = inputs[0].shape()[dims[i]];
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return rocm::rocm_fft2_kernel(inputs[0], dims, n_vec, norm, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::IFFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t ndim = inputs[0].ndim();
-        std::vector<int64_t> dims = {ndim - 2, ndim - 1};
-        std::vector<int64_t> n_vec = {
-            inputs[0].shape()[dims[0]],
-            inputs[0].shape()[dims[1]]
-        };
-        auto attr_n = attrs.get_int_list(AttrKey::Shape);
-        if (!attr_n.empty() && attr_n.size() >= 2) {
-            n_vec[0] = attr_n[0];
-            n_vec[1] = attr_n[1];
-        }
+        std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) dims = {ndim - 2, ndim - 1};
+        for (auto& d : dims) if (d < 0) d += ndim;
+        std::vector<int64_t> n_vec(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) n_vec[i] = inputs[0].shape()[dims[i]];
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return rocm::rocm_ifft2_kernel(inputs[0], dims, n_vec, norm, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::FFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t ndim = inputs[0].ndim();
-        std::vector<int64_t> dims(ndim);
-        for (int64_t i = 0; i < ndim; ++i) dims[i] = i;
-        std::vector<int64_t> n_vec(ndim);
-        for (int64_t i = 0; i < ndim; ++i) n_vec[i] = inputs[0].shape()[i];
-        auto attr_n = attrs.get_int_list(AttrKey::Shape);
-        if (!attr_n.empty()) {
-            for (size_t i = 0; i < attr_n.size() && i < n_vec.size(); ++i) {
-                n_vec[i] = attr_n[i];
-            }
-        }
+        std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) { dims.resize(ndim); for (int64_t i = 0; i < ndim; ++i) dims[i] = i; }
+        for (auto& d : dims) if (d < 0) d += ndim;
+        std::vector<int64_t> n_vec(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) n_vec[i] = inputs[0].shape()[dims[i]];
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return rocm::rocm_fftn_kernel(inputs[0], dims, n_vec, norm, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::IFFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t ndim = inputs[0].ndim();
-        std::vector<int64_t> dims(ndim);
-        for (int64_t i = 0; i < ndim; ++i) dims[i] = i;
-        std::vector<int64_t> n_vec(ndim);
-        for (int64_t i = 0; i < ndim; ++i) n_vec[i] = inputs[0].shape()[i];
-        auto attr_n = attrs.get_int_list(AttrKey::Shape);
-        if (!attr_n.empty()) {
-            for (size_t i = 0; i < attr_n.size() && i < n_vec.size(); ++i) {
-                n_vec[i] = attr_n[i];
-            }
-        }
+        std::vector<int64_t> dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) { dims.resize(ndim); for (int64_t i = 0; i < ndim; ++i) dims[i] = i; }
+        for (auto& d : dims) if (d < 0) d += ndim;
+        std::vector<int64_t> n_vec(dims.size());
+        for (size_t i = 0; i < dims.size(); ++i) n_vec[i] = inputs[0].shape()[dims[i]];
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return rocm::rocm_ifftn_kernel(inputs[0], dims, n_vec, norm, get_hip_stream(attrs));
     });
@@ -4060,6 +4073,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::where_hip(inputs[0], inputs[1], inputs[2], get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Slice, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // AUTOGRAD-R046: support both the multi-dim (Starts/Ends/Steps lists)
+        // and single-dim (Dim/Start/End/Step scalars) attribute formats,
+        // matching CPU/CUDA. rocm::slice_hip is natively single-dim only, so
+        // the list format is composed by applying it once per dimension
+        // (mirrors cpu::slice_multi_kernel's composition exactly, including
+        // its short-list end/step defaulting).
+        if (attrs.has(AttrKey::Starts)) {
+            auto starts = attrs.get_int_list(AttrKey::Starts);
+            auto ends = attrs.get_int_list(AttrKey::Ends);
+            auto steps = attrs.get_int_list(AttrKey::Steps);
+            Tensor result = inputs[0];
+            for (size_t d = 0; d < starts.size(); ++d) {
+                const int64_t end = (d < ends.size()) ? ends[d] : result.shape()[static_cast<int64_t>(d)];
+                const int64_t step = (d < steps.size()) ? steps[d] : 1;
+                result = rocm::slice_hip(result, static_cast<int64_t>(d), starts[d], end, step, get_hip_stream(attrs));
+            }
+            return result;
+        }
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         int64_t start = attrs.get_int(AttrKey::Start, 0);
         int64_t end = attrs.get_int(AttrKey::End, std::numeric_limits<int64_t>::max());
@@ -4163,6 +4194,34 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             output_padding[0], output_padding[1],
             dilation[0], dilation[1], groups,
             get_hip_stream(attrs));
+    });
+
+    // ConvTranspose1dForward: mirror CPU/CUDA — unsqueeze [N,C,L] -> [N,C,1,L],
+    // run the 2-D transpose conv (via generic dispatch, reusing this backend's
+    // own already-correct ConvTranspose2dForward above), squeeze back. Closes
+    // the JIT-graph capability gap (src/jit/graph.cpp's ConvTranspose case
+    // dispatches OpId::ConvTranspose1dForward for 1-D nodes; only CPU/CUDA had
+    // it registered).
+    table.register_single_output_kernel(OpId::ConvTranspose1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<Tensor> in2d = {inputs[0].unsqueeze(2), inputs[1].unsqueeze(2)};
+        if (inputs.size() > 2) in2d.push_back(inputs[2]);
+        NewOpAttributes attrs2d;
+        attrs2d.set(AttrKey::StrideH, int64_t{1});
+        attrs2d.set(AttrKey::StrideW, stride);
+        attrs2d.set(AttrKey::PaddingH, int64_t{0});
+        attrs2d.set(AttrKey::PaddingW, padding);
+        attrs2d.set(AttrKey::OutputPaddingH, int64_t{0});
+        attrs2d.set(AttrKey::OutputPaddingW, output_padding);
+        attrs2d.set(AttrKey::DilationH, int64_t{1});
+        attrs2d.set(AttrKey::DilationW, dilation);
+        attrs2d.set(AttrKey::Groups, groups);
+        auto result_4d = tenzor::dispatch(OpId::ConvTranspose2dForward, in2d, attrs2d)[0];
+        return result_4d.squeeze(2);
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // Audit F.11: per-axis attrs via shared helpers (replaces inline
@@ -4907,7 +4966,20 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
     // Aminmax: native HIP dual min/max reduction (returns 2 tensors)
     table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        auto [min_t, max_t] = rocm::aminmax_kernel(inputs[0], get_hip_stream(attrs));
+        // rocm::aminmax_kernel has no dim parameter (always full-tensor
+        // reduction); ops/reduction.cpp's aminmax(x, dim=k) is a live,
+        // ordinary eager-API call site that sets AttrKey::Dim, so the
+        // caller-requested per-axis reduction was being silently ignored.
+        // Compose the dim-aware path from Min/Max (both already dim-aware
+        // on this backend); fall through to the native full-reduction
+        // kernel when no dim is requested, mirroring this file's own
+        // Nansum wrapper immediately below.
+        if (!attrs.has(AttrKey::Dim)) {
+            auto [min_t, max_t] = rocm::aminmax_kernel(inputs[0], get_hip_stream(attrs));
+            return {min_t, max_t};
+        }
+        Tensor min_t = tenzor::dispatch(OpId::Min, inputs, attrs)[0];
+        Tensor max_t = tenzor::dispatch(OpId::Max, inputs, attrs)[0];
         return {min_t, max_t};
     });
     table.register_single_output_kernel(OpId::IndexAdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -4993,9 +5065,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             if (dim < 0) dim += ndim;
             int64_t dim_size = output.shape()[dim];
 
+            // AUTOGRAD-R046 side-fix: `end += dim_size + 1` was an off-by-one
+            // (matches the previously-fixed CUDA bug this test regresses
+            // for) — end=-1 on a size-4 dim must resolve to 3 (stop before
+            // the last element), not 4. Match CPU/CUDA's fully-clamped
+            // negative-index normalization exactly.
             if (start < 0) start += dim_size;
-            if (end < 0) end += dim_size + 1;
+            if (end < 0) end += dim_size;
             if (start < 0) start = 0;
+            if (start > dim_size) start = dim_size;
+            if (end < 0) end = 0;
             if (end > dim_size) end = dim_size;
 
             auto dst_slice = output.slice(dim, start, end, step);

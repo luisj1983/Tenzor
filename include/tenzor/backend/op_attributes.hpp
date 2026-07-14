@@ -189,6 +189,8 @@ enum class AttrKey : uint16_t {
 
     // Fused operation flags
     HasBias,         // Whether bias is present
+    HasBlockMask,    // FlexAttention(Backward): whether a block_mask tensor is present in inputs
+    HasRelposBias,   // FlexAttention(Backward): whether a relpos_bias tensor is present in inputs
     IsTraining,      // Whether in training mode
     NumGroups,       // Number of groups (GroupNorm, grouped convolution)
     TargetDtype,     // Target dtype for cast operations

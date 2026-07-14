@@ -50,10 +50,19 @@ TEST(GradientParityCritical, Mul) {
 }
 
 TEST(GradientParityCritical, Softmax_LastDim) {
+    // sum(softmax(x, -1)) is identically the batch size (each row sums to 1),
+    // so backprop with the default ones_like(out) upstream grad is exactly
+    // zero for every input — a fully broken softmax-backward kernel would
+    // pass identically to a correct one. Return sm*sm so the default
+    // ones-weighted backward exercises d(sum(sm*sm))/dx, the non-constant
+    // softmax-backward Jacobian (diag(sm) - sm sm^T), mirroring the fix
+    // already applied in test_gradient_parity.cpp::SoftmaxBackward and
+    // test_grad_nn_parity.cpp::SoftmaxBackward.
     auto x = randn({4, 6}, DType::Float32, Device::cpu());
     test_gradient_parity(
         [](const std::vector<Variable>& in) -> Variable {
-            return nn::functional::softmax(in[0], -1);
+            auto sm = nn::functional::softmax(in[0], -1);
+            return sm * sm;
         },
         {x}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "GradParity_Softmax");
 }

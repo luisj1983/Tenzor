@@ -17,6 +17,7 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/math.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -446,6 +447,20 @@ Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b) {
         throw std::runtime_error("MPS matmul: operand dtypes must match (got " +
             std::string(dtype_name(a.dtype())) + " vs " +
             std::string(dtype_name(b.dtype())) + ")");
+    }
+    // Dtypes outside Float32/Float16 (Float64, Complex64/128, ...) have no
+    // native MPSMatrixMultiplication path here. Unlike Bmm (entirely
+    // CPU-shuttled) and the linalg ops (try_gpu_dispatch shuttle), this
+    // plain-2D OpId::MatMul had no fallback at all and threw immediately —
+    // reachable any time a complex-dtype linalg backward formula
+    // (Inv/Solve/Det/Cholesky/Svd/Eigh/LU) calls matmul() on saved/grad
+    // tensors that land on an MPS-device Variable. Shuttle through CPU
+    // for these dtypes, mirroring mps_accelerate_single's own pattern.
+    if (a.dtype() != DType::Float32 && a.dtype() != DType::Float16) {
+        Tensor a_cpu = a.to(Device::cpu());
+        Tensor b_cpu = b.to(Device::cpu());
+        Tensor result_cpu = tenzor::matmul(a_cpu, b_cpu);
+        return result_cpu.to(a.device());
     }
     MPSDataType mps_dt;
     size_t elem_size;

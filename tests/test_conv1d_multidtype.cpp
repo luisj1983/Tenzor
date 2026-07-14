@@ -68,9 +68,12 @@ TEST_P(Conv1dMultiDTypeTest, MultipleKernelSizes) {
     }
 }
 
-// Backward — exercises Conv1dBackwardInput, Conv1dBackwardWeight,
-// Conv1dBackwardBias kernels. The optimizer-style sum().backward() pattern
-// populates .grad() on the input tensor and the conv's parameters.
+// Backward — exercises Conv1d's autograd path, which composes via
+// Conv2dBackwardInput/Weight/Bias after unsqueezing to 4D (the
+// Conv1dBackwardInput/Weight/Bias OpIds are registered on every backend but
+// are dead code — nn::Conv1d never dispatches them; AUTOGRAD-R056). The
+// optimizer-style sum().backward() pattern populates .grad() on the input
+// tensor and the conv's parameters.
 TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
     // CPU reference: same conv config, same input, run on CPU.
     // Reseed before each construction so reference and device modules get

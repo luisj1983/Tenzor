@@ -90,45 +90,10 @@ auto SpGEMMBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Va
     throw std::runtime_error("SpGEMMBackward::forward should not be called directly");
 }
 
-auto SpGEMMBackward::accumulate_sparse_into_inputs(const Tensor& grad_c) -> void {
-    // audit-10 NN.5: SparseAdam accumulation side-effect, factored out of
-    // backward() so backward_with_variables can call it directly without
-    // re-entering backward() (which would re-accumulate under retain_graph).
-    if (sparse_grad_accumulated_) {
-        return;
-    }
-    if (sparse_b_t_.has_value() && !input_variables_.empty()) {
-        Tensor dense_grad_a = sparse::spmm(sparse_b_t_.value(), grad_c);
-        auto& a_var = input_variables_[0];
-        if (a_var.has_sparse_grad()) {
-            auto& existing = a_var.sparse_grad().value();
-            a_var.accumulate_sparse_grad(
-                SparseTensor::sparse_csr(existing.crow_indices(),
-                                          existing.col_indices(),
-                                          dense_grad_a,
-                                          existing.shape()));
-        }
-    }
-    if (sparse_a_t_.has_value() && input_variables_.size() >= 2) {
-        Tensor dense_grad_b = sparse::spmm(sparse_a_t_.value(), grad_c);
-        auto& b_var = input_variables_[1];
-        if (b_var.has_sparse_grad()) {
-            auto& existing = b_var.sparse_grad().value();
-            b_var.accumulate_sparse_grad(
-                SparseTensor::sparse_csr(existing.crow_indices(),
-                                          existing.col_indices(),
-                                          dense_grad_b,
-                                          existing.shape()));
-        }
-    }
-    sparse_grad_accumulated_ = true;
-}
-
 // F011/F012: sparse-sparse (SpGEMM, A@B with BOTH operands sparse) autograd is
 // NOT implemented. There is no differentiable spgemm() forward that constructs
-// this backward or populates its transposed factors — set_sparse_a_transposed /
-// set_sparse_b_transposed are never called anywhere, so sparse_a_t_/sparse_b_t_
-// are always empty and the methods would return EMPTY (zero) gradients (F012).
+// this backward or populates transposed factors for it, so the methods below
+// would otherwise return EMPTY (zero) gradients (F012).
 // The grad_A path was also wrong: spmm(Bᵀ, grad_C) = Bᵀ·grad_C is the transpose
 // of the correct grad_A = grad_C·Bᵀ (F011). Rather than silently emit zero or
 // transposed gradients, FAIL LOUD. A correct future implementation needs a
@@ -164,13 +129,17 @@ auto SparseTriSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::
     // x = L^{-1} @ b  => grad_b = L^{-T} @ grad_x
     // For upper: x = U^{-1} @ b => grad_b = U^{-T} @ grad_x
     // Solve the transposed system: L^T @ grad_b = grad_x
-    if (sparse_l_t_.has_value()) {
-        // Solve L^T @ result = grad_x, which is equivalent to (L^{-T}) @ grad_x
-        auto grad_b = sparse::sparse_triangular_solve(
-            sparse_l_t_.value(), grad_outputs[0], !upper_);
-        return {grad_b};
+    // AUTOGRAD-R030: fail loud on a missing transposed factor, matching the
+    // sibling SpMMBackward/SpMVBackward convention — an identity pass-through
+    // is only correct when L/U is the identity matrix, which is not something
+    // this function can assume.
+    if (!sparse_l_t_.has_value()) {
+        throw std::runtime_error("SparseTriSolveBackward: sparse_l_t_ not set");
     }
-    return {grad_outputs[0]};
+    // Solve L^T @ result = grad_x, which is equivalent to (L^{-T}) @ grad_x
+    auto grad_b = sparse::sparse_triangular_solve(
+        sparse_l_t_.value(), grad_outputs[0], !upper_);
+    return {grad_b};
 }
 
 auto SparseTriSolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
@@ -181,8 +150,10 @@ auto SparseTriSolveBackward::backward_with_variables(std::vector<Variable> grad_
     // `sparse_l_t_` already stores the transposed factor; the autograd-
     // aware `tenzor::sparse_triangular_solve(SparseTensor, Variable, bool)`
     // keeps grad_fn live through grad_outputs[0].
+    // AUTOGRAD-R030: fail loud (matching backward() above) instead of an
+    // identity pass-through that is silently wrong whenever L/U != I.
     if (!sparse_l_t_.has_value()) {
-        return {grad_outputs[0]};
+        throw std::runtime_error("SparseTriSolveBackward: sparse_l_t_ not set");
     }
     auto grad_b = tenzor::sparse_triangular_solve(*sparse_l_t_, grad_outputs[0], !upper_);
     return {grad_b};

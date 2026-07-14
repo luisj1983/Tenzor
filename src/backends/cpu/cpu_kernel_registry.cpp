@@ -2253,7 +2253,21 @@ static void register_cpu_kernels_pooling(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::AdaptiveAvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        // The only live caller of this table entry (nn::AdaptiveAvgPool2dBackward
+        // in pooling.cpp, reached via MPS's mps_accelerate_single CPU-roundtrip)
+        // sets AttrKey::InputH/InputW, not AttrKey::InputShape — N and C come
+        // from grad_output's own shape. Require both keys explicitly rather
+        // than silently defaulting to 0, which would produce a zero-sized
+        // grad_input and an OOB write in the kernel below.
+        if (!attrs.has(AttrKey::InputH) || !attrs.has(AttrKey::InputW)) {
+            throw std::runtime_error(
+                "AdaptiveAvgPool2dBackward (CPU kernel): missing required "
+                "AttrKey::InputH/InputW attributes");
+        }
+        int64_t input_h = attrs.get_int(AttrKey::InputH);
+        int64_t input_w = attrs.get_int(AttrKey::InputW);
+        const auto& grad_shape = inputs[0].shape();
+        std::vector<int64_t> input_shape{grad_shape[0], grad_shape[1], input_h, input_w};
         return cpu::adaptive_avgpool2d_backward_kernel(inputs[0], input_shape);
     });
 
@@ -3280,7 +3294,57 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
-        return std::vector<Tensor>{cpu::fused_attention_kernel(inputs[0], inputs[1], inputs[2], scale, causal)};
+        const Tensor& Qi = inputs[0];
+        const Tensor& Ki = inputs[1];
+        const Tensor& Vi = inputs[2];
+        Tensor output = cpu::fused_attention_kernel(Qi, Ki, Vi, scale, causal);
+
+        // Per docs/internals/attention-contract.md, Outputs=(output,
+        // logsumexp). cpu::fused_attention_kernel handles GQA (H_kv < H_q)
+        // internally via index math, with no host-side K/V broadcast; the
+        // LSE recomputation below needs Q and K to have matching head
+        // counts for a plain batched matmul, so broadcast K here the same
+        // way ROCm/OneAPI's wrappers do for their own LSE/score computation
+        // — this broadcast is local to this composed LSE path and does not
+        // change what cpu::fused_attention_kernel itself received above.
+        Tensor Q = Qi.is_contiguous() ? Qi : Qi.contiguous();
+        Tensor K = Ki.is_contiguous() ? Ki : Ki.contiguous();
+        if (Q.ndim() == 4 && K.shape()[1] != Q.shape()[1]) {
+            int64_t b = Q.shape()[0], h = Q.shape()[1], sk = K.shape()[2], d = K.shape()[3];
+            int64_t h_kv = K.shape()[1];
+            if (h % h_kv != 0) {
+                throw std::runtime_error(
+                    "FusedAttention CPU: H_q must be a multiple of H_kv; got " +
+                    std::to_string(h) + " and " + std::to_string(h_kv));
+            }
+            int64_t reps = h / h_kv;
+            NewOpAttributes us; us.set(AttrKey::Dim, static_cast<int64_t>(2));
+            Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{K}, us)[0];
+            std::vector<int64_t> exp_k = {b, h_kv, reps, sk, d};
+            std::string s_k;
+            for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+            NewOpAttributes ek; ek.set(AttrKey::Shape, s_k);
+            Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek)[0];
+            K = Ke.contiguous().reshape({b, h, sk, d});
+        }
+
+        int64_t nd = Q.ndim();
+        Tensor scores = tenzor::matmul(Q, tenzor::transpose(K, nd - 2, nd - 1));
+        scores = tenzor::mul(scores, static_cast<double>(scale));
+        if (causal) {
+            auto ssh = std::vector<int64_t>(scores.shape().begin(), scores.shape().end());
+            int64_t seq_q = ssh[ssh.size() - 2], seq_k = ssh[ssh.size() - 1];
+            // Matches cpu::fused_attention_kernel's own top-left causal
+            // convention (j_limit = min(i+1, seq_k), i.e. row i attends to
+            // keys 0..i): mask where j > i.
+            Tensor rows = tenzor::reshape(tenzor::arange(0, seq_q, 1, DType::Int64, scores.device()), {seq_q, 1});
+            Tensor cols = tenzor::reshape(tenzor::arange(0, seq_k, 1, DType::Int64, scores.device()), {1, seq_k});
+            Tensor mask = tenzor::gt(cols, rows);
+            Tensor neg_inf = tenzor::full(ssh, -std::numeric_limits<double>::infinity(), scores.dtype(), scores.device());
+            scores = tenzor::where(mask, neg_inf, scores);
+        }
+        Tensor lse = tenzor::logsumexp(scores, -1, /*keepdim=*/false);
+        return std::vector<Tensor>{output, lse};
     });
 
     // =========================================================================
@@ -3382,8 +3446,11 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
         // ScoreModId 0 (identity) and 1 (causal) reduce to FusedAttention —
-        // route to the optimised flash kernel directly.
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // route to the optimised flash kernel directly. AUTOGRAD-R027: the
+        // fused kernel has no block_mask parameter and would silently ignore
+        // one if present, so only take this shortcut when none was supplied.
+        if ((score_mod_id == 0 || score_mod_id == 1) &&
+            !attrs.get_bool(AttrKey::HasBlockMask, false)) {
             bool causal = (score_mod_id == 1);
             return cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2],
                                                 scale, causal, /*dropout_p=*/0.0f,
@@ -3409,19 +3476,24 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
-        // ScoreModId 0/1: route to fused FlashAttention backward (mathematically identical).
-        if (score_mod_id == 0 || score_mod_id == 1) {
+        // ScoreModId 0/1: route to fused FlashAttention backward (mathematically
+        // identical) — but only when no block_mask was supplied (AUTOGRAD-R027:
+        // this fixed-arity call has no block_mask parameter and would silently
+        // ignore one if present).
+        if ((score_mod_id == 0 || score_mod_id == 1) &&
+            !attrs.get_bool(AttrKey::HasBlockMask, false)) {
             bool causal = (score_mod_id == 1);
             return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                                                  scale, causal, /*dropout_p=*/0.0f,
                                                  /*philox_seed=*/0, /*philox_offset=*/0);
         }
 
-        // Composed backward for IDs 2-7 and user functors (>= 8): shared,
-        // device-agnostic path (replays forward to recover masked scores,
-        // applies the softmax-attention chain rule). Same helper used by every
-        // GPU backend so forward/backward stay mutually consistent (F018/F023).
-        if (score_mod_id >= 2) {
+        // Composed backward for IDs 2-7 and user functors (>= 8), or
+        // ScoreModId 0/1 with block_mask present: shared, device-agnostic path
+        // (replays forward to recover masked scores, applies the softmax-
+        // attention chain rule). Same helper used by every GPU backend so
+        // forward/backward stay mutually consistent (F018/F023).
+        if (score_mod_id >= 0) {
             return tenzor::nn::flex_attention_score_mod_backward(inputs, attrs);
         }
 

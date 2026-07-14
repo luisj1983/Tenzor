@@ -7,10 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # From build/ directory (already configured with Ninja)
 ninja                           # Build all targets
-ninja tenzor                    # Build core library only
+ninja tenzor_core               # Build core library only (bin/libtenzor_core.so)
 ninja tenzor_backend_cpu        # Build CPU backend
 ninja tenzor_backend_cuda       # Build CUDA backend
-ninja tenzor_core               # Build Python module
+ninja tenzor_python             # Build Python module (python/tenzor/tenzor_core*.so) — NOT `ninja tenzor_core`, which only rebuilds the core lib and silently leaves the Python module stale
 
 # Fresh configuration (from project root)
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

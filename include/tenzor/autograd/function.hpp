@@ -252,6 +252,19 @@ public:
      *     returns zeros (rarely needed in gradient flows).
      *   - AsStridedBackward — scatter_add inverse stride mapping; flagged stub.
      *
+     * Ops with neither an override nor is_higher_order_stub() (create_graph=true
+     * throws via the Audit II.2 guard below — intentional, not an audit miss):
+     *   - EigBackward — general (possibly complex-conjugate-pair) non-symmetric
+     *     eigendecomposition backward, unlike its listed siblings above
+     *     (Svd/Qr/Eigh/Eigvalsh/Cholesky, which DO have real
+     *     backward_with_variables()). Its Tensor-level backward() has a
+     *     real/complex branch and unpacks LAPACK's packed-real eigenvector
+     *     format via raw-pointer host reads (see function_linalg.cpp), so
+     *     unlike LinalgLDLFactorBackward/LinalgHouseholderBackward above there
+     *     is no well-defined "return zeros" stub value to fall back to —
+     *     throwing on create_graph=true is the correct, safe behavior until a
+     *     real Variable-level implementation is written.
+     *
      * The "structural-zero" cases are mathematically correct. The Conv/Norm/
      * RNN cases are pragmatic correctness compromises that Warn mode accepts
      * (see HigherOrderGradMode). Set HigherOrderGradMode::Error to surface
@@ -3007,40 +3020,22 @@ public:
 /**
  * @brief Backward function for sparse-sparse matrix multiplication (SpGEMM).
  *
- * For C = A @ B where A and B are sparse:
- * - grad_A = grad_C @ B^T (sparse)
- * - grad_B = A^T @ grad_C (sparse)
- * Both A and B are treated as constants (sparse matrices are not differentiable
- * through the sparsity pattern), so gradients flow through dense conversions.
+ * Sparse-sparse (A @ B, both operands sparse) autograd is NOT implemented:
+ * there is no differentiable spgemm() forward that constructs this node, so
+ * backward()/backward_with_variables() unconditionally throw
+ * (see spgemm_autograd_not_implemented() in function_sparse.cpp). A correct
+ * future implementation needs a differentiable spgemm forward that stores A
+ * and B (not their transposes) and computes:
+ *   grad_A = grad_C @ B^H = transpose(spmm(B, transpose(grad_C)))
+ *   grad_B = A^H @ grad_C = spmm(adjoint(A), grad_C)
  */
 class SpGEMMBackward : public Function {
 public:
-    void set_sparse_a_transposed(SparseTensor at) { sparse_a_t_.emplace(std::move(at)); }
-    void set_sparse_b_transposed(SparseTensor bt) { sparse_b_t_.emplace(std::move(bt)); }
-
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SpGEMMBackward"; }
-
-    // audit-10 NN.6: drop ad-hoc sparse transposed CSR caches on cleanup.
-    void release_op_specific_state() override {
-        sparse_a_t_.reset();
-        sparse_b_t_.reset();
-        sparse_grad_accumulated_ = false;
-    }
-
-private:
-    /// audit-10 NN.5: accumulate the sparse-grad slot side-effect once.
-    /// `backward_with_variables` previously delegated to `backward()` for the
-    /// SparseAdam accumulation, then rebuilt Variable-level dense grads — a
-    /// second `backward(retain_graph=true)` re-entered and double-accumulated.
-    auto accumulate_sparse_into_inputs(const Tensor& grad_c) -> void;
-
-    std::optional<SparseTensor> sparse_a_t_;  ///< A^T in sparse format
-    std::optional<SparseTensor> sparse_b_t_;  ///< B^T in sparse format
-    bool sparse_grad_accumulated_{false};
 };
 
 /**

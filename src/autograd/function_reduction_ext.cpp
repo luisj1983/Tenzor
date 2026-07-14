@@ -285,16 +285,11 @@ auto StdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         std_expanded = unsqueeze(std_out, dim_opt.value());
         grad_expanded = unsqueeze(grad, dim_opt.value());
     } else if (!dim_opt.has_value()) {
-        if (std_out.ndim() > 0) {
-            std_expanded = reshape(std_out, std::vector<int64_t>(input_shape_vec.size(), 1));
-        } else {
-            std_expanded = reshape(std_out, std::vector<int64_t>(input_shape_vec.size(), 1));
-        }
-        if (grad.ndim() > 0) {
-            grad_expanded = reshape(grad, std::vector<int64_t>(input_shape_vec.size(), 1));
-        } else {
-            grad_expanded = reshape(grad, std::vector<int64_t>(input_shape_vec.size(), 1));
-        }
+        // AUTOGRAD-R038: both ndim()>0/else arms reshaped identically —
+        // reshape() only requires matching numel(), not matching ndim(),
+        // so the branch was dead refactor debris.
+        std_expanded = reshape(std_out, std::vector<int64_t>(input_shape_vec.size(), 1));
+        grad_expanded = reshape(grad, std::vector<int64_t>(input_shape_vec.size(), 1));
     }
 
     std_expanded = expand(std_expanded, input_shape_vec);
@@ -422,11 +417,9 @@ auto VarBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     if (dim_opt.has_value() && !keepdim) {
         grad_expanded = unsqueeze(grad, dim_opt.value());
     } else if (!dim_opt.has_value()) {
-        if (grad.ndim() > 0) {
-            grad_expanded = reshape(grad, std::vector<int64_t>(input_shape_vec.size(), 1));
-        } else {
-            grad_expanded = reshape(grad, std::vector<int64_t>(input_shape_vec.size(), 1));
-        }
+        // AUTOGRAD-R038: both ndim()>0/else arms reshaped identically — dead
+        // refactor debris (see StdBackward::backward's identical pattern).
+        grad_expanded = reshape(grad, std::vector<int64_t>(input_shape_vec.size(), 1));
     }
     grad_expanded = expand(grad_expanded, input_shape_vec);
 

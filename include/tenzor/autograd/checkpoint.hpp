@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 #include "../core/device.hpp"
@@ -198,9 +199,38 @@ public:
      * shared_ptr) instead of raw Variable* to prevent dangling pointers
      * if the caller's scope exits before backward.
      *
+     * Gradient accumulation for checkpoint leaf inputs actually happens
+     * through the ordinary input_variables() mechanism, which the
+     * BackwardEngine consults generically — original_input_copies_ is
+     * bookkeeping only and is never itself read by any accumulation path.
+     * Every current caller passes `originals[i]` pointing to the SAME
+     * Variable as `input_variables()[i]`, so this is a no-op today; if a
+     * future caller ever passed a genuinely different Variable here (per
+     * this method's own doc contract of "explicit control over gradient
+     * accumulation targets"), gradients would silently accumulate to the
+     * invisible `input_variables()[i]` copy and never reach the caller's
+     * intended `*originals[i]`. Fail loudly instead of honoring a contract
+     * that isn't implemented.
+     *
      * @param originals Pointers to original input Variables
      */
     auto store_original_inputs(const std::vector<Variable*>& originals) -> void {
+        const auto& live_inputs = input_variables();
+        if (live_inputs.size() == originals.size()) {
+            for (size_t i = 0; i < originals.size(); ++i) {
+                if (!originals[i]) continue;
+                if (originals[i]->tensor().data_ptr() != live_inputs[i].tensor().data_ptr()) {
+                    throw std::runtime_error(
+                        "CheckpointFunction::store_original_inputs: originals[" +
+                        std::to_string(i) + "] does not share storage with the "
+                        "corresponding input_variables() entry. Gradient "
+                        "accumulation only ever targets input_variables() (see "
+                        "get_original_inputs() doc comment), so a genuinely "
+                        "different original Variable here would silently drop "
+                        "its gradient — this is not currently implemented.");
+                }
+            }
+        }
         original_input_copies_.clear();
         original_input_copies_.reserve(originals.size());
         for (const auto* var : originals) {

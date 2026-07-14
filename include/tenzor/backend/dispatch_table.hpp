@@ -33,6 +33,15 @@ namespace tenzor {
 // Forward declaration
 class Backend;
 
+// Forward-declared rather than including autograd/variable.hpp (which would
+// invert this file's layering — backend/ sits below autograd/ per the
+// project's layered design). InferenceModeGuard's doc comment promises
+// in-place ops skip version-counter increments while it's active;
+// dispatch_inplace() below is the version counter's only generic bump site,
+// so it needs this check to make that promise real. Defined in
+// src/autograd/variable.cpp; always linked into the same binary as this TU.
+auto is_inference_mode_enabled() -> bool;
+
 /**
  * @brief Kernel function pointer type for direct dispatch.
  *
@@ -426,8 +435,11 @@ struct alignas(64) BackendDispatchTable {
         }
         auto pre_version = target.version();
         auto& result = fn(target, others, attrs);
-        // Auto-bump version counter only if kernel didn't already bump
-        if (result.version() == pre_version) {
+        // Auto-bump version counter only if kernel didn't already bump.
+        // Skipped entirely under InferenceModeGuard, matching its own doc
+        // comment ("skips version counter increments for in-place ops") —
+        // previously unimplemented anywhere (AUTOGRAD-R024).
+        if (result.version() == pre_version && !is_inference_mode_enabled()) {
             result.bump_version();
         }
         // Notify the JIT tracer of the in-place mutation. dispatch_inplace

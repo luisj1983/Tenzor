@@ -225,7 +225,23 @@ auto apply_builtin_score_mod(Tensor scores, const Tensor& Q,
         scores = where(mask_2d.to(DType::Bool), neg_inf, scores);
     };
 
-    if (score_mod_id == 2 || score_mod_id == 6) {
+    if (score_mod_id == 0) {
+        // Identity: no modification. Handled here (rather than only by each
+        // backend's native fused-kernel fast path) so the shared composed
+        // path stays correct for id==0 whenever a backend routes to it
+        // (e.g. AUTOGRAD-R027: score_mod_id==0/1 combined with an extra
+        // trailing tensor the native fast path can't safely interpret).
+    } else if (score_mod_id == 1) {
+        // Causal: bottom-right aligned (mask ki > qi + (S_k - S_q)), matching
+        // the native fused-kernel causal convention (F026) and
+        // composed_attention_backward_variable's Variable-level twin.
+        auto [rows_2d, cols_2d] = build_index_grids();
+        Tensor shift_t = full({1}, static_cast<double>(S_k - S_q),
+                              rows_2d.dtype(), rows_2d.device());
+        Tensor row_shifted = rows_2d + shift_t;
+        Tensor future = gt(cols_2d, row_shifted);
+        apply_neg_inf_mask(future);
+    } else if (score_mod_id == 2 || score_mod_id == 6) {
         // Sliding window: mask positions where |i - j| > window/2.
         int64_t window_size = attrs.get_int(AttrKey::WindowSize, 0);
         if (window_size <= 0) {
@@ -372,6 +388,19 @@ auto flex_attention_score_mod_forward(std::span<const Tensor> inputs,
     const float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
     const int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
+    // AUTOGRAD-R027: block_mask is not yet implemented anywhere in the
+    // composed score-mod path (no code here or in apply_builtin_score_mod
+    // reads it) — fail loudly rather than silently computing attention as if
+    // it were absent. Every caller of this shared helper (all 5 backends,
+    // for any ScoreModId) reaches this check first.
+    if (attrs.get_bool(AttrKey::HasBlockMask, false)) {
+        throw std::runtime_error(
+            "FlexAttention: block_mask is not yet implemented for the "
+            "composed score-mod path (ScoreModId=" + std::to_string(score_mod_id) +
+            "). Use nn::flex_attention(Q,K,V,const BlockMask&,...) for "
+            "block-sparse attention instead.");
+    }
+
     const Tensor& Q = inputs[0];
     const Tensor& K = inputs[1];
     const Tensor& V = inputs[2];
@@ -386,16 +415,12 @@ auto flex_attention_score_mod_forward(std::span<const Tensor> inputs,
                           scores.dtype(), scores.device());
     scores = scores * scale_t;
 
-    // For relpos_bias (id 3) the bias is the trailing input after [Q,K,V] and
-    // an optional block_mask.
+    // block_mask is already ruled out above, so the only possible trailing
+    // input after [Q,K,V] is relpos_bias (present iff AttrKey::HasRelposBias).
     Tensor bias_hold;
     const Tensor* relpos_bias = nullptr;
-    if (score_mod_id == 3) {
-        if (inputs.size() == 4) {
-            bias_hold = inputs[3];
-        } else if (inputs.size() >= 5) {
-            bias_hold = inputs.back();
-        }
+    if (attrs.get_bool(AttrKey::HasRelposBias, false) && inputs.size() >= 4) {
+        bias_hold = inputs.back();
         relpos_bias = &bias_hold;
     }
 
@@ -429,6 +454,16 @@ auto flex_attention_score_mod_backward(std::span<const Tensor> inputs,
     -> std::vector<Tensor> {
     const float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
     const int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
+
+    // AUTOGRAD-R027: see flex_attention_score_mod_forward — block_mask has no
+    // implementation in the composed backward path either; fail loudly
+    // instead of silently differentiating as if it were absent.
+    if (attrs.get_bool(AttrKey::HasBlockMask, false)) {
+        throw std::runtime_error(
+            "FlexAttentionBackward: block_mask is not yet implemented for the "
+            "composed score-mod path (ScoreModId=" + std::to_string(score_mod_id) +
+            ").");
+    }
 
     const Tensor& dO = inputs[0];
     const Tensor& Q  = inputs[1];
