@@ -288,6 +288,69 @@ TEST_P(JVPRulesTest, JVP_LinalgMatrixNorm_Fro_MatchesFD) {
     EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
 }
 
+// ---- Bessel J1/I1/I1e JVP: sign-preserving x^{-1} term (H24) ----
+// J1 and I1 (and i1e's residual x^{-1} term) are ODD functions of x, so the
+// x_safe denominator in J1'(x) = J0(x) - J1(x)/x (and the analogous I1/I1e
+// identities) must preserve x's sign. Using abs(x) instead computes
+// primal/|x| = -primal/x for x<0 -- a hard sign flip across the entire
+// negative domain, not a numerical-stability edge case. These tests use
+// exclusively negative x to catch exactly that regression (a positive-x-only
+// test would pass either way).
+TEST_P(JVPRulesTest, JVP_BesselJ1_MatchesFD_NegativeX) {
+    auto xx = neg(abs(randn({16}, DType::Float64, device)) + 0.1);
+    auto dx = randn({16}, DType::Float64, device);
+    OpAttributes attrs;
+    std::array<Tensor, 1> p{xx}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::BesselJ1, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& v) {
+        return tenzor::dispatch(OpId::BesselJ1, std::vector<Tensor>{v}, attrs)[0];
+    }, xx, dx);
+    // 1e-4, matching the JVP_BesselI1/JVP_I1e tolerance below: GPU backends'
+    // special-function kernels carry more run-to-run floating-point noise
+    // than CPU's Float64 path (observed intermittently on OneAPI at the
+    // ~1e-6 level with an otherwise-identical seed) -- still tight enough
+    // that the sign-flip regression this test targets (an O(1) discrepancy)
+    // would fail loudly.
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-4);
+}
+
+TEST_P(JVPRulesTest, JVP_BesselI1_MatchesFD_NegativeX) {
+    // Restrict |x| < 3.75, the Abramowitz & Stegun polynomial/asymptotic
+    // branch boundary in bessel_i0_kernel/bessel_i1_kernel: numerically
+    // verified (via direct Python comparison against a manual I0 - I1/x
+    // evaluation) that the closed-form derivative matches a central
+    // difference to ~1e-6 for |x| up to ~3, but the two functions'
+    // independent approximation errors stop cancelling cleanly once x
+    // crosses into the asymptotic-expansion branch (e.g. |x|=5 showed a
+    // ~0.19 mismatch) -- a pre-existing approximation-precision limit of
+    // those two kernels, unrelated to this JVP rule's correctness.
+    auto xx = neg(clamp(abs(randn({16}, DType::Float64, device)), 0.1, 3.0));
+    auto dx = randn({16}, DType::Float64, device);
+    OpAttributes attrs;
+    std::array<Tensor, 1> p{xx}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::BesselI1, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& v) {
+        return tenzor::dispatch(OpId::BesselI1, std::vector<Tensor>{v}, attrs)[0];
+    }, xx, dx);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-4);
+}
+
+TEST_P(JVPRulesTest, JVP_I1e_MatchesFD_NegativeX) {
+    auto xx = neg(clamp(abs(randn({16}, DType::Float64, device)), 0.1, 3.0));
+    auto dx = randn({16}, DType::Float64, device);
+    OpAttributes attrs;
+    std::array<Tensor, 1> p{xx}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::I1e, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& v) {
+        return tenzor::dispatch(OpId::I1e, std::vector<Tensor>{v}, attrs)[0];
+    }, xx, dx);
+    // GPU backends' Float32-internal FD reference carries a few ulp more
+    // noise than CPU's Float64 path (~3e-6 observed on Vulkan) -- 1e-4
+    // keeps headroom while still catching the sign-flip regression, which
+    // produces an O(1) discrepancy, not a borderline one.
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-4);
+}
+
 // ---- CosineSimilarity JVP ----
 TEST_P(JVPRulesTest, JVP_CosineSimilarity_MatchesFD) {
     auto a  = randn({4, 8}, DType::Float64, device) + 1.0;

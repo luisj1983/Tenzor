@@ -365,6 +365,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // overwritten, invalidating the outer call's iterators.
     auto sorted = topological_sort(root.grad_fn());
 
+    // CR3: classify which functions in `sorted` have no parent outside this
+    // walk, computed once up front (see compute_unshared_functions's doc
+    // comment for why) and consulted by every release site below -- both
+    // the per-function release inside the main loop and cleanup_graph's
+    // final pass -- so a Function shared with another, independently-alive
+    // Variable's graph is never torn down out from under it.
+    auto unshared = compute_unshared_functions(sorted);
+
     // Set the create_graph flag so backward functions know to use Variable ops
     // Use RAII guard to ensure flag is restored even on exception
     std::optional<CreateGraphGuard> graph_guard;
@@ -375,10 +383,13 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // Helper to clean up computation graph (breaks circular references)
     auto cleanup_graph = [&]() {
         if (!retain_graph) {
-            for (auto& func : sorted) {
-                if (func) {
-                    // Clear grad_fn on intermediate (non-leaf) input variables
-                    // to break reference cycles that would otherwise leak memory.
+            for (const auto& func : sorted) {
+                if (func && unshared.count(func.get())) {
+                    // Clear grad_fn on intermediate (non-leaf) input
+                    // variables to break reference cycles that would
+                    // otherwise leak memory. Safe here because `func` has
+                    // no external parent, so nothing outside this walk can
+                    // reach these particular Variable copies either.
                     for (auto& var : func->input_variables()) {
                         if (var.grad_fn() && !var.is_leaf()) {
                             var.set_grad_fn(nullptr);
@@ -446,7 +457,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 // Function's memory is released at the same point in the
                 // pass as everyone else's instead of lingering until this
                 // whole execute() call's cleanup_graph().
-                if (!retain_graph) {
+                // CR3: gated by `unshared` -- see compute_unshared_functions.
+                if (!retain_graph && unshared.count(function.get())) {
                     function->release_saved_tensors();
                     function->clear_saved_variables();
                     function->release_op_specific_state();
@@ -772,7 +784,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Release saved tensors after all gradient accumulation and hook
             // execution is complete. This must happen after hooks since hooks
             // may access saved tensors via closures.
-            if (!retain_graph) {
+            // CR3: gated by `unshared` -- see compute_unshared_functions.
+            if (!retain_graph && unshared.count(function.get())) {
                 function->release_saved_tensors();
                 // audit-9 JJ.2: also drop saved_variables_ so the higher-order
                 // graph released here can actually be freed.  Each Function
@@ -883,6 +896,38 @@ auto BackwardEngine::topological_sort(std::shared_ptr<Function> root)
     }
 
     return sorted;
+}
+
+auto BackwardEngine::compute_unshared_functions(
+    const std::vector<std::shared_ptr<Function>>& sorted)
+    -> std::unordered_set<Function*> {
+    // CR3: snapshot local (within-this-walk) in-degree for every node
+    // before any release call anywhere in this backward() pass runs --
+    // cleanup_graph's set_next_functions({}) decrements parent_count_ live,
+    // so computing this any later would see already-decremented counts.
+    std::unordered_map<Function*, int> local_in_degree;
+    for (const auto& func : sorted) {
+        if (!func) continue;
+        for (const auto& child : func->next_functions()) {
+            if (child) ++local_in_degree[child.get()];
+        }
+    }
+
+    std::unordered_set<Function*> unshared;
+    unshared.reserve(sorted.size());
+    for (const auto& func : sorted) {
+        if (!func) continue;
+        auto it = local_in_degree.find(func.get());
+        int local_count = (it != local_in_degree.end()) ? it->second : 0;
+        if (local_count == func->parent_count()) {
+            // Every parent of this node is also part of `sorted` -- no
+            // Function outside this walk (e.g. a sibling Variable's
+            // independently-alive graph) references it, so it is safe to
+            // fully release once this backward() call is done with it.
+            unshared.insert(func.get());
+        }
+    }
+    return unshared;
 }
 
 auto BackwardEngine::clear_gradients() -> void {
@@ -1067,6 +1112,13 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         }
     }
 
+    // CR3: see execute()'s identical use of compute_unshared_functions --
+    // classifies which functions in `sorted` (the union of all roots'
+    // reachable sets) have no parent outside this call, so a Function
+    // shared with another, independently-alive Variable's graph is never
+    // torn down out from under it. Computed once, before any release call.
+    auto unshared = compute_unshared_functions(sorted);
+
     // Seed gradient accumulators for root grad_fns. audit-6 BB.3: use the
     // deduped per-unique-root cumulative seed so duplicate roots contribute
     // their gradients exactly once (summed), not last-writer-wins.
@@ -1083,10 +1135,14 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
 
     auto cleanup_graph = [&]() {
         if (!retain_graph) {
-            for (auto& func : sorted) {
-                if (func) {
-                    // Clear grad_fn on intermediate (non-leaf) input variables
-                    // to break reference cycles that would otherwise leak memory.
+            // CR3: see compute_unshared_functions's doc comment -- `sorted`
+            // here is the union of all `roots`' reachable sets, so a
+            // Function shared between two of these roots is still cleared
+            // (its parents are all within `sorted`); a Function ALSO shared
+            // with some other, independently-alive graph outside this call
+            // is correctly left untouched (see `unshared`, computed above).
+            for (const auto& func : sorted) {
+                if (func && unshared.count(func.get())) {
                     for (auto& var : func->input_variables()) {
                         if (var.grad_fn() && !var.is_leaf()) {
                             var.set_grad_fn(nullptr);
@@ -1132,7 +1188,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 // Function's memory is released at the same point in the
                 // pass as everyone else's instead of lingering until this
                 // whole execute() call's cleanup_graph().
-                if (!retain_graph) {
+                // CR3: gated by `unshared` -- see compute_unshared_functions.
+                if (!retain_graph && unshared.count(function.get())) {
                     function->release_saved_tensors();
                     function->clear_saved_variables();
                     function->release_op_specific_state();
@@ -1404,7 +1461,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             // the single-root execute() path. Hooks may capture saved tensors
             // via closures, so they must remain alive through the accumulation
             // loop above.
-            if (!retain_graph) {
+            // CR3: gated by `unshared` -- see compute_unshared_functions.
+            if (!retain_graph && unshared.count(function.get())) {
                 function->release_saved_tensors();
                 // audit-9 JJ.2: see single-root execute() at L630 — drop
                 // saved_variables_ to release the second-order graph.

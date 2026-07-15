@@ -356,6 +356,12 @@ add_parity_test(test_cpu_sparse_dtype_native test_cpu_sparse_dtype_native.cpp)
 # Wave H4: ROCm InterpolateBackward native nearest-mode scatter.
 add_parity_test(test_rocm_interpolate_nearest_backward test_rocm_interpolate_nearest_backward.cpp)
 
+# L10: Vulkan nearest-mode 5D (volumetric) interpolate forward+backward.
+add_parity_test(test_vulkan_interpolate_nearest_5d test_vulkan_interpolate_nearest_5d.cpp)
+
+# M16: MPS ROIAlignBackward native kernel (macOS-only; skips cleanly elsewhere).
+add_parity_test(test_mps_roi_align_backward test_mps_roi_align_backward.cpp)
+
 # Wave Inf-A: CPU FFT non-MKL DFT fallback (covers any signal length).
 add_parity_test(test_cpu_fft_fallback test_cpu_fft_fallback.cpp)
 

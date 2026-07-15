@@ -1,0 +1,51 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// L10: nearest-mode backward for 5D (volumetric) input, via atomic-float
+// scatter. Mirrors interpolate_nearest_backward.comp's (4D) float-floor
+// convention exactly, extended with a depth axis, so forward and backward
+// agree on which single source voxel each output voxel's gradient scatters
+// into (integer division can floor to a different voxel at near-integer
+// products — this must match nearest_interpolate_5d.comp's float-floor).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, out_d, out_h, out_w)
+layout(binding = 1) buffer GradInput  { float grad_input[]; };   // (N, C, in_d, in_h, in_w)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // N * C * out_d * out_h * out_w
+    uint batch;
+    uint channels;
+    uint in_d;
+    uint in_h;
+    uint in_w;
+    uint out_d;
+    uint out_h;
+    uint out_w;
+    uint align_corners;  // ignored — nearest mode doesn't use it
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint ow = temp % params.out_w; temp /= params.out_w;
+    uint oh = temp % params.out_h; temp /= params.out_h;
+    uint od = temp % params.out_d; temp /= params.out_d;
+    uint c  = temp % params.channels; temp /= params.channels;
+    uint b  = temp;
+
+    uint id_ = min(uint(floor(float(od) * float(params.in_d) / float(params.out_d))),
+                   params.in_d - 1u);
+    uint ih  = min(uint(floor(float(oh) * float(params.in_h) / float(params.out_h))),
+                   params.in_h - 1u);
+    uint iw  = min(uint(floor(float(ow) * float(params.in_w) / float(params.out_w))),
+                   params.in_w - 1u);
+
+    uint base_idx = b * (params.channels * params.in_d * params.in_h * params.in_w)
+                  + c * (params.in_d * params.in_h * params.in_w);
+    uint in_idx = base_idx + id_ * (params.in_h * params.in_w) + ih * params.in_w + iw;
+    atomicAdd(grad_input[in_idx], grad_output[idx]);
+}

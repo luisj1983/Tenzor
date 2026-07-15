@@ -104,6 +104,54 @@ TEST_P(MaxUnpoolMultiDTypeTest, MaxUnpool2dPlacesValuesAtIndices) {
     EXPECT_NEAR(op[15], 0.0f, atol_);
 }
 
+// C3: the existing PlacesValuesAtIndices test above uses batch=1, channels=1,
+// where the (n,c)-plane base offset is always 0 regardless of whether a
+// kernel computes it correctly -- MPS's native max_unpool2d_forward_kernel
+// had exactly this bug (assumed indices were already globally-flat, no
+// plane offset added) and this shape couldn't have caught it. Channels=3
+// here means channel 1's values must land in channel 1's OWN plane, not
+// wrap into channel 0's or channel 2's.
+TEST_P(MaxUnpoolMultiDTypeTest, MaxUnpool2dPlacesValuesAtIndices_MultiChannel) {
+    auto pooled_cpu = tenzor::ones({1, 3, 2, 2}, DType::Float32, Device::cpu());
+    auto* pd = pooled_cpu.data<float>();
+    for (int c = 0; c < 3; ++c) {
+        for (int i = 0; i < 4; ++i) pd[c * 4 + i] = static_cast<float>(c * 10 + i + 1);
+    }
+    if (dtype_ != DType::Float32) pooled_cpu = pooled_cpu.to(dtype_);
+    Variable pooled(pooled_cpu.to(device_), false);
+
+    // Output is (1,3,4,4) -> 16 elements/plane. Same in-plane pattern
+    // {0,2,8,10} for every channel; a correct kernel places each channel's
+    // values in ITS OWN 16-element plane (offsets 0/16/32).
+    auto indices_cpu = zeros({1, 3, 2, 2}, DType::Int64, Device::cpu());
+    auto* idx = indices_cpu.data<int64_t>();
+    int64_t pattern[] = {0, 2, 8, 10};
+    for (int c = 0; c < 3; ++c) {
+        for (int k = 0; k < 4; ++k) idx[c * 4 + k] = pattern[k];
+    }
+    auto indices = indices_cpu.to(device_);
+
+    auto out = nn::functional::max_unpool2d(
+        pooled, indices, std::make_pair<int64_t, int64_t>(2, 2));
+
+    auto out_cpu = out.tensor().to(Device::cpu());
+    if (out_cpu.dtype() != DType::Float32) out_cpu = out_cpu.to(DType::Float32);
+    const auto* op = out_cpu.data<float>();
+    for (int c = 0; c < 3; ++c) {
+        int64_t plane_base = c * 16;
+        for (int k = 0; k < 4; ++k) {
+            EXPECT_NEAR(op[plane_base + pattern[k]], static_cast<float>(c * 10 + k + 1), atol_)
+                << "channel " << c << " pattern index " << k;
+        }
+        // A position that's in-pattern for a DIFFERENT channel but not this
+        // one must be zero here -- catches both a missing base offset (which
+        // would put channel c's values at global offset `pattern[k]`
+        // instead of `plane_base + pattern[k]`) and any cross-channel bleed.
+        EXPECT_NEAR(op[plane_base + 1], 0.0f, atol_) << "channel " << c;
+        EXPECT_NEAR(op[plane_base + 15], 0.0f, atol_) << "channel " << c;
+    }
+}
+
 // ============================================================================
 // MaxUnpool3d
 // ============================================================================
@@ -178,6 +226,45 @@ TEST_P(MaxUnpoolMultiDTypeTest, MaxUnpool3dPlacesValuesAtIndices) {
     EXPECT_NEAR(op[1], 0.0f, atol_);
     EXPECT_NEAR(op[16], 0.0f, atol_);
     EXPECT_NEAR(op[63], 0.0f, atol_);
+}
+
+// C3: same multi-channel rationale as MaxUnpool2dPlacesValuesAtIndices_MultiChannel.
+TEST_P(MaxUnpoolMultiDTypeTest, MaxUnpool3dPlacesValuesAtIndices_MultiChannel) {
+    auto pooled_cpu = tenzor::ones({1, 3, 2, 2, 2}, DType::Float32, Device::cpu());
+    auto* pd = pooled_cpu.data<float>();
+    for (int c = 0; c < 3; ++c) {
+        for (int i = 0; i < 8; ++i) pd[c * 8 + i] = static_cast<float>(c * 10 + i + 1);
+    }
+    if (dtype_ != DType::Float32) pooled_cpu = pooled_cpu.to(dtype_);
+    Variable pooled(pooled_cpu.to(device_), false);
+
+    // Output is (1,3,4,4,4) -> 64 elements/plane. Same in-plane pattern for
+    // every channel; a correct kernel places each channel's values in ITS
+    // OWN 64-element plane (offsets 0/64/128).
+    auto indices_cpu = zeros({1, 3, 2, 2, 2}, DType::Int64, Device::cpu());
+    auto* idx = indices_cpu.data<int64_t>();
+    int64_t pattern[] = {0, 2, 8, 10, 32, 34, 40, 42};
+    for (int c = 0; c < 3; ++c) {
+        for (int k = 0; k < 8; ++k) idx[c * 8 + k] = pattern[k];
+    }
+    auto indices = indices_cpu.to(device_);
+
+    auto out = nn::functional::max_unpool3d(
+        pooled, indices,
+        std::make_tuple<int64_t, int64_t, int64_t>(2, 2, 2));
+
+    auto out_cpu = out.tensor().to(Device::cpu());
+    if (out_cpu.dtype() != DType::Float32) out_cpu = out_cpu.to(DType::Float32);
+    const auto* op = out_cpu.data<float>();
+    for (int c = 0; c < 3; ++c) {
+        int64_t plane_base = c * 64;
+        for (int k = 0; k < 8; ++k) {
+            EXPECT_NEAR(op[plane_base + pattern[k]], static_cast<float>(c * 10 + k + 1), atol_)
+                << "channel " << c << " pattern index " << k;
+        }
+        EXPECT_NEAR(op[plane_base + 1], 0.0f, atol_) << "channel " << c;
+        EXPECT_NEAR(op[plane_base + 63], 0.0f, atol_) << "channel " << c;
+    }
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(MaxUnpoolMultiDTypeTest);

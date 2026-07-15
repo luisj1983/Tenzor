@@ -5189,9 +5189,16 @@ auto jvp_gamma(const DualTensor& x) -> DualTensor {
 
 // Bessel derivatives (DLMF identities):
 //   J0'(x) = −J1(x)
-//   J1'(x) = J0(x) − J1(x)/x       (we use J0(x) − J1(x)*x^{-1}; safe at x>0)
+//   J1'(x) = J0(x) − J1(x)/x
 //   I0'(x) = I1(x)
 //   I1'(x) = I0(x) − I1(x)/x       (analogous identity for modified Bessel).
+// H24: the x^{-1} term must be SIGN-PRESERVING (x_safe = x + eps, matching
+// jvp_spherical_bessel_j0/jvp_sinc's convention below) -- both J1 and I1 are
+// odd functions of x, so dividing by abs(x) instead computes primal/|x| =
+// -primal/x for x<0: the negation of the correct term, a hard sign flip
+// across the entire negative domain, not merely a numerical-stability
+// nicety. At the removable singularity x=0 itself, J1(0)=I1(0)=0 so the
+// eps-nudge still yields the correct limit (0/eps -> 0) either way.
 auto jvp_bessel_j0(const DualTensor& x) -> DualTensor {
     auto primal = tenzor::bessel_j0(x.primal());
     auto deriv  = tenzor::neg(tenzor::bessel_j1(x.primal()));
@@ -5200,7 +5207,7 @@ auto jvp_bessel_j0(const DualTensor& x) -> DualTensor {
 auto jvp_bessel_j1(const DualTensor& x) -> DualTensor {
     auto primal = tenzor::bessel_j1(x.primal());
     auto j0     = tenzor::bessel_j0(x.primal());
-    auto x_safe = tenzor::add(tenzor::abs(x.primal()), 1e-30);
+    auto x_safe = tenzor::add(x.primal(), 1e-30);
     auto deriv  = tenzor::sub(j0, tenzor::div(primal, x_safe));
     return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
 }
@@ -5212,7 +5219,7 @@ auto jvp_bessel_i0(const DualTensor& x) -> DualTensor {
 auto jvp_bessel_i1(const DualTensor& x) -> DualTensor {
     auto primal = tenzor::bessel_i1(x.primal());
     auto i0     = tenzor::bessel_i0(x.primal());
-    auto x_safe = tenzor::add(tenzor::abs(x.primal()), 1e-30);
+    auto x_safe = tenzor::add(x.primal(), 1e-30);
     auto deriv  = tenzor::sub(i0, tenzor::div(primal, x_safe));
     return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
 }
@@ -5228,11 +5235,13 @@ auto jvp_i0e(const DualTensor& x) -> DualTensor {
     return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));
 }
 // Analogous for i1e: i1e'(x) = i0e(x) − sign(x)·i1e(x) − i1e(x)/x.
+// H24: x_safe must be sign-preserving (see jvp_bessel_j1/jvp_bessel_i1
+// above) -- i1e is odd, so abs(x) flips the sign of this term for x<0.
 auto jvp_i1e(const DualTensor& x) -> DualTensor {
     auto primal = tenzor::i1e(x.primal());
     auto i0e_   = tenzor::i0e(x.primal());
     auto sgn    = tenzor::sign(x.primal());
-    auto x_safe = tenzor::add(tenzor::abs(x.primal()), 1e-30);
+    auto x_safe = tenzor::add(x.primal(), 1e-30);
     auto deriv  = tenzor::sub(tenzor::sub(i0e_, tenzor::mul(sgn, primal)),
                                 tenzor::div(primal, x_safe));
     return DualTensor(std::move(primal), tenzor::mul(x.tangent(), deriv));

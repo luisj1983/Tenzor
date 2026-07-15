@@ -289,8 +289,18 @@ auto NormBackward_Linalg::backward(std::vector<Tensor> grad_outputs) -> std::vec
 
     if (ord_ == "fro") {
         // dL/dA = dL/dy * A / norm(A)
+        // H25: norm_val==0 (the exact-zero matrix) made this an unguarded
+        // /0 -> Inf, then Inf * A(==0) -> NaN, even though the correct
+        // subgradient there is 0 (matches PyTorch's zero-at-origin
+        // convention). Guard with the same eps-substitution pattern
+        // LinalgVectorNormBackward already uses for its identical L2-norm
+        // formula (function_new_ops.cpp).
         auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto scale = div(grad, norm_val);
+        auto norm_val_shape_vec = std::vector<int64_t>(norm_val.shape().begin(), norm_val.shape().end());
+        auto eps = full(norm_val_shape_vec, detail::dtype_epsilon(norm_val.dtype()),
+                        norm_val.dtype(), norm_val.device());
+        auto safe_norm = where(eq(norm_val, zeros_like(norm_val)), eps, norm_val);
+        auto scale = div(grad, safe_norm);
         auto scale_shape = std::vector<int64_t>(scale.shape().begin(), scale.shape().end());
         while (scale_shape.size() < input_shape.size()) {
             scale_shape.push_back(1);
@@ -981,7 +991,16 @@ auto NormBackward_Linalg::backward_with_variables(std::vector<Variable> grad_out
     if (ord_ == "fro") {
         // Frobenius: dL/dA = dL/dy * A / norm(A) — graph-preserving form so
         // `create_graph=true` works (audit-9 R.q).
-        auto scale = grad_outputs[0] * tenzor::reciprocal(Variable(norm_val, false));
+        // H25: same unguarded-zero-norm fix as backward() above --
+        // reciprocal(0) = Inf otherwise. norm_val is already wrapped
+        // detached here (consistent with this class's documented
+        // always-detach second-order policy), so the guard only needs to
+        // operate at the Tensor level before wrapping.
+        auto norm_val_shape_vec = std::vector<int64_t>(norm_val.shape().begin(), norm_val.shape().end());
+        auto eps = full(norm_val_shape_vec, detail::dtype_epsilon(norm_val.dtype()),
+                        norm_val.dtype(), norm_val.device());
+        auto safe_norm_val = where(eq(norm_val, zeros_like(norm_val)), eps, norm_val);
+        auto scale = grad_outputs[0] * tenzor::reciprocal(Variable(safe_norm_val, false));
         auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
         auto scale_shape = std::vector<int64_t>(scale.shape().begin(), scale.shape().end());
         while (scale_shape.size() < input_shape.size()) {

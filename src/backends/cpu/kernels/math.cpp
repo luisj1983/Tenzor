@@ -6647,9 +6647,17 @@ auto betainc_kernel(std::span<const Tensor> inputs) -> Tensor {
 
 auto bessel_j0_kernel(const Tensor& input) -> Tensor {
 #if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    // H24 follow-up: std::cyl_bessel_j throws std::domain_error for x < 0
+    // (the C++ standard's general-order specification), but J0 is an EVEN,
+    // entire function of x (J0(-x) = J0(x)) that's perfectly well-defined
+    // there. abs() before dispatching to the library function makes this
+    // consistent with every other backend's bessel_j0 (CUDA/ROCm's native
+    // j0()/j0f() accept negative x directly; OneAPI/Vulkan's custom
+    // polynomial approximations already abs() internally) and with this
+    // same function's own #else fallback branch below.
     return unary_math_kernel(input,
-        [](float x) { return static_cast<float>(std::cyl_bessel_j(0, static_cast<double>(x))); },
-        [](double x) { return std::cyl_bessel_j(0, x); }, "bessel_j0");
+        [](float x) { return static_cast<float>(std::cyl_bessel_j(0, static_cast<double>(std::abs(x)))); },
+        [](double x) { return std::cyl_bessel_j(0, std::abs(x)); }, "bessel_j0");
 #else
     // Fallback: polynomial approximation (Abramowitz & Stegun)
     auto j0_approx = [](double x) -> double {
@@ -6675,9 +6683,19 @@ auto bessel_j0_kernel(const Tensor& input) -> Tensor {
 
 auto bessel_j1_kernel(const Tensor& input) -> Tensor {
 #if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    // H24 follow-up: same std::cyl_bessel_j domain restriction as bessel_j0
+    // above, but J1 is an ODD, entire function (J1(-x) = -J1(x)), so the
+    // sign must be reapplied after computing on abs(x) -- matching this
+    // function's own #else fallback and every other backend's bessel_j1.
     return unary_math_kernel(input,
-        [](float x) { return static_cast<float>(std::cyl_bessel_j(1, static_cast<double>(x))); },
-        [](double x) { return std::cyl_bessel_j(1, x); }, "bessel_j1");
+        [](float x) {
+            float s = (x < 0.0f) ? -1.0f : 1.0f;
+            return s * static_cast<float>(std::cyl_bessel_j(1, static_cast<double>(std::abs(x))));
+        },
+        [](double x) {
+            double s = (x < 0.0) ? -1.0 : 1.0;
+            return s * std::cyl_bessel_j(1, std::abs(x));
+        }, "bessel_j1");
 #else
     auto j1_approx = [](double x) -> double {
         double sign = (x < 0) ? -1.0 : 1.0;

@@ -11,6 +11,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include "../core/tensor.hpp"
 #include "variable.hpp"
 #include "function.hpp"
@@ -165,6 +166,52 @@ private:
      */
     auto topological_sort(std::shared_ptr<Function> root)
         -> std::vector<std::shared_ptr<Function>>;
+
+    /**
+     * @brief Classify which Functions in @p sorted are safe to fully
+     * release (saved tensors, saved Variables, op-specific state,
+     * input_variables()/next_functions()) once this backward() call
+     * finishes with them.
+     *
+     * CR3: a Function reachable from one root's walk may also be reachable
+     * from a DIFFERENT, independently-alive Variable's graph -- e.g. two
+     * sibling Variables built from a shared non-leaf intermediate
+     * (`a = f(y); b = g(y);` both have `y`'s Function in their
+     * next_functions()). Unconditionally releasing every Function in
+     * `sorted` (the pre-fix behavior, applied both mid-loop right after
+     * each Function's own backward() runs and again in cleanup_graph)
+     * corrupts that other graph's state out from under it.
+     *
+     * Function::parent_count() is a global, atomic count of how many
+     * Functions currently list a given Function in their next_functions().
+     * This computes each node's LOCAL in-degree using only edges between
+     * functions that are themselves in `sorted`. If a node's local
+     * in-degree equals its global parent_count(), every parent of that
+     * node is also part of this same call, so no external graph can be
+     * relying on it and it is safe to release. If parent_count() is
+     * larger, an external parent exists outside `sorted` and the node's
+     * state must be left untouched so that graph's later backward() still
+     * works.
+     *
+     * Computed once, immediately after topological_sort() builds `sorted`
+     * and before any release call runs anywhere in this backward() call --
+     * both to snapshot parent_count() before cleanup_graph's
+     * set_next_functions({}) calls start decrementing it live, and so the
+     * SAME classification gates every release site consistently (a
+     * Function must not be released mid-loop by one site and preserved by
+     * another).
+     *
+     * @param sorted Topologically-sorted functions reachable from one root
+     *               (as produced by topological_sort()); may contain
+     *               multiple roots' reachable sets when called from
+     *               execute_multi().
+     * @return Set of raw Function pointers (into `sorted`'s shared_ptrs,
+     *         valid for the lifetime of this backward() call) that have no
+     *         parent outside `sorted` and are therefore safe to release.
+     */
+    static auto compute_unshared_functions(
+        const std::vector<std::shared_ptr<Function>>& sorted)
+        -> std::unordered_set<Function*>;
 
     /**
      * @brief Gradient accumulation buffers for multi-path graphs.

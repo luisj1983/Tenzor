@@ -518,22 +518,41 @@ kernel void depthwise_conv2d_kernel(
 // MaxUnpool2d / MaxUnpool3d
 // ============================================================================
 
+// C3: `indices` holds PLANE-LOCAL offsets (matching every other pooling
+// kernel's convention in this file, e.g. maxpool2d_forward_kernel/
+// maxpool3d_backward_kernel below), not a global NCHW/NCDHW-flat index --
+// the base offset for this thread's (n,c) plane must be added explicitly.
+// Plain write (not atomic), no zero-init here: matches the CPU reference
+// (max_unpool2d_impl/max_unpool3d_impl, pooling.cpp) exactly -- indices are
+// expected unique per output position (colliding indices are last-writer-
+// wins, same as CPU/PyTorch), and the caller zero-initializes `output`
+// before dispatch. Bounds-checks idx like the CPU reference does.
 kernel void max_unpool2d_forward_kernel(
     device const float* input    [[buffer(0)]],
     device const int* indices    [[buffer(1)]],
     device float* output         [[buffer(2)]],
+    constant uint& in_plane      [[buffer(3)]],   // in_h * in_w
+    constant uint& out_plane     [[buffer(4)]],   // out_h * out_w
     uint id                      [[thread_position_in_grid]])
 {
-    output[indices[id]] = input[id];
+    uint plane = id / in_plane;
+    int idx = indices[id];
+    if (idx < 0 || uint(idx) >= out_plane) return;
+    output[plane * out_plane + uint(idx)] = input[id];
 }
 
 kernel void max_unpool3d_forward_kernel(
     device const float* input    [[buffer(0)]],
     device const int* indices    [[buffer(1)]],
     device float* output         [[buffer(2)]],
+    constant uint& in_plane      [[buffer(3)]],   // in_d * in_h * in_w
+    constant uint& out_plane     [[buffer(4)]],   // out_d * out_h * out_w
     uint id                      [[thread_position_in_grid]])
 {
-    output[indices[id]] = input[id];
+    uint plane = id / in_plane;
+    int idx = indices[id];
+    if (idx < 0 || uint(idx) >= out_plane) return;
+    output[plane * out_plane + uint(idx)] = input[id];
 }
 
 // ============================================================================
@@ -1099,6 +1118,75 @@ kernel void roi_align_forward_kernel(
         }
     }
     output[id] = sum / float(sr * sc);
+}
+
+// M16: ROIAlign backward — mirrors roi_align_forward_kernel's bin/sample-grid
+// construction exactly (same offset/clamp/bilinear-corner math), scattering
+// each grad_output sample's contribution to its 4 bilinear-neighbor input
+// pixels via atomic_float instead of gathering from them. grad_input must be
+// zero-initialized by the caller before this kernel runs (host-side memset,
+// matching adaptive_maxpool3d_backward_kernel's convention) since multiple
+// ROIs/bins can scatter into the same input pixel.
+kernel void roi_align_backward_kernel(
+    device const float* grad_output [[buffer(0)]],
+    device const float* rois        [[buffer(1)]],
+    device atomic_float* grad_input [[buffer(2)]],
+    constant uint& channels      [[buffer(3)]],
+    constant uint& in_h          [[buffer(4)]],
+    constant uint& in_w          [[buffer(5)]],
+    constant uint& pool_h        [[buffer(6)]],
+    constant uint& pool_w        [[buffer(7)]],
+    constant float& spatial_scale [[buffer(8)]],
+    constant uint& sampling_ratio [[buffer(9)]],
+    constant uint& aligned       [[buffer(10)]],
+    uint id                      [[thread_position_in_grid]])
+{
+    uint pw_idx = id % pool_w;
+    uint ph_idx = (id / pool_w) % pool_h;
+    uint c = (id / (pool_w * pool_h)) % channels;
+    uint n = id / (pool_w * pool_h * channels);
+
+    device const float* roi = rois + n * 5;
+    int batch_idx = int(roi[0]);
+    float offset = aligned ? 0.5f : 0.0f;
+    float roi_x1 = roi[1] * spatial_scale - offset;
+    float roi_y1 = roi[2] * spatial_scale - offset;
+    float roi_x2 = roi[3] * spatial_scale - offset;
+    float roi_y2 = roi[4] * spatial_scale - offset;
+
+    float roi_w = roi_x2 - roi_x1;
+    float roi_h = roi_y2 - roi_y1;
+    if (!aligned) {
+        roi_w = max(roi_w, 1.0f);
+        roi_h = max(roi_h, 1.0f);
+    }
+
+    float bin_h = roi_h / float(pool_h);
+    float bin_w = roi_w / float(pool_w);
+
+    uint sr = (sampling_ratio > 0) ? sampling_ratio : uint(max(1.0f, ceil(bin_h)));
+    uint sc = (sampling_ratio > 0) ? sampling_ratio : uint(max(1.0f, ceil(bin_w)));
+
+    float grad_val = grad_output[id] / float(sr * sc);
+    device atomic_float* base = grad_input + (batch_idx * channels + c) * in_h * in_w;
+
+    for (uint iy = 0; iy < sr; ++iy) {
+        float y = roi_y1 + bin_h * (float(ph_idx) + (float(iy) + 0.5f) / float(sr));
+        for (uint ix = 0; ix < sc; ++ix) {
+            float x = roi_x1 + bin_w * (float(pw_idx) + (float(ix) + 0.5f) / float(sc));
+            if (y < -1.0f || y > float(in_h) || x < -1.0f || x > float(in_w)) continue;
+            y = clamp(y, 0.0f, float(in_h - 1));
+            x = clamp(x, 0.0f, float(in_w - 1));
+            int y0 = int(floor(y)), x0 = int(floor(x));
+            int y1 = min(y0 + 1, int(in_h - 1)), x1 = min(x0 + 1, int(in_w - 1));
+            float ly = y - float(y0), lx = x - float(x0);
+            float hy = 1.0f - ly, hx = 1.0f - lx;
+            atomic_fetch_add_explicit(&base[y0 * in_w + x0], grad_val * hy * hx, memory_order_relaxed);
+            atomic_fetch_add_explicit(&base[y0 * in_w + x1], grad_val * hy * lx, memory_order_relaxed);
+            atomic_fetch_add_explicit(&base[y1 * in_w + x0], grad_val * ly * hx, memory_order_relaxed);
+            atomic_fetch_add_explicit(&base[y1 * in_w + x1], grad_val * ly * lx, memory_order_relaxed);
+        }
+    }
 }
 
 // ============================================================================

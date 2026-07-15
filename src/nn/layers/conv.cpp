@@ -744,10 +744,38 @@ public:
         bool has_bias = saved_tensors_.size() > 2;
 
         // grad_input via conv_transpose1d (preserves computation graph)
+        //
+        // H23: for stride > 1 the transpose is ambiguous — several input
+        // lengths map to the same conv output length, so output_padding=0
+        // produces an input up to (stride-1) shorter than the true input.
+        // Recover the exact output_padding from the SAVED input length,
+        // mirroring the already-fixed Conv2dBackward/Conv3dBackward. With
+        // out = floor((in + 2*pad - dilation*(k-1) - 1)/stride) + 1, the
+        // transpose base length (output_padding=0) is
+        //   base = (out-1)*stride - 2*pad + dilation*(k-1) + 1
+        // and output_padding = in - base (clamped to [0, stride-1]).
+        const auto& in_shape = input_var.tensor().shape();
+        const auto& go_shape = grad_out_var.tensor().shape();
+        const auto& w_shape = weight_var.tensor().shape();
+        auto compute_output_padding = [](int64_t in_size, int64_t out_size,
+                                         int64_t stride, int64_t pad,
+                                         int64_t dilation, int64_t k) -> int64_t {
+            int64_t base = (out_size - 1) * stride - 2 * pad + dilation * (k - 1) + 1;
+            int64_t op = in_size - base;
+            if (op < 0) op = 0;              // clamp against malformed saved shapes
+            if (op > stride - 1) op = stride - 1;
+            return op;
+        };
+        int64_t out_pad = 0;
+        if (in_shape.size() == 3 && go_shape.size() == 3 && w_shape.size() == 3) {
+            out_pad = compute_output_padding(in_shape[2], go_shape[2],
+                                             stride_, padding_,
+                                             dilation_, w_shape[2]);
+        }
         auto grad_input = ::tenzor::nn::functional::conv_transpose1d(
             grad_out_var, weight_var,
             std::nullopt,
-            {stride_}, {padding_}, {0}, groups_, {dilation_});
+            {stride_}, {padding_}, {out_pad}, groups_, {dilation_});
 
         // grad_weight via dispatch (unsqueeze to 4D, use Conv2dBackwardWeight)
         Tensor grad_4d = grad_out_var.tensor().unsqueeze(2);
@@ -763,6 +791,30 @@ public:
         backward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
         backward_attrs.set(AttrKey::Dilation, dilation_);
         backward_attrs.set(AttrKey::Groups, groups_);
+
+        // Set 4D shape strings required by conv2d_backward_weight_kernel
+        // (mirrors this class's own backward() above, and the equivalent
+        // Conv2dBackward::backward_with_variables setup) -- without these,
+        // the kernel reads an empty weight_shape/input_shape and crashes
+        // via an out-of-bounds vector access. This path was previously
+        // unexercised (no create_graph=true test existed for nn::Conv1d).
+        {
+            auto is = input_4d.shape();
+            std::string is_str;
+            for (size_t i = 0; i < is.size(); ++i) {
+                if (i > 0) is_str += ',';
+                is_str += std::to_string(is[i]);
+            }
+            backward_attrs.set(AttrKey::InputShape, is_str);
+
+            auto ws = weight_4d.shape();
+            std::string ws_str;
+            for (size_t i = 0; i < ws.size(); ++i) {
+                if (i > 0) ws_str += ',';
+                ws_str += std::to_string(ws[i]);
+            }
+            backward_attrs.set(AttrKey::WeightShape, ws_str);
+        }
 
         std::vector<Tensor> gw_inputs = {grad_4d, input_4d, weight_4d};
         auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight, gw_inputs, backward_attrs)[0];
@@ -859,37 +911,34 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     auto bias_it = parameters_.find("bias");
     Device original_device = input.tensor().device();
 
-    // Handle dtype and device mismatch for weight
-    Tensor weight_matched = weight.tensor();
-    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
-                                   (input.tensor().device().type != weight.tensor().device().type);
-    if (weight_needs_conversion) {
-        if (input.tensor().device().type != weight.tensor().device().type) {
-            weight_matched = weight_matched.to(original_device);
-        }
-        if (input.dtype() != weight_matched.dtype()) {
-            weight_matched = weight_matched.to(input.dtype());
-        }
+    // Handle dtype and device mismatch for weight. H23 follow-up: this used
+    // to promote via a raw Tensor (weight.tensor().to(...)), which (a) is
+    // never wired back into a differentiable Variable, so it cannot be
+    // saved for higher-order gradients, and (b) was what got saved into
+    // tensors_to_save below -- but only when NO conversion was needed did
+    // that saved tensor actually match the device backend_with_variables'
+    // grad_weight dispatch expects; whenever weight lived on a different
+    // device than input (the common case for a freshly-constructed module
+    // never explicitly moved via .to()), backward_with_variables crashed
+    // with a device-mismatch (or, pre-H23, out-of-bounds) failure the first
+    // time create_graph=true exercised it. variable_cast + wrap_preserving_grad
+    // (the pattern Conv2d/Conv3d already use) keeps the promotion
+    // differentiable AND ensures the promoted, device/dtype-matched tensor
+    // is what's actually saved for backward.
+    Variable weight_matched = variable_cast(weight, input.dtype());
+    if (input.tensor().device().type != weight.tensor().device().type) {
+        tenzor::utils::wrap_preserving_grad(weight_matched, weight_matched.tensor().to(original_device));
     }
 
     const Tensor* bias_ptr = nullptr;
-    Tensor bias_matched;
+    Variable bias_matched;
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
-                                     (input.tensor().device().type != bias.tensor().device().type);
-        if (bias_needs_conversion) {
-            bias_matched = bias.tensor();
-            if (input.tensor().device().type != bias.tensor().device().type) {
-                bias_matched = bias_matched.to(original_device);
-            }
-            if (input.dtype() != bias_matched.dtype()) {
-                bias_matched = bias_matched.to(input.dtype());
-            }
-            bias_ptr = &bias_matched;
-        } else {
-            bias_ptr = &bias.tensor();
+        bias_matched = variable_cast(bias, input.dtype());
+        if (input.tensor().device().type != bias.tensor().device().type) {
+            tenzor::utils::wrap_preserving_grad(bias_matched, bias_matched.tensor().to(original_device));
         }
+        bias_ptr = &bias_matched.tensor();
     }
 
     Tensor input_tensor = input.tensor();   // 3-D [N, C, L], unpadded
@@ -910,7 +959,7 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         // Depthwise path keeps the proven manual-pad + unsqueeze-to-4D form.
         Tensor padded = (padding_ > 0) ? pad_1d(input_tensor, padding_) : input_tensor;
         std::vector<Tensor> dw_inputs = {traced_unsqueeze(padded, 2),
-                                         traced_unsqueeze(weight_matched, 2)};
+                                         traced_unsqueeze(weight_matched.tensor(), 2)};
         if (bias_ptr != nullptr) {
             dw_inputs.push_back(*bias_ptr);
         }
@@ -929,7 +978,7 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         // manual-pad + Conv2dForward(pad=0) path. Using 3-D operands keeps the
         // op faithful for JIT tracing / ONNX export (3-D weight, rank-1 attrs)
         // instead of leaking a degenerate 4-D Conv2d into the traced graph.
-        std::vector<Tensor> inputs_vec = {input_tensor, weight_matched};
+        std::vector<Tensor> inputs_vec = {input_tensor, weight_matched.tensor()};
         if (bias_ptr != nullptr) {
             inputs_vec.push_back(*bias_ptr);
         }
@@ -952,14 +1001,29 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     if (input.requires_grad() || weight.requires_grad()) {
         std::vector<Tensor> tensors_to_save;
         if (bias_ptr != nullptr) {
-            tensors_to_save = {input.tensor(), weight.tensor(), *bias_ptr};
+            tensors_to_save = {input.tensor(), weight_matched.tensor(), *bias_ptr};
         } else {
-            tensors_to_save = {input.tensor(), weight.tensor()};
+            tensors_to_save = {input.tensor(), weight_matched.tensor()};
         }
 
         auto backward_fn = std::make_shared<Conv1dBackward>(
             stride_, padding_, dilation_, groups_, std::move(tensors_to_save)
         );
+
+        // Save Variables for higher-order gradient support (create_graph=true).
+        // Previously missing entirely on Conv1d (unlike Conv2d/Conv3d), so
+        // Conv1dBackward::backward_with_variables's has_saved_variables()
+        // check always fell through to the detached-Tensor fallback --
+        // silently severing the second-order gradient chain back to
+        // input/weight through grad_input's/grad_weight's cross-dependence,
+        // the same bug class as M17-M24.
+        if (::tenzor::is_creating_graph()) {
+            std::vector<Variable> vars_to_save = {input, weight_matched};
+            if (bias_it != parameters_.end()) {
+                vars_to_save.push_back(bias_matched);
+            }
+            backward_fn->save_variables_for_backward(std::move(vars_to_save));
+        }
 
         result.set_grad_fn(backward_fn);
 

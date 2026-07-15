@@ -1,0 +1,51 @@
+#version 450
+
+// L10: nearest-mode forward for 5D (volumetric, N/C/D/H/W) input. Mirrors
+// nearest_interpolate.comp's (4D) float-floor convention exactly, extended
+// with a depth axis — no half-pixel offset, no align_corners (nearest mode
+// ignores it on every backend, matching CPU's interpolate_nearest_5d_impl).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input  { float input_data[]; };   // (N, C, in_d, in_h, in_w)
+layout(binding = 1) buffer Output { float output_data[]; };  // (N, C, out_d, out_h, out_w)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_d;
+    uint in_h;
+    uint in_w;
+    uint out_d;
+    uint out_h;
+    uint out_w;
+    uint align_corners;  // ignored — present so the host can share the trilinear struct
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint ow = temp % params.out_w; temp /= params.out_w;
+    uint oh = temp % params.out_h; temp /= params.out_h;
+    uint od = temp % params.out_d; temp /= params.out_d;
+    uint c  = temp % params.channels; temp /= params.channels;
+    uint b  = temp;
+
+    uint id_ = min(uint(floor(float(od) * float(params.in_d) / float(params.out_d))),
+                   params.in_d - 1u);
+    uint ih  = min(uint(floor(float(oh) * float(params.in_h) / float(params.out_h))),
+                   params.in_h - 1u);
+    uint iw  = min(uint(floor(float(ow) * float(params.in_w) / float(params.out_w))),
+                   params.in_w - 1u);
+
+    uint input_idx = b * (params.channels * params.in_d * params.in_h * params.in_w)
+                    + c * (params.in_d * params.in_h * params.in_w)
+                    + id_ * (params.in_h * params.in_w)
+                    + ih * params.in_w
+                    + iw;
+
+    output_data[idx] = input_data[input_idx];
+}

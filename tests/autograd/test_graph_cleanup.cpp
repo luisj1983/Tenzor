@@ -141,3 +141,34 @@ TEST_F(GraphCleanupTest, MultipleBackwardCalls) {
     // Gradient should have accumulated
     EXPECT_GRAD_FLOWS(x);
 }
+
+// CR3: two independently-alive Variables sharing a non-leaf ancestor
+// Function. Before the fix, `a.backward()` (default retain_graph=false)
+// unconditionally cleared every Function reachable from `a` -- including
+// `y`'s Function, which is also referenced by `b`'s independently-held
+// grad_fn chain (`b` was never backward()'d yet). That corrupted `b`'s
+// saved state out from under it: `b.backward()` would then either throw
+// ("expected N saved tensors but got 0") or silently drop the gradient
+// contribution through the shared ancestor, depending on the op.
+TEST_F(GraphCleanupTest, SharedNonLeafAncestorAcrossIndependentRoots) {
+    auto x = Variable(randn({2, 3}, DType::Float32, Device::cpu()), true);
+    auto y = x * x;              // shared non-leaf ancestor (MulBackward)
+    auto a = tenzor::sum(y);     // root A, next_functions = {y's Function}
+    auto b = tenzor::sum(y);     // root B, next_functions = {SAME y's Function}
+
+    a.backward();  // default retain_graph=false
+    EXPECT_GRAD_FLOWS(x);
+    auto grad_from_a = x.grad().value();
+
+    x.zero_grad();
+    ASSERT_NO_THROW(b.backward())
+        << "b's independently-alive graph must survive a's cleanup";
+    EXPECT_GRAD_FLOWS(x);
+    auto grad_from_b = x.grad().value();
+
+    // d(sum(x*x))/dx = 2x regardless of which root triggered the backward
+    // pass through the shared y = x*x ancestor -- both should agree.
+    EXPECT_TRUE(tenzor::allclose(grad_from_a, grad_from_b))
+        << "gradient through the shared ancestor should be identical and "
+           "correct from either root";
+}

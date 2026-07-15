@@ -918,6 +918,69 @@ Tensor mps_roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
     return output;
 }
 
+// M16: ROIAlignBackward had no native kernel at all (unconditional CPU
+// round-trip) -- the formula in roi_align_backward_kernel (pool3d.metal) was
+// already verified correct against the CPU reference; this just wires it up,
+// mirroring mps_roi_align_forward_kernel's dispatch shape exactly (same
+// buffer/attribute layout, same F16/BF16-widen-to-F32 discipline, same
+// Float64-excluded-by-caller convention since Metal has no double type).
+Tensor mps_roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
+                                     int64_t batch_size, int64_t feat_height, int64_t feat_width,
+                                     float spatial_scale, int64_t sampling_ratio,
+                                     bool aligned) {
+    ensure_initialized();
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        Tensor gi32 = mps_roi_align_backward_kernel(
+            grad_output.to(DType::Float32), rois.to(DType::Float32),
+            batch_size, feat_height, feat_width, spatial_scale, sampling_ratio, aligned);
+        return gi32.to(grad_output.dtype());
+    }
+    const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
+
+    auto gs = grad_output.shape();
+    int64_t channels = gs[1], pool_h = gs[2], pool_w = gs[3];
+    int64_t num_rois = rois.shape()[0];
+
+    Tensor grad_input({batch_size, channels, feat_height, feat_width},
+                       grad_output.dtype(), grad_output.device());
+    size_t bytes = grad_input.numel() * dtype_size(grad_input.dtype());
+    std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
+    if (num_rois == 0) return grad_input;
+
+    auto pipeline = get_pipeline("roi_align_backward_kernel");
+    id<MTLBuffer> buf_go = get_buffer(grad_output);
+    id<MTLBuffer> buf_rois = get_buffer(rois_f32);
+    id<MTLBuffer> buf_gi = get_buffer(grad_input);
+
+    uint32_t u_channels = (uint32_t)channels, u_in_h = (uint32_t)feat_height, u_in_w = (uint32_t)feat_width;
+    uint32_t u_pool_h = (uint32_t)pool_h, u_pool_w = (uint32_t)pool_w;
+    uint32_t u_sampling_ratio = (uint32_t)sampling_ratio;
+    uint32_t u_aligned = aligned ? 1u : 0u;
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:buf_go offset:0 atIndex:0];
+    [enc setBuffer:buf_rois offset:0 atIndex:1];
+    [enc setBuffer:buf_gi offset:0 atIndex:2];
+    [enc setBytes:&u_channels length:sizeof(uint32_t) atIndex:3];
+    [enc setBytes:&u_in_h length:sizeof(uint32_t) atIndex:4];
+    [enc setBytes:&u_in_w length:sizeof(uint32_t) atIndex:5];
+    [enc setBytes:&u_pool_h length:sizeof(uint32_t) atIndex:6];
+    [enc setBytes:&u_pool_w length:sizeof(uint32_t) atIndex:7];
+    [enc setBytes:&spatial_scale length:sizeof(float) atIndex:8];
+    [enc setBytes:&u_sampling_ratio length:sizeof(uint32_t) atIndex:9];
+    [enc setBytes:&u_aligned length:sizeof(uint32_t) atIndex:10];
+
+    size_t total = grad_output.numel();
+    MTLSize gridsz = MTLSizeMake(total, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(total));
+    [enc dispatchThreads:gridsz threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
+    return grad_input;
+}
+
 // NMS: use shared memory (zero-copy) + CPU loop (serial by nature)
 Tensor mps_nms_kernel(const Tensor& boxes, const Tensor& scores, float iou_threshold) {
     int64_t N = boxes.shape()[0];

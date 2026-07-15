@@ -310,6 +310,47 @@ TEST_P(LinalgNormOrds, Gradcheck_Fro) {
     EXPECT_NEAR(num, ana, 1e-5) << "fro: numerical=" << num << " analytic=" << ana;
 }
 
+// H25: NormBackward_Linalg's "fro" branch used to divide by norm_val with
+// no zero-guard -- for the exact-zero matrix, norm_val==0 gave
+// scale=grad/0=Inf, then Inf*A(==0)=NaN, even though the correct
+// subgradient at the origin is 0 (matches PyTorch's convention and the
+// already-guarded LinalgVectorNormBackward's identical L2-norm formula).
+// This is a first-order bug -- reproducible on a plain backward() call, no
+// create_graph needed -- so it's tested with a direct backward() (Variable
+// path exercises backward_with_variables() only under create_graph=true;
+// covered separately below).
+TEST_P(LinalgNormOrds, Fro_ZeroMatrix_GradientIsZeroNotNaN) {
+    auto A = zeros({3, 4}, DType::Float64, device);
+    tenzor::Variable A_var(A, /*requires_grad=*/true);
+    auto y = tenzor::linalg_norm(A_var, "fro");
+    EXPECT_NEAR(scalar_f64(y.tensor()), 0.0, 1e-12);
+    y.backward();
+    auto grad_opt = A_var.grad();
+    ASSERT_TRUE(grad_opt.has_value());
+    auto grad_cpu = grad_opt->to(Device::cpu()).to(DType::Float64).contiguous();
+    auto* g = grad_cpu.data<double>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        ASSERT_FALSE(std::isnan(g[i])) << "grad[" << i << "] is NaN";
+        EXPECT_NEAR(g[i], 0.0, 1e-12) << "grad[" << i << "]";
+    }
+}
+
+// Same check through backward_with_variables() (create_graph=true path).
+TEST_P(LinalgNormOrds, Fro_ZeroMatrix_CreateGraphGradientIsZeroNotNaN) {
+    auto A = zeros({3, 4}, DType::Float64, device);
+    tenzor::Variable A_var(A, /*requires_grad=*/true);
+    auto y = tenzor::linalg_norm(A_var, "fro");
+    y.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+    auto grad_opt = A_var.grad();
+    ASSERT_TRUE(grad_opt.has_value());
+    auto grad_cpu = grad_opt->to(Device::cpu()).to(DType::Float64).contiguous();
+    auto* g = grad_cpu.data<double>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        ASSERT_FALSE(std::isnan(g[i])) << "grad[" << i << "] is NaN";
+        EXPECT_NEAR(g[i], 0.0, 1e-12) << "grad[" << i << "]";
+    }
+}
+
 TEST_P(LinalgNormOrds, Gradcheck_One) {
     auto A = mk_matrix_f64(device);
     auto [y, grad] = norm_forward_backward(A, "1");

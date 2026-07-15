@@ -119,6 +119,39 @@ TEST_P(HigherOrderNNTest, Conv3d_DoubleBackward_Strided_GradInputShapeMatchesInp
     EXPECT_GRAD_FLOWS(input);
 }
 
+// H23: Conv1dBackward::backward_with_variables had the identical
+// hardcoded-output_padding={0} defect as H18/H19, in the one Conv-backward
+// class their fix did not touch (F.conv1d routes through the already-fixed
+// Conv2dBackward via a 4D unsqueeze/squeeze composition, but nn::Conv1d's
+// own module path uses this class directly). Same verification shape as the
+// Conv2d/Conv3d tests above: for stride > 1, output_padding=0 alone cannot
+// reconstruct the true input length.
+TEST_P(HigherOrderNNTest, Conv1d_DoubleBackward_Strided_GradInputShapeMatchesInput) {
+    auto input = Variable(randn({1, 1, 8}, DType::Float32, device), true);
+    nn::Conv1d conv(1, 1, /*kernel_size=*/3, /*stride=*/2, /*padding=*/1);
+
+    auto output = conv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(input.grad_variable().has_value())
+        << "create_graph=true must populate grad_variable()";
+    Variable grad_var = input.grad_variable().value();
+
+    auto input_shape = input.tensor().shape();
+    auto grad_shape = grad_var.tensor().shape();
+    ASSERT_EQ(grad_shape.size(), input_shape.size());
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        EXPECT_EQ(grad_shape[i], input_shape[i])
+            << "grad_input shape mismatch at dim " << i
+            << " (output_padding not recovered for stride=2)";
+    }
+
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(input);
+}
+
 // ============================================================================
 // JIT-R067: grad_weight double-backward (3rd-order gradient) across the
 // whole Conv family. Previously grad_weight was computed via a raw,

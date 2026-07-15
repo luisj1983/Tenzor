@@ -627,6 +627,108 @@ Tensor mps_adaptive_maxpool3d_backward_kernel(
     }
 }
 
+// C3: max_unpool2d_forward_kernel/max_unpool3d_forward_kernel (pool3d.metal)
+// previously used a global NCHW/NCDHW-flat index convention inconsistent
+// with every other pooling kernel's plane-local convention, AND were pure
+// dead code (OpId::MaxUnpool{2,3}dForward stayed on the CPU round-trip).
+// This wires them up natively, fixing both issues together: the shaders
+// now take an explicit in_plane/out_plane pair and reconstruct the (n,c)
+// base offset themselves. `indices` may arrive as Int32 (from MPS's own
+// native MaxPool3dForward) or Int64 (from MaxPool2dForward's CPU
+// round-trip, or a caller-constructed value) -- never assume either;
+// explicitly coerce to Int32 (this file's structural-index convention,
+// e.g. roi_align_forward_kernel/histogram_kernel) regardless of source,
+// the same defensive-cast discipline CR1 established for the sibling
+// Int32/Int64 MaxPool3dBackward mismatch.
+Tensor mps_max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices,
+                                       int64_t out_h, int64_t out_w) {
+    @autoreleasepool {
+        ensure_initialized();
+        DType orig_dtype = input.dtype();
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            Tensor in32 = mps_max_unpool2d_forward_kernel(input.to(DType::Float32), indices, out_h, out_w);
+            return in32.to(orig_dtype);
+        }
+
+        auto s = input.shape();  // [N, C, in_h, in_w]
+        int64_t N = s[0], C = s[1], in_h = s[2], in_w = s[3];
+        Tensor output({N, C, out_h, out_w}, input.dtype(), input.device());
+        size_t bytes = output.numel() * dtype_size(output.dtype());
+        std::memset(const_cast<void*>(output.data_ptr()), 0, bytes);
+
+        Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+        uint32_t in_plane = static_cast<uint32_t>(in_h * in_w);
+        uint32_t out_plane = static_cast<uint32_t>(out_h * out_w);
+        uint32_t total = static_cast<uint32_t>(input.numel());
+
+        auto pipeline = get_pipeline("max_unpool2d_forward_kernel");
+        id<MTLBuffer> buf_in = get_buffer(input);
+        id<MTLBuffer> buf_idx = get_buffer(indices_i32);
+        id<MTLBuffer> buf_out = get_buffer(output);
+
+        id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:buf_in offset:0 atIndex:0];
+        [enc setBuffer:buf_idx offset:0 atIndex:1];
+        [enc setBuffer:buf_out offset:0 atIndex:2];
+        [enc setBytes:&in_plane length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&out_plane length:sizeof(uint32_t) atIndex:4];
+        dispatch_1d(enc, pipeline, total);
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
+
+        return output;
+    }
+}
+
+Tensor mps_max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices,
+                                       int64_t out_d, int64_t out_h, int64_t out_w) {
+    @autoreleasepool {
+        ensure_initialized();
+        DType orig_dtype = input.dtype();
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            Tensor in32 = mps_max_unpool3d_forward_kernel(input.to(DType::Float32), indices,
+                                                          out_d, out_h, out_w);
+            return in32.to(orig_dtype);
+        }
+
+        auto s = input.shape();  // [N, C, in_d, in_h, in_w]
+        int64_t N = s[0], C = s[1], in_d = s[2], in_h = s[3], in_w = s[4];
+        Tensor output({N, C, out_d, out_h, out_w}, input.dtype(), input.device());
+        size_t bytes = output.numel() * dtype_size(output.dtype());
+        std::memset(const_cast<void*>(output.data_ptr()), 0, bytes);
+
+        Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+        uint32_t in_plane = static_cast<uint32_t>(in_d * in_h * in_w);
+        uint32_t out_plane = static_cast<uint32_t>(out_d * out_h * out_w);
+        uint32_t total = static_cast<uint32_t>(input.numel());
+
+        auto pipeline = get_pipeline("max_unpool3d_forward_kernel");
+        id<MTLBuffer> buf_in = get_buffer(input);
+        id<MTLBuffer> buf_idx = get_buffer(indices_i32);
+        id<MTLBuffer> buf_out = get_buffer(output);
+
+        id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:buf_in offset:0 atIndex:0];
+        [enc setBuffer:buf_idx offset:0 atIndex:1];
+        [enc setBuffer:buf_out offset:0 atIndex:2];
+        [enc setBytes:&in_plane length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&out_plane length:sizeof(uint32_t) atIndex:4];
+        dispatch_1d(enc, pipeline, total);
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        ::tenzor::mps::mps_cmd_check(cmd, __func__);
+
+        return output;
+    }
+}
+
 // ============================================================================
 // MaxPool1d
 // ============================================================================

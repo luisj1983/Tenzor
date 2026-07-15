@@ -465,6 +465,14 @@ Tensor mps_roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
                                     int64_t output_h, int64_t output_w,
                                     float spatial_scale, int64_t sampling_ratio,
                                     bool aligned);
+Tensor mps_roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
+                                     int64_t batch_size, int64_t feat_height, int64_t feat_width,
+                                     float spatial_scale, int64_t sampling_ratio,
+                                     bool aligned);
+Tensor mps_max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices,
+                                       int64_t out_h, int64_t out_w);
+Tensor mps_max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices,
+                                       int64_t out_d, int64_t out_h, int64_t out_w);
 std::vector<Tensor> mps_batchnorm_mean_var_kernel(const Tensor& input);
 Tensor mps_batchnorm_forward_training_kernel(const Tensor& input, const Tensor& mean,
                                                const Tensor& var, const Tensor& weight,
@@ -1913,8 +1921,9 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // double type at all, so it keeps the CPU round-trip inline below —
     // matching the box_iou/grid_sample precedent above of gating Float64
     // rather than misbinding an 8-byte buffer to a 4-byte-float shader.
-    // ROIAlignBackward has no native kernel (none existed to wire up) and
-    // stays fully on the CPU round-trip.
+    // ROIAlignBackward now has a native kernel too (roi_align_backward_kernel,
+    // pool3d.metal), matching the same Float64-CPU-roundtrip / F16-BF16-widen
+    // discipline as forward.
     table.register_kernel(OpId::ROIAlignForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             if (inputs[0].dtype() == DType::Float64) {
@@ -1936,7 +1945,30 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             return {mps_roi_align_forward_kernel(inputs[0], inputs[1], output_h, output_w,
                                                  spatial_scale, sampling_ratio, aligned)};
         });
-    mps_accelerate_multi(OpId::ROIAlignBackward);
+    table.register_kernel(OpId::ROIAlignBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [grad_output, rois]
+            if (inputs[0].dtype() == DType::Float64) {
+                auto dev = inputs[0].device();
+                std::vector<Tensor> cpu_inputs;
+                cpu_inputs.reserve(inputs.size());
+                for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+                auto cpu_result = dispatch(OpId::ROIAlignBackward, cpu_inputs, attrs);
+                std::vector<Tensor> gpu_result;
+                gpu_result.reserve(cpu_result.size());
+                for (auto& t : cpu_result) gpu_result.push_back(t.to(dev));
+                return gpu_result;
+            }
+            int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 1);
+            int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
+            int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
+            float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+            int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+            bool aligned = attrs.get_bool(AttrKey::Aligned, true);
+            return {mps_roi_align_backward_kernel(inputs[0], inputs[1],
+                                                  batch_size, feat_height, feat_width,
+                                                  spatial_scale, sampling_ratio, aligned)};
+        });
 
     // Fractional Max Pool + Max Unpool — use Metal shaders via Accelerate path
     mps_accelerate_multi(OpId::FractionalMaxPool2dForward);
@@ -1944,9 +1976,40 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::FractionalMaxPool2dBackward);
     mps_accelerate_single(OpId::FractionalMaxPool3dBackward);
     mps_accelerate_single(OpId::MaxUnpool1dBackward);
-    mps_accelerate_single(OpId::MaxUnpool2dForward);
+    // C3: max_unpool{2,3}d_forward_kernel (pool3d.metal) now correctly use
+    // the plane-local index convention (previously a stale global-flat
+    // assumption, and dead code -- nothing called them). Wired up here,
+    // replacing the CPU round-trip; Float64 has no Metal double type so it
+    // stays on the round-trip below, matching every other native kernel's
+    // convention in this file.
+    table.register_single_output_kernel(OpId::MaxUnpool2dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            if (inputs[0].dtype() == DType::Float64) {
+                auto dev = inputs[0].device();
+                std::vector<Tensor> cpu_inputs;
+                cpu_inputs.reserve(inputs.size());
+                for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+                return dispatch(OpId::MaxUnpool2dForward, cpu_inputs, attrs)[0].to(dev);
+            }
+            int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+            int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+            return mps_max_unpool2d_forward_kernel(inputs[0], inputs[1], out_h, out_w);
+        });
     mps_accelerate_single(OpId::MaxUnpool2dBackward);
-    mps_accelerate_single(OpId::MaxUnpool3dForward);
+    table.register_single_output_kernel(OpId::MaxUnpool3dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            if (inputs[0].dtype() == DType::Float64) {
+                auto dev = inputs[0].device();
+                std::vector<Tensor> cpu_inputs;
+                cpu_inputs.reserve(inputs.size());
+                for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+                return dispatch(OpId::MaxUnpool3dForward, cpu_inputs, attrs)[0].to(dev);
+            }
+            int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+            int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+            int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+            return mps_max_unpool3d_forward_kernel(inputs[0], inputs[1], out_d, out_h, out_w);
+        });
     mps_accelerate_single(OpId::MaxUnpool3dBackward);
 
     // ================================================================

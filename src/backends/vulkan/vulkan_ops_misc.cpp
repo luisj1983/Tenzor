@@ -1385,6 +1385,60 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
         return output;
     }
 
+    // L10: nearest forward (5D volumetric) — was entirely unimplemented
+    // (fell through to the 4D-only guard below), the sibling gap to M29's
+    // now-fixed trilinear support. Float32-only shader, same widen/narrow
+    // discipline as the trilinear branch above and as bicubic below.
+    if (mode == "nearest" && input_shape.size() == 5) {
+        if (input.dtype() != DType::Float32) {
+            const DType orig = input.dtype();
+            return dispatchInterpolate(input.to(DType::Float32), attrs).to(orig);
+        }
+        std::string size_str(attrs.get_string(AttrKey::OutputSize));
+        std::vector<int64_t> out_sizes;
+        {
+            size_t start = 0;
+            while (start <= size_str.size()) {
+                size_t comma = size_str.find(',', start);
+                std::string tok = size_str.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                out_sizes.push_back(std::stoll(tok));
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
+        if (out_sizes.size() != 3) {
+            throw std::invalid_argument(
+                "dispatchInterpolate (Vulkan): nearest 5D OutputSize must have 3 elements (D,H,W)");
+        }
+        const Tensor input_c = dispatchContiguous(input);
+        int32_t dev = input_c.device().index;
+        const int64_t N = input_shape[0], C = input_shape[1];
+        const int64_t id_ = input_shape[2], ih = input_shape[3], iw = input_shape[4];
+        const int64_t od = out_sizes[0], oh = out_sizes[1], ow = out_sizes[2];
+        Tensor output(std::vector<int64_t>{N, C, od, oh, ow}, input_c.dtype(), input_c.device());
+
+        auto* pipe = getPipeline("nearest_interpolate_5d", dev);
+        struct Nearest5dPC {
+            uint32_t n_elements, batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners;
+        } pc;
+        pc.n_elements = static_cast<uint32_t>(N * C * od * oh * ow);
+        pc.batch = static_cast<uint32_t>(N); pc.channels = static_cast<uint32_t>(C);
+        pc.in_d = static_cast<uint32_t>(id_); pc.in_h = static_cast<uint32_t>(ih); pc.in_w = static_cast<uint32_t>(iw);
+        pc.out_d = static_cast<uint32_t>(od); pc.out_h = static_cast<uint32_t>(oh); pc.out_w = static_cast<uint32_t>(ow);
+        pc.align_corners = align_corners ? 1u : 0u;
+        std::vector<std::pair<uint32_t, const void*>> bnd = {{0, input_c.data_ptr()}, {1, output.data_ptr()}};
+        std::vector<size_t> szs = {input_c.numel() * input_c.dtype_size(), output.numel() * output.dtype_size()};
+        auto ds = allocateAndWriteDescriptorSet(dev, pipe, bnd, szs);
+        auto cmd = beginSingleTimeCommands(dev);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipe->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Nearest5dPC), &pc);
+        vkCmdDispatch(cmd, div_wg_checked(pc.n_elements, devices_[dev].workgroupSize, devices_[dev].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, dev);
+        return output;
+    }
+
     if (input_shape.size() != 4) {
         throw std::invalid_argument("interpolate requires 4D input (N, C, H, W), got " +
                                     std::to_string(input_shape.size()) + "D");
@@ -7669,6 +7723,52 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipe->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TriPC), &pc);
+        vkCmdDispatch(cmd, div_wg_checked(pc.n_elements, devices_[dev].workgroupSize, devices_[dev].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, dev);
+        return gin;
+    }
+
+    // L10: nearest backward (5D volumetric) — sibling gap to the trilinear
+    // branch above. Same zero-init-then-atomic-scatter shape.
+    if (mode == "nearest" && gshape.size() == 5) {
+        if (input_size.size() != 3)
+            throw std::runtime_error("dispatchInterpolateBackward (Vulkan): nearest 5D input_size must be [in_d,in_h,in_w].");
+        auto cg = grad_output.contiguous();
+        int32_t dev = cg.device().index;
+        const int64_t N = gshape[0], C = gshape[1], od = gshape[2], oh = gshape[3], ow = gshape[4];
+        const int64_t id_ = input_size[0], ih = input_size[1], iw = input_size[2];
+        Tensor gin(std::vector<int64_t>{N, C, id_, ih, iw}, cg.dtype(), cg.device());
+        {  // zero-init via the fill shader
+            auto* fp = getPipeline("fill", dev);
+            struct FPC { uint32_t n; uint32_t v; } fpc; fpc.n = static_cast<uint32_t>(gin.numel()); fpc.v = 0u;
+            std::vector<std::pair<uint32_t, const void*>> fb = {{0, gin.data_ptr()}};
+            std::vector<size_t> fs = {gin.numel() * gin.dtype_size()};
+            auto ds = allocateAndWriteDescriptorSet(dev, fp, fb, fs);
+            auto cmd = beginSingleTimeCommands(dev);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fp->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fp->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, fp->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(FPC), &fpc);
+            vkCmdDispatch(cmd, div_wg_checked(fpc.n, devices_[dev].workgroupSize, devices_[dev].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, dev);
+        }
+        auto* pipe = getPipeline("interpolate_nearest_5d_backward", dev);
+        struct Nearest5dPC {
+            uint32_t n_elements, batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners;
+        } pc;
+        pc.n_elements = static_cast<uint32_t>(N * C * od * oh * ow);
+        pc.batch = static_cast<uint32_t>(N); pc.channels = static_cast<uint32_t>(C);
+        pc.in_d = static_cast<uint32_t>(id_); pc.in_h = static_cast<uint32_t>(ih); pc.in_w = static_cast<uint32_t>(iw);
+        pc.out_d = static_cast<uint32_t>(od); pc.out_h = static_cast<uint32_t>(oh); pc.out_w = static_cast<uint32_t>(ow);
+        pc.align_corners = align_corners ? 1u : 0u;
+        std::vector<std::pair<uint32_t, const void*>> bnd = {{0, cg.data_ptr()}, {1, gin.data_ptr()}};
+        std::vector<size_t> szs = {cg.numel() * cg.dtype_size(), gin.numel() * gin.dtype_size()};
+        auto ds = allocateAndWriteDescriptorSet(dev, pipe, bnd, szs);
+        auto cmd = beginSingleTimeCommands(dev);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipe->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Nearest5dPC), &pc);
         vkCmdDispatch(cmd, div_wg_checked(pc.n_elements, devices_[dev].workgroupSize, devices_[dev].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, dev);
