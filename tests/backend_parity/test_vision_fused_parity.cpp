@@ -77,6 +77,29 @@ TEST_P(VisionFusedParity, Interpolate_Bilinear) {
         {input}, 1e-4f, 1e-6f, "interpolate bilinear");
 }
 
+// M29: trilinear (5D) forward — Vulkan previously had no forward
+// implementation at all (dispatchInterpolate unconditionally required 4D),
+// even though a full native trilinear backward shader already existed as
+// unreachable dead code. A genuinely non-trivial resize (upsample one axis,
+// downsample another) exercises the new gather shader's coordinate
+// transform on both branches of the align_corners=false half-pixel formula.
+//
+// Explicit per-device dispatch (not test_operation_parity): that helper
+// silently EXCLUDES any backend whose call throws from the comparison
+// (catches, cerr-logs, moves on) rather than failing — with 4 other
+// backends already implementing trilinear, a Vulkan exception would still
+// leave >=2 successful results and the test would pass without ever
+// exercising Vulkan. This directly asserts THIS device's call succeeds and
+// matches the CPU reference.
+TEST_P(VisionFusedParity, Interpolate_Trilinear) {
+    auto input = randn({1, 2, 3, 4, 5}, DType::Float32, Device::cpu());
+    auto ref = ops::interpolate(input, {6, 7, 9}, "trilinear", false);
+
+    auto out = ops::interpolate(input.to(device), {6, 7, 9}, "trilinear", false);
+    device.synchronize();
+    EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-4f, 1e-6f);
+}
+
 // interpolate_backward bicubic (4D) parity — newly added on all GPU backends (W4).
 TEST_P(VisionFusedParity, InterpolateBackward_Bicubic) {
     auto grad_out = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
@@ -131,6 +154,32 @@ TEST_P(VisionFusedParity, GridSample_Bilinear) {
 // differentiable and use grid coords that land in reflected regions so the
 // fold-sign is exercised; the parity harness then compares grad_grid across all
 // backends. Run for align_corners=true and false (the reflection span differs).
+// L5: nearest-mode grid_sample's round-half tie-break must match across
+// backends (round-half-to-even, matching CPU std::nearbyint / CUDA rint /
+// PyTorch-ATen convention) — ROCm/OneAPI/Vulkan/MPS previously used
+// round-half-away-from-zero (or, for Vulkan, GLSL's implementation-defined
+// round()), silently picking a DIFFERENT pixel than CPU/CUDA whenever a
+// grid coordinate lands exactly on a .5 boundary between two pixels.
+// W_in=H_in=6, align_corners=true, grid_x=grid_y=0 gives
+// ix=iy=(0+1)/2*(6-1)=2.5 exactly — round-to-even picks pixel index 2,
+// round-away-from-zero picks index 3, so a divergence here is unambiguous,
+// not rounding noise. Each input element is set to its own flat index, so
+// the sampled VALUE directly reveals which pixel was picked.
+TEST_P(VisionFusedParity, GridSample_NearestTieBreak) {
+    auto input = zeros({1, 1, 6, 6}, DType::Float32, Device::cpu());
+    {
+        float* d = input.data<float>();
+        for (int i = 0; i < 36; ++i) d[i] = static_cast<float>(i);
+    }
+    auto grid = zeros({1, 1, 1, 2}, DType::Float32, Device::cpu());  // grid_x=grid_y=0
+
+    test_operation_parity(
+        [&grid](const std::vector<Tensor>& ins) {
+            return ops::grid_sample(ins[0], grid.to(ins[0].device()), "nearest", "zeros", true);
+        },
+        {input}, 1e-6f, 1e-7f, "grid_sample nearest tie-break");
+}
+
 TEST_P(VisionFusedParity, GridSample_Reflection) {
     auto input = randn({1, 2, 5, 5}, DType::Float32, Device::cpu());
     // DETERMINISTIC grid whose samples land in reflected regions but comfortably
@@ -223,6 +272,53 @@ TEST_P(VisionFusedParity, AffineGrid) {
             return ops::affine_grid(ins[0], {2, 3, 8, 8}, false);
         },
         {theta}, 1e-4f, 1e-6f, "affine_grid");
+}
+
+// M10: OneAPI's affine_grid forward widened Float16/BFloat16 theta to
+// Float32 for its compute kernel but never narrowed the output grid back,
+// silently upcasting the whole affine_grid -> grid_sample pipeline's dtype.
+TEST_P(VisionFusedParity, AffineGrid_Float16BFloat16PreservesDtype) {
+    for (DType dt : {DType::Float16, DType::BFloat16}) {
+        auto theta = randn({1, 2, 3}, DType::Float32, Device::cpu()).to(dt).to(device);
+        auto grid = ops::affine_grid(theta, {1, 3, 4, 4}, false);
+        EXPECT_EQ(grid.dtype(), dt)
+            << "affine_grid dtype not preserved for " << dtype_name(dt)
+            << " on device " << device.to_string();
+    }
+}
+
+// M9: ROCm's AffineGridBackward kernel was float-only (no native double
+// compute path) even when the caller passed a Float64 grad_grid, so a
+// Float64 theta.grad() silently lost precision to Float32 epsilon. Forward
+// tolerance stays at Float32 epsilon since affine_grid's forward compute
+// on CUDA/ROCm is a widen-narrow by design (M8 only restores the dtype, it
+// doesn't add a native double forward kernel — see affine_grid_cuda). The
+// backward tolerance is tight (well below Float32 epsilon ~1.2e-7) so a
+// silent F32 compute in AffineGridBackward fails this test against the CPU
+// double reference, which does have a native double backward kernel.
+// Vulkan is excluded: its affine_grid_backward.comp uses atomicAdd(float)
+// (VK_EXT_shader_atomic_float) and has no double-atomic path, so it computes
+// in Float32 by design — same documented exclusion as GridSample_Bicubic_Float64
+// above. It still restores the caller's dtype on return (dispatchCast to
+// gr_dt), so there is no dtype-drop bug there, only expected reduced precision.
+TEST_P(VisionFusedParity, AffineGrid_Float64GradientParity) {
+    std::vector<Device> backends;
+    for (const auto& d : get_available_backends()) {
+        if (d.type != Device::Type::Vulkan) backends.push_back(d);
+    }
+    if (backends.size() < 2) {
+        GTEST_SKIP() << "need >=2 non-Vulkan backends for native-f64 affine_grid gradient parity";
+    }
+    // H=5, W=7 (not powers of 2): x_norm/y_norm are non-dyadic rationals, so
+    // Float32 vs Float64 accumulation genuinely differs in the low bits —
+    // power-of-2 sizes would make every intermediate exactly representable
+    // in both precisions and mask a Float32-only backward kernel entirely.
+    auto theta = randn({2, 2, 3}, DType::Float64, Device::cpu());
+    test_gradient_parity(
+        [](std::vector<Variable>& ins) {
+            return tenzor::affine_grid(ins[0], {2, 3, 5, 7}, false);
+        },
+        {theta}, {}, 1e-5f, 1e-6f, 1e-9f, 1e-12f, backends, "affine_grid_f64_grad");
 }
 
 // ============================================================================
@@ -390,6 +486,94 @@ TEST_P(VisionFusedParity, ROIAlign) {
         } catch (const std::exception& e) {
             ADD_FAILURE() << "ROIAlign failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+// M15: spatial_scale (and, on CUDA/ROCm, the ROI box coordinates) used to be
+// narrowed to Float32 on every GPU backend regardless of feature dtype, even
+// though CUDA/ROCm/OneAPI/Vulkan all have genuine native-double roi_align
+// kernels (matching CPU). A non-power-of-2 spatial_scale (1.0/3.0) forces the
+// narrowing to actually lose precision (~7 vs ~15-16 accurate digits) instead
+// of rounding exactly, and a tight tolerance well below Float32 epsilon
+// catches it against the CPU double reference.
+TEST_P(VisionFusedParity, ROIAlign_Float64_NonPow2SpatialScale) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("vision fused parity Float64 roi_align");
+    auto features = randn({1, 4, 16, 16}, DType::Float64, Device::cpu());
+    auto rois = zeros({2, 5}, DType::Float64, Device::cpu());
+    auto* r = rois.data<double>();
+    r[0] = 0; r[1] = 1.0; r[2] = 1.0; r[3] = 11.0; r[4] = 13.0;
+    r[5] = 0; r[6] = 2.0; r[7] = 0.0; r[8] = 15.0; r[9] = 9.0;
+
+    auto backends = get_available_backends();
+
+    Tensor ref;
+    {
+        nn::detection::ROIAlign roi(4, 4, /*spatial_scale=*/1.0 / 3.0,
+                                    /*sampling_ratio=*/2, /*aligned=*/true);
+        ref = roi.forward(Variable(features, false), rois).tensor();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            nn::detection::ROIAlign roi_dev(4, 4, 1.0 / 3.0, 2, true);
+            roi_dev.to(backends[i]);
+            auto features_dev = features.to(backends[i]);
+            auto rois_dev = rois.to(backends[i]);
+            auto out = roi_dev.forward(Variable(features_dev, false), rois_dev).tensor();
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("ROIAlign_Float64_NonPow2SpatialScale on ") + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-9f, 1e-12f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "ROIAlign_Float64_NonPow2SpatialScale failed on "
+                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+// L4: OneAPI/Vulkan's ROIAlignForward registry defaulted SpatialScale to 1.0
+// (OneAPI) or 0.0 (Vulkan, via OpAttributes::get_float()'s generic fallback)
+// and Aligned to false, diverging from CPU/CUDA/ROCm's SpatialScale=1/16,
+// Aligned=true. Every real call site (nn::detection::ROIAlign) sets both
+// explicitly, so this was dead — but a latent trap for any future
+// direct-dispatch caller that omits them, silently producing a
+// wrong-by-construction result (a 0.0 spatial_scale collapses every ROI to
+// a single point) instead of an error. Dispatch OpId::ROIAlignForward
+// directly with an OpAttributes that OMITS SpatialScale/Aligned entirely
+// (only setting the otherwise-required OutputSizeH/W) to exercise the
+// DEFAULT fallback path itself, and confirm every backend's default-driven
+// result now matches CPU's.
+TEST_P(VisionFusedParity, ROIAlign_DefaultAttrsMatchAcrossBackends) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("vision fused parity roi_align defaults");
+    auto features = randn({1, 4, 16, 16}, DType::Float32, Device::cpu());
+    auto rois = zeros({2, 5}, DType::Float32, Device::cpu());
+    auto* r = rois.data<float>();
+    r[0] = 0; r[1] = 1.0f; r[2] = 1.0f; r[3] = 11.0f; r[4] = 13.0f;
+    r[5] = 0; r[6] = 2.0f; r[7] = 0.0f; r[8] = 15.0f; r[9] = 9.0f;
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::OutputSizeH, int64_t{4});
+    attrs.set(AttrKey::OutputSizeW, int64_t{4});
+    // Deliberately NOT setting AttrKey::SpatialScale or AttrKey::Aligned —
+    // the whole point is to exercise each backend's own default.
+
+    auto backends = get_available_backends();
+
+    Tensor ref = dispatch(OpId::ROIAlignForward,
+        std::vector<Tensor>{features, rois}, attrs)[0];
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto features_dev = features.to(backends[i]);
+            auto rois_dev = rois.to(backends[i]);
+            auto out = dispatch(OpId::ROIAlignForward,
+                std::vector<Tensor>{features_dev, rois_dev}, attrs)[0];
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("ROIAlign_DefaultAttrsMatchAcrossBackends on ") + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-4f, 1e-5f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "ROIAlign_DefaultAttrsMatchAcrossBackends failed on "
+                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }

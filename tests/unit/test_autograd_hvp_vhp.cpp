@@ -12,6 +12,9 @@
 #include "tenzor/autograd/ops.hpp"
 #include <cmath>
 #include <functional>
+#include <fstream>
+#include <sstream>
+#include <string>
 
 using namespace tenzor;
 
@@ -208,3 +211,65 @@ TEST_P(HvpVhpTest, HessianTranscendentalHighPrecision) {
 }
 
 INSTANTIATE_BACKEND_TESTS(HvpVhpTest);
+
+// H2 regression: repeated create_graph=true backward passes inside hvp()'s
+// grad_func used to form a shared_ptr reference cycle (leaf VariableImpl <->
+// its own grad_with_graph_impl_ chain, closed via save_variables_for_backward
+// retaining the leaf under HigherOrderGraphRetentionGuard), leaking every
+// leaf's VariableImpl and device tensor storage forever — see functional.cpp
+// grad_func / audit finding H2. Not parametrized by backend: this is a
+// host-side refcounting bug, identical on every device.
+static long current_rss_kb() {
+    std::ifstream f("/proc/self/status");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("VmRSS:", 0) == 0) {
+            std::istringstream iss(line.substr(6));
+            long kb = 0;
+            iss >> kb;
+            return kb;
+        }
+    }
+    return -1;
+}
+
+TEST(HvpVhpLeakRegression, RepeatedHvpDoesNotLeakLeafGraph) {
+    ::tenzor::testing::EnsureInitialized();
+    Tensor x0 = tenzor::full({8}, 1.5, DType::Float32, Device::cpu());
+    Tensor v0 = tenzor::full({8}, 1.0, DType::Float32, Device::cpu());
+    Variable xvar(x0, false);
+
+    auto func = [](const Variable& p) -> Variable {
+        // Must be non-trivial (not purely linear) so p itself becomes a
+        // saved operand in the second-order graph, which is what closes the
+        // reference cycle.
+        Variable y = p * p * p;
+        return tenzor::sum(y);
+    };
+
+    constexpr int kWarmup = 500;
+    constexpr int kIterations = 4000;
+
+    for (int i = 0; i < kWarmup; ++i) {
+        auto [out, hv] = tenzor::hvp(func, xvar, v0);
+        (void)out;
+        (void)hv;
+    }
+    long rss_before = current_rss_kb();
+    ASSERT_GE(rss_before, 0) << "could not read /proc/self/status";
+
+    for (int i = 0; i < kIterations; ++i) {
+        auto [out, hv] = tenzor::hvp(func, xvar, v0);
+        (void)out;
+        (void)hv;
+    }
+    long rss_after = current_rss_kb();
+
+    // Pre-fix, this leaked the full per-call graph (many KB) every iteration;
+    // 4000 iterations grew RSS by tens of MB. A generous 20 MB ceiling
+    // comfortably separates "leaking every call" from normal allocator churn.
+    EXPECT_LT(rss_after - rss_before, 20 * 1024)
+        << "RSS grew by " << (rss_after - rss_before)
+        << " kB over " << kIterations
+        << " hvp() calls — suspected leaf VariableImpl reference-cycle leak (H2)";
+}

@@ -30,7 +30,8 @@ inline auto adagrad_densify_sparse_grad(tenzor::Variable& param) -> bool {
 
     tenzor::Tensor dense = sparse_opt->to_dense();
     if (param.has_grad()) {
-        const tenzor::Tensor& existing = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const tenzor::Tensor existing = param.grad().value();
         param.set_grad(existing + dense);
     } else {
         param.set_grad(std::move(dense));
@@ -208,7 +209,8 @@ auto Adagrad::step_impl() -> void {
 
         const AdagradHP hp = resolve(i);
 
-        const auto& grad_orig = param->grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const auto grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
         const DType param_dt = param_data_orig.dtype();

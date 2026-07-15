@@ -8,6 +8,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <cmath>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/normalization.hpp>
 #include <tenzor/autograd/variable.hpp>
@@ -97,6 +98,48 @@ TEST_P(LayerNormMultiDTypeTest, GradientFlow) {
     EXPECT_NO_THROW({ y.backward(grad); });
     EXPECT_GRAD_FLOWS(x);  // W.26
     expectShape(*x.grad(), {2, 16});
+}
+
+TEST_P(LayerNormMultiDTypeTest, TinyVarianceGradientFinite) {
+    // M4: cuDNN's LayerNorm forward (CUDA F16/BF16, cuDNN build) used to
+    // narrow the saved mean/inv_std to the input's half-precision dtype
+    // instead of keeping them at Float32. rstd = 1/sqrt(var+eps) can exceed
+    // FP16's max (65504) for a near-constant input with a tiny eps,
+    // saturating to Inf when narrowed.
+    //
+    // Both x and the upstream grad_seed are constant (bit-identical across
+    // all elements) so the TRUE (mathematically exact) grad_input is
+    // IDENTICALLY ZERO regardless of rstd's magnitude: x_hat=(x-mean)*rstd
+    // = 0*rstd = 0 for every element (x-mean is exactly 0, independent of
+    // rstd), and dy*w - mean(dy*w) = 0 for every element too (dy*w is the
+    // same constant everywhere). grad_input = rstd*(dy*w-mean(dy*w)-x_hat*
+    // ...) = rstd*0 = 0 — exactly representable in any float dtype, no
+    // matter how large rstd is, UNLESS an implementation detail (like
+    // narrowing rstd to F16 before this multiply) turns that 0*rstd into
+    // 0*Inf = NaN. This isolates the narrowing bug from the (expected,
+    // not-a-bug) case where a genuinely large gradient just doesn't fit in
+    // FP16 — here the true answer is always 0, so any NaN/Inf is an
+    // artifact of internal precision, not a real overflow.
+    nn::LayerNorm ln({16}, /*eps=*/1e-12);
+    convert_model(ln);
+    auto x_t = tenzor::full({2, 16}, 1.0, dtype_, device_);
+    Variable x(x_t, true);
+
+    auto y = ln.forward(x);
+    auto y_cpu = y.tensor().to(Device::cpu()).to(DType::Float32);
+    const auto* yp = y_cpu.data<float>();
+    for (int64_t i = 0; i < y_cpu.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(yp[i])) << "output[" << i << "] = " << yp[i];
+    }
+
+    auto grad_seed = tenzor::full({2, 16}, 1.0, dtype_, device_);
+    y.backward(grad_seed);
+    ASSERT_TRUE(x.grad().has_value());
+    auto grad_cpu = x.grad()->to(Device::cpu()).to(DType::Float32);
+    const auto* gp = grad_cpu.data<float>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(gp[i])) << "grad[" << i << "] = " << gp[i];
+    }
 }
 
 // ============================================================================

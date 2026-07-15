@@ -57,7 +57,10 @@ void main() {
                                 uint(in_y) * params.in_width + uint(in_x);
                 float64_t value = input_data[input_idx];
 
-                if (value > max_val) {
+                // L2: NaN-propagating (see f32 variant's comment); float64_t
+                // self-inequality NaN check already used by
+                // max_pool2d_backward_f64.comp.
+                if (value > max_val || value != value) {
                     max_val = value;
                     max_idx = int(uint(in_y) * params.in_width + uint(in_x));  // plane-local (see non-f64 variant)
                 }

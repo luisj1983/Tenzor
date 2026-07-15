@@ -17,7 +17,8 @@ layout(push_constant) uniform PushConstants {
     uint feat_width;
     uint output_h;
     uint output_w;
-    uint spatial_scale_bits;  // float reinterpreted as uint
+    uint spatial_scale_lo;    // M15: low/high 32 bits of the double bit pattern
+    uint spatial_scale_hi;    // (packDouble2x32), replacing a lossy float32 round-trip
     uint sampling_ratio;
     uint aligned;
     uint batch_size;          // N (number of feature-map batches) for ROI bounds check
@@ -75,7 +76,7 @@ void main() {
         return;
     }
     uint batch_idx = uint(batch_idx_signed);
-    float64_t spatial_scale = float64_t(uintBitsToFloat(params.spatial_scale_bits));
+    float64_t spatial_scale = float64_t(packDouble2x32(uvec2(params.spatial_scale_lo, params.spatial_scale_hi)));
 
     float64_t roi_x1 = rois_data[roi_base + 1] * spatial_scale;
     float64_t roi_y1 = rois_data[roi_base + 2] * spatial_scale;

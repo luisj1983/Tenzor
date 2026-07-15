@@ -461,6 +461,10 @@ Tensor mps_interpolate_kernel(const Tensor& input, int64_t out_h, int64_t out_w,
                                const std::string& mode, bool align_corners);
 Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type);
 Tensor mps_nms_kernel(const Tensor& boxes, const Tensor& scores, float iou_threshold);
+Tensor mps_roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
+                                    int64_t output_h, int64_t output_w,
+                                    float spatial_scale, int64_t sampling_ratio,
+                                    bool aligned);
 std::vector<Tensor> mps_batchnorm_mean_var_kernel(const Tensor& input);
 Tensor mps_batchnorm_forward_training_kernel(const Tensor& input, const Tensor& mean,
                                                const Tensor& var, const Tensor& weight,
@@ -1652,7 +1656,38 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // ================================================================
 
     // Pooling backward ops (use Metal atomic scatter)
-    mps_accelerate_single(OpId::MaxPool3dBackward);
+    //
+    // MaxPool3dBackward: forward (native Metal, mps_maxpool3d_forward_kernel in
+    // mps_extended_ops.mm) allocates its indices buffer as Int32, but this op
+    // round-trips through the CPU kernel table (mps_accelerate_single below),
+    // and the CPU maxpool3d_backward_kernel unconditionally requires Int64
+    // indices (indices.data<int64_t>()) — matching the Int64 pooling-index
+    // convention used by every other backend (CPU/CUDA/ROCm/Vulkan/OneAPI all
+    // allocate pooling indices as Int64). A plain mps_accelerate_single copies
+    // inputs to CPU verbatim with no dtype fixup, so the Int32 indices tensor
+    // throws a DTypeException inside the CPU kernel every time — audit CR1.
+    // Give this op its own wrapper that upcasts indices to Int64 before the
+    // CPU dispatch instead of the generic accelerate helper.
+    // M13: dtype wasn't the only mismatch — forward's indices (pool3d.metal
+    // maxpool3d_forward_kernel) also used to store a global NCHW-flat index,
+    // while the CPU maxpool3d_backward_kernel this round-trips into expects a
+    // (n,c)-plane-local index and reconstructs the plane base itself. Sending
+    // it an already-global index silently double-counted the plane offset and
+    // scattered the gradient to a wrong (often out-of-bounds) input position.
+    // Fixed at the source: forward now stores the plane-local index, matching
+    // every other backend.
+    table.register_single_output_kernel(OpId::MaxPool3dBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            Tensor grad_output_cpu = inputs[0].to(Device::cpu());
+            Tensor indices_cpu = inputs[1].to(Device::cpu());
+            if (indices_cpu.dtype() != DType::Int64) {
+                indices_cpu = indices_cpu.to(DType::Int64);
+            }
+            std::vector<Tensor> cpu_inputs{grad_output_cpu, indices_cpu};
+            auto cpu_result = dispatch(OpId::MaxPool3dBackward, cpu_inputs, attrs);
+            return cpu_result[0].to(dev);
+        });
     mps_accelerate_single(OpId::AvgPool3dBackward);
     mps_accelerate_single(OpId::AdaptiveAvgPool3dBackward);
     table.register_single_output_kernel(OpId::AdaptiveMaxPool3dBackward,
@@ -1873,7 +1908,34 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::ToMemoryFormat);
     mps_accelerate_multi(OpId::Histogram);
     mps_accelerate_multi(OpId::BetaInc);
-    mps_accelerate_multi(OpId::ROIAlignForward);
+    // M16: native Metal for Float32/Float16/BFloat16 (was a full CPU
+    // round-trip for every dtype). Float64 has no Metal Shading Language
+    // double type at all, so it keeps the CPU round-trip inline below —
+    // matching the box_iou/grid_sample precedent above of gating Float64
+    // rather than misbinding an 8-byte buffer to a 4-byte-float shader.
+    // ROIAlignBackward has no native kernel (none existed to wire up) and
+    // stays fully on the CPU round-trip.
+    table.register_kernel(OpId::ROIAlignForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            if (inputs[0].dtype() == DType::Float64) {
+                auto dev = inputs[0].device();
+                std::vector<Tensor> cpu_inputs;
+                cpu_inputs.reserve(inputs.size());
+                for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+                auto cpu_result = dispatch(OpId::ROIAlignForward, cpu_inputs, attrs);
+                std::vector<Tensor> gpu_result;
+                gpu_result.reserve(cpu_result.size());
+                for (auto& t : cpu_result) gpu_result.push_back(t.to(dev));
+                return gpu_result;
+            }
+            int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 7);
+            int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 7);
+            float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+            int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
+            bool aligned = attrs.get_bool(AttrKey::Aligned, true);
+            return {mps_roi_align_forward_kernel(inputs[0], inputs[1], output_h, output_w,
+                                                 spatial_scale, sampling_ratio, aligned)};
+        });
     mps_accelerate_multi(OpId::ROIAlignBackward);
 
     // Fractional Max Pool + Max Unpool — use Metal shaders via Accelerate path
@@ -2046,6 +2108,14 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::Cross);
     mps_accelerate_single(OpId::CumulativeTrapezoid);
     mps_accelerate_single(OpId::DCT);
+    // L6: forward was never registered at all — the backward-only trio below
+    // is unreachable without it (autograd always calls forward first), so
+    // deformable_conv2d threw "kernel not found" on MPS unconditionally.
+    // CPU-roundtrip, matching every other unrewritten-to-native op in this
+    // completeness-parity block; CPU's own DeformableConv2dForward is the
+    // reference implementation these backward kernels were already written
+    // against.
+    mps_accelerate_multi(OpId::DeformableConv2dForward);
     mps_accelerate_multi(OpId::DeformableConv2dBackwardBias);
     mps_accelerate_multi(OpId::DeformableConv2dBackwardInput);
     mps_accelerate_multi(OpId::DeformableConv2dBackwardWeight);

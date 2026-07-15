@@ -124,7 +124,8 @@ auto Adadelta::step_impl() -> void {
 
         const AdadeltaHP hp = resolve(i);
 
-        const auto& grad_orig = param->grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const auto grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
         const DType param_dt = param_data_orig.dtype();

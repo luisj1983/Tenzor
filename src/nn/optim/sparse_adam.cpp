@@ -257,7 +257,8 @@ auto SparseAdam::step_impl() -> void {
         }
 
         if (!param.has_grad()) continue;
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
 
         // For 2D+ parameters (e.g., embedding tables), use the sparse path:
         // only update rows that have non-zero gradients.

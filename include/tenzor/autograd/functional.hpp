@@ -56,6 +56,26 @@ auto jvp(std::function<Variable(const Variable&)> func,
          JvpMode mode = JvpMode::Walker) -> std::pair<Variable, Tensor>;
 
 /**
+ * @brief M25: whether the most recent jvp() call on this thread fell back to
+ * a central finite-difference approximation instead of the exact analytic
+ * JVP graph walk.
+ *
+ * jvp() (and anything built on it — hvp(), vhp(), hessian(), jacobian())
+ * silently degrades to FD when any op in the traced graph lacks a
+ * registered forward-mode rule (see jvp_dispatch.hpp); the returned Tensor
+ * is indistinguishable in type/shape from the exact result, and a
+ * per-call stderr warning is the only other signal. Callers that need a
+ * hard guarantee of exactness (e.g. a test asserting analytic correctness,
+ * not just numerical closeness to its own independent FD reference) should
+ * check this immediately after the jvp()/hvp()/vhp()/hessian() call —
+ * it reflects only the most recent call on this thread and is overwritten
+ * by the next one.
+ *
+ * @return true if the last jvp() call on this thread used the FD fallback.
+ */
+auto jvp_used_fd_fallback() -> bool;
+
+/**
  * @brief Compute full Jacobian matrix of func at input.
  *
  * For f: R^n -> R^m, returns the m x n Jacobian matrix.
@@ -98,10 +118,19 @@ auto hvp(std::function<Variable(const Variable&)> func,
          const Tensor& v) -> std::pair<Variable, Tensor>;
 
 /**
- * @brief Compute Vector-Hessian Product using reverse-over-reverse mode.
+ * @brief Compute Vector-Hessian Product.
  *
  * For f: R^n -> R with Hessian H, computes v^T @ H without materializing H.
- * Uses reverse-over-reverse: backward through the gradient computation.
+ *
+ * M25: implemented as `return hvp(func, input, v);` (forward-over-reverse),
+ * NOT a separate reverse-over-reverse computation. This is mathematically
+ * exact — H is symmetric for any twice-differentiable scalar-valued f
+ * (Schwarz's theorem/Clairaut's theorem: mixed partials commute), so
+ * v^T @ H == (H @ v)^T and hvp's result already equals vhp's — but it means
+ * vhp() shares hvp's dependence on jvp()'s FD fallback (see
+ * jvp_used_fd_fallback()): if `func`'s doubled backward graph contains an op
+ * without a registered forward-mode rule, this call silently returns a
+ * finite-difference approximation, not an exact analytic result.
  *
  * @param func Scalar-valued differentiable function
  * @param input Point at which to evaluate

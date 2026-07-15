@@ -455,7 +455,12 @@ auto affine_grid_cuda(const Tensor& theta, const std::vector<int64_t>& size,
         N, H, W, align_corners);
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-    return grid;
+    // M8: restore theta's original dtype (the kernel above is Float32-only,
+    // like grid_sample_cuda one function above — which DOES do this
+    // restore). Returning a hardcoded Float32 grid silently dropped a
+    // Float64 theta's precision, defeating Float64 gradcheck/parity for the
+    // whole affine_grid -> grid_sample pipeline.
+    return grid.to(theta.dtype());
 }
 
 // ============================================================================

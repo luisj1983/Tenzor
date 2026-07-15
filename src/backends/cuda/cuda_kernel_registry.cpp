@@ -479,11 +479,11 @@ namespace cuda {
     // ROI Align operations
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
                            int64_t output_h, int64_t output_w,
-                           float spatial_scale, int64_t sampling_ratio,
+                           double spatial_scale, int64_t sampling_ratio,
                            bool aligned, cudaStream_t stream) -> Tensor;
     auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                             int64_t batch_size, int64_t feat_height, int64_t feat_width,
-                            float spatial_scale, int64_t sampling_ratio,
+                            double spatial_scale, int64_t sampling_ratio,
                             bool aligned, cudaStream_t stream = nullptr) -> Tensor;
 
     // BatchNorm2d operations
@@ -1675,27 +1675,26 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
-        // Float64: cuDNN's pooling selects the max in single precision even with
-        // a CUDNN_DATA_DOUBLE descriptor, so the returned element is the F32-
-        // truncated input (~1e-7 off the true double element) and breaks exact
-        // cross-backend parity. Max-pool is a pure selection with no arithmetic,
-        // so the native kernel (Compute=double) reproduces the input bit-exactly.
-        // Use it for symmetric Float64; cuDNN still serves all other dtypes.
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-        // The native kernel now supports per-axis (asymmetric) config (F009), so
-        // use it for ALL Float64 max-pool — symmetric or not — to preserve the
-        // bit-exact double selection cuDNN cannot (it selects in F32).
-        if (inputs[0].dtype() == DType::Float64) {
-            auto [output, indices] = cuda::maxpool2d_forward_kernel(inputs[0],
-                kernel_size[0], kernel_size[1], stride[0], stride[1],
-                padding[0], padding[1], dilation[0], dilation[1], get_cuda_stream(attrs));
-            return std::vector<Tensor>{output, indices};
-        }
-        auto [output, indices] = cuda::cudnn_maxpool2d_forward(inputs[0],
-            kernel_size[0], kernel_size[1],
-            stride[0], stride[1],
-            padding[0], padding[1],
-            get_cuda_stream(attrs));
+        // L2 follow-up: cuDNN's pooling primitive has no documented NaN-
+        // propagation guarantee and empirically just skips NaN entries (its
+        // internal comparison never treats NaN as "the new max"), unlike
+        // every native maxpool kernel in this codebase (CPU, the native CUDA
+        // kernel below, ROCm, Vulkan post-L2, OneAPI post-L2), all of which
+        // use `isnan(val) || val > max_val`. cuDNN ALSO selects the max in
+        // single precision even with a CUDNN_DATA_DOUBLE descriptor (the
+        // original reason this Float64-only branch existed — see below), so
+        // there was already a real-input-correctness gap being routed around
+        // for Float64; the NaN gap is the same class of problem for F32/F16/
+        // BF16. The native kernel (maxpool2d_forward_impl, used unconditionally
+        // in the non-cuDNN build below) already supports all four dtypes with
+        // per-axis (asymmetric) kernel/stride/padding/dilation (F009) and is a
+        // pure memory-bound selection op — not something cuDNN's Tensor-Core
+        // paths (built for GEMM/conv) meaningfully accelerate — so there is no
+        // correctness/performance tradeoff to make here: always use it.
+        auto [output, indices] = cuda::maxpool2d_forward_kernel(inputs[0],
+            kernel_size[0], kernel_size[1], stride[0], stride[1],
+            padding[0], padding[1], dilation[0], dilation[1], get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
     table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1742,6 +1741,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, indices, input, output]
+        // M12: mirror MaxPool2dForward's Float64 bypass. cuDNN's backward
+        // re-derives the argmax by comparing output to input internally in
+        // single precision (same limitation as its forward selection), so a
+        // near-tie at F32 precision but distinguishable in true double bits
+        // can scatter the gradient to a different position than forward's
+        // native double-precision argmax (recorded in `indices`). The native
+        // kernel below is a pure index-based scatter using those indices, so
+        // it reproduces forward's exact selection regardless of dtype.
+        if (inputs[0].dtype() == DType::Float64) {
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            return cuda::maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+        }
         const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
         const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
@@ -2890,7 +2901,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // attrs: output_h, output_w, spatial_scale, sampling_ratio, aligned
         int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 7);
         int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 7);
-        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
         int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
         bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 
@@ -2905,7 +2916,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 1);
         int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
         int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
-        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
         int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
         bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 

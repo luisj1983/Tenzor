@@ -3423,8 +3423,71 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         if (inputs.size() > 7 && inputs[7].is_valid() && inputs[7].numel() > 0) {
             philox_offset = static_cast<uint64_t>(inputs[7].data<int64_t>()[0]);
         }
-        return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-                                             scale, causal, dropout_p, philox_seed, philox_offset);
+
+        const Tensor& Qi = inputs[1];
+        const Tensor& Ki_orig = inputs[2];
+        const Tensor& Vi_orig = inputs[3];
+
+        // H21: flash_attention_backward_typed/_half (below) index K/V/dK/dV
+        // using Q's OWN head count (num_heads = Q.shape()[1]) with no
+        // awareness that K/V may have fewer heads (GQA/MQA, H_kv < H_q) —
+        // an out-of-bounds heap read/write into K/V/dK/dV for any
+        // un-broadcast GQA-shaped call. Mirrors the sibling FlashAttention
+        // FORWARD wrapper's GQA broadcast (above in this file): expand K/V
+        // to Q's head count before dispatch, then reduce dK/dV back down to
+        // K/V's original head count by summing each repeated head group's
+        // contribution (the reverse of the forward broadcast/expand).
+        Tensor Ki = Ki_orig, Vi = Vi_orig;
+        int64_t h_kv = 0, reps = 1;
+        bool did_broadcast = false;
+        if (Qi.shape().size() == 4 && Ki_orig.shape().size() == 4) {
+            int64_t h = Qi.shape()[1];
+            h_kv = Ki_orig.shape()[1];
+            if (h_kv != h) {
+                if (h % h_kv != 0) {
+                    throw std::invalid_argument(
+                        "FlashAttentionBackward CPU: H_q must be a multiple of H_kv; got " +
+                        std::to_string(h) + " and " + std::to_string(h_kv));
+                }
+                int64_t b = Qi.shape()[0];
+                int64_t sk = Ki_orig.shape()[2];
+                int64_t dk = Ki_orig.shape()[3];
+                int64_t dv = Vi_orig.shape()[3];
+                reps = h / h_kv;
+                Tensor Kb = Ki_orig.is_contiguous() ? Ki_orig : Ki_orig.contiguous();
+                Tensor Vb = Vi_orig.is_contiguous() ? Vi_orig : Vi_orig.contiguous();
+                NewOpAttributes us_attrs;
+                us_attrs.set(AttrKey::Dim, static_cast<int64_t>(2));
+                Tensor Ku = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Kb}, us_attrs)[0];
+                Tensor Vu = tenzor::dispatch(OpId::Unsqueeze, std::vector<Tensor>{Vb}, us_attrs)[0];
+                std::vector<int64_t> exp_k = {b, h_kv, reps, sk, dk};
+                std::vector<int64_t> exp_v = {b, h_kv, reps, sk, dv};
+                std::string s_k, s_v;
+                for (size_t i = 0; i < exp_k.size(); ++i) { if (i) s_k += ","; s_k += std::to_string(exp_k[i]); }
+                for (size_t i = 0; i < exp_v.size(); ++i) { if (i) s_v += ","; s_v += std::to_string(exp_v[i]); }
+                NewOpAttributes ek_attrs; ek_attrs.set(AttrKey::Shape, s_k);
+                NewOpAttributes ev_attrs; ev_attrs.set(AttrKey::Shape, s_v);
+                Tensor Ke = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Ku}, ek_attrs)[0];
+                Tensor Ve = tenzor::dispatch(OpId::Expand, std::vector<Tensor>{Vu}, ev_attrs)[0];
+                Ki = Ke.contiguous().reshape({b, h, sk, dk});
+                Vi = Ve.contiguous().reshape({b, h, sk, dv});
+                did_broadcast = true;
+            }
+        }
+
+        auto grads = cpu::flash_attention_backward(inputs[0], Qi, Ki, Vi, inputs[4],
+                                                    scale, causal, dropout_p, philox_seed, philox_offset);
+        if (did_broadcast && grads.size() >= 3) {
+            int64_t b = Qi.shape()[0];
+            int64_t sk = Ki_orig.shape()[2];
+            int64_t dk = Ki_orig.shape()[3];
+            int64_t dv = Vi_orig.shape()[3];
+            Tensor dK_full = grads[1].reshape({b, h_kv, reps, sk, dk});
+            Tensor dV_full = grads[2].reshape({b, h_kv, reps, sk, dv});
+            grads[1] = tenzor::sum(dK_full, /*dim=*/2, /*keepdim=*/false);
+            grads[2] = tenzor::sum(dV_full, /*dim=*/2, /*keepdim=*/false);
+        }
+        return grads;
     });
 
     // =========================================================================

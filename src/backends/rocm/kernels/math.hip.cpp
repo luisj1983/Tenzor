@@ -637,11 +637,24 @@ __global__ void complex_div_kernel(const T* a, const T* b, T* c, int64_t n) {
         int64_t base = idx * 2;
         T ar = a[base], ai = a[base + 1];
         T br = b[base], bi = b[base + 1];
-        T denom = br * br + bi * bi;
-        // Use ieee_div so a zero denominator yields IEEE Inf/NaN rather than the
-        // finite garbage that -freciprocal-math produces for Float64 (see ieee_div).
-        c[base]     = ieee_div(ar * br + ai * bi, denom);
-        c[base + 1] = ieee_div(ai * br - ar * bi, denom);
+        // L8: Smith's algorithm — avoids overflow in br*br+bi*bi for a
+        // large-magnitude divisor (matches CPU std::complex / CUDA
+        // complex_div_kernel; this ROCm kernel previously used the naive
+        // formula despite the finding's assumption it already matched
+        // CUDA). Every division still goes through ieee_div so IEEE 754
+        // semantics hold under this TU's -ffast-math (see ieee_div's doc
+        // comment above).
+        if (fabs(br) >= fabs(bi)) {
+            T r = ieee_div(bi, br);
+            T d = br + bi * r;
+            c[base]     = ieee_div(ar + ai * r, d);
+            c[base + 1] = ieee_div(ai - ar * r, d);
+        } else {
+            T r = ieee_div(br, bi);
+            T d = bi + br * r;
+            c[base]     = ieee_div(ar * r + ai, d);
+            c[base + 1] = ieee_div(ai * r - ar, d);
+        }
     }
 }
 
@@ -721,10 +734,18 @@ __global__ void broadcast_complex_div_kernel(
         int64_t a_base = idx_a * 2, b_base = idx_b * 2, c_base = out_idx * 2;
         T ar = a[a_base], ai = a[a_base + 1];
         T br = b[b_base], bi = b[b_base + 1];
-        T denom = br * br + bi * bi;
-        // See complex_div_kernel: ieee_div restores IEEE Inf/NaN on zero denom.
-        c[c_base]     = ieee_div(ar * br + ai * bi, denom);
-        c[c_base + 1] = ieee_div(ai * br - ar * bi, denom);
+        // L8: Smith's algorithm — see complex_div_kernel's comment above.
+        if (fabs(br) >= fabs(bi)) {
+            T r = ieee_div(bi, br);
+            T d = br + bi * r;
+            c[c_base]     = ieee_div(ar + ai * r, d);
+            c[c_base + 1] = ieee_div(ai - ar * r, d);
+        } else {
+            T r = ieee_div(br, bi);
+            T d = bi + br * r;
+            c[c_base]     = ieee_div(ar * r + ai, d);
+            c[c_base + 1] = ieee_div(ai * r - ar, d);
+        }
     }
 }
 

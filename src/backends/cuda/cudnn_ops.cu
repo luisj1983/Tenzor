@@ -3621,17 +3621,23 @@ __global__ void optimized_layer_norm_backward_kernel(
 /**
  * @brief Mixed-precision LayerNorm forward kernel
  *
- * Reads InputT, accumulates in float, writes OutputT.
+ * Reads InputT, accumulates in float, writes OutputT for the normalized
+ * output but StatsT (always float — see M4) for mean/inv_std: rstd's
+ * dynamic range exceeds FP16 max=65504 when var ~ 1e-11, so narrowing the
+ * saved stats to the input's half-precision dtype (like the output) can
+ * saturate to Inf and poison backward with NaN. Mirrors the non-cuDNN
+ * fallback fused_layer_norm_cuda, which already keeps mean/inv_std at
+ * Float32 for F16/BF16 input.
  * Eliminates full-tensor dtype conversion passes for FP16 inputs.
  */
-template<int BLOCK_SIZE, typename InputT, typename OutputT>
+template<int BLOCK_SIZE, typename InputT, typename OutputT, typename StatsT>
 __global__ void layer_norm_mixed_kernel(
     const InputT* __restrict__ input,
     const InputT* __restrict__ weight,
     const InputT* __restrict__ bias,
     OutputT* __restrict__ output,
-    OutputT* __restrict__ mean_out,
-    OutputT* __restrict__ inv_std_out,
+    StatsT* __restrict__ mean_out,
+    StatsT* __restrict__ inv_std_out,
     int64_t batch_size,
     int64_t norm_size,
     float eps
@@ -3686,8 +3692,8 @@ __global__ void layer_norm_mixed_kernel(
     if (threadIdx.x == 0) {
         const float variance = sum_sq_dev / static_cast<float>(norm_size);
         inv_std = rsqrtf(variance + eps);
-        mean_out[b] = static_cast<OutputT>(mean);
-        inv_std_out[b] = static_cast<OutputT>(inv_std);
+        mean_out[b] = static_cast<StatsT>(mean);
+        inv_std_out[b] = static_cast<StatsT>(inv_std);
         shared[1] = inv_std;
     }
     __syncthreads();
@@ -3705,14 +3711,18 @@ __global__ void layer_norm_mixed_kernel(
 
 /**
  * @brief Mixed-precision LayerNorm backward kernel
+ *
+ * mean/inv_std are StatsT (always float — see M4 / the forward kernel's
+ * doc comment): the forward saves them at Float32 regardless of InputT, so
+ * the backward must read them back at that same width, not InputT's.
  */
-template<int BLOCK_SIZE, typename InputT, typename OutputT>
+template<int BLOCK_SIZE, typename InputT, typename OutputT, typename StatsT>
 __global__ void layer_norm_backward_mixed_kernel(
     const InputT* __restrict__ grad_output,
     const InputT* __restrict__ input,
     const InputT* __restrict__ weight,
-    const InputT* __restrict__ mean,
-    const InputT* __restrict__ inv_std,
+    const StatsT* __restrict__ mean,
+    const StatsT* __restrict__ inv_std,
     OutputT* __restrict__ grad_input,
     float* __restrict__ grad_weight,
     float* __restrict__ grad_bias,
@@ -3969,8 +3979,16 @@ auto cudnn_layer_norm_forward(
     // Create output tensors
     auto shape = input.shape();
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
-    Tensor mean_tensor({batch_size}, input.dtype(), input.device());
-    Tensor inv_std_tensor({batch_size}, input.dtype(), input.device());
+    // M4: mean/inv_std are always saved at Float32, even for F16/BF16 input —
+    // narrowing them to the input's half-precision dtype risks rstd
+    // overflowing FP16's max (65504) when variance is tiny, saturating to
+    // Inf and poisoning backward with NaN. See layer_norm_mixed_kernel's doc
+    // comment; matches the non-cuDNN fused_layer_norm_cuda fallback.
+    const bool narrow_stats =
+        (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    const DType stats_dtype = narrow_stats ? DType::Float32 : input.dtype();
+    Tensor mean_tensor({batch_size}, stats_dtype, input.device());
+    Tensor inv_std_tensor({batch_size}, stats_dtype, input.device());
 
     // Ensure tensors are contiguous
     Tensor input_c = input.is_contiguous() ? input : input.contiguous();
@@ -4020,13 +4038,13 @@ auto cudnn_layer_norm_forward(
         constexpr int BLOCK_SIZE = 256;
         int blocks = static_cast<int>(batch_size);
 
-        layer_norm_mixed_kernel<BLOCK_SIZE, __half, __half><<<blocks, BLOCK_SIZE, 0, stream>>>(
+        layer_norm_mixed_kernel<BLOCK_SIZE, __half, __half, float><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input_c.data_ptr()),
             reinterpret_cast<const __half*>(weight_c.data_ptr()),
             reinterpret_cast<const __half*>(bias_c.data_ptr()),
             reinterpret_cast<__half*>(output.data_ptr()),
-            reinterpret_cast<__half*>(mean_tensor.data_ptr()),
-            reinterpret_cast<__half*>(inv_std_tensor.data_ptr()),
+            mean_tensor.data<float>(),
+            inv_std_tensor.data<float>(),
             batch_size,
             norm_size,
             eps
@@ -4036,13 +4054,13 @@ auto cudnn_layer_norm_forward(
         constexpr int BLOCK_SIZE = 256;
         int blocks = static_cast<int>(batch_size);
 
-        layer_norm_mixed_kernel<BLOCK_SIZE, __nv_bfloat16, __nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
+        layer_norm_mixed_kernel<BLOCK_SIZE, __nv_bfloat16, __nv_bfloat16, float><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input_c.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(weight_c.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(bias_c.data_ptr()),
             reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(mean_tensor.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(inv_std_tensor.data_ptr()),
+            mean_tensor.data<float>(),
+            inv_std_tensor.data<float>(),
             batch_size,
             norm_size,
             eps
@@ -4151,12 +4169,15 @@ auto cudnn_layer_norm_backward(
         cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, grad_weight_f32.numel() * sizeof(float), stream);
         cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, grad_bias_f32.numel() * sizeof(float), stream);
 
-        layer_norm_backward_mixed_kernel<BLOCK_SIZE, __half, __half><<<blocks, BLOCK_SIZE, 0, stream>>>(
+        // M4: mean/inv_std were saved at Float32 by the forward (see
+        // layer_norm_mixed_kernel's doc comment) regardless of input's
+        // dtype — read them back at that same width, not as __half.
+        layer_norm_backward_mixed_kernel<BLOCK_SIZE, __half, __half, float><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_out_c.data_ptr()),
             reinterpret_cast<const __half*>(input_c.data_ptr()),
             reinterpret_cast<const __half*>(weight_c.data_ptr()),
-            reinterpret_cast<const __half*>(mean_c.data_ptr()),
-            reinterpret_cast<const __half*>(inv_std_c.data_ptr()),
+            mean_c.data<float>(),
+            inv_std_c.data<float>(),
             reinterpret_cast<__half*>(grad_input.data_ptr()),
             grad_weight_f32.data<float>(),
             grad_bias_f32.data<float>(),
@@ -4177,12 +4198,14 @@ auto cudnn_layer_norm_backward(
         cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, grad_weight_f32.numel() * sizeof(float), stream);
         cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, grad_bias_f32.numel() * sizeof(float), stream);
 
-        layer_norm_backward_mixed_kernel<BLOCK_SIZE, __nv_bfloat16, __nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
+        // M4: mean/inv_std were saved at Float32 by the forward — see the
+        // __half branch above.
+        layer_norm_backward_mixed_kernel<BLOCK_SIZE, __nv_bfloat16, __nv_bfloat16, float><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_out_c.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input_c.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(weight_c.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(mean_c.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(inv_std_c.data_ptr()),
+            mean_c.data<float>(),
+            inv_std_c.data<float>(),
             reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
             grad_weight_f32.data<float>(),
             grad_bias_f32.data<float>(),

@@ -70,6 +70,65 @@ TEST_F(GraphOptimizerOpIdTest, EliminatesInverseTransposePairPreservingGradients
     }
 }
 
+// M1: the transpose-pair splice used to compute "single consumer" via a walk
+// starting ONLY at the optimized root, so it couldn't see a sibling Variable
+// sharing the same transpose-pair sub-expression through retain_graph=true —
+// splicing one root's graph silently corrupted the other root's graph too
+// (both reference the SAME shared_ptr<Function> nodes). This constructs
+// exactly that: y = transpose(transpose(h)) feeds TWO independent consumers
+// (a and b); optimizing only a's graph must not touch the pair T1/T2, since
+// T1 has TWO parents globally (a's MulBackward and b's MulBackward) even
+// though only one of them (a's) is reachable by walking from loss_a alone.
+//
+// Verified via revert: with the old walk-local "consumers" count (which
+// can't see b's edge), transpose_pairs_eliminated == 1 for this exact
+// construction — the splice DOES fire. The fix's parent_count() check
+// (globally accurate, maintained by Function::set_next_functions()) brings
+// that to 0. Note the splice itself mutates only the SPLICING PARENT's own
+// next_functions() storage (a's MulBackward), never T1/T2's — b's MulBackward
+// keeps its own independent edge to T1 regardless, so this construction does
+// not additionally demonstrate corrupted VALUES on `b`'s side; the direct,
+// unambiguous signal is transpose_pairs_eliminated itself, asserted below.
+// Both a's and b's gradients are still checked as a value-level sanity check.
+TEST_F(GraphOptimizerOpIdTest, DoesNotSpliceTransposePairSharedByAnotherVariable) {
+    auto x = Variable(ones({3, 4}, DType::Float32, Device::cpu()), true);
+    auto c0 = Variable(full({3, 4}, 1.0f, DType::Float32, Device::cpu()), false);
+    auto h = x * c0;  // non-leaf intermediate (matches
+                      // EliminatesInverseTransposePairPreservingGradients
+                      // above — the pair's input must not be a leaf, or
+                      // accumulates_locally() blocks the splice entirely
+                      // regardless of the sharing concern this test targets).
+    auto y = h.transpose(0, 1).transpose(0, 1);  // identity pair, shape {3,4}
+
+    auto c1 = Variable(full({3, 4}, 2.0f, DType::Float32, Device::cpu()), false);
+    auto c2 = Variable(full({3, 4}, 5.0f, DType::Float32, Device::cpu()), false);
+    auto a = y * c1;  // consumer #1 of y's transpose-pair chain
+    auto b = y * c2;  // consumer #2 of the SAME transpose-pair chain
+
+    auto loss_a = sum(a);
+    auto loss_b = sum(b);
+
+    GraphOptimizer opt;
+    auto opt_stats = opt.optimize_variable(loss_a);
+    EXPECT_EQ(opt_stats.transpose_pairs_eliminated, 0u)
+        << "optimizer spliced a transpose pair that b's independent graph "
+           "also references — parent_count() should have blocked this";
+
+    loss_b.backward(std::nullopt, /*retain_graph=*/true);
+    ASSERT_TRUE(x.has_grad());
+    auto xg = x.grad().value().to(Device::cpu()).contiguous();
+    for (int i = 0; i < 12; ++i) {
+        EXPECT_FLOAT_EQ(xg.data<float>()[i], 5.0f) << "b's gradient wrong at i=" << i;
+    }
+
+    x.zero_grad();
+    loss_a.backward();
+    auto xg2 = x.grad().value().to(Device::cpu()).contiguous();
+    for (int i = 0; i < 12; ++i) {
+        EXPECT_FLOAT_EQ(xg2.data<float>()[i], 2.0f) << "a's gradient wrong at i=" << i;
+    }
+}
+
 TEST_F(GraphOptimizerOpIdTest, FusePatternInputsReportTheirOpId) {
     // The classes consumed by graph_optimizer fuse_* passes.
     EXPECT_EQ(AddBackward{}.op_id(), OpId::Add);

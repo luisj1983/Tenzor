@@ -200,9 +200,13 @@ __global__ void grid_sample_nearest_kernel(
         iy = gs_reflect_coord<T>(iy, H_in, align_corners);
     }
 
+    // L5: rint/rintf = round-half-to-even, matching CPU std::nearbyint / CUDA
+    // rint / PyTorch-ATen grid_sampler nearest (roundf/round are half-away-
+    // from-zero and diverge from every other backend at exact .5 offsets,
+    // e.g. an aligned grid landing exactly between two pixels).
     int nx, ny;
-    if constexpr (std::is_same_v<T, float>) { nx = static_cast<int>(roundf(ix)); ny = static_cast<int>(roundf(iy)); }
-    else                                    { nx = static_cast<int>(round(ix));  ny = static_cast<int>(round(iy)); }
+    if constexpr (std::is_same_v<T, float>) { nx = static_cast<int>(rintf(ix)); ny = static_cast<int>(rintf(iy)); }
+    else                                    { nx = static_cast<int>(rint(ix));  ny = static_cast<int>(rint(iy)); }
 
     T val = T(0);
     if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
@@ -400,7 +404,11 @@ auto affine_grid_kernel_host(const Tensor& theta, const std::vector<int64_t>& si
         N, H, W, align_corners);
 
     HIP_CHECK(hipGetLastError());
-    return grid;
+    // M9: restore theta's original dtype (same fix as the CUDA sibling's M8
+    // and this file's own grid_sample_kernel_host above, which already does
+    // `return output_f32.to(input.dtype());`). Returning a hardcoded
+    // Float32 grid silently dropped a Float64 theta's precision.
+    return grid.to(theta.dtype());
 }
 
 // =========================================================================
@@ -490,10 +498,16 @@ __global__ void grid_sample_bilinear_backward_kernel(
         sum_dy += go * (wx0 * (-safe_get(y0, x0) + safe_get(y1, x0)) +
                         wx1 * (-safe_get(y0, x1) + safe_get(y1, x1)));
     }
-    // F069: zero grad_grid where the pre-clamp coord is out of range for BOTH
-    // zeros (0) and border (1) padding — under border the clamp derivative is 0,
-    // so a clamped sample must not produce a spurious grad_grid (matches CPU/CUDA).
-    bool oob_gate = (padding_mode == 0 || padding_mode == 1);
+    // H9 (was mislabeled F069): zero grad_grid where the pre-clamp coord is
+    // out of range ONLY for border (1) padding — under border the clamp
+    // derivative is 0 there, so a clamped sample must not produce a spurious
+    // grad_grid. 'zeros' must NOT be gated: safe_get()/safe_scatter() above
+    // already return/skip 0 for out-of-bounds bilinear corners, so sum_dx/
+    // sum_dy already contain only in-bounds contributions, and the bands
+    // ix in [-1,0) / (W-1,W) (likewise iy) have exactly one in-bounds
+    // neighbour with a genuine non-zero gradient that a 'zeros' gate here
+    // would incorrectly drop to 0 (matches CPU/CUDA).
+    bool oob_gate = (padding_mode == 1);
     T scale_x = (oob_gate && !in_bounds_ix) ? T(0) : dix_dgx;
     T scale_y = (oob_gate && !in_bounds_iy) ? T(0) : diy_dgy;
     grad_grid[grid_idx]     = sum_dx * scale_x;
@@ -530,9 +544,13 @@ __global__ void grid_sample_nearest_backward_kernel(
         iy = gs_reflect_coord<T>(iy, H_in, align_corners);
     }
 
+    // L5: rint/rintf = round-half-to-even, matching CPU std::nearbyint / CUDA
+    // rint / PyTorch-ATen grid_sampler nearest (roundf/round are half-away-
+    // from-zero and diverge from every other backend at exact .5 offsets,
+    // e.g. an aligned grid landing exactly between two pixels).
     int nx, ny;
-    if constexpr (std::is_same_v<T, float>) { nx = static_cast<int>(roundf(ix)); ny = static_cast<int>(roundf(iy)); }
-    else                                    { nx = static_cast<int>(round(ix));  ny = static_cast<int>(round(iy)); }
+    if constexpr (std::is_same_v<T, float>) { nx = static_cast<int>(rintf(ix)); ny = static_cast<int>(rintf(iy)); }
+    else                                    { nx = static_cast<int>(rint(ix));  ny = static_cast<int>(rint(iy)); }
 
     grad_grid[grid_idx]     = T(0);
     grad_grid[grid_idx + 1] = T(0);
@@ -657,9 +675,10 @@ __global__ void grid_sample_bicubic_backward_kernel(
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }
 
+template <typename T>
 __global__ void affine_grid_backward_kernel_dev(
-    const float* __restrict__ grad_grid,
-    float* __restrict__ grad_theta,
+    const T* __restrict__ grad_grid,
+    T* __restrict__ grad_theta,
     int N, int H, int W, bool align_corners)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -670,20 +689,20 @@ __global__ void affine_grid_backward_kernel_dev(
     int h = (idx / W) % H;
     int n = idx / (H * W);
 
-    float x_norm, y_norm;
+    T x_norm, y_norm;
     if (align_corners) {
-        x_norm = (W > 1) ? (2.0f * static_cast<float>(w) / static_cast<float>(W - 1) - 1.0f) : 0.0f;
-        y_norm = (H > 1) ? (2.0f * static_cast<float>(h) / static_cast<float>(H - 1) - 1.0f) : 0.0f;
+        x_norm = (W > 1) ? (T(2) * static_cast<T>(w) / static_cast<T>(W - 1) - T(1)) : T(0);
+        y_norm = (H > 1) ? (T(2) * static_cast<T>(h) / static_cast<T>(H - 1) - T(1)) : T(0);
     } else {
-        x_norm = (2.0f * static_cast<float>(w) + 1.0f) / static_cast<float>(W) - 1.0f;
-        y_norm = (2.0f * static_cast<float>(h) + 1.0f) / static_cast<float>(H) - 1.0f;
+        x_norm = (T(2) * static_cast<T>(w) + T(1)) / static_cast<T>(W) - T(1);
+        y_norm = (T(2) * static_cast<T>(h) + T(1)) / static_cast<T>(H) - T(1);
     }
 
     int gg_idx = ((n * H + h) * W + w) * 2;
-    float dg_x = grad_grid[gg_idx];
-    float dg_y = grad_grid[gg_idx + 1];
+    T dg_x = grad_grid[gg_idx];
+    T dg_y = grad_grid[gg_idx + 1];
 
-    float* t = grad_theta + n * 6;
+    T* t = grad_theta + n * 6;
     atomicAdd(&t[0], dg_x * x_norm);
     atomicAdd(&t[1], dg_x * y_norm);
     atomicAdd(&t[2], dg_x);
@@ -786,21 +805,32 @@ auto affine_grid_backward_kernel_host(const Tensor& grad_grid,
     int W = static_cast<int>(size[3]);
 
     DType gr_dt = grad_grid.dtype();
-    Tensor gg_f32 = grad_grid.to(DType::Float32).contiguous();
-    Tensor gt_f32({N, 2, 3}, DType::Float32, grad_grid.device());
-    HIP_CHECK(hipMemsetAsync(gt_f32.data_ptr(), 0,
-        gt_f32.numel() * sizeof(float), stream));
+    // M9: native FP64 compute path (matches CUDA sibling's affine_grid_backward_cuda),
+    // instead of always downcasting to Float32 and losing a Float64 grad_grid's precision.
+    DType compute = (gr_dt == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor gg_c = grad_grid.to(compute).contiguous();
+    Tensor gt_c({N, 2, 3}, compute, grad_grid.device());
+    HIP_CHECK(hipMemsetAsync(gt_c.data_ptr(), 0,
+        gt_c.numel() * dtype_size(compute), stream));
 
     int total = N * H * W;
     int block_size = 256;
     int gs = (total + block_size - 1) / block_size;
 
-    hipLaunchKernelGGL(affine_grid_backward_kernel_dev,
-        dim3(gs), dim3(block_size), 0, stream,
-        gg_f32.data<float>(), gt_f32.data<float>(),
-        N, H, W, align_corners);
+    if (compute == DType::Float64) {
+        hipLaunchKernelGGL(affine_grid_backward_kernel_dev<double>,
+            dim3(gs), dim3(block_size), 0, stream,
+            gg_c.data<double>(), gt_c.data<double>(),
+            N, H, W, align_corners);
+    } else {
+        hipLaunchKernelGGL(affine_grid_backward_kernel_dev<float>,
+            dim3(gs), dim3(block_size), 0, stream,
+            gg_c.data<float>(), gt_c.data<float>(),
+            N, H, W, align_corners);
+    }
     HIP_CHECK(hipGetLastError());
-    return gt_f32.to(gr_dt);
+    return gt_c.to(gr_dt);
 }
 
 }  // namespace rocm

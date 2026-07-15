@@ -61,7 +61,17 @@ kernel void maxpool3d_forward_kernel(
                 float v = input[src];
                 if (isnan(v) || v > max_val) {
                     max_val = v;
-                    max_idx = int(src);
+                    // M13: store a (n,c)-plane-local index — src minus the
+                    // (b*channels+c)*in_d*in_h*in_w base — matching the
+                    // convention every other backend uses (CPU's
+                    // maxpool3d_backward_impl documents "max_idx = d*H*W +
+                    // h*W + w, spatial index within single channel" and
+                    // reconstructs the plane base itself). OpId::MaxPool3dBackward
+                    // round-trips this forward's indices through that exact CPU
+                    // kernel, so a global-flat index here silently double-counts
+                    // the plane offset on the CPU side and scatters the gradient
+                    // to a wrong (often out-of-bounds) input position.
+                    max_idx = int(uint(id_d) * in_h * in_w + uint(id_h) * in_w + uint(id_w));
                 }
             }
         }
@@ -74,14 +84,23 @@ kernel void maxpool3d_forward_kernel(
 // MaxPool3d Backward
 // ============================================================================
 
+// Dead code: OpId::MaxPool3dBackward is wired to a CPU round-trip
+// (mps_kernel_registry.mm), not this native kernel — see mps_kernel_registry.mm
+// comment on that registration. Kept convention-consistent with the forward
+// kernel above (plane-local index, reconstructed here) so it isn't a landmine
+// if ever wired up natively, matching audit M11's precedent for avgpool3d.
 kernel void maxpool3d_backward_kernel(
     device const float* grad_out [[buffer(0)]],
     device const int* indices    [[buffer(1)]],
     device atomic_float* grad_in [[buffer(2)]],
+    constant uint& out_spatial   [[buffer(3)]],
+    constant uint& in_plane      [[buffer(4)]],
     uint id                      [[thread_position_in_grid]])
 {
     int idx = indices[id];
-    atomic_fetch_add_explicit(&grad_in[idx], grad_out[id], memory_order_relaxed);
+    uint plane = id / out_spatial;
+    uint dst = plane * in_plane + uint(idx);
+    atomic_fetch_add_explicit(&grad_in[dst], grad_out[id], memory_order_relaxed);
 }
 
 // ============================================================================
@@ -166,6 +185,7 @@ kernel void avgpool3d_backward_kernel(
     constant uint& pd            [[buffer(16)]],
     constant uint& ph            [[buffer(17)]],
     constant uint& pw            [[buffer(18)]],
+    constant uint& count_include_pad [[buffer(19)]],
     uint id                      [[thread_position_in_grid]])
 {
     uint ow = id % out_w;
@@ -174,8 +194,31 @@ kernel void avgpool3d_backward_kernel(
     uint c = (id / (out_w * out_h * out_d)) % channels;
     uint b = id / (out_w * out_h * out_d * channels);
 
+    // M11: match forward's divisor exactly. count_include_pad=true divides by
+    // the full kernel volume (forward's `count` there counts padded positions
+    // too); count_include_pad=false divides by only the in-bounds positions,
+    // which must be recounted here since forward's per-output `count` isn't
+    // otherwise available to backward.
     int pool_size = int(kd) * int(kh) * int(kw);
-    float g = grad_out[id] / float(pool_size);
+    int count = 0;
+    if (!count_include_pad) {
+        for (uint dd = 0; dd < kd; ++dd) {
+            int id_d = int(od * sd) - int(pd) + int(dd);
+            if (id_d < 0 || id_d >= int(in_d)) continue;
+            for (uint dh = 0; dh < kh; ++dh) {
+                int id_h = int(oh * sh) - int(ph) + int(dh);
+                if (id_h < 0 || id_h >= int(in_h)) continue;
+                for (uint dw = 0; dw < kw; ++dw) {
+                    int id_w = int(ow * sw) - int(pw) + int(dw);
+                    if (id_w < 0 || id_w >= int(in_w)) continue;
+                    count++;
+                }
+            }
+        }
+    } else {
+        count = pool_size;
+    }
+    float g = (count > 0) ? (grad_out[id] / float(count)) : 0.0f;
 
     for (uint dd = 0; dd < kd; ++dd) {
         int id_d = int(od * sd) - int(pd) + int(dd);
@@ -263,14 +306,19 @@ kernel void adaptive_maxpool3d_forward_kernel(
     uint w_start = ow * in_w / out_w;
     uint w_end = ((ow + 1) * in_w + out_w - 1) / out_w;
 
+    // Dead code: OpId::AdaptiveMaxPool3d forward is wired to a CPU round-trip
+    // (mps_accelerate_multi in mps_kernel_registry.mm), not this native kernel.
+    // Kept convention-consistent with adaptive_maxpool3d_backward_kernel below
+    // (M13/CR2: plane-local index) so it isn't a landmine if ever wired up.
+    uint plane_base = ((b * channels + c) * in_d) * in_h * in_w;
     float max_val = -INFINITY;
     int max_idx = 0;
     for (uint dd = d_start; dd < d_end; ++dd) {
         for (uint hh = h_start; hh < h_end; ++hh) {
             for (uint ww = w_start; ww < w_end; ++ww) {
-                uint idx = ((b * channels + c) * in_d + dd) * in_h * in_w + hh * in_w + ww;
+                uint idx = plane_base + dd * in_h * in_w + hh * in_w + ww;
                 float v = input[idx];
-                if (isnan(v) || v > max_val) { max_val = v; max_idx = int(idx); }
+                if (isnan(v) || v > max_val) { max_val = v; max_idx = int(idx - plane_base); }
             }
         }
     }
@@ -765,8 +813,14 @@ kernel void grid_sample_kernel(
     float val = 0.0f;
     if (mode == 1u) {
         // nearest
-        int nx = int(round(gs_apply_padding(ix, W, padding_mode, ac)));
-        int ny = int(round(gs_apply_padding(iy, H, padding_mode, ac)));
+        // L5: rint = round-half-to-even, matching CPU std::nearbyint / CUDA
+        // rint / PyTorch-ATen grid_sampler nearest — MSL round() is
+        // half-away-from-zero. Also makes this native forward consistent
+        // with GridSampleBackward, which round-trips through the CPU kernel
+        // (already round-to-even) — before this fix the two disagreed with
+        // each other on the SAME op for exact .5 ties.
+        int nx = int(rint(gs_apply_padding(ix, W, padding_mode, ac)));
+        int ny = int(rint(gs_apply_padding(iy, H, padding_mode, ac)));
         if (ny >= 0 && ny < H && nx >= 0 && nx < W) val = ch_at(ny, nx);
     } else if (mode == 2u) {
         // bicubic (4x4 Catmull-Rom)
@@ -827,8 +881,16 @@ kernel void interpolate_nearest_kernel(
     uint c = (id / (out_w * out_h)) % channels;
     uint b = id / (out_w * out_h * channels);
 
-    uint ih = oh * in_h / out_h;
-    uint iw = ow * in_w / out_w;
+    // M28: float scale-then-floor, matching CPU's nearest_src (used by MPS's
+    // own CPU-roundtrip backward, and by CUDA/ROCm forward+backward too).
+    // The previous exact-integer-division formula (oh*in_h/out_h) is not
+    // algebraically identical — 17 (in,out,oh) triples in [1,64] diverge —
+    // so a large enough resize silently scattered the backward gradient to
+    // the wrong input pixel.
+    float h_scale = float(in_h) / float(out_h);
+    float w_scale = float(in_w) / float(out_w);
+    uint ih = min(uint(floor(float(oh) * h_scale)), in_h - 1);
+    uint iw = min(uint(floor(float(ow) * w_scale)), in_w - 1);
 
     output[id] = input[((b * channels + c) * in_h + ih) * in_w + iw];
 }
@@ -1097,42 +1159,54 @@ kernel void embedding_bag_forward_kernel(
 // ============================================================================
 // AdaptiveMaxPool3d Backward (Float32 + Float16)
 //
-// One thread per element of grad_output. The forward stored the input-linear
-// index of the max position in `indices`; backward atomically accumulates
-// grad_output into grad_input at that index. Mirrors the 2D adaptive max
-// pool backward pattern in pooling.metal — no new logic.
+// One thread per element of grad_output. The forward (mps_accelerate_multi
+// CPU-roundtrip -> cpu::adaptive_maxpool3d_impl) stores the max position as
+// an Int64 index LOCAL to the (n,c) plane (matching every other backend's
+// pooling-index convention), NOT a global NCHW-flat offset. Backward must
+// therefore (1) read the indices buffer at its true 8-byte stride, and
+// (2) re-add the (n,c) plane base offset before scattering into grad_input —
+// audit CR2. Mirrors the plane-offset pattern already used by
+// fractional_maxpool_backward_kernel above.
 // ============================================================================
 
 kernel void adaptive_maxpool3d_backward_kernel(
     device const float* grad_output  [[buffer(0)]],
-    device const int* indices        [[buffer(1)]],
+    device const long* indices       [[buffer(1)]],
     device float* grad_input         [[buffer(2)]],
-    constant uint& num_output        [[buffer(3)]],
+    constant uint& out_spatial       [[buffer(3)]],
+    constant uint& in_plane          [[buffer(4)]],
+    constant uint& num_output        [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
-    int idx = indices[tid];
+    long idx = indices[tid];
     if (idx >= 0) {
-        device atomic_float* dst = reinterpret_cast<device atomic_float*>(&grad_input[idx]);
-        atomic_fetch_add_explicit(dst, grad_output[tid], memory_order_relaxed);
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        device atomic_float* d = reinterpret_cast<device atomic_float*>(&grad_input[dst]);
+        atomic_fetch_add_explicit(d, grad_output[tid], memory_order_relaxed);
     }
 }
 
 kernel void adaptive_maxpool3d_backward_kernel_f16(
     device const half* grad_output   [[buffer(0)]],
-    device const int* indices        [[buffer(1)]],
+    device const long* indices       [[buffer(1)]],
     device half* grad_input          [[buffer(2)]],
-    constant uint& num_output        [[buffer(3)]],
+    constant uint& out_spatial       [[buffer(3)]],
+    constant uint& in_plane          [[buffer(4)]],
+    constant uint& num_output        [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
-    int idx = indices[tid];
+    long idx = indices[tid];
     if (idx >= 0) {
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
         // Metal lacks atomic_fetch_add for half. Match the 2D-f16 fallback:
         // single-threaded-per-output relaxed read-modify-write. Index uniqueness
         // for max-pool backward usually keeps this contention-free; if two
         // outputs land on the same input index, the upper-layer scatter pattern
         // accepts last-writer-wins (same behaviour as the 2D-f16 backward).
-        grad_input[idx] = half(float(grad_input[idx]) + float(grad_output[tid]));
+        grad_input[dst] = half(float(grad_input[dst]) + float(grad_output[tid]));
     }
 }

@@ -72,17 +72,21 @@ auto Variable::grad() const -> std::optional<Tensor> {
     if (!impl_) {
         throw std::runtime_error("Cannot access grad of uninitialized Variable");
     }
-    // Serialize against concurrent gradient accumulation when thread_safe_ is
-    // enabled, matching has_grad()/set_grad()/mutable_grad(); reading grad_
-    // (and the metadata flags) unlocked while a backward worker writes it is a
-    // data race. Return BY VALUE: the optional<Tensor> (a cheap handle copy) is
-    // constructed from impl_->grad_ while the lock is still held, so the caller
-    // never touches grad_ unlocked. Returning a reference (the previous
-    // behaviour) leaked grad_ past the lock's scope, defeating the guard.
-    std::unique_lock<std::mutex> lock;
-    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        lock = std::unique_lock<std::mutex>(*impl_->grad_mutex_);
-    }
+    // L1: always serialize against concurrent gradient accumulation — the
+    // backward engine (engine.cpp's leaf-accumulation lock) takes
+    // grad_mutex_ unconditionally on every leaf regardless of thread_safe_,
+    // so gating the READ side on that opt-in flag left a real race: a user
+    // thread calling .grad() without first calling make_thread_safe() read
+    // grad_ (and the metadata flags below) unlocked while a concurrent
+    // backward pass wrote it under lock. The engine already pays this cost
+    // unconditionally on its hot path (once per graph edge), so matching it
+    // here on the cold, once-per-step read path costs nothing extra in
+    // practice. Return BY VALUE: the optional<Tensor> (a cheap handle copy)
+    // is constructed from impl_->grad_ while the lock is still held, so the
+    // caller never touches grad_ unlocked. Returning a reference (the
+    // previous behaviour) leaked grad_ past the lock's scope, defeating the
+    // guard.
+    std::unique_lock<std::mutex> lock(*impl_->grad_mutex_);
     // Match PyTorch: warn at most once when .grad is accessed on a
     // non-leaf Variable that has no stored gradient and was not marked
     // with retain_grad(). Use was_non_leaf_ rather than the live
@@ -141,19 +145,16 @@ auto Variable::grad_variable() const -> const std::optional<Variable>& {
         }
         return *cache;
     };
-    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(*impl_->grad_mutex_);
-        return populate_cache();
-    }
+    // L1: see grad()'s comment — always lock, matching the engine's
+    // unconditional accumulation lock.
+    std::lock_guard lock(*impl_->grad_mutex_);
     return populate_cache();
 }
 
 auto Variable::has_grad() const -> bool {
     if (!impl_) return false;
-    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(*impl_->grad_mutex_);
-        return impl_->grad_.has_value();
-    }
+    // L1: see grad()'s comment — always lock.
+    std::lock_guard lock(*impl_->grad_mutex_);
     return impl_->grad_.has_value();
 }
 
@@ -161,12 +162,9 @@ auto Variable::set_grad(Tensor gradient) -> void {
     if (!impl_) {
         throw std::runtime_error("Cannot set grad of uninitialized Variable");
     }
-    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(*impl_->grad_mutex_);
-        impl_->grad_ = std::move(gradient);
-    } else {
-        impl_->grad_ = std::move(gradient);
-    }
+    // L1: see grad()'s comment — always lock.
+    std::lock_guard lock(*impl_->grad_mutex_);
+    impl_->grad_ = std::move(gradient);
 }
 
 auto Variable::accumulate_grad(Tensor gradient) -> void {
@@ -191,12 +189,9 @@ auto Variable::accumulate_grad(Tensor gradient) -> void {
             impl_->grad_ = std::move(gradient);
         }
     };
-    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(*impl_->grad_mutex_);
-        do_accumulate();
-    } else {
-        do_accumulate();
-    }
+    // L1: see grad()'s comment — always lock.
+    std::lock_guard lock(*impl_->grad_mutex_);
+    do_accumulate();
 }
 
 auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph, bool create_graph) -> void {
@@ -275,23 +270,17 @@ auto Variable::preserve_grad_dtype() const -> bool {
 
 auto Variable::zero_grad() -> void {
     if (impl_) {
-        if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-            std::lock_guard lock(*impl_->grad_mutex_);
-            impl_->grad_.reset();
-            // audit-9 JJ.1: also clear the higher-order graph-carrying
-            // gradient and its cached Variable handle.  Without this, a
-            // create_graph=true step leaves grad_with_graph_impl_ holding
-            // the previous iteration's graph; the next iteration's
-            // grad_variable() returns the stale chain, producing wrong
-            // second-order gradients and pinning the previous graph alive.
-            impl_->grad_with_graph_impl_.reset();
-            impl_->grad_with_graph_cache_storage_.reset();
-        } else {
-            impl_->grad_.reset();
-            // audit-9 JJ.1: see above.
-            impl_->grad_with_graph_impl_.reset();
-            impl_->grad_with_graph_cache_storage_.reset();
-        }
+        // L1: see grad()'s comment — always lock.
+        std::lock_guard lock(*impl_->grad_mutex_);
+        impl_->grad_.reset();
+        // audit-9 JJ.1: also clear the higher-order graph-carrying
+        // gradient and its cached Variable handle.  Without this, a
+        // create_graph=true step leaves grad_with_graph_impl_ holding
+        // the previous iteration's graph; the next iteration's
+        // grad_variable() returns the stale chain, producing wrong
+        // second-order gradients and pinning the previous graph alive.
+        impl_->grad_with_graph_impl_.reset();
+        impl_->grad_with_graph_cache_storage_.reset();
     }
 }
 
@@ -317,7 +306,9 @@ auto Variable::detach_() -> void {
     // mutex-protected mutation of grad_with_graph_impl_ /
     // grad_with_graph_cache_storage_ (audit-9 JJ.1).
     impl_->grad_fn_.reset();
-    if (impl_->thread_safe_.load(std::memory_order_acquire) && impl_->grad_mutex_) {
+    // L1: see grad()'s comment — always lock (grad_mutex_ is still
+    // null-checked: a moved-from VariableImpl can leave it null).
+    if (impl_->grad_mutex_) {
         std::lock_guard lock(*impl_->grad_mutex_);
         impl_->grad_.reset();
         impl_->grad_with_graph_impl_.reset();
@@ -420,12 +411,9 @@ auto Variable::accumulate_sparse_grad(SparseTensor sg) -> void {
             impl_->sparse_grad_ = std::move(sg);
         }
     };
-    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
-        std::lock_guard lock(*impl_->grad_mutex_);
-        do_accumulate();
-    } else {
-        do_accumulate();
-    }
+    // L1: see grad()'s comment — always lock.
+    std::lock_guard lock(*impl_->grad_mutex_);
+    do_accumulate();
 }
 
 // NoGradGuard implementation

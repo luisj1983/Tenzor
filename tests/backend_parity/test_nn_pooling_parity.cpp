@@ -231,6 +231,31 @@ TEST_P(NNPoolingParity, AdaptiveMaxPool1d) {
     }, {input}, 1e-6f, 1e-8f, "AdaptiveMaxPool1d");
 }
 
+// M14: Vulkan's start_index(a,b,c) computed floor(float(a*c)/float(b)) — a
+// float32 division. Float32 exactly represents integers only up to 2^24
+// (~16.7M); with out_length=2000 and in_length=500000, a*c exceeds 2^24 for
+// most output positions, and an offline float32 emulation (numpy) of the
+// exact same formula shows 231/2000 output windows getting an off-by-one
+// start index vs. plain integer division. On this session's actual GPU
+// (RTX 5070 / RADV) the two formulas happened to agree bit-for-bit for this
+// input regardless — probed directly by temporarily forcing start_index to
+// return a wrong constant, which this test does catch, confirming the
+// dispatch/rebuild path is exercised correctly. The fix (pure integer
+// division, matching backward and every other backend) is kept regardless:
+// it's strictly more correct with no downside, and the a*c overflow risk is
+// real for large enough dims even where this specific case didn't trigger it.
+TEST_P(NNPoolingParity, AdaptiveAvgPool1d_LargeDims_Float32PrecisionBoundary) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
+
+    auto input = randn({1, 1, 500000}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::AdaptiveAvgPool1d pool(2000);
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-5f, 1e-6f, "AdaptiveAvgPool1d_LargeDims");
+}
+
 // ============================================================================
 // 3D Adaptive Pooling Tests
 // ============================================================================
@@ -418,6 +443,15 @@ TEST_P(NNPoolingParity, AvgPool3d_Backward) {
     pool_grad_parity([] { return nn::AvgPool3d(2); }, {1, 2, 4, 4, 4},
                      "AvgPool3d_bwd");
 }
+// H14: padding=0 above never exercises count_include_pad (no padded cells
+// exist, so the in-bounds count always equals the full kernel volume
+// regardless of the flag). kernel_size=3, padding=1 with the PyTorch default
+// count_include_pad=true forces every boundary output to actually divide by
+// the full kernel volume instead of the in-bounds-only count.
+TEST_P(NNPoolingParity, AvgPool3d_Backward_PaddedCountIncludePad) {
+    pool_grad_parity([] { return nn::AvgPool3d(3, 1, 1); }, {1, 2, 4, 4, 4},
+                     "AvgPool3d_bwd_padded_cip");
+}
 TEST_P(NNPoolingParity, AdaptiveMaxPool3d_Backward) {
     pool_grad_parity([] { return nn::AdaptiveMaxPool3d(2, 2, 2); },
                      {1, 2, 4, 4, 4}, "AdaptiveMaxPool3d_bwd");
@@ -449,6 +483,105 @@ TEST_P(NNPoolingParity, MaxPool2dAsymmetric_F64) {
         nn::MaxPool2d pool({3, 2}, {2, 1}, {1, 0});
         return pool.forward(Variable(inputs[0], false)).tensor();
     }, {input}, 1e-12f, 1e-12f, "MaxPool2dAsymmetric_F64");
+}
+
+// M12: cuDNN's MaxPool2dBackward re-derives the argmax by comparing forward's
+// `output` against `input`. forward already bypasses cuDNN for Float64
+// (cuDNN's pooling *reduction* selects the max in single precision even with
+// a CUDNN_DATA_DOUBLE descriptor), so this test constructs the matching
+// backward risk: a window with two elements equal at Float32 rounding but
+// distinct at double precision (1024.0 and 1024.0 + 5e-5 — same float32
+// value since the ulp at that magnitude is ~1.2e-4, but distinct doubles),
+// requiring the gradient to land on the true double-precision max
+// (1024.00005) alone, matching CPU/forward's own `indices`. On this session's
+// cuDNN build the backward equality comparison against `output` turned out
+// to already be done at full double precision (probed directly: this exact
+// near-tie already resolved correctly pre-fix), so this doesn't reproduce a
+// live divergence here — the fix (route Float64 through the same
+// indices-based native kernel forward's `indices` came from, instead of
+// trusting cuDNN's undocumented internal comparison precision) is kept as a
+// defense-in-depth correctness guarantee consistent with forward's own
+// Float64 bypass, and this test guards that guarantee going forward.
+TEST_P(NNPoolingParity, MaxPool2d_Float64_NearTieBackward) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
+    auto input = zeros({1, 1, 2, 2}, DType::Float64, Device::cpu());
+    {
+        double* d = input.data<double>();
+        d[0] = 1024.0;          // (0,0): float32-rounds to 1024.0
+        d[1] = 1024.00005;      // (0,1): also float32-rounds to 1024.0, true double max
+        d[2] = 0.0;
+        d[3] = 0.0;
+    }
+
+    Tensor ref_grad;
+    {
+        nn::MaxPool2d pool(2);
+        auto v = Variable(input.clone(), true);
+        auto out = pool.forward(v);
+        out.backward(ones_like(out.tensor()));
+        ref_grad = v.grad().value();
+    }
+    ASSERT_DOUBLE_EQ(ref_grad.data<double>()[0], 0.0);
+    ASSERT_DOUBLE_EQ(ref_grad.data<double>()[1], 1.0);
+
+    auto backends = get_available_backends();
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            nn::MaxPool2d pool(2);
+            pool.to(backends[i]);
+            auto v = Variable(input.to(backends[i]), true);
+            auto out = pool.forward(v);
+            out.backward(ones_like(out.tensor()));
+            backends[i].synchronize();
+            SCOPED_TRACE("MaxPool2d_Float64_NearTieBackward on " + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref_grad, v.grad().value().to(Device::cpu()), 1e-12f, 1e-12f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "MaxPool2d_Float64_NearTieBackward failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
+        }
+    }
+}
+
+TEST_P(NNPoolingParity, MaxPool2d_NaNPropagation) {
+    // L2: Vulkan's MaxPool2d forward (all four compute-dtype shader variants
+    // — f32/f16/bf16/f64) used a plain `value > max_val` comparison with no
+    // NaN check, unlike MaxPool1d/MaxPool3d/AdaptiveMaxPool2d on the SAME
+    // backend (`val > max_val || val != val`) and unlike the CPU reference.
+    // A NaN anywhere in a MaxPool2d window was silently skipped instead of
+    // propagated (NaN > x is always false, so the plain comparison never
+    // "won"), diverging from every sibling pooling op on Vulkan.
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
+    auto backends = get_available_backends();
+    for (DType dt : {DType::Float32, DType::Float64, DType::Float16, DType::BFloat16}) {
+        auto input = zeros({1, 1, 2, 2}, DType::Float32, Device::cpu());
+        {
+            float* d = input.data<float>();
+            d[0] = 1.0f;
+            d[1] = std::numeric_limits<float>::quiet_NaN();
+            d[2] = 2.0f;
+            d[3] = 3.0f;
+        }
+        input = input.to(dt);
+
+        for (size_t i = 0; i < backends.size(); ++i) {
+            try {
+                nn::MaxPool2d pool(2);
+                pool.to(backends[i]);
+                auto out = pool.forward(Variable(input.to(backends[i]), false));
+                backends[i].synchronize();
+                auto out_f32 = out.tensor().to(Device::cpu()).to(DType::Float32);
+                EXPECT_TRUE(std::isnan(out_f32.data<float>()[0]))
+                    << "MaxPool2d(" << dtype_name(dt) << ") on "
+                    << backend_name(backends[i])
+                    << " did not propagate NaN (silently skipped it) — got "
+                    << out_f32.data<float>()[0];
+            } catch (const std::exception& e) {
+                ADD_FAILURE() << "MaxPool2d_NaNPropagation(" << dtype_name(dt)
+                              << ") failed on " << backend_name(backends[i])
+                              << ": " << e.what();
+            }
+        }
+    }
 }
 
 TEST_P(NNPoolingParity, AvgPool2dAsymmetric) {

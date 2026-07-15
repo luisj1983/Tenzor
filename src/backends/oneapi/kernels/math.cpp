@@ -1284,18 +1284,34 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
                 a_cont, b_cont, output, info, queue,
                 [](const float* a, const float* b, float* c, int64_t ai, int64_t bi, int64_t ci) {
                     float ar = a[ai], ai_ = a[ai + 1], br = b[bi], bi_ = b[bi + 1];
-                    float denom = br * br + bi_ * bi_;
-                    c[ci]     = (ar * br + ai_ * bi_) / denom;
-                    c[ci + 1] = (ai_ * br - ar * bi_) / denom;
+                    // L8: Smith's algorithm — avoids overflow in br*br+bi*bi
+                    // for a large-magnitude divisor (matches CPU
+                    // std::complex / CUDA-ROCm complex_div_kernel).
+                    if (sycl::fabs(br) >= sycl::fabs(bi_)) {
+                        float r = bi_ / br, d = br + bi_ * r;
+                        c[ci]     = (ar + ai_ * r) / d;
+                        c[ci + 1] = (ai_ - ar * r) / d;
+                    } else {
+                        float r = br / bi_, d = bi_ + br * r;
+                        c[ci]     = (ar * r + ai_) / d;
+                        c[ci + 1] = (ai_ * r - ar) / d;
+                    }
                 });
         } else if (a_cont.dtype() == DType::Complex128) {
             sycl_broadcast_complex_binary<double, BroadcastDivComplex128>(
                 a_cont, b_cont, output, info, queue,
                 [](const double* a, const double* b, double* c, int64_t ai, int64_t bi, int64_t ci) {
                     double ar = a[ai], ai_ = a[ai + 1], br = b[bi], bi_ = b[bi + 1];
-                    double denom = br * br + bi_ * bi_;
-                    c[ci]     = (ar * br + ai_ * bi_) / denom;
-                    c[ci + 1] = (ai_ * br - ar * bi_) / denom;
+                    // L8: Smith's algorithm — see the Complex64 branch above.
+                    if (sycl::fabs(br) >= sycl::fabs(bi_)) {
+                        double r = bi_ / br, d = br + bi_ * r;
+                        c[ci]     = (ar + ai_ * r) / d;
+                        c[ci + 1] = (ai_ - ar * r) / d;
+                    } else {
+                        double r = br / bi_, d = bi_ + br * r;
+                        c[ci]     = (ar * r + ai_) / d;
+                        c[ci + 1] = (ai_ * r - ar) / d;
+                    }
                 });
         } else {
             throw std::runtime_error("div broadcast: unsupported dtype");
@@ -1365,9 +1381,16 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             float ar = a_ptr[base], ai = a_ptr[base + 1];
             float br = b_ptr[base], bi = b_ptr[base + 1];
-            float denom = br * br + bi * bi;
-            out_ptr[base]     = (ar * br + ai * bi) / denom;
-            out_ptr[base + 1] = (ai * br - ar * bi) / denom;
+            // L8: Smith's algorithm — see the broadcast Complex64 branch above.
+            if (sycl::fabs(br) >= sycl::fabs(bi)) {
+                float r = bi / br, d = br + bi * r;
+                out_ptr[base]     = (ar + ai * r) / d;
+                out_ptr[base + 1] = (ai - ar * r) / d;
+            } else {
+                float r = br / bi, d = bi + br * r;
+                out_ptr[base]     = (ar * r + ai) / d;
+                out_ptr[base + 1] = (ai * r - ar) / d;
+            }
         }).wait();
     }
     else if (a_cont.dtype() == DType::Complex128) {
@@ -1379,9 +1402,16 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             double ar = a_ptr[base], ai = a_ptr[base + 1];
             double br = b_ptr[base], bi = b_ptr[base + 1];
-            double denom = br * br + bi * bi;
-            out_ptr[base]     = (ar * br + ai * bi) / denom;
-            out_ptr[base + 1] = (ai * br - ar * bi) / denom;
+            // L8: Smith's algorithm — see the broadcast Complex64 branch above.
+            if (sycl::fabs(br) >= sycl::fabs(bi)) {
+                double r = bi / br, d = br + bi * r;
+                out_ptr[base]     = (ar + ai * r) / d;
+                out_ptr[base + 1] = (ai - ar * r) / d;
+            } else {
+                double r = br / bi, d = bi + br * r;
+                out_ptr[base]     = (ar * r + ai) / d;
+                out_ptr[base + 1] = (ai * r - ar) / d;
+            }
         }).wait();
     }
     else if (a_cont.dtype() == DType::Int8) {

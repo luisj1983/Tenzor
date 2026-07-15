@@ -223,12 +223,17 @@ struct VariableImpl {
     /// Mutex protecting grad_ for concurrent gradient accumulation.
     /// Shared via shared_ptr so copies (which share grad_ via Tensor handle
     /// semantics) also share the mutex for correct thread safety.
-    /// Only locked when thread_safe_ is true, so zero overhead for
-    /// single-threaded code.
+    /// Always locked around gradient reads/writes (L1) — the backward
+    /// engine's own leaf-accumulation lock was already unconditional, so
+    /// gating the accessor side on thread_safe_ only created a race without
+    /// saving real cost (an uncontended mutex lock is negligible next to a
+    /// Tensor op).
     std::shared_ptr<std::mutex> grad_mutex_ = std::make_shared<std::mutex>();
 
-    /// Opt-in flag for thread-safe gradient access. When true, grad_mutex_
-    /// is locked around gradient reads/writes. Enable via Variable::make_thread_safe().
+    /// Legacy flag from the old opt-in thread-safety scheme. No longer
+    /// gates anything (grad_mutex_ is always locked — L1); kept only so
+    /// Variable::make_thread_safe()/is_thread_safe() remain source-
+    /// compatible introspection stubs.
     std::atomic<bool> thread_safe_{false};
 
     /// Forward-pass creation metadata for anomaly detection tracebacks.
@@ -257,16 +262,26 @@ struct VariableImpl {
  *
  * @par Thread safety
  * All concurrent access to a Variable requires external synchronization.
- * While shared_ptr reference counting is atomic, the Tensor data, gradient
- * state, and computation graph are NOT. In particular:
+ * While shared_ptr reference counting is atomic, the Tensor data and
+ * computation graph are NOT. In particular:
  * - Forward/backward passes sharing Variables must run on the same thread
- * - Gradient accumulation is NOT atomic unless make_thread_safe() is called
+ * - Gradient state (grad(), grad_variable(), has_grad(), set_grad(),
+ *   accumulate_grad(), zero_grad(), detach_(), accumulate_sparse_grad()) IS
+ *   always synchronized via a per-Variable mutex — this matches the
+ *   backward engine's own leaf-accumulation lock (BackwardEngine::execute()
+ *   takes it unconditionally on every leaf), so the two sides can no longer
+ *   disagree about whether to lock (L1). make_thread_safe()/is_thread_safe()
+ *   are kept for API compatibility but no longer gate anything — locking
+ *   was already unconditional on the engine's hot path, so making the
+ *   colder, once-per-step accessor path always lock too costs nothing
+ *   extra in practice.
  * - Hook registration/invocation is serialized via shared_mutex
  * - NoGradGuard is thread-local (does NOT propagate to spawned threads)
  * - The backward engine uses a per-thread singleton model
- * For concurrent training, use separate Variable instances per thread,
- * or call make_thread_safe() on shared parameters before concurrent
- * gradient accumulation (e.g., data-parallel training).
+ * For concurrent training (e.g. data-parallel with a shared parameter),
+ * separate Variable instances per thread are still the safest default;
+ * gradient accumulation into a genuinely shared Variable is now always
+ * synchronized, but the computation graph itself is not.
  *
  * @code
  * // Create variables that require gradients
@@ -635,24 +650,29 @@ public:
     }
 
     /**
-     * @brief Enable thread-safe gradient access for this variable.
+     * @brief Legacy no-op: gradient access is always thread-safe now (L1).
      *
-     * When enabled, gradient reads/writes are protected by a mutex,
-     * allowing safe concurrent gradient accumulation from multiple
-     * backward passes (e.g., data-parallel training).
-     *
-     * Zero overhead when not enabled — the mutex exists but is never locked.
+     * Historically, gradient reads/writes were only mutex-protected when
+     * this was called, but the backward engine's leaf-accumulation lock was
+     * always unconditional — the two sides could disagree about whether to
+     * lock, leaving a real race for anyone who forgot to call this. Gradient
+     * access (grad(), accumulate_grad(), set_grad(), zero_grad(), etc.) is
+     * now unconditionally synchronized, matching the engine, so this method
+     * no longer changes behavior. Kept for source compatibility.
      *
      * @code
      * Variable shared_param(tensor, true);
-     * shared_param.make_thread_safe();
-     * // Now safe to call backward() concurrently from multiple threads
+     * shared_param.make_thread_safe();  // no-op; grad access is always safe
+     * // Safe to call backward() concurrently from multiple threads
      * @endcode
      */
     auto make_thread_safe() -> void;
 
     /**
-     * @brief Check if thread-safe gradient access is enabled.
+     * @brief Legacy introspection: whether make_thread_safe() was called.
+     *
+     * Gradient access is unconditionally thread-safe regardless of this
+     * flag (L1) — kept for source compatibility / introspection only.
      *
      * @return true if make_thread_safe() has been called
      */

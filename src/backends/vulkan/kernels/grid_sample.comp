@@ -120,8 +120,13 @@ void main() {
     float val = 0.0;
     if (params.mode == 1) {
         // nearest
-        int nx = int(round(ix));
-        int ny = int(round(iy));
+        // L5: roundEven = round-half-to-even, matching CPU std::nearbyint /
+        // CUDA rint / PyTorch-ATen grid_sampler nearest — plain round() is
+        // implementation-defined for exact .5 ties in GLSL (unlike C's
+        // round(), which is always away-from-zero) and can diverge by
+        // vendor/driver.
+        int nx = int(roundEven(ix));
+        int ny = int(roundEven(iy));
         if (ny >= 0 && ny < params.H_in && nx >= 0 && nx < params.W_in) {
             val = input_data[((n * params.C + c) * params.H_in + ny) * params.W_in + nx];
         }

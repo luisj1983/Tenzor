@@ -13,6 +13,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/fft.hpp>
 #include <cmath>
+#include <complex>
 
 #include "gradcheck_complex.hpp"
 #include "../backend_test_fixture.hpp"
@@ -709,6 +710,44 @@ TEST_P(GradCheckComprehensiveTest, FFT) {
         return fft_autograd::fft(v);
     };
     EXPECT_TRUE(tenzor_test::gradcheck_complex(f, x, 1e-3, 5e-2, 5e-2));
+}
+
+// H22: DivBackward's zero-safety guard (where(eq(b,0), eps, b)) ran
+// unconditionally before the complex check, and eq() has no
+// Complex64/Complex128 kernel on any backend — so ANY complex-denominator
+// division threw instead of computing the Wirtinger gradient
+// (grad_a = grad/conj(b), grad_b = -conj(a)*grad/conj(b)^2), even when b
+// contained no zero at all. gradcheck_complex only supports real INPUTS
+// (see its own doc comment), so this checks the complex-input case
+// directly against a host-computed analytic reference instead.
+TEST_P(GradCheckComprehensiveTest, DivComplexBackwardMatchesWirtinger) {
+    std::complex<float> a_data[] = {{1.0f, 2.0f}, {-0.5f, 0.5f}};
+    std::complex<float> b_data[] = {{2.0f, -1.0f}, {1.5f, 0.5f}};
+    auto a_t = Tensor::from_blob(a_data, {2}, DType::Complex64, Device::cpu()).clone().to(device);
+    auto b_t = Tensor::from_blob(b_data, {2}, DType::Complex64, Device::cpu()).clone().to(device);
+    Variable a(a_t, true);
+    Variable b(b_t, true);
+
+    Variable y = a / b;
+    ASSERT_NO_THROW(y.backward(tenzor::ones_like(y.tensor())))
+        << "complex-denominator division backward threw (H22)";
+
+    ASSERT_TRUE(a.has_grad());
+    ASSERT_TRUE(b.has_grad());
+
+    auto ga = a.grad()->to(Device::cpu());
+    auto gb = b.grad()->to(Device::cpu());
+    auto* ga_p = ga.data<std::complex<float>>();
+    auto* gb_p = gb.data<std::complex<float>>();
+    for (int i = 0; i < 2; ++i) {
+        std::complex<float> conj_b = std::conj(b_data[i]);
+        std::complex<float> expected_ga = std::complex<float>(1.0f, 0.0f) / conj_b;
+        std::complex<float> expected_gb = -std::conj(a_data[i]) / (conj_b * conj_b);
+        EXPECT_NEAR(ga_p[i].real(), expected_ga.real(), 1e-4f) << "grad_a real i=" << i;
+        EXPECT_NEAR(ga_p[i].imag(), expected_ga.imag(), 1e-4f) << "grad_a imag i=" << i;
+        EXPECT_NEAR(gb_p[i].real(), expected_gb.real(), 1e-4f) << "grad_b real i=" << i;
+        EXPECT_NEAR(gb_p[i].imag(), expected_gb.imag(), 1e-4f) << "grad_b imag i=" << i;
+    }
 }
 
 TEST_P(GradCheckComprehensiveTest, IFFT) {

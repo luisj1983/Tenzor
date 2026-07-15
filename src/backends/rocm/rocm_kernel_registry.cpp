@@ -1058,11 +1058,11 @@ namespace rocm {
     // ROI Align (roi_align.hip.cpp)
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
                            int64_t output_h, int64_t output_w,
-                           float spatial_scale, int64_t sampling_ratio,
+                           double spatial_scale, int64_t sampling_ratio,
                            bool aligned, hipStream_t stream) -> Tensor;
     auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                             int64_t batch_size, int64_t feat_height, int64_t feat_width,
-                            float spatial_scale, int64_t sampling_ratio,
+                            double spatial_scale, int64_t sampling_ratio,
                             bool aligned, hipStream_t stream) -> Tensor;
 
     // RMSNorm backward (fused_ops.hip.cpp)
@@ -2439,7 +2439,42 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
             if (has_lse && fused_supported && Q.dtype() == DType::Float32) {
                 const Tensor& L = inputs[5];
-                return rocm::flash_attention_backward_hip(dO, Q, K, V, O, L, scale, causal, dropout_p, rng_seed);
+                // H20: flash_attention_backward_hip requires 3D
+                // [batch_heads, seq_len, head_dim] input (Q.shape()[0] is
+                // read directly as batch_heads) — this fast path used to
+                // pass the ORIGINAL 4D [B,H,S,D] tensors straight through
+                // with no reshape, silently reinterpreting the head axis as
+                // sequence length and the sequence axis as head_dim. Both
+                // the Float64 branch above and the composed-ops fallback
+                // below already do this reshape; mirror it here.
+                bool is_4d_f32 = (Q.shape().size() == 4);
+                std::vector<int64_t> q_shape_4d_f32, k_shape_4d_f32, v_shape_4d_f32;
+                Tensor Q3f = Q, K3f = K, V3f = V, O3f = O, dO3f = dO, L3f = L;
+                if (is_4d_f32) {
+                    q_shape_4d_f32.assign(Q.shape().begin(), Q.shape().end());
+                    k_shape_4d_f32.assign(K.shape().begin(), K.shape().end());
+                    v_shape_4d_f32.assign(V.shape().begin(), V.shape().end());
+                    int64_t b = q_shape_4d_f32[0], h = q_shape_4d_f32[1];
+                    int64_t sq = q_shape_4d_f32[2], dq = q_shape_4d_f32[3];
+                    int64_t sk = k_shape_4d_f32[2], dk = k_shape_4d_f32[3];
+                    int64_t dv = v_shape_4d_f32[3];
+                    Q3f  = tenzor::reshape(Q.contiguous(),  std::vector<int64_t>{b * h, sq, dq});
+                    K3f  = tenzor::reshape(K.contiguous(),  std::vector<int64_t>{b * h, sk, dk});
+                    V3f  = tenzor::reshape(V.contiguous(),  std::vector<int64_t>{b * h, sk, dv});
+                    O3f  = tenzor::reshape(O.contiguous(),  std::vector<int64_t>{b * h, sq, dv});
+                    dO3f = tenzor::reshape(dO.contiguous(), std::vector<int64_t>{b * h, sq, dv});
+                    if (L.shape().size() == 3) {
+                        L3f = tenzor::reshape(L.contiguous(), std::vector<int64_t>{b * h, sq});
+                    }
+                }
+                auto grads = rocm::flash_attention_backward_hip(
+                    dO3f, Q3f, K3f, V3f, O3f, L3f, scale, causal, dropout_p, rng_seed);
+                if (is_4d_f32) {
+                    grads[0] = tenzor::reshape(grads[0], q_shape_4d_f32);
+                    grads[1] = tenzor::reshape(grads[1], k_shape_4d_f32);
+                    grads[2] = tenzor::reshape(grads[2], v_shape_4d_f32);
+                }
+                return grads;
             }
 
             // Audit A.11 — native Float64 backward. Recomputes per-row LSE
@@ -3239,7 +3274,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::ROIAlignForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 7);
         int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 7);
-        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
         int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
         bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 
@@ -3252,7 +3287,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 1);
         int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
         int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
-        float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0));
+        double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
         int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
         bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 

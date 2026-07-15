@@ -40,7 +40,8 @@ inline auto adam_densify_sparse_grad(tenzor::Variable& param) -> bool {
     if (param.has_grad()) {
         // Combine producer-supplied dense and sparse contributions so the
         // resulting step reflects the full backward total.
-        const tenzor::Tensor& existing = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const tenzor::Tensor existing = param.grad().value();
         param.set_grad(existing + dense);
     } else {
         param.set_grad(std::move(dense));
@@ -131,7 +132,8 @@ auto Adam::step_impl() -> void {
         }
         if (!param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
         HP hp = resolve(i);
 
         // ── CUDA path: fused single-kernel dispatch ──────────────────────────
@@ -612,7 +614,8 @@ auto AdamW::step_impl() -> void {
         auto& param = *param_ptr;
         HP hp = resolve(i);
 
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
 
         // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
         if (param.tensor().device().type == Device::Type::CUDA &&

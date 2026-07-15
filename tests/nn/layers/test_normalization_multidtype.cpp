@@ -149,9 +149,41 @@ TEST_P(NormalizationMultiDTypeTest, LayerNormBackwardGradientFlow) {
     EXPECT_TRUE(input.has_grad());
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
+    // H5: grad_weight/grad_bias must be narrowed back to the parameter's own
+    // dtype on the GPU backward path, not left at the Float32 compute dtype
+    // used internally for the Float16/BFloat16 upcast.
     auto params = ln.parameters();
     for (auto& param : params) {
         EXPECT_TRUE(param->has_grad());
+        EXPECT_EQ(param->grad()->dtype(), dtype());
+    }
+}
+
+// H6: RMSNorm's GPU backward wrapper used to skip the Float32
+// upcast/narrow entirely (unlike LayerNorm above), so grad_weight came back
+// Float32 (CUDA's kernel deliberately allocates it at Float32 regardless of
+// input dtype) against a Float16/BFloat16 weight parameter.
+TEST_P(NormalizationMultiDTypeTest, RMSNormBackwardGradientFlow) {
+    RMSNorm rn(4, 1e-6);
+    convert_model(rn);
+    rn.train();
+
+    auto input_data = std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f};
+    auto input_tensor = create_tensor(input_data, {1, 4});
+    auto input = Variable(input_tensor, true);
+
+    auto output = rn(input);
+
+    auto grad_output = tenzor::ones({1, 4}, dtype(), device());
+    output.backward(grad_output);
+
+    EXPECT_TRUE(input.has_grad());
+    EXPECT_EQ(input.grad()->dtype(), dtype());
+
+    auto params = rn.parameters();
+    for (auto& param : params) {
+        EXPECT_TRUE(param->has_grad());
+        EXPECT_EQ(param->grad()->dtype(), dtype());
     }
 }
 

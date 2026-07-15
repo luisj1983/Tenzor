@@ -64,7 +64,11 @@ auto SGD::step_impl() -> void {
         HP hp = resolve(i);
 
         Tensor& param_tensor = param.tensor();
-        const Tensor& grad_tensor = *param.grad();
+        // Dangling-reference fix: grad() returns optional<Tensor> BY VALUE;
+        // *grad() dereferences that temporary and returns a reference that is
+        // NOT lifetime-extended (operator* is &&-qualified on a prvalue), so
+        // binding a reference here dangled past this statement. Bind by value.
+        const Tensor grad_tensor = *param.grad();
 
         // ── CUDA path: fused single-kernel dispatch ──────────────────────────
         // R.16: fused CUDA kernel only handles Float32/Float64 (half-precision

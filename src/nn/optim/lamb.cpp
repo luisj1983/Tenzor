@@ -72,7 +72,8 @@ auto LAMB::step_impl() -> void {
 
         const LAMBHP hp = resolve(i);
 
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
 
         // R.16: half-precision params run the math in state_dt (Float32).
         const DType param_dt = param.tensor().dtype();

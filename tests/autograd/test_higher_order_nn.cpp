@@ -57,6 +57,68 @@ TEST_P(HigherOrderNNTest, Conv2d_DoubleBackward) {
     EXPECT_GRAD_FLOWS(input);
 }
 
+// H18/H19: Conv2dBackward/Conv3dBackward::backward_with_variables used to
+// hardcode output_padding={0,0[,0]} when reconstructing grad_input via
+// conv_transpose{2,3}d. For stride > 1 the transpose is ambiguous — several
+// input spatial sizes map to the same conv output size — so output_padding=0
+// silently produces a grad_input up to (stride-1) smaller than the true
+// input on every axis. Verify the create_graph=true grad_input SHAPE exactly
+// matches the original input shape for a stride=2 conv, which output_padding=0
+// alone cannot reconstruct.
+TEST_P(HigherOrderNNTest, Conv2d_DoubleBackward_Strided_GradInputShapeMatchesInput) {
+    auto input = Variable(randn({1, 1, 8, 8}, DType::Float32, device), true);
+    nn::Conv2d conv(1, 1, /*kernel_size=*/3, /*stride=*/2, /*padding=*/1);
+
+    auto output = conv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(input.grad_variable().has_value())
+        << "create_graph=true must populate grad_variable()";
+    Variable grad_var = input.grad_variable().value();
+
+    auto input_shape = input.tensor().shape();
+    auto grad_shape = grad_var.tensor().shape();
+    ASSERT_EQ(grad_shape.size(), input_shape.size());
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        EXPECT_EQ(grad_shape[i], input_shape[i])
+            << "grad_input shape mismatch at dim " << i
+            << " (output_padding not recovered for stride=2)";
+    }
+
+    // Second backward should still propagate cleanly through the now
+    // correctly-shaped grad_input graph.
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(input);
+}
+
+TEST_P(HigherOrderNNTest, Conv3d_DoubleBackward_Strided_GradInputShapeMatchesInput) {
+    auto input = Variable(randn({1, 1, 8, 8, 8}, DType::Float32, device), true);
+    nn::Conv3d conv(1, 1, /*kernel_size=*/3, /*stride=*/2, /*padding=*/1);
+
+    auto output = conv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+
+    ASSERT_TRUE(input.grad_variable().has_value())
+        << "create_graph=true must populate grad_variable()";
+    Variable grad_var = input.grad_variable().value();
+
+    auto input_shape = input.tensor().shape();
+    auto grad_shape = grad_var.tensor().shape();
+    ASSERT_EQ(grad_shape.size(), input_shape.size());
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        EXPECT_EQ(grad_shape[i], input_shape[i])
+            << "grad_input shape mismatch at dim " << i
+            << " (output_padding not recovered for stride=2)";
+    }
+
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(input);
+}
+
 // ============================================================================
 // JIT-R067: grad_weight double-backward (3rd-order gradient) across the
 // whole Conv family. Previously grad_weight was computed via a raw,

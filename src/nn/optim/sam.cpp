@@ -56,7 +56,8 @@ auto SAM::first_step() -> void {
 
     for (auto& param_ptr : parameters_) {
         if (!param_ptr || !param_ptr->has_grad()) continue;
-        const Tensor& grad = param_ptr->grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param_ptr->grad().value();
         const DType state_dt = optim_state_dtype(grad.dtype());
         Tensor grad_compute = (grad.dtype() == state_dt) ? grad : grad.to(state_dt);
         // Sum of squared elements
@@ -81,7 +82,8 @@ auto SAM::first_step() -> void {
             continue;
         }
 
-        const Tensor& grad = param_ptr->grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param_ptr->grad().value();
 
         // Per-parameter rho (from ParamGroup or instance default); global norm.
         const double rho_i = resolve(i);

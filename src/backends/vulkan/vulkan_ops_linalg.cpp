@@ -5,6 +5,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include <limits>
 
 namespace tenzor {
 
@@ -2414,6 +2415,21 @@ void VulkanBackend::checkSparseRowDispatch(int32_t device_id, const char* op_nam
     }
 }
 
+void VulkanBackend::checkSparseIndexFitsI32(const char* op_name, int64_t num_cols,
+                                             int64_t nnz) const {
+    constexpr int64_t kMaxI32 = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    if (num_cols > kMaxI32 || nnz > kMaxI32) {
+        throw std::runtime_error(
+            std::string("Vulkan ") + op_name + ": sparse tensor with num_cols=" +
+            std::to_string(num_cols) + ", nnz=" + std::to_string(nnz) +
+            " exceeds INT32_MAX (" + std::to_string(kMaxI32) + ") — the Vulkan sparse "
+            "shaders only accept Int32 CSR indices, and narrowing Int64 col_indices/"
+            "crow_indices here would silently wrap out-of-range values into wrong "
+            "(aliased) column reads. Use a smaller matrix, or a backend with an "
+            "int64-correct sparse path (CPU/ROCm).");
+    }
+}
+
 auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor& col_indices,
                                         const Tensor& values, const Tensor& dense,
                                         int64_t M, int64_t K, int64_t N) -> Tensor {
@@ -2446,6 +2462,10 @@ auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor&
     bool is_f64 = (values.dtype() == DType::Float64);
     std::string shader_name = is_f64 ? "sparse_spmm_f64" : "sparse_spmm";
     auto* pipeline = getPipeline(shader_name, device_id);
+
+    // M31: guard the narrowing cast below against silent Int64->Int32
+    // wraparound (see checkSparseIndexFitsI32's doc comment).
+    checkSparseIndexFitsI32("SpMM", K, col_indices.numel());
 
     // Convert Int64 indices to Int32 for shader compatibility
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
@@ -2535,6 +2555,10 @@ auto VulkanBackend::dispatchSparseSpMV(const Tensor& crow_indices, const Tensor&
     std::string shader_name = is_f64 ? "sparse_spmv_f64" : "sparse_spmv";
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // M31: guard the narrowing cast below against silent Int64->Int32
+    // wraparound (see checkSparseIndexFitsI32's doc comment).
+    checkSparseIndexFitsI32("SpMV", K, col_indices.numel());
+
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
@@ -2613,6 +2637,10 @@ auto VulkanBackend::dispatchSparseToDense(const Tensor& crow_indices, const Tens
     std::string shader_name = is_f64 ? "sparse_to_dense_f64" : "sparse_to_dense";
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // M31: guard the narrowing cast below against silent Int64->Int32
+    // wraparound (see checkSparseIndexFitsI32's doc comment).
+    checkSparseIndexFitsI32("SparseToDense", K, col_indices.numel());
+
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
@@ -2689,6 +2717,10 @@ auto VulkanBackend::dispatchSparseAdd(const Tensor& crow_indices, const Tensor& 
     bool is_f64 = (values.dtype() == DType::Float64);
     std::string shader_name = is_f64 ? "sparse_add_f64" : "sparse_add";
     auto* pipeline = getPipeline(shader_name, device_id);
+
+    // M31: guard the narrowing cast below against silent Int64->Int32
+    // wraparound (see checkSparseIndexFitsI32's doc comment).
+    checkSparseIndexFitsI32("SparseAdd", K, col_indices.numel());
 
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
@@ -3174,6 +3206,12 @@ auto VulkanBackend::dispatchSparseSpGEMM(const Tensor& a_crow, const Tensor& a_c
     // of A: guard M against the device limit (see SpMM).
     checkSparseRowDispatch(device_id, "SpGEMM", M);
 
+    // M31: guard the narrowing casts below against silent Int64->Int32
+    // wraparound (see checkSparseIndexFitsI32's doc comment). A is (M,K),
+    // B is (K,N): A's col_indices range over K, B's range over N.
+    checkSparseIndexFitsI32("SpGEMM (A)", K, a_col.numel());
+    checkSparseIndexFitsI32("SpGEMM (B)", N, b_col.numel());
+
     // Convert Int64 indices to Int32 for shader compatibility
     auto a_crow_i32 = (a_crow.dtype() == DType::Int32) ? a_crow : a_crow.to(DType::Int32);
     auto a_col_i32 = (a_col.dtype() == DType::Int32) ? a_col : a_col.to(DType::Int32);
@@ -3329,6 +3367,10 @@ auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor&
     std::string shader_name = is_f64 ? "sparse_trsv_f64" : "sparse_trsv";
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // M31: guard the narrowing cast below against silent Int64->Int32
+    // wraparound (see checkSparseIndexFitsI32's doc comment). Square N x N.
+    checkSparseIndexFitsI32("SparseTrsv", N, col_indices.numel());
+
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
 
@@ -3396,6 +3438,10 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
     bool is_f64 = (values.dtype() == DType::Float64);
     std::string shader_name = is_f64 ? "sparse_trsm_f64" : "sparse_trsm";
     auto* pipeline = getPipeline(shader_name, device_id);
+
+    // M31: guard the narrowing cast below against silent Int64->Int32
+    // wraparound (see checkSparseIndexFitsI32's doc comment). Square N x N.
+    checkSparseIndexFitsI32("SparseTrsm", N, col_indices.numel());
 
     auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
     auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);

@@ -52,9 +52,18 @@ void main() {
         case 1: rr = ar - br; ri = ai - bi; break;
         case 2: rr = ar * br - ai * bi; ri = ar * bi + ai * br; break;
         case 3: {
-            float64_t denom = br * br + bi * bi;
-            rr = (ar * br + ai * bi) / denom;
-            ri = (ai * br - ar * bi) / denom;
+            // L8: Smith's algorithm — see complex_math.comp's comment.
+            if (abs(br) >= abs(bi)) {
+                float64_t r = bi / br;
+                float64_t d = br + bi * r;
+                rr = (ar + ai * r) / d;
+                ri = (ai - ar * r) / d;
+            } else {
+                float64_t r = br / bi;
+                float64_t d = bi + br * r;
+                rr = (ar * r + ai) / d;
+                ri = (ai * r - ar) / d;
+            }
             break;
         }
         default: rr = 0.0lf; ri = 0.0lf; break;

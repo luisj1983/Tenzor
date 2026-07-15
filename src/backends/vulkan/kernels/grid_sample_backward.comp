@@ -148,8 +148,12 @@ void main() {
 
     if (params.mode == 1) {
         // nearest
-        int nx = int(round(ix));
-        int ny = int(round(iy));
+        // L5: roundEven — must match the forward's tie-break exactly (see
+        // grid_sample.comp's comment), otherwise a grid point landing on an
+        // exact .5 tie scatters its gradient to a different pixel than the
+        // one the forward actually sampled.
+        int nx = int(roundEven(ix));
+        int ny = int(roundEven(iy));
         grad_grid[grid_idx]     = 0.0;
         grad_grid[grid_idx + 1] = 0.0;
         if (ny >= 0 && ny < params.H_in && nx >= 0 && nx < params.W_in) {
@@ -216,8 +220,15 @@ void main() {
             sum_dx += go * dval_dix;
             sum_dy += go * dval_diy;
         }
-        grad_grid[grid_idx]     = sum_dx * dix_dgx;
-        grad_grid[grid_idx + 1] = sum_dy * diy_dgy;
+        // H13: 'border' padding needs the same clamp-derivative gate the
+        // bilinear path below applies — an out-of-bounds (clamped)
+        // coordinate does not move the sampled value as the grid changes, so
+        // its grid-gradient is 0 there. 'zeros' must NOT be gated (matches
+        // CPU/CUDA bicubic backward).
+        float scale_x = (params.padding_mode == 1 && !in_bounds_ix) ? 0.0 : dix_dgx;
+        float scale_y = (params.padding_mode == 1 && !in_bounds_iy) ? 0.0 : diy_dgy;
+        grad_grid[grid_idx]     = sum_dx * scale_x;
+        grad_grid[grid_idx + 1] = sum_dy * scale_y;
         return;
     }
 
@@ -265,12 +276,17 @@ void main() {
         sum_dy += go * (wx0 * (-v00 + v10) + wx1 * (-v01 + v11));
     }
 
-    // For both zeros (0) and border (1) padding, an out-of-bounds (clamped)
-    // coordinate does not move the sampled value as the grid changes, so its
-    // grid-gradient is 0. The previous condition only handled zeros padding,
-    // leaving a spurious grad_grid under border padding when the coord clamped.
-    float scale_x = (params.padding_mode <= 1 && !in_bounds_ix) ? 0.0 : dix_dgx;
-    float scale_y = (params.padding_mode <= 1 && !in_bounds_iy) ? 0.0 : diy_dgy;
+    // H10: gate ONLY border (1) padding. Under border, an out-of-bounds
+    // (clamped) coordinate does not move the sampled value as the grid
+    // changes, so its grid-gradient is 0 there. 'zeros' must NOT be gated:
+    // the per-neighbour atomicAdd/safe_get calls above already skip/return 0
+    // for out-of-bounds bilinear corners, so sum_dx/sum_dy already contain
+    // only in-bounds contributions — the bands ix in [-1,0) / (W-1,W)
+    // (likewise iy) have exactly one in-bounds neighbour and a genuine
+    // non-zero gradient that gating 'zeros' here would incorrectly drop to 0
+    // (matches CPU/CUDA).
+    float scale_x = (params.padding_mode == 1 && !in_bounds_ix) ? 0.0 : dix_dgx;
+    float scale_y = (params.padding_mode == 1 && !in_bounds_iy) ? 0.0 : diy_dgy;
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }

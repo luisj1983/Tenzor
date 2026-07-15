@@ -1319,14 +1319,76 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
 
 auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes& attrs) -> Tensor {
     auto input_shape = input.shape();
-    if (input_shape.size() != 4) {
-        throw std::invalid_argument("interpolate requires 4D input (N, C, H, W), got " +
-                                    std::to_string(input_shape.size()) + "D");
-    }
 
     // Extract attributes
     std::string mode(attrs.get_string(AttrKey::Mode));
     bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+
+    // M29: trilinear forward (5D) — was entirely unimplemented (this function
+    // unconditionally required 4D), even though a full native trilinear
+    // *backward* shader already existed and was unreachable dead code.
+    // Mirrors dispatchInterpolateBackward's trilinear branch exactly (same
+    // push-constant layout, same coordinate-transform convention) so forward
+    // and backward agree at the borders.
+    if (mode == "trilinear") {
+        if (input_shape.size() != 5) {
+            throw std::invalid_argument(
+                "dispatchInterpolate (Vulkan): trilinear requires 5D input (N,C,D,H,W), got " +
+                std::to_string(input_shape.size()) + "D");
+        }
+        if (input.dtype() != DType::Float32) {
+            const DType orig = input.dtype();
+            return dispatchInterpolate(input.to(DType::Float32), attrs).to(orig);
+        }
+        std::string size_str(attrs.get_string(AttrKey::OutputSize));
+        std::vector<int64_t> out_sizes;
+        {
+            size_t start = 0;
+            while (start <= size_str.size()) {
+                size_t comma = size_str.find(',', start);
+                std::string tok = size_str.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                out_sizes.push_back(std::stoll(tok));
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
+        if (out_sizes.size() != 3) {
+            throw std::invalid_argument(
+                "dispatchInterpolate (Vulkan): trilinear OutputSize must have 3 elements (D,H,W)");
+        }
+        const Tensor input_c = dispatchContiguous(input);
+        int32_t dev = input_c.device().index;
+        const int64_t N = input_shape[0], C = input_shape[1];
+        const int64_t id_ = input_shape[2], ih = input_shape[3], iw = input_shape[4];
+        const int64_t od = out_sizes[0], oh = out_sizes[1], ow = out_sizes[2];
+        Tensor output(std::vector<int64_t>{N, C, od, oh, ow}, input_c.dtype(), input_c.device());
+
+        auto* pipe = getPipeline("interpolate_trilinear", dev);
+        struct TriPC {
+            uint32_t n_elements, batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners;
+        } pc;
+        pc.n_elements = static_cast<uint32_t>(N * C * od * oh * ow);
+        pc.batch = static_cast<uint32_t>(N); pc.channels = static_cast<uint32_t>(C);
+        pc.in_d = static_cast<uint32_t>(id_); pc.in_h = static_cast<uint32_t>(ih); pc.in_w = static_cast<uint32_t>(iw);
+        pc.out_d = static_cast<uint32_t>(od); pc.out_h = static_cast<uint32_t>(oh); pc.out_w = static_cast<uint32_t>(ow);
+        pc.align_corners = align_corners ? 1u : 0u;
+        std::vector<std::pair<uint32_t, const void*>> bnd = {{0, input_c.data_ptr()}, {1, output.data_ptr()}};
+        std::vector<size_t> szs = {input_c.numel() * input_c.dtype_size(), output.numel() * output.dtype_size()};
+        auto ds = allocateAndWriteDescriptorSet(dev, pipe, bnd, szs);
+        auto cmd = beginSingleTimeCommands(dev);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipe->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TriPC), &pc);
+        vkCmdDispatch(cmd, div_wg_checked(pc.n_elements, devices_[dev].workgroupSize, devices_[dev].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, dev);
+        return output;
+    }
+
+    if (input_shape.size() != 4) {
+        throw std::invalid_argument("interpolate requires 4D input (N, C, H, W), got " +
+                                    std::to_string(input_shape.size()) + "D");
+    }
 
     // Bicubic forward has a single Float32 shader (matching the f32-only
     // bicubic backward). Widen non-F32 inputs to F32, compute, and narrow back
@@ -1497,9 +1559,19 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
 
     int64_t output_h = attrs.get_int(AttrKey::OutputSizeH);
     int64_t output_w = attrs.get_int(AttrKey::OutputSizeW);
-    float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale));
+    // M15: keep full double precision here — the Float64 shader path below
+    // now consumes it as a genuine 64-bit push constant instead of narrowing
+    // through float32 (spatial_scale_f32 below is a float32-shader-only copy).
+    // L4: explicit default (1/16, matching CPU/CUDA/ROCm) instead of
+    // get_float()'s generic 0.0 fallback — a silent 0.0 spatial_scale would
+    // collapse every ROI to a single point. Dead today (every call site sets
+    // this explicitly), but a latent trap for any future direct-dispatch
+    // caller that omits it.
+    double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
+    float spatial_scale_f32 = static_cast<float>(spatial_scale);
     int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
-    bool aligned = attrs.get_bool(AttrKey::Aligned, false);
+    // L4: default matches CPU/CUDA/ROCm (true), not Vulkan's previous false.
+    bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 
     int32_t device_id = features.device().index;
 
@@ -1562,39 +1634,79 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
 
-    // Push constants: 11 uint32_t values = 44 bytes
-    struct PushConstants {
-        uint32_t n_elements;
-        uint32_t num_rois;
-        uint32_t channels;
-        uint32_t feat_height;
-        uint32_t feat_width;
-        uint32_t output_h;
-        uint32_t output_w;
-        uint32_t spatial_scale_bits;
-        uint32_t sampling_ratio;
-        uint32_t aligned;
-        uint32_t batch_size;
-    } push_constants;
+    if (features.dtype() == DType::Float64) {
+        // M15: roi_align_f64.comp takes spatial_scale as a genuine 64-bit
+        // push constant (spatial_scale_lo/hi -> packDouble2x32), matching the
+        // strided_fill_f64 host-side pattern, instead of round-tripping
+        // through a 32-bit float.
+        struct PushConstantsF64 {
+            uint32_t n_elements;
+            uint32_t num_rois;
+            uint32_t channels;
+            uint32_t feat_height;
+            uint32_t feat_width;
+            uint32_t output_h;
+            uint32_t output_w;
+            uint32_t spatial_scale_lo;
+            uint32_t spatial_scale_hi;
+            uint32_t sampling_ratio;
+            uint32_t aligned;
+            uint32_t batch_size;
+        } push_constants{};
 
-    push_constants.n_elements = static_cast<uint32_t>(output.numel());
-    push_constants.num_rois = static_cast<uint32_t>(num_rois);
-    push_constants.channels = static_cast<uint32_t>(channels);
-    push_constants.feat_height = static_cast<uint32_t>(feat_height);
-    push_constants.feat_width = static_cast<uint32_t>(feat_width);
-    push_constants.output_h = static_cast<uint32_t>(output_h);
-    push_constants.output_w = static_cast<uint32_t>(output_w);
-    // Pass float as uint bits
-    uint32_t scale_bits;
-    std::memcpy(&scale_bits, &spatial_scale, sizeof(float));
-    push_constants.spatial_scale_bits = scale_bits;
-    push_constants.sampling_ratio = static_cast<uint32_t>(sampling_ratio);
-    push_constants.aligned = aligned ? 1u : 0u;
-    push_constants.batch_size = static_cast<uint32_t>(features.shape()[0]);
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+        push_constants.num_rois = static_cast<uint32_t>(num_rois);
+        push_constants.channels = static_cast<uint32_t>(channels);
+        push_constants.feat_height = static_cast<uint32_t>(feat_height);
+        push_constants.feat_width = static_cast<uint32_t>(feat_width);
+        push_constants.output_h = static_cast<uint32_t>(output_h);
+        push_constants.output_w = static_cast<uint32_t>(output_w);
+        uint64_t scale_bits;
+        std::memcpy(&scale_bits, &spatial_scale, sizeof(double));
+        push_constants.spatial_scale_lo = static_cast<uint32_t>(scale_bits & 0xFFFFFFFFu);
+        push_constants.spatial_scale_hi = static_cast<uint32_t>(scale_bits >> 32);
+        push_constants.sampling_ratio = static_cast<uint32_t>(sampling_ratio);
+        push_constants.aligned = aligned ? 1u : 0u;
+        push_constants.batch_size = static_cast<uint32_t>(features.shape()[0]);
 
-    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                      VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsF64), &push_constants);
+    } else {
+        // Push constants: 11 uint32_t values = 44 bytes
+        struct PushConstants {
+            uint32_t n_elements;
+            uint32_t num_rois;
+            uint32_t channels;
+            uint32_t feat_height;
+            uint32_t feat_width;
+            uint32_t output_h;
+            uint32_t output_w;
+            uint32_t spatial_scale_bits;
+            uint32_t sampling_ratio;
+            uint32_t aligned;
+            uint32_t batch_size;
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+        push_constants.num_rois = static_cast<uint32_t>(num_rois);
+        push_constants.channels = static_cast<uint32_t>(channels);
+        push_constants.feat_height = static_cast<uint32_t>(feat_height);
+        push_constants.feat_width = static_cast<uint32_t>(feat_width);
+        push_constants.output_h = static_cast<uint32_t>(output_h);
+        push_constants.output_w = static_cast<uint32_t>(output_w);
+        // Pass float as uint bits
+        uint32_t scale_bits;
+        std::memcpy(&scale_bits, &spatial_scale_f32, sizeof(float));
+        push_constants.spatial_scale_bits = scale_bits;
+        push_constants.sampling_ratio = static_cast<uint32_t>(sampling_ratio);
+        push_constants.aligned = aligned ? 1u : 0u;
+        push_constants.batch_size = static_cast<uint32_t>(features.shape()[0]);
+
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+    }
 
     uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -1639,9 +1751,17 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     int64_t batch_size = attrs.get_int(AttrKey::BatchSize);
     int64_t feat_height = attrs.get_int(AttrKey::FeatHeight);
     int64_t feat_width = attrs.get_int(AttrKey::FeatWidth);
-    float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale));
+    // M15: see dispatchROIAlignForward above.
+    // L4: explicit default (1/16, matching CPU/CUDA/ROCm) instead of
+    // get_float()'s generic 0.0 fallback — a silent 0.0 spatial_scale would
+    // collapse every ROI to a single point. Dead today (every call site sets
+    // this explicitly), but a latent trap for any future direct-dispatch
+    // caller that omits it.
+    double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
+    float spatial_scale_f32 = static_cast<float>(spatial_scale);
     int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
-    bool aligned = attrs.get_bool(AttrKey::Aligned, false);
+    // L4: default matches CPU/CUDA/ROCm (true), not Vulkan's previous false.
+    bool aligned = attrs.get_bool(AttrKey::Aligned, true);
 
     int32_t device_id = grad_output.device().index;
 
@@ -1712,38 +1832,75 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
 
-    // Push constants: 11 uint32_t values = 44 bytes
-    struct PushConstants {
-        uint32_t n_elements;
-        uint32_t num_rois;
-        uint32_t channels;
-        uint32_t feat_height;
-        uint32_t feat_width;
-        uint32_t output_h;
-        uint32_t output_w;
-        uint32_t spatial_scale_bits;
-        uint32_t sampling_ratio;
-        uint32_t aligned;
-        uint32_t batch_size;
-    } push_constants;
+    if (grad_output.dtype() == DType::Float64) {
+        // M15: see dispatchROIAlignForward above.
+        struct PushConstantsF64 {
+            uint32_t n_elements;
+            uint32_t num_rois;
+            uint32_t channels;
+            uint32_t feat_height;
+            uint32_t feat_width;
+            uint32_t output_h;
+            uint32_t output_w;
+            uint32_t spatial_scale_lo;
+            uint32_t spatial_scale_hi;
+            uint32_t sampling_ratio;
+            uint32_t aligned;
+            uint32_t batch_size;
+        } push_constants{};
 
-    push_constants.n_elements = static_cast<uint32_t>(grad_output.numel());
-    push_constants.num_rois = static_cast<uint32_t>(num_rois);
-    push_constants.channels = static_cast<uint32_t>(channels);
-    push_constants.feat_height = static_cast<uint32_t>(feat_height);
-    push_constants.feat_width = static_cast<uint32_t>(feat_width);
-    push_constants.output_h = static_cast<uint32_t>(output_h);
-    push_constants.output_w = static_cast<uint32_t>(output_w);
-    uint32_t scale_bits;
-    std::memcpy(&scale_bits, &spatial_scale, sizeof(float));
-    push_constants.spatial_scale_bits = scale_bits;
-    push_constants.sampling_ratio = static_cast<uint32_t>(sampling_ratio);
-    push_constants.aligned = aligned ? 1u : 0u;
-    push_constants.batch_size = static_cast<uint32_t>(batch_size);
+        push_constants.n_elements = static_cast<uint32_t>(grad_output.numel());
+        push_constants.num_rois = static_cast<uint32_t>(num_rois);
+        push_constants.channels = static_cast<uint32_t>(channels);
+        push_constants.feat_height = static_cast<uint32_t>(feat_height);
+        push_constants.feat_width = static_cast<uint32_t>(feat_width);
+        push_constants.output_h = static_cast<uint32_t>(output_h);
+        push_constants.output_w = static_cast<uint32_t>(output_w);
+        uint64_t scale_bits;
+        std::memcpy(&scale_bits, &spatial_scale, sizeof(double));
+        push_constants.spatial_scale_lo = static_cast<uint32_t>(scale_bits & 0xFFFFFFFFu);
+        push_constants.spatial_scale_hi = static_cast<uint32_t>(scale_bits >> 32);
+        push_constants.sampling_ratio = static_cast<uint32_t>(sampling_ratio);
+        push_constants.aligned = aligned ? 1u : 0u;
+        push_constants.batch_size = static_cast<uint32_t>(batch_size);
 
-    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                      VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsF64), &push_constants);
+    } else {
+        // Push constants: 11 uint32_t values = 44 bytes
+        struct PushConstants {
+            uint32_t n_elements;
+            uint32_t num_rois;
+            uint32_t channels;
+            uint32_t feat_height;
+            uint32_t feat_width;
+            uint32_t output_h;
+            uint32_t output_w;
+            uint32_t spatial_scale_bits;
+            uint32_t sampling_ratio;
+            uint32_t aligned;
+            uint32_t batch_size;
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(grad_output.numel());
+        push_constants.num_rois = static_cast<uint32_t>(num_rois);
+        push_constants.channels = static_cast<uint32_t>(channels);
+        push_constants.feat_height = static_cast<uint32_t>(feat_height);
+        push_constants.feat_width = static_cast<uint32_t>(feat_width);
+        push_constants.output_h = static_cast<uint32_t>(output_h);
+        push_constants.output_w = static_cast<uint32_t>(output_w);
+        uint32_t scale_bits;
+        std::memcpy(&scale_bits, &spatial_scale_f32, sizeof(float));
+        push_constants.spatial_scale_bits = scale_bits;
+        push_constants.sampling_ratio = static_cast<uint32_t>(sampling_ratio);
+        push_constants.aligned = aligned ? 1u : 0u;
+        push_constants.batch_size = static_cast<uint32_t>(batch_size);
+
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+    }
 
     uint32_t workgroups = static_cast<uint32_t>(div_wg_checked(grad_output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -4654,6 +4811,19 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
             "Use CPU backend or Float32 for this device.");
     }
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    // Below, the shader decodes flat positions using strides computed purely
+    // from .shape() (a row-major contiguous assumption) and reads/writes via
+    // raw data_ptr() with no stride/offset awareness. dispatchScatter and
+    // dispatchGather (vulkan_ops_indexing.cpp) already guard with
+    // dispatchContiguous() for exactly this reason; this sibling was missed
+    // (audit H3) — a non-contiguous view (e.g. from a preceding
+    // permute/transpose/slice) fed into self/index/src silently scattered to
+    // the wrong flat positions.
+    const Tensor self_c = dispatchContiguous(self);
+    const Tensor index_c = dispatchContiguous(index);
+    const Tensor src_c = dispatchContiguous(src);
+
     // Select shader based on dtype
     const char* shader_name = (self.dtype() == DType::Float64) ? "scatter_add_f64"
                             : (self.dtype() == DType::Float16) ? "scatter_add_f16"
@@ -4672,19 +4842,19 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
     // Create output as copy of self
     std::vector<int64_t> out_shape(self_shape.begin(), self_shape.end());
     Tensor output(out_shape, self.dtype(), self.device());
-    size_t bytes = self.numel() * self.dtype_size();
-    copy(output.data_ptr(), self.data_ptr(), bytes, CopyKind::DeviceToDevice);
+    size_t bytes = self_c.numel() * self_c.dtype_size();
+    copy(output.data_ptr(), self_c.data_ptr(), bytes, CopyKind::DeviceToDevice);
 
     // Convert Int64 indices to Int32 for shader compatibility
-    Tensor index_int32 = index;
-    if (index.dtype() == DType::Int64) {
-        std::vector<int64_t> idx_shape(index.shape().begin(), index.shape().end());
-        index_int32 = Tensor(idx_shape, DType::Int32, index.device());
+    Tensor index_int32 = index_c;
+    if (index_c.dtype() == DType::Int64) {
+        std::vector<int64_t> idx_shape(index_c.shape().begin(), index_c.shape().end());
+        index_int32 = Tensor(idx_shape, DType::Int32, index_c.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        const void* buf_in = index.data_ptr();
+        const void* buf_in = index_c.data_ptr();
         const void* buf_out = index_int32.data_ptr();
-        size_t size_in = index.numel() * sizeof(int64_t);
+        size_t size_in = index_c.numel() * sizeof(int64_t);
         size_t size_out = index_int32.numel() * sizeof(int32_t);
 
         std::vector<std::pair<uint32_t, const void*>> cast_bindings = {
@@ -4694,7 +4864,7 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
         VkDescriptorSet cast_ds = allocateAndWriteDescriptorSet(device_id, cast_pipeline, cast_bindings, cast_sizes);
 
         struct { uint32_t n_elements; } cast_pc;
-        cast_pc.n_elements = static_cast<uint32_t>(index.numel());
+        cast_pc.n_elements = static_cast<uint32_t>(index_c.numel());
 
         uint32_t cast_groups = div_wg_checked(cast_pc.n_elements, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -4713,7 +4883,7 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
     // collapsed inner_size derived from self mis-decodes whenever index is
     // smaller than self on a non-scatter axis (gather-backward in 3D+).
     uint32_t dim_size = static_cast<uint32_t>(self_shape[dim]);
-    auto index_shape = index.shape();
+    auto index_shape = index_c.shape();
     if (index_shape.size() > 8 || self_shape.size() > 8) {
         throw std::runtime_error(
             "VulkanBackend::dispatchScatterAdd: rank > 8 is not supported");
@@ -4736,11 +4906,11 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
     }
 
     // Buffers
-    const void* buf_src = src.data_ptr();
+    const void* buf_src = src_c.data_ptr();
     const void* buf_idx = index_int32.data_ptr();
     const void* buf_out = output.data_ptr();
 
-    size_t buf_src_size = src.numel() * src.dtype_size();
+    size_t buf_src_size = src_c.numel() * src_c.dtype_size();
     size_t buf_idx_size = index_int32.numel() * sizeof(int32_t);
     size_t buf_out_size = output.numel() * output.dtype_size();
 
@@ -4760,7 +4930,7 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
         uint32_t self_strides[8];
     } push_constants;
 
-    push_constants.n = static_cast<uint32_t>(index.numel());
+    push_constants.n = static_cast<uint32_t>(index_c.numel());
     push_constants.ndim = static_cast<uint32_t>(ndim);
     push_constants.dim = static_cast<uint32_t>(dim);
     push_constants.dim_size = dim_size;
@@ -4769,7 +4939,7 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
         push_constants.self_strides[d] = self_strides[d];
     }
 
-    uint32_t workgroups = div_wg_checked(index.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+    uint32_t workgroups = div_wg_checked(index_c.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,

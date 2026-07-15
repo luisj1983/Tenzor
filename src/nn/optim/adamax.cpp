@@ -62,7 +62,8 @@ auto Adamax::step_impl() -> void {
             1.0 - std::pow(hp.beta1, static_cast<double>(step_count_));
         const double step_size = hp.lr / bias_correction1;
 
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
 
         // R.16: run math in the optimiser state dtype (Float32 for halves)
         // and cast back to the param dtype on assignment.

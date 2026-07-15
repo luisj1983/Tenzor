@@ -189,6 +189,90 @@ TEST_F(FlashAttentionGqaParity, DirectGqaCallAgreesAcrossBackends) {
     }
 }
 
+// H21: flash_attention_backward_typed/_half (CPU) indexed K/V/dK/dV using
+// Q's OWN head count with no awareness that K/V may have fewer heads
+// (GQA/MQA, H_kv < H_q) — an out-of-bounds heap read/write into K/V/dK/dV
+// for any un-broadcast GQA-shaped call (forward already broadcasts K/V
+// internally, so this was reachable the moment a caller passed genuinely
+// un-broadcast GQA-shaped K/V straight into the differentiable
+// tenzor::flash_attention() Variable API, not pre-expanded via repeat_kv).
+// The fix broadcasts K/V to Q's head count before dispatch (mirroring the
+// forward wrapper) and reduces dK/dV back down afterward. Verify this
+// GQA-shaped direct call matches an independently-computed reference: call
+// the SAME backward with K/V manually pre-expanded to H_q heads (a trivial,
+// always-safe H_kv==H_q call), then manually reduce dK/dV by summing each
+// repeated head group — this is exactly what the fix does internally, so
+// agreement here confirms both "no OOB crash/corruption" and "correct
+// values", not just the former.
+TEST_F(FlashAttentionGqaParity, CpuBackwardGqaMatchesManuallyExpandedReference) {
+    constexpr int64_t kBatch = 2, kHq = 4, kHkv = 2, kReps = kHq / kHkv;
+    constexpr int64_t kSeq = 6, kDim = 8;
+    auto Q = random_f32({kBatch, kHq, kSeq, kDim}, Device::cpu());
+    auto K = random_f32({kBatch, kHkv, kSeq, kDim}, Device::cpu());
+    auto V = random_f32({kBatch, kHkv, kSeq, kDim}, Device::cpu());
+    auto dO = random_f32({kBatch, kHq, kSeq, kDim}, Device::cpu());
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Scale, static_cast<double>(1.0 / std::sqrt(static_cast<double>(kDim))));
+    attrs.set(AttrKey::Causal, false);
+    attrs.set(AttrKey::DropoutP, 0.0);
+    attrs.set(AttrKey::IsTraining, false);
+
+    // Direct GQA-shaped call — exercises the fix's internal broadcast+reduce.
+    std::vector<Tensor> fwd_ins = {Q, K, V};
+    auto fwd_out = dispatch(OpId::FlashAttention, fwd_ins, attrs);
+    ASSERT_GE(fwd_out.size(), 1u);
+    std::vector<Tensor> bwd_ins = {dO, Q, K, V, fwd_out[0]};
+    auto gqa_grads = dispatch(OpId::FlashAttentionBackward, bwd_ins, attrs);
+    ASSERT_GE(gqa_grads.size(), 3u);
+
+    // Reference: manually pre-expand K/V to H_q heads (repeat_kv), so the
+    // backward's own GQA path is never triggered (H_kv == H_q trivially).
+    auto Ku = K.unsqueeze(2);
+    auto Vu = V.unsqueeze(2);
+    auto Ke = Ku.expand({kBatch, kHkv, kReps, kSeq, kDim}).contiguous()
+                 .reshape({kBatch, kHq, kSeq, kDim});
+    auto Ve = Vu.expand({kBatch, kHkv, kReps, kSeq, kDim}).contiguous()
+                 .reshape({kBatch, kHq, kSeq, kDim});
+    std::vector<Tensor> fwd_ins_ref = {Q, Ke, Ve};
+    auto fwd_out_ref = dispatch(OpId::FlashAttention, fwd_ins_ref, attrs);
+    ASSERT_GE(fwd_out_ref.size(), 1u);
+    std::vector<Tensor> bwd_ins_ref = {dO, Q, Ke, Ve, fwd_out_ref[0]};
+    auto full_grads = dispatch(OpId::FlashAttentionBackward, bwd_ins_ref, attrs);
+    ASSERT_GE(full_grads.size(), 3u);
+
+    // dQ needs no reduction — compare directly.
+    ASSERT_EQ(gqa_grads[0].numel(), full_grads[0].numel());
+    {
+        auto* a = gqa_grads[0].data<float>();
+        auto* b = full_grads[0].data<float>();
+        for (int64_t i = 0; i < gqa_grads[0].numel(); ++i) {
+            EXPECT_NEAR(a[i], b[i], 5e-4f) << "dQ elem " << i;
+        }
+    }
+
+    // dK/dV: reduce the full-head reference down to H_kv heads by summing
+    // each repeated group, then compare against the GQA path's own result.
+    auto dK_ref = tenzor::sum(full_grads[1].reshape({kBatch, kHkv, kReps, kSeq, kDim}), 2, false);
+    auto dV_ref = tenzor::sum(full_grads[2].reshape({kBatch, kHkv, kReps, kSeq, kDim}), 2, false);
+    ASSERT_EQ(gqa_grads[1].numel(), dK_ref.numel());
+    ASSERT_EQ(gqa_grads[2].numel(), dV_ref.numel());
+    {
+        auto* a = gqa_grads[1].data<float>();
+        auto* b = dK_ref.data<float>();
+        for (int64_t i = 0; i < gqa_grads[1].numel(); ++i) {
+            EXPECT_NEAR(a[i], b[i], 5e-4f) << "dK elem " << i;
+        }
+    }
+    {
+        auto* a = gqa_grads[2].data<float>();
+        auto* b = dV_ref.data<float>();
+        for (int64_t i = 0; i < gqa_grads[2].numel(); ++i) {
+            EXPECT_NEAR(a[i], b[i], 5e-4f) << "dV elem " << i;
+        }
+    }
+}
+
 // JIT-R169/JIT-R170: OneAPI and Vulkan's FlashAttention dropout+training
 // composed-ops branch previously bypassed the GQA K/V head-broadcast that
 // the non-dropout fast path applies, so H_kv < H_q (real GQA, not MQA) threw

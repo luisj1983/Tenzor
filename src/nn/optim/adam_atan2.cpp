@@ -82,7 +82,8 @@ auto AdamAtan2::step_impl() -> void {
         const AdamAtan2HP hp = resolve(i);
 
         Tensor& param_tensor = param.tensor();
-        const Tensor& grad_tensor = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad_tensor = param.grad().value();
 
         // Use fused CUDA kernel for CUDA tensors
         if (param_tensor.device().type == Device::Type::CUDA &&

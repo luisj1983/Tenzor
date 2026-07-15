@@ -47,8 +47,12 @@ auto AddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     if (input_shape_a_ == input_shape_b_) {
         auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
         if (grad_shape == input_shape_a_) {
-            // Both inputs have same shape as gradient - just return gradient twice
-            return {grad, grad};
+            // Both inputs have same shape as gradient. Return independent storage for
+            // the two operands: the engine applies per-variable hooks and leaf grad
+            // accumulation directly on each returned tensor with no clone() of its
+            // own, so returning the SAME TensorImpl handle twice let an in-place hook
+            // on one operand's gradient silently corrupt the other's (H1).
+            return {grad, grad.clone()};
         }
     }
 
@@ -67,7 +71,12 @@ auto AddBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     if (input_shape_a_ == input_shape_b_) {
         auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
         if (grad_shape == input_shape_a_) {
-            return {grad, grad};
+            // Same aliasing hazard as backward() above (H1), but here the second
+            // Variable must stay graph-connected for create_graph=true. tenzor::clone
+            // gives independent tensor storage via a differentiable `* 1.0` when grad
+            // requires_grad (or a tracer-visible OpId::Clone dispatch otherwise), so
+            // higher-order gradients still flow correctly through the clone.
+            return {grad, clone(grad)};
         }
     }
 
@@ -187,21 +196,30 @@ auto DivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& b = saved_tensors_[1];
     const auto& grad = grad_outputs[0];
 
-    // Zero-safe: replace zero denominator with epsilon to avoid NaN/Inf
-    auto zero_b = zeros(std::vector<int64_t>(b.shape().begin(), b.shape().end()),
-                        b.dtype(), b.device());
-    auto eps_b = full(std::vector<int64_t>(b.shape().begin(), b.shape().end()),
-                      detail::dtype_epsilon(b.dtype()), b.dtype(), b.device());
-    auto safe_b = where(eq(b, zero_b), eps_b, b);
-
+    // H22: check complex FIRST, matching LogBackward/AbsBackward's
+    // check-complex-first pattern. The zero-safety `where(eq(b,0), eps, b)`
+    // guard below used to run UNCONDITIONALLY before this check — eq() has
+    // no Complex64/Complex128 kernel on any backend (CPU/CUDA/ROCm/OneAPI/
+    // Vulkan all throw "unsupported dtype"), so it threw before the
+    // Wirtinger branch could ever be reached, for every complex-denominator
+    // division regardless of whether b actually contained a zero.
     Tensor grad_a_unreduced, grad_b_unreduced;
     if (a.is_complex() || b.is_complex()) {
         // Wirtinger: d/d(conj(a)) (a/b) = 1/conj(b)
         //            d/d(conj(b)) (a/b) = -conj(a)/conj(b)^2
-        auto conj_b = conj(safe_b);
+        // No zero-safety substitution here (out of scope for this fix): an
+        // exactly-zero complex denominator still produces Inf/NaN, same as
+        // the real path would without its epsilon guard.
+        auto conj_b = conj(b);
         grad_a_unreduced = div(grad, conj_b);
         grad_b_unreduced = neg(div(mul(conj(a), grad), mul(conj_b, conj_b)));
     } else {
+        // Zero-safe: replace zero denominator with epsilon to avoid NaN/Inf
+        auto zero_b = zeros(std::vector<int64_t>(b.shape().begin(), b.shape().end()),
+                            b.dtype(), b.device());
+        auto eps_b = full(std::vector<int64_t>(b.shape().begin(), b.shape().end()),
+                          detail::dtype_epsilon(b.dtype()), b.dtype(), b.device());
+        auto safe_b = where(eq(b, zero_b), eps_b, b);
         grad_a_unreduced = div(grad, safe_b);
         grad_b_unreduced = neg(div(mul(a, grad), mul(safe_b, safe_b)));
     }
@@ -224,33 +242,36 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         saved_b = Variable(saved_tensors_[1], false);
     }
 
-    // Zero-safe: replace zero denominator with epsilon (same guard as backward()).
-    // FF.4: construct `safe_b` via Variable-level ops so the grad_fn carried on
-    // `saved_b` (when `has_saved_variables()` is populated) survives into the
-    // backward graph — mirrors the audit-5 X.5 / Y.9 fix that was already
-    // applied to the complex Wirtinger paths. The previous implementation built
-    // `safe_b` from raw Tensor ops and wrapped with `Variable(..., false)`,
-    // severing the chain even at b != 0 (real and complex paths alike).
-    auto b_tensor_view = saved_b.tensor();
-    auto b_shape = std::vector<int64_t>(b_tensor_view.shape().begin(), b_tensor_view.shape().end());
-    auto zero_b_t = zeros(b_shape, b_tensor_view.dtype(), b_tensor_view.device());
-    auto eps_b_t = full(b_shape, detail::dtype_epsilon(b_tensor_view.dtype()),
-                        b_tensor_view.dtype(), b_tensor_view.device());
-    Variable zero_b_var(zero_b_t, false);
-    Variable eps_b_var(eps_b_t, false);
-    auto b_is_zero = ::tenzor::eq(saved_b, zero_b_var);
-    auto safe_b = ::tenzor::where(b_is_zero, eps_b_var, saved_b);
-
+    // H22: check complex FIRST — eq() (used by the zero-safety guard below)
+    // has no Complex64/Complex128 kernel on any backend, so it threw before
+    // the Wirtinger branch could ever be reached. Same fix as backward()
+    // above.
     Variable grad_a_unreduced, grad_b_unreduced;
     if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
         // Wirtinger: route conj through the Variable-level overload so the
-        // grad_fn carried on saved_a (and the zero-safe `safe_b`) survives.
-        // Raw `Variable(conj(t), false)` severed the chain — audit-5 X.5.
-        auto conj_b = tenzor::conj(safe_b);
+        // grad_fn carried on saved_a/saved_b survives. Raw
+        // `Variable(conj(t), false)` severed the chain — audit-5 X.5. No
+        // zero-safety substitution here (out of scope for this fix).
+        auto conj_b = tenzor::conj(saved_b);
         auto conj_a = tenzor::conj(saved_a);
         grad_a_unreduced = grad_outputs[0] / conj_b;
         grad_b_unreduced = tenzor::neg((conj_a * grad_outputs[0]) / (conj_b * conj_b));
     } else {
+        // Zero-safe: replace zero denominator with epsilon (same guard as
+        // backward()). FF.4: construct `safe_b` via Variable-level ops so
+        // the grad_fn carried on `saved_b` (when has_saved_variables() is
+        // populated) survives into the backward graph. The previous
+        // implementation built `safe_b` from raw Tensor ops and wrapped
+        // with `Variable(..., false)`, severing the chain even at b != 0.
+        auto b_tensor_view = saved_b.tensor();
+        auto b_shape = std::vector<int64_t>(b_tensor_view.shape().begin(), b_tensor_view.shape().end());
+        auto zero_b_t = zeros(b_shape, b_tensor_view.dtype(), b_tensor_view.device());
+        auto eps_b_t = full(b_shape, detail::dtype_epsilon(b_tensor_view.dtype()),
+                            b_tensor_view.dtype(), b_tensor_view.device());
+        Variable zero_b_var(zero_b_t, false);
+        Variable eps_b_var(eps_b_t, false);
+        auto b_is_zero = ::tenzor::eq(saved_b, zero_b_var);
+        auto safe_b = ::tenzor::where(b_is_zero, eps_b_var, saved_b);
         grad_a_unreduced = grad_outputs[0] / safe_b;
         grad_b_unreduced = tenzor::neg((saved_a * grad_outputs[0]) / (safe_b * safe_b));
     }

@@ -474,10 +474,16 @@ public:
                                               int64_t H_in, int64_t W_in) -> Tensor;
 
     // New pooling operations (OpAttributes versions)
+    // C1: dispatchMaxPool2dForward (max_pool2d.comp, no indices) and
+    // dispatchMaxPool2dBackward (recompute-from-input) were dead code —
+    // never registered for any OpId, unlike dispatchAvgPool2d{Forward,
+    // Backward} which are still live. The live MaxPool2d path is
+    // dispatchMaxPool2d (with-indices forward) + dispatchMaxPool2dBackward
+    // WithIndices below. Removed rather than left as a landmine that would
+    // silently mismatch (indices-less forward paired with an indices-based
+    // backward) if ever wired in later.
     auto dispatchAvgPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
-    auto dispatchMaxPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
     auto dispatchAvgPool2dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
-    auto dispatchMaxPool2dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
 
     // 1D pooling operations
     auto dispatchMaxPool1dForward(const Tensor& input, const OpAttributes& attrs) -> std::vector<Tensor>;
@@ -982,6 +988,17 @@ public:
     // runtime_error naming the op, M, and the limit instead of issuing an
     // invalid dispatch that drivers truncate or device-lose.
     void checkSparseRowDispatch(int32_t device_id, const char* op_name, int64_t M) const;
+    // M31: the Vulkan sparse shaders only accept Int32 crow/col indices, so
+    // every CSR dispatch narrows the Int64 SparseTensor indices via
+    // .to(DType::Int32) with no magnitude check — unlike CPU's
+    // mkl_index_fits() (sparse_ops.cpp) and ROCm's verify_i64_fits_i32()
+    // (sparse.hip.cpp), which both guard the equivalent narrowing. By the
+    // CSR invariant col_indices values are in [0, num_cols) and
+    // crow_indices values are in [0, nnz], so bounding num_cols and nnz
+    // against INT32_MAX is sufficient to guarantee every index value fits —
+    // no need to scan the actual index buffers. Throws instead of silently
+    // wrapping out-of-range indices into wrong (aliased) column reads.
+    void checkSparseIndexFitsI32(const char* op_name, int64_t num_cols, int64_t nnz) const;
     auto dispatchSparseSpMM(const Tensor& crow_indices, const Tensor& col_indices,
                              const Tensor& values, const Tensor& dense,
                              int64_t M, int64_t K, int64_t N) -> Tensor;

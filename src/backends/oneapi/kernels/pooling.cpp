@@ -143,130 +143,23 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                                                  int64_t dilation_h, int64_t dilation_w,
                                                  sycl::queue& queue) -> std::pair<Tensor, Tensor>;
 
-// MaxPool2d forward with indices using oneDNN - returns both output and indices for backward pass
+// MaxPool2d forward with indices — always uses the native SYCL implementation.
+// L2 follow-up: this used to route Float32 through oneDNN's pooling
+// primitive, which has no documented NaN-propagation guarantee AND computed
+// the output value (via oneDNN) and the index (via a separate NaN-aware
+// scan below) independently — a NaN window could return a value/index pair
+// that don't correspond to each other. maxpool2d_forward_with_indices_sycl
+// now has an explicit Float32 branch (mirroring its Float64/Float16/
+// BFloat16 branches) with a single consistent isnan-aware scan for both
+// value and index, so there is no remaining reason to keep the oneDNN path.
 auto maxpool2d_forward_with_indices(const Tensor& input,
                                     int64_t kernel_h, int64_t kernel_w,
                                     int64_t stride_h, int64_t stride_w,
                                     int64_t padding_h, int64_t padding_w,
                                     int64_t dilation_h, int64_t dilation_w,
                                     sycl::queue& queue) -> std::pair<Tensor, Tensor> {
-    using namespace dnnl;
-
-    // oneDNN pooling only reliably supports f32 on all devices;
-    // for other dtypes use the pure SYCL implementation to avoid
-    // buffer-size mismatches between the tensor and the descriptor.
-    if (input.dtype() != DType::Float32) {
-        return maxpool2d_forward_with_indices_sycl(input,
-            kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, queue);
-    }
-
-    auto shape = input.shape();
-    if (shape.size() != 4) {
-        throw std::invalid_argument("MaxPool2d requires 4D input (N, C, H, W)");
-    }
-
-    const int64_t N = shape[0];
-    const int64_t C = shape[1];
-    const int64_t H_in = shape[2];
-    const int64_t W_in = shape[3];
-
-    const int64_t H_out = (H_in + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
-    const int64_t W_out = (W_in + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
-
-    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
-    // Indices must be Int64 to correctly represent element positions for all tensor sizes.
-    Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
-
-    // Create oneDNN engine and stream
-    auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
-    auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
-
-    // Memory descriptors
-    memory::dims src_dims = {N, C, H_in, W_in};
-    memory::dims dst_dims = {N, C, H_out, W_out};
-    memory::dims kernel_dims = {kernel_h, kernel_w};
-    memory::dims strides_dims = {stride_h, stride_w};
-    memory::dims padding_dims = {padding_h, padding_w};
-    memory::dims dilation_dims = {dilation_h - 1, dilation_w - 1};
-
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
-    auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::nchw);
-
-    // oneDNN v3 API: primitive_desc built directly from engine + parameters
-    // (the legacy ::desc step was removed in oneDNN 3.x). forward_training keeps
-    // the workspace (max indices).
-    auto pool_pd = pooling_forward::primitive_desc(
-        dnnl_engine,
-        prop_kind::forward_training,
-        algorithm::pooling_max,
-        src_md, dst_md,
-        strides_dims, kernel_dims,
-        dilation_dims,
-        padding_dims, padding_dims
-    );
-
-    // Wrap tensors
-    auto src_mem = sycl_interop::make_memory(pool_pd.src_desc(), dnnl_engine,
-                                              sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(input.data_ptr()));
-
-    auto dst_mem = sycl_interop::make_memory(pool_pd.dst_desc(), dnnl_engine,
-                                              sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(output.data_ptr()));
-
-    // Create workspace for indices (oneDNN stores max indices in workspace)
-    auto workspace_mem = memory(pool_pd.workspace_desc(), dnnl_engine);
-
-    // Execute
-    auto pool_prim = pooling_forward(pool_pd);
-    pool_prim.execute(dnnl_stream, {
-        {DNNL_ARG_SRC, src_mem},
-        {DNNL_ARG_DST, dst_mem},
-        {DNNL_ARG_WORKSPACE, workspace_mem}
-    });
-
-    dnnl_stream.wait();
-
-    // oneDNN workspace format is internal, so we need to compute indices manually
-    // for compatibility with our backward pass that expects linear indices
-    const float* in_ptr = get_data_ptr<const float>(input);
-    int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
-
-    const int64_t total_size = N * C * H_out * W_out;
-    queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
-        int64_t temp = flat_idx;
-        const int64_t w_out = temp % W_out;
-        temp /= W_out;
-        const int64_t h_out = temp % H_out;
-        temp /= H_out;
-        const int64_t c = temp % C;
-        const int64_t n = temp / C;
-
-        float max_val = -3.4028235e+38f;
-        int64_t max_idx = 0;
-
-        for (int64_t kh = 0; kh < kernel_h; ++kh) {
-            for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
-                int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
-
-                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                    int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
-                    float val = in_ptr[input_idx];
-                    if (sycl::isnan(val) || val > max_val) {
-                        max_val = val;
-                        // Plane-local argmax (matches CPU/CUDA/ROCm and feeds
-                        // max_unpool2d which expects h*W_in+w within the plane).
-                        max_idx = h_in * W_in + w_in;
-                    }
-                }
-            }
-        }
-
-        idx_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] = max_idx;
-    });
-
-    return {output, indices};
+    return maxpool2d_forward_with_indices_sycl(input,
+        kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, queue);
 }
 
 // MaxPool2d forward using oneDNN - returns only output
@@ -438,7 +331,53 @@ static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
     // causing out-of-bounds access in the backward pass.
     Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
 
-    if (input.dtype() == DType::Float64) {
+    if (input.dtype() == DType::Float32) {
+        // L2 follow-up: oneDNN's pooling primitive has no documented NaN-
+        // propagation guarantee (it also computed indices SEPARATELY via a
+        // NaN-aware scan while the VALUE came from oneDNN, so a NaN window
+        // could return an output value inconsistent with its own recorded
+        // index). Route Float32 here too — every other dtype already avoids
+        // oneDNN for exactly this class of correctness gap; see the removed
+        // Float32 special-case in the caller.
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<MaxPool2dWithIndicesKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            float max_val = -3.4028235e+38f;
+            int64_t max_idx = 0;
+
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
+                    int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
+
+                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                        float val = in_ptr[input_idx];
+                        if (sycl::isnan(val) || val > max_val) {
+                            max_val = val;
+                            max_idx = h_in * W_in + w_in;  // plane-local (see F041)
+                        }
+                    }
+                }
+            }
+
+            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+            out_ptr[out_idx] = max_val;
+            idx_ptr[out_idx] = max_idx;
+        });
+    }
+    else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
         int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
@@ -3300,12 +3239,18 @@ auto avgpool3d_forward(const Tensor& input, const std::vector<int64_t>& kernel_s
 
 auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& kernel_size,
                          const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
-                         const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor {
+                         const std::vector<int64_t>& input_shape, bool count_include_pad,
+                         sycl::queue& queue) -> Tensor {
     if (input_shape.size() != 5) {
         throw std::invalid_argument("AvgPool3d backward requires 5D input_shape");
     }
     const int64_t N = input_shape[0], Ch = input_shape[1], D_in = input_shape[2], H_in = input_shape[3], W_in = input_shape[4];
     const int64_t kD = kernel_size[0], kH = kernel_size[1], kW = kernel_size[2];
+    // H14: count_include_pad=true (PyTorch default) must divide by the full
+    // kernel volume, matching forward's divisor — see avgpool3d_forward
+    // above. The four dtype branches below previously always divided by the
+    // in-bounds-only `count`, silently ignoring count_include_pad.
+    const int64_t pool_volume = kD * kH * kW;
     const int64_t sD = stride[0], sH = stride[1], sW = stride[2];
     const int64_t pD = padding[0], pH = padding[1], pW = padding[2];
     auto gs = grad_output.shape();
@@ -3329,7 +3274,8 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue; count++; }}}
-            float gv = count > 0 ? go[gid] / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            float gv = divisor > 0 ? go[gid] / static_cast<float>(divisor) : 0.0f;
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue;
@@ -3353,7 +3299,8 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue; count++; }}}
-            double gv = count > 0 ? go[gid] / static_cast<double>(count) : 0.0;
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            double gv = divisor > 0 ? go[gid] / static_cast<double>(divisor) : 0.0;
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue;
@@ -3378,7 +3325,8 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue; count++; }}}
-            float gv = count > 0 ? static_cast<float>(go[gid]) / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            float gv = divisor > 0 ? static_cast<float>(go[gid]) / static_cast<float>(divisor) : 0.0f;
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue;
@@ -3405,7 +3353,8 @@ auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& k
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue; count++; }}}
-            float gv = count > 0 ? bf16_to_f32(go[gid]) / static_cast<float>(count) : 0.0f;
+            const int64_t divisor = count_include_pad ? pool_volume : count;
+            float gv = divisor > 0 ? bf16_to_f32(go[gid]) / static_cast<float>(divisor) : 0.0f;
             for (int64_t kd = 0; kd < kD; ++kd) { int64_t di = d*sD - pD + kd; if (di < 0 || di >= D_in) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) { int64_t hi = h*sH - pH + kh; if (hi < 0 || hi >= H_in) continue;
                     for (int64_t kw = 0; kw < kW; ++kw) { int64_t wi = w*sW - pW + kw; if (wi < 0 || wi >= W_in) continue;

@@ -127,6 +127,24 @@ TEST_P(GradCheckMissingTest, TensorSolve) {
     EXPECT_TRUE(passed_a) << "tensorsolve gradcheck (wrt A) failed on " << device.to_string();
 }
 
+// M2: LdexpBackward was fully implemented but never wired to any
+// Variable-level call site — tenzor::ldexp only existed as a raw-Tensor
+// free function, so x.requires_grad through it silently carried no grad_fn
+// back to x. n is the integer exponent (non-differentiable by design —
+// LdexpBackward::backward returns zeros for it), so only x is gradchecked,
+// matching the TensorSolve pattern above (n captured fixed in the lambda).
+TEST_P(GradCheckMissingTest, LdexpGradcheck) {
+    auto x_data = tenzor::add(tenzor::abs(randn({3, 4}, DType::Float64, device)), 0.1);
+    Variable x(x_data, true);
+    Variable n(full({3, 4}, 2.0, DType::Float64, Device::cpu()).to(device), false);
+
+    auto f = [&n](const Variable& v) -> Variable {
+        return tenzor::ldexp(v, n);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-3, 1e-3))
+        << "ldexp gradcheck (wrt x) failed on " << device.to_string();
+}
+
 // ============================================================================
 // MEDIUM RISK
 // ============================================================================
@@ -1083,36 +1101,59 @@ TEST_P(GradCheckMissingTest, SortGradcheck) {
 }
 
 TEST_P(GradCheckMissingTest, GridSampleGradcheck) {
-    if (device.type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KnownBug,
-            "grid_sample GPU GridSampleBackward tracked separately");
-    }
+    // H9-H13: cross-backend padding-mode gate bugs in GridSampleBackward
+    // (ROCm/Vulkan/OneAPI zeros-vs-border gate mixups, OneAPI bicubic
+    // missing a border gate entirely) are fixed — re-enable GPU coverage
+    // instead of skipping it as a known bug.
+    //
     // Tiny [N=1, C=2, H=3, W=3] feature map sampled with a [N=1, H=2, W=2,
-    // 2] grid in (-1, 1). align_corners=true to keep boundary derivatives
-    // simple.
-    auto in_t = randn({1, 2, 3, 3}, DType::Float64, Device::cpu());
-    auto grid_t = ::tenzor::mul(randn({1, 2, 2, 2}, DType::Float64, Device::cpu()), 0.5);
-    Variable input(in_t, /*requires_grad=*/true);
-    Variable grid(grid_t, /*requires_grad=*/false);
-    auto f = [&](const Variable& v) -> Variable {
-        return ::tenzor::grid_sample(v, grid, "bilinear", "zeros", true);
+    // 2] grid. align_corners=true, so normalized g in [-1,1] denormalizes to
+    // pixel-space ix in [0, W_in-1] = [0, 2] via ix = (g+1)*1.0.
+    //
+    // H9-H11's bug (zeros/border gate mixup) is invisible unless the
+    // PRE-clamp pixel coordinate lands in the "one bilinear neighbour still
+    // in bounds" band ix in [-1,0) u (W_in-1,W_in) = [-1,0) u (2,3), i.e.
+    // g in [-2,-1) u (1,2) — outside [-2,-1)/(1,2) both bilinear corners are
+    // fully out of bounds and sum_dx/sum_dy are already exactly 0 regardless
+    // of the gate, masking the bug. A random grid only lands in that narrow
+    // band by chance, so use explicit deterministic values that hit it for
+    // every one of the 4 sample points (both axes, both signs).
+    double grid_data[] = {
+        -1.5, -1.5,   1.5,  1.5,
+        -1.5,  0.3,   0.2,  1.5,
     };
-    EXPECT_TRUE(gradcheck(f, input, 1e-4, 1e-3, 1e-3))
-        << "grid_sample gradcheck failed (input)";
+    auto in_t = randn({1, 2, 3, 3}, DType::Float64, Device::cpu()).to(device);
+    auto grid_t = Tensor::from_blob(grid_data, {1, 2, 2, 2}, DType::Float64, Device::cpu())
+                      .clone().to(device);
+    Variable input(in_t, /*requires_grad=*/false);
+    Variable grid(grid_t, /*requires_grad=*/true);
+
+    for (const std::string& padding_mode : {"zeros", "border"}) {
+        for (const std::string& mode : {"bilinear", "bicubic"}) {
+            // H9-H13 are specifically bugs in the grad_grid write, not
+            // grad_input — gradcheck the GRID (not the input) to exercise
+            // the fixed code path. grad_input's atomicAdd scatter is a
+            // separate, already-correct path on all these backends.
+            auto f = [&](const Variable& g) -> Variable {
+                return ::tenzor::grid_sample(input, g, mode, padding_mode, true);
+            };
+            EXPECT_TRUE(gradcheck(f, grid, 1e-4, 1e-3, 1e-3))
+                << "grid_sample gradcheck failed (grid), mode=" << mode
+                << " padding_mode=" << padding_mode
+                << " device=" << device.to_string();
+        }
+    }
 }
 
 TEST_P(GradCheckMissingTest, AffineGridGradcheck) {
-    if (device.type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
-            "affine_grid gradcheck CPU-only — GPU AffineGridBackward not wired");
-    }
     // affine_grid(theta) is an exactly-linear function of theta — the
     // affine transform x' = theta * [grid_x; grid_y; 1] applied at every
     // pre-computed (grid_x, grid_y) pixel. Loose tolerance because the
     // AffineGridBackward CPU impl reduces over the spatial grid in
     // Float32 internally (the `gi_f32` accumulator pattern in
-    // function_vision.cpp).
-    auto theta_t = randn({1, 2, 3}, DType::Float64, Device::cpu());
+    // function_vision.cpp); GPU backends widen-narrow through Float32
+    // (M9/M10) unless the input is genuinely Float64.
+    auto theta_t = randn({1, 2, 3}, DType::Float64, Device::cpu()).to(device);
     Variable theta(theta_t, /*requires_grad=*/true);
     auto f = [&](const Variable& v) -> Variable {
         return ::tenzor::affine_grid(v, /*size=*/{1, 1, 3, 3},

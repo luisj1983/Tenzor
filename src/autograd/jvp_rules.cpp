@@ -12,9 +12,11 @@
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <array>
 #include <climits>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <optional>
 #include <span>
@@ -766,16 +768,46 @@ auto jvp_min_red(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) 
 }
 
 auto jvp_prod(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> DualTensor {
-    // d/dx prod(x) along dim:
-    //   tangent = prod * sum(dx / x, dim)  (when x has no zeros)
-    // For numerical safety with possible zeros we use the explicit
-    // formula prod * sum(dx / x). This matches PyTorch's _prod_backward
-    // behaviour for the no-zero case (zero-handling is asymptotic and
-    // not exercised by smooth-domain JVP tests).
-    auto primal = tenzor::prod(x.primal(), dim, keepdim);
-    auto ratio = tenzor::div(x.tangent(), x.primal());
-    auto sum_ratio = tenzor::sum(ratio, dim, keepdim);
-    auto tangent = tenzor::mul(primal, sum_ratio);
+    // M26: replace the naive `dx/x` ratio (NaN whenever ANY reduced element
+    // is exactly zero) with the exact, zero-aware per-element factor —
+    // mirrors ProdBackward's own compute_prod_backward_factor
+    // (function_reduction_ext.cpp, anonymous-namespace / not directly
+    // callable from here, so duplicated in this file's own self-contained
+    // tensor-op style like every other JVP rule): for each position i,
+    // factor_i = product of all OTHER elements in its reduction group,
+    // which is finite even when x_i == 0 (or when exactly one OTHER element
+    // in the group is 0), and exactly 0 when 2+ elements in the group are
+    // zero. tangent = sum_i factor_i * dx_i is the forward-mode counterpart
+    // of the VJP's grad_i = grad_output * factor_i.
+    auto x_p = x.primal();
+    auto primal = tenzor::prod(x_p, dim, keepdim);
+
+    auto input_shape_vec = std::vector<int64_t>(x_p.shape().begin(), x_p.shape().end());
+    auto zero_in = tenzor::zeros(input_shape_vec, x_p.dtype(), x_p.device());
+    auto ones_in = tenzor::ones(input_shape_vec, x_p.dtype(), x_p.device());
+    auto mask_zero = tenzor::eq(x_p, zero_in);
+    auto safe_input = tenzor::where(mask_zero, ones_in, x_p);
+
+    // Always reduce the intermediates with keepdim=true (same rank as the
+    // input regardless of dim/full-reduction), so expand() is always a
+    // simple same-rank broadcast — sidesteps unsqueeze+expand rank-mismatch
+    // edge cases some backends' Expand kernel rejects for the dim=nullopt /
+    // 1-D-input cases. Apply the CALLER's requested `keepdim` only at the
+    // very end, on the final tangent reduction.
+    Tensor prod_safe_kd = tenzor::prod(safe_input, dim, /*keepdim=*/true);
+    Tensor prod_safe_expanded = tenzor::expand(prod_safe_kd, input_shape_vec);
+    auto factor_raw = tenzor::div(prod_safe_expanded, safe_input);
+
+    auto mask_zero_int = mask_zero.to(DType::Int64);
+    Tensor zero_count_kd = tenzor::sum(mask_zero_int, dim, /*keepdim=*/true);
+    Tensor zero_count_expanded = tenzor::expand(zero_count_kd, input_shape_vec);
+
+    auto remaining = tenzor::sub(zero_count_expanded, mask_zero_int);
+    auto zeros_int = tenzor::zeros(input_shape_vec, DType::Int64, x_p.device());
+    auto keep = tenzor::eq(remaining, zeros_int);
+    auto factor = tenzor::where(keep, factor_raw, zero_in);
+
+    auto tangent = tenzor::sum(tenzor::mul(factor, x.tangent()), dim, keepdim);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
@@ -822,14 +854,112 @@ auto jvp_cumsum(const DualTensor& x, int64_t dim) -> DualTensor {
     return DualTensor(std::move(primal), std::move(tangent));
 }
 
+namespace {
+// H17: exact, zero-safe forward-mode (JVP) cumulative-product tangent.
+//   y_k = prod_{j<=k} x_j
+//   dy_k = sum_{i<=k} dx_i * prod_{j<=k, j!=i} x_j
+// The inner product EXCLUDES the differentiated element x_i, so it never
+// divides by x_i — correct for ANY number of zeros in a run, unlike the
+// `cumsum(dx/x) * y` closed form this replaces: a single zero anywhere in
+// the prefix poisons every subsequent output position via NaN propagation
+// through the division and cumsum. Mirrors CumProdBackward's own
+// already-fixed exact-prefix-product-excluding-self algorithm
+// (function_fft.cpp cumprod_backward_exact_kernel) — same O(n^2)
+// correctness-over-performance tradeoff, just gathering into output
+// position k instead of scattering into input position i. Unlike the VJP,
+// JVP is a directional derivative of a holomorphic function of x, so
+// complex inputs are NOT conjugated here.
+template <typename T>
+void cumprod_jvp_exact_kernel(const T* x, const T* dx, T* dy, int64_t outer, int64_t n) {
+    for (int64_t o = 0; o < outer; ++o) {
+        const T* xr = x + o * n;
+        const T* dxr = dx + o * n;
+        T* dyr = dy + o * n;
+        for (int64_t k = 0; k < n; ++k) dyr[k] = T(0);
+        for (int64_t i = 0; i < n; ++i) {
+            T prefix_excl = T(1);
+            for (int64_t j = 0; j < i; ++j) prefix_excl *= xr[j];
+            T running = prefix_excl;
+            for (int64_t k = i; k < n; ++k) {
+                if (k > i) running *= xr[k];
+                dyr[k] += dxr[i] * running;
+            }
+        }
+    }
+}
+} // namespace
+
 auto jvp_cumprod(const DualTensor& x, int64_t dim) -> DualTensor {
-    // d/dx cumprod_k(x) = cumprod_k(x) * cumsum_k(dx / x)
     auto p = x.primal();
     auto primal = tenzor::cumprod(p, dim);
-    auto ratio = tenzor::div(x.tangent(), p);
-    auto cs = tenzor::cumsum(ratio, dim);
-    auto tangent = tenzor::mul(primal, cs);
-    return DualTensor(std::move(primal), std::move(tangent));
+
+    const Device orig_device = p.device();
+    const DType orig_dtype = p.dtype();
+    const int64_t ndim = static_cast<int64_t>(p.shape().size());
+    if (ndim == 0) {
+        // Scalar: cumprod is the identity, tangent passes through unchanged.
+        return DualTensor(std::move(primal), x.tangent());
+    }
+    int64_t d = dim;
+    if (d < 0) d += ndim;
+
+    Tensor xt = p;
+    Tensor dxt = x.tangent();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    const DType work_dtype = widen ? DType::Float32 : orig_dtype;
+    if (orig_device.type != Device::Type::CPU) {
+        xt = xt.to(Device::cpu());
+        dxt = dxt.to(Device::cpu());
+    }
+    if (xt.dtype() != work_dtype) xt = xt.to(work_dtype);
+    if (dxt.dtype() != work_dtype) dxt = dxt.to(work_dtype);
+
+    if (d != ndim - 1) {
+        xt = tenzor::movedim(xt, {d}, {ndim - 1});
+        dxt = tenzor::movedim(dxt, {d}, {ndim - 1});
+    }
+    xt = xt.contiguous();
+    dxt = dxt.contiguous();
+
+    const int64_t n = xt.shape().back();
+    const int64_t total = xt.numel();
+    const int64_t outer = (n == 0) ? 0 : total / n;
+
+    Tensor dy = tenzor::empty(std::vector<int64_t>(xt.shape().begin(), xt.shape().end()),
+                              work_dtype, Device::cpu());
+
+    if (total > 0 && n > 0) {
+        if (work_dtype == DType::Float64) {
+            cumprod_jvp_exact_kernel<double>(xt.data<double>(), dxt.data<double>(),
+                                             dy.data<double>(), outer, n);
+        } else if (work_dtype == DType::Float32) {
+            cumprod_jvp_exact_kernel<float>(xt.data<float>(), dxt.data<float>(),
+                                            dy.data<float>(), outer, n);
+        } else if (work_dtype == DType::Complex64) {
+            cumprod_jvp_exact_kernel<std::complex<float>>(
+                xt.data<std::complex<float>>(), dxt.data<std::complex<float>>(),
+                dy.data<std::complex<float>>(), outer, n);
+        } else if (work_dtype == DType::Complex128) {
+            cumprod_jvp_exact_kernel<std::complex<double>>(
+                xt.data<std::complex<double>>(), dxt.data<std::complex<double>>(),
+                dy.data<std::complex<double>>(), outer, n);
+        } else {
+            throw std::runtime_error("jvp_cumprod: unsupported dtype");
+        }
+    }
+
+    if (d != ndim - 1) {
+        dy = tenzor::movedim(dy, {ndim - 1}, {d});
+    }
+    if (widen) {
+        dy = dy.to(orig_dtype);
+    }
+    if (orig_device.type != Device::Type::CPU) {
+        dy = dy.to(orig_device);
+    }
+    dy = dy.contiguous();
+
+    return DualTensor(std::move(primal), std::move(dy));
 }
 
 auto jvp_logsumexp(const DualTensor& x, int64_t dim, bool keepdim) -> DualTensor {
@@ -3272,11 +3402,23 @@ JvpMultiResult jvp_adapter_layer_norm(std::span<const Tensor> primals,
     auto term3 = tenzor::mul(tenzor::mul(x_minus_mean, rstd), dgamma);
     auto dy = tenzor::add(tenzor::add(tenzor::add(term1, term2), term3), dbeta);
 
-    // Reshape mean/rstd to drop the trailing-1 dims that the LayerNorm
-    // kernel does not include in its returned stats. The shape of mean
-    // returned by the backend matches x with the last K dims collapsed
-    // to size 1 (and *not* squeezed), per the existing contract; keep
-    // keepdim=true layout for compatibility with both styles.
+    // H16: the real kernel (nn_kernels.cpp layer_norm_kernel_with_stats)
+    // allocates mean/rstd as a FLAT {batch_size} tensor (batch_size =
+    // numel(x)/norm_size, collapsed across ALL leading dims) — not x's shape
+    // with the last K dims collapsed to 1 and kept. mean/rstd/dmean/drstd
+    // above are keepdim=true (shape x with trailing K dims = 1), which has
+    // the same total element count as {batch_size} — reshape down to match
+    // the real contract.
+    int64_t norm_size = 1;
+    for (int64_t i = 0; i < K; ++i) {
+        norm_size *= x.shape()[xnd - 1 - i];
+    }
+    int64_t batch_size = x.numel() / norm_size;
+    mean  = tenzor::reshape(mean,  {batch_size});
+    rstd  = tenzor::reshape(rstd,  {batch_size});
+    dmean = tenzor::reshape(dmean, {batch_size});
+    drstd = tenzor::reshape(drstd, {batch_size});
+
     if (widen) {
         y     = y.to(orig_dtype);
         dy    = dy.to(orig_dtype);
@@ -3348,20 +3490,33 @@ JvpMultiResult jvp_adapter_linalg_eigh(std::span<const Tensor> primals,
     auto E_diag    = tenzor::mul(E, eye_mat);
     auto dW        = tenzor::sum(E_diag, /*dim=*/last, /*keepdim=*/false);
 
-    // Build F mask: F_{ij} = 1/(W_j - W_i) for i ≠ j, 0 on diagonal.
-    // W has shape (..., N); unsqueeze on the last two axes to broadcast
-    // into a (..., N, N) pairwise-difference table.
+    // M27: Lorentzian-broadened reciprocal of the eigenvalue gap (mirrors
+    // the already-fixed EighBackward VJP, function_linalg.cpp): F_ij =
+    // diff_ij / (diff_ij^2 + eps^2), diff_ij = w_j - w_i. Exact
+    // 1/(w_j - w_i) for well-separated eigenvalues, BOUNDED by 1/(2 eps) at
+    // (near-)degenerate roots, and NEVER hard-zeroed — unlike the previous
+    // fixed-threshold mask this replaces, which clamped any pair under an
+    // exact-equality test to 0 and thus dropped the eigenvector-rotation
+    // tangent for closely-but-legitimately-separated spectra (e.g. w1=1.0,
+    // w2=1.0+1e-7, common in near-repeated eigenvalues of covariance/PCA
+    // matrices). The diagonal (diff == 0) yields F == 0 automatically (zero
+    // numerator), so no explicit diagonal masking is needed.
     auto W_col = tenzor::unsqueeze(W, -1);  // (..., N, 1)  varies over i
     auto W_row = tenzor::unsqueeze(W, -2);  // (..., 1, N)  varies over j
-    auto denom = tenzor::sub(W_row, W_col); // (..., N, N)
-    // Avoid divide-by-zero on the diagonal; replace zeros with 1, then zero
-    // the diagonal of F afterwards via masking.
-    auto zero_tensor  = tenzor::zeros_like(denom);
-    auto one_tensor   = tenzor::ones_like(denom);
-    auto is_zero_mask = tenzor::eq(denom, zero_tensor);
-    auto safe_denom   = tenzor::where(is_zero_mask, one_tensor, denom);
-    auto F            = tenzor::div(one_tensor, safe_denom);
-    F                 = tenzor::where(is_zero_mask, zero_tensor, F);
+    auto diffs = tenzor::sub(W_row, W_col); // diffs[..., i, j] = w_j - w_i
+    double rel_eps;
+    switch (W.dtype()) {
+        case DType::Float16:
+        case DType::BFloat16: rel_eps = 1e-2; break;
+        case DType::Float64:  rel_eps = 1e-12; break;
+        default:               rel_eps = 1e-6; break;  // Float32
+    }
+    auto max_scale = tenzor::max(tenzor::abs(W), W.ndim() - 1, /*keepdim=*/true);  // (..., 1)
+    max_scale = tenzor::unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
+    auto eps_tol = tenzor::add(tenzor::mul(max_scale, rel_eps), rel_eps);
+    auto eps_sq  = tenzor::mul(eps_tol, eps_tol);
+    auto denom   = tenzor::add(tenzor::mul(diffs, diffs), eps_sq);
+    auto F       = tenzor::div(diffs, denom);
 
     // dV = V @ (F * E)  (batched)
     auto dV = tenzor::matmul(V, tenzor::mul(F, E));
@@ -4756,23 +4911,30 @@ JvpResult jvp_adapter_max_unpool_3d(std::span<const Tensor> p, std::span<const T
 // ============================================================================
 // Linear-in-weight: Embedding.
 //   y[i] = weight[indices[i]];   indices ∈ Integer, weight ∈ Float.
-//   dy[i] = dweight[indices[i]]  → dispatch(Embedding, [indices, dweight]).
+//   dy[i] = dweight[indices[i]]  → dispatch(Embedding, [dweight, indices]).
+//
+// H8: the universal OpId::Embedding calling convention (matching every real
+// call site — cpu_kernel_registry.cpp:2506-2512 dispatches
+// embedding_kernel(inputs[0]=weight, inputs[1]=indices);
+// nn/layers/embedding.cpp and nn/functional.cpp both dispatch
+// {weight, indices} in that order) is (weight, indices), NOT
+// (indices, weight). This rule previously assumed the opposite order.
 // ============================================================================
 JvpResult jvp_adapter_embedding(std::span<const Tensor> primals,
                                 std::span<const Tensor> tangents,
                                 const OpAttributes& attrs) {
     if (primals.size() != 2 || primals.size() != tangents.size()) {
         throw std::runtime_error(
-            "jvp_adapter_embedding: expected 2 inputs (indices, weight)");
+            "jvp_adapter_embedding: expected 2 inputs (weight, indices)");
     }
-    auto dweight = tangents[1].numel() != 0 ? tangents[1]
-        : tenzor::zeros(std::vector<int64_t>(primals[1].shape().begin(),
-                                              primals[1].shape().end()),
-                        primals[1].dtype(), primals[1].device());
+    auto dweight = tangents[0].numel() != 0 ? tangents[0]
+        : tenzor::zeros(std::vector<int64_t>(primals[0].shape().begin(),
+                                              primals[0].shape().end()),
+                        primals[0].dtype(), primals[0].device());
     auto primal  = tenzor::dispatch(OpId::Embedding,
                                     std::vector<Tensor>{primals[0], primals[1]}, attrs)[0];
     auto tangent = tenzor::dispatch(OpId::Embedding,
-                                    std::vector<Tensor>{primals[0], dweight}, attrs)[0];
+                                    std::vector<Tensor>{dweight, primals[1]}, attrs)[0];
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 
@@ -5113,8 +5275,19 @@ auto jvp_addcmul(const DualTensor& a, const DualTensor& b,
 auto jvp_addcdiv(const DualTensor& a, const DualTensor& b,
                  const DualTensor& c, double v) -> DualTensor {
     auto primal = tenzor::addcdiv(a.primal(), b.primal(), c.primal(), v);
-    auto c_sq = tenzor::mul(c.primal(), c.primal());
-    auto num  = tenzor::sub(tenzor::mul(b.tangent(), c.primal()),
+    // M7 (AUTOGRAD-R022): zero-safe denominator, mirroring AddcdivBackward's
+    // VJP guard — addcdiv(a,b,c,value) has the same b/c and b/c^2 terms as
+    // Div's a/b and a/b^2, so it needs DivBackward's same epsilon-substitution
+    // guard. Only c_sq (the denominator) needs substitution; the numerator's
+    // c*db term is a multiplication, not a division, so the TRUE c==0 there
+    // is already safe (no NaN/Inf).
+    auto c_p = c.primal();
+    auto c_shape = std::vector<int64_t>(c_p.shape().begin(), c_p.shape().end());
+    auto zero_c = tenzor::zeros(c_shape, c_p.dtype(), c_p.device());
+    auto eps_c = tenzor::full(c_shape, detail::dtype_epsilon(c_p.dtype()), c_p.dtype(), c_p.device());
+    auto safe_c = tenzor::where(tenzor::eq(c_p, zero_c), eps_c, c_p);
+    auto c_sq = tenzor::mul(safe_c, safe_c);
+    auto num  = tenzor::sub(tenzor::mul(b.tangent(), c_p),
                               tenzor::mul(b.primal(), c.tangent()));
     auto t_bc = tenzor::div(num, c_sq);
     auto tangent = tenzor::add(a.tangent(), tenzor::mul(t_bc, v));
@@ -5163,14 +5336,51 @@ auto jvp_minimum(const DualTensor& a, const DualTensor& b) -> DualTensor {
                                  tenzor::mul(b.tangent(), wb));
     return DualTensor(std::move(primal), std::move(tangent));
 }
-// Fmax / Fmin: like maximum/minimum but NaN-propagating per IEEE 754-2008.
-// Sub-gradient identical (NaN inputs make the tangent NaN automatically via
-// arithmetic in the same chain — no special handling needed for forward AD).
+// Fmax / Fmin: NaN-IGNORING per IEEE 754-2008 maxNum/minNum (confirmed at
+// src/backends/cpu/kernels/advanced.cpp:1133-1161) — the opposite of
+// maximum/minimum, which propagate NaN. H7: the primal must come from
+// tenzor::fmax/fmin, not tenzor::maximum/tenzor::minimum, and the tangent
+// weighting must special-case "exactly one operand is NaN" (the real op
+// returns — and the tangent must come entirely from — the OTHER, non-NaN
+// operand; gt/eq on a NaN operand are both false, so the plain
+// maximum/minimum weighting silently gives that case weight 0).
 auto jvp_fmax(const DualTensor& a, const DualTensor& b) -> DualTensor {
-    return jvp_maximum(a, b);
+    auto primal = tenzor::fmax(a.primal(), b.primal());
+    auto a_nan = tenzor::isnan(a.primal());
+    auto b_nan = tenzor::isnan(b.primal());
+    auto a_active = tenzor::gt(a.primal(), b.primal());
+    auto tie = tenzor::eq(a.primal(), b.primal());
+    auto ones = tenzor::ones_like(a.primal());
+    auto zeros = tenzor::zeros_like(a.primal());
+    auto half = tenzor::mul(ones, 0.5);
+    auto wa_no_nan = tenzor::where(a_active, ones, tenzor::where(tie, half, zeros));
+    // b NaN (a finite) -> wa=1; a NaN (b finite) -> wa=0; both NaN -> result
+    // is NaN regardless, split 0.5/0.5.
+    auto wa = tenzor::where(b_nan,
+                             tenzor::where(a_nan, half, ones),
+                             tenzor::where(a_nan, zeros, wa_no_nan));
+    auto wb = tenzor::sub(ones, wa);
+    auto tangent = tenzor::add(tenzor::mul(a.tangent(), wa),
+                                 tenzor::mul(b.tangent(), wb));
+    return DualTensor(std::move(primal), std::move(tangent));
 }
 auto jvp_fmin(const DualTensor& a, const DualTensor& b) -> DualTensor {
-    return jvp_minimum(a, b);
+    auto primal = tenzor::fmin(a.primal(), b.primal());
+    auto a_nan = tenzor::isnan(a.primal());
+    auto b_nan = tenzor::isnan(b.primal());
+    auto a_active = tenzor::lt(a.primal(), b.primal());
+    auto tie = tenzor::eq(a.primal(), b.primal());
+    auto ones = tenzor::ones_like(a.primal());
+    auto zeros = tenzor::zeros_like(a.primal());
+    auto half = tenzor::mul(ones, 0.5);
+    auto wa_no_nan = tenzor::where(a_active, ones, tenzor::where(tie, half, zeros));
+    auto wa = tenzor::where(b_nan,
+                             tenzor::where(a_nan, half, ones),
+                             tenzor::where(a_nan, zeros, wa_no_nan));
+    auto wb = tenzor::sub(ones, wa);
+    auto tangent = tenzor::add(tenzor::mul(a.tangent(), wa),
+                                 tenzor::mul(b.tangent(), wb));
+    return DualTensor(std::move(primal), std::move(tangent));
 }
 
 // d/d{a,b} log_add_exp2(a, b) = softmax2_weighted in base-2:
@@ -5188,22 +5398,53 @@ auto jvp_logaddexp2(const DualTensor& a, const DualTensor& b) -> DualTensor {
 }
 
 // xlog1py(x, y) = x * log1p(y); d = dx * log1p(y) + x * dy / (1+y).
+// M6: mask x==0 (xlog1py(0,y)=0 by convention, matching Xlog1pyBackward's
+// VJP mask) and epsilon-guard the (1+y)==0 denominator, matching
+// Xlog1pyBackward's safe_denom guard.
 auto jvp_xlog1py(const DualTensor& x, const DualTensor& y) -> DualTensor {
     auto primal = tenzor::xlog1py(x.primal(), y.primal());
-    auto log1py = tenzor::log1p(y.primal());
-    auto one = tenzor::ones_like(y.primal());
-    auto t1 = tenzor::mul(x.tangent(), log1py);
-    auto t2 = tenzor::div(tenzor::mul(x.primal(), y.tangent()),
-                            tenzor::add(one, y.primal()));
+    auto x_p = x.primal();
+    auto y_p = y.primal();
+    auto x_shape = std::vector<int64_t>(x_p.shape().begin(), x_p.shape().end());
+    auto x_is_zero = tenzor::eq(x_p, tenzor::zeros(x_shape, x_p.dtype(), x_p.device()));
+
+    auto log1py = tenzor::log1p(y_p);
+    auto t1_raw = tenzor::mul(x.tangent(), log1py);
+    auto t1 = tenzor::where(x_is_zero, tenzor::zeros_like(t1_raw), t1_raw);
+
+    auto y_shape = std::vector<int64_t>(y_p.shape().begin(), y_p.shape().end());
+    auto one_plus_y = tenzor::add(y_p, 1.0);
+    auto eps = tenzor::full(y_shape, detail::dtype_epsilon(y_p.dtype()), y_p.dtype(), y_p.device());
+    auto denom_is_zero = tenzor::eq(one_plus_y, tenzor::zeros(y_shape, y_p.dtype(), y_p.device()));
+    auto safe_denom = tenzor::where(denom_is_zero, eps, one_plus_y);
+    auto t2_raw = tenzor::div(tenzor::mul(x_p, y.tangent()), safe_denom);
+    auto t2 = tenzor::where(x_is_zero, tenzor::zeros_like(t2_raw), t2_raw);
+
     return DualTensor(std::move(primal), tenzor::add(t1, t2));
 }
 
 // xlogy(x, y) = x * log(y); d = dx * log(y) + x * dy / y.
+// M6: mask x==0 (xlogy(0,y)=0 by convention, matching XLogYBackward's VJP
+// mask) and epsilon-guard the y==0 denominator, matching XLogYBackward's
+// safe_y guard.
 auto jvp_xlogy(const DualTensor& x, const DualTensor& y) -> DualTensor {
     auto primal = tenzor::xlogy(x.primal(), y.primal());
-    auto logy = tenzor::log(y.primal());
-    auto t1 = tenzor::mul(x.tangent(), logy);
-    auto t2 = tenzor::div(tenzor::mul(x.primal(), y.tangent()), y.primal());
+    auto x_p = x.primal();
+    auto y_p = y.primal();
+    auto x_shape = std::vector<int64_t>(x_p.shape().begin(), x_p.shape().end());
+    auto x_is_zero = tenzor::eq(x_p, tenzor::zeros(x_shape, x_p.dtype(), x_p.device()));
+
+    auto logy = tenzor::log(y_p);
+    auto t1_raw = tenzor::mul(x.tangent(), logy);
+    auto t1 = tenzor::where(x_is_zero, tenzor::zeros_like(t1_raw), t1_raw);
+
+    auto y_shape = std::vector<int64_t>(y_p.shape().begin(), y_p.shape().end());
+    auto eps_y = tenzor::full(y_shape, detail::dtype_epsilon(y_p.dtype()), y_p.dtype(), y_p.device());
+    auto y_is_zero = tenzor::eq(y_p, tenzor::zeros(y_shape, y_p.dtype(), y_p.device()));
+    auto safe_y = tenzor::where(y_is_zero, eps_y, y_p);
+    auto t2_raw = tenzor::div(tenzor::mul(x_p, y.tangent()), safe_y);
+    auto t2 = tenzor::where(x_is_zero, tenzor::zeros_like(t2_raw), t2_raw);
+
     return DualTensor(std::move(primal), tenzor::add(t1, t2));
 }
 
@@ -5447,7 +5688,10 @@ JvpResult jvp_adapter_addcmul(std::span<const Tensor> primals,
     if (primals.size() != 3 || tangents.size() != 3) {
         throw std::runtime_error("jvp_adapter_addcmul: expected 3 inputs");
     }
-    double v = attrs.get_float(AttrKey::Value, 1.0);
+    // Same wrong-attr-key bug as jvp_adapter_addcdiv (discovered while
+    // fixing M7): the real dispatcher (ops/math.cpp addcmul()) always sets
+    // AttrKey::Alpha, matching every backend kernel.
+    double v = attrs.get_float(AttrKey::Alpha, 1.0);
     auto a = make_dual(primals[0], tangents[0]);
     auto b = make_dual(primals[1], tangents[1]);
     auto c = make_dual(primals[2], tangents[2]);
@@ -5459,7 +5703,12 @@ JvpResult jvp_adapter_addcdiv(std::span<const Tensor> primals,
     if (primals.size() != 3 || tangents.size() != 3) {
         throw std::runtime_error("jvp_adapter_addcdiv: expected 3 inputs");
     }
-    double v = attrs.get_float(AttrKey::Value, 1.0);
+    // Discovered while fixing M7: the real dispatcher (ops/math.cpp
+    // addcdiv()) always sets AttrKey::Alpha, matching every backend kernel
+    // (CPU/CUDA/ROCm/OneAPI/Vulkan). This adapter read AttrKey::Value
+    // instead, silently using the wrong scale factor (defaulting to 1.0)
+    // whenever alpha != 1.0.
+    double v = attrs.get_float(AttrKey::Alpha, 1.0);
     auto a = make_dual(primals[0], tangents[0]);
     auto b = make_dual(primals[1], tangents[1]);
     auto c = make_dual(primals[2], tangents[2]);
@@ -6975,27 +7224,108 @@ JvpResult jvp_adapter_renorm_s15(std::span<const Tensor> primals,
 //
 // SparseSpGEMM(A_sp, B_sp): C_sp = A_sp * B_sp (CSR x CSR).
 // Inputs: [A_crow, A_col, A_values, B_crow, B_col, B_values].
-// Output (single-output dispatch returns first slot which is C_crow).
-// We're constrained by the single-output JVP surface — return the primal
-// output and a zero tangent for the structural indices output. The values-
-// tangent is well-defined (bilinear in A.values and B.values) but isn't
-// reachable through single-output JVP. Caller should use a multi-output
-// path if values tangent is needed.
-JvpResult jvp_adapter_sparse_spgemm_s15(std::span<const Tensor> primals,
-                                        std::span<const Tensor> tangents,
-                                        const OpAttributes& attrs) {
+// Outputs: [C_crow, C_col, C_values] (audit H4: the single-output adapter
+// this replaced returned outs[0] = C_crow — an integer structural tensor —
+// as the "primal", not the values, and always returned a zero tangent even
+// though the true values-tangent is well-defined and bilinear:
+//   dC.values = SpGEMM(A_pattern, dA.values, B) + SpGEMM(A, B_pattern, dB.values)
+// A CSR product's sparsity pattern is a function of (crow, col) alone, not of
+// values, so substituting a tangent values buffer while keeping the SAME
+// (crow, col) pattern lands the result on exactly C's own pattern — the two
+// contributions sum position-for-position with C.values, no re-indexing
+// needed. crow/col themselves are non-differentiable structural outputs
+// (zero tangent, matching every other index/structural JVP output in this
+// file, e.g. jvp_adapter_cummax_impl above).
+JvpMultiResult jvp_adapter_sparse_spgemm_s15(std::span<const Tensor> primals,
+                                             std::span<const Tensor> tangents,
+                                             const OpAttributes& attrs) {
     if (primals.size() != 6 || tangents.size() != 6) {
         throw std::runtime_error(
             "jvp_adapter_sparse_spgemm_s15: expected 6 inputs "
             "(A_crow, A_col, A_values, B_crow, B_col, B_values)");
     }
+    const Tensor& A_crow = primals[0];
+    const Tensor& A_col = primals[1];
+    const Tensor& A_values = primals[2];
+    const Tensor& B_crow = primals[3];
+    const Tensor& B_col = primals[4];
+    const Tensor& B_values = primals[5];
+    const Tensor& dA_values = tangents[2];
+    const Tensor& dB_values = tangents[5];
+
     auto outs = tenzor::dispatch(OpId::SparseSpGEMM,
-        std::vector<Tensor>(primals.begin(), primals.end()), attrs);
-    Tensor primal = outs[0];
-    Tensor tangent = tenzor::zeros(
-        std::vector<int64_t>(primal.shape().begin(), primal.shape().end()),
-        primal.dtype(), primal.device());
-    return JvpResult{std::move(primal), std::move(tangent)};
+        std::vector<Tensor>{A_crow, A_col, A_values, B_crow, B_col, B_values}, attrs);
+    Tensor C_crow = outs[0];
+    Tensor C_col = outs[1];
+    Tensor C_values = outs[2];
+
+    int64_t M = attrs.get_int(AttrKey::M);
+    int64_t N = attrs.get_int(AttrKey::N);
+
+    // Each contribution below is computed via a fresh SpGEMM dispatch, which
+    // prunes exact-zero accumulated entries from its OWN output pattern (see
+    // cpu_spgemm_typed) — a contribution's nnz can legitimately be SMALLER
+    // than C's own pattern (e.g. dB_values == 0 makes the whole B-side
+    // contribution structurally empty). Summing two differently-pruned
+    // values tensors positionally would misalign or crash. Route through the
+    // dense M x N intermediate instead — exact, and sidesteps pattern
+    // alignment entirely — then gather back onto C's own (row, col)
+    // positions so the tangent is parallel to C_values.
+    OpAttributes dense_attrs;
+    dense_attrs.set(AttrKey::M, M);
+    dense_attrs.set(AttrKey::K, N);  // SparseToDense's kernel names its 2nd dim "K"
+
+    Tensor dense_tangent = tenzor::zeros({M, N}, C_values.dtype(), C_values.device());
+    if (dA_values.numel() > 0) {
+        auto outs_a = tenzor::dispatch(OpId::SparseSpGEMM,
+            std::vector<Tensor>{A_crow, A_col, dA_values, B_crow, B_col, B_values}, attrs);
+        auto dense_a = tenzor::dispatch(OpId::SparseToDense,
+            std::vector<Tensor>{outs_a[0], outs_a[1], outs_a[2]}, dense_attrs)[0];
+        dense_tangent = tenzor::add(dense_tangent, dense_a);
+    }
+    if (dB_values.numel() > 0) {
+        auto outs_b = tenzor::dispatch(OpId::SparseSpGEMM,
+            std::vector<Tensor>{A_crow, A_col, A_values, B_crow, B_col, dB_values}, attrs);
+        auto dense_b = tenzor::dispatch(OpId::SparseToDense,
+            std::vector<Tensor>{outs_b[0], outs_b[1], outs_b[2]}, dense_attrs)[0];
+        dense_tangent = tenzor::add(dense_tangent, dense_b);
+    }
+
+    // Gather dense_tangent[row, col] for each of C's nnz positions, in C's
+    // own CSR order. crow/col are tiny (O(nnz)) index metadata — expanding
+    // crow to a per-nnz row index on the host is standard CSR practice and
+    // mirrors what cpu_spgemm_typed itself does with raw index pointers.
+    int64_t nnz_c = C_values.numel();
+    Tensor values_tangent;
+    if (nnz_c == 0) {
+        values_tangent = tenzor::zeros_like(C_values);
+    } else {
+        Tensor crow_cpu = C_crow.to(Device::cpu()).contiguous();
+        Tensor col_cpu = C_col.to(Device::cpu()).contiguous();
+        Tensor flat_idx_cpu = Tensor({nnz_c}, DType::Int64, Device::cpu());
+        {
+            const int64_t* crow_ptr = crow_cpu.data<int64_t>();
+            const int64_t* col_ptr = col_cpu.data<int64_t>();
+            int64_t* flat_ptr = flat_idx_cpu.data<int64_t>();
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t p = crow_ptr[i]; p < crow_ptr[i + 1]; ++p) {
+                    flat_ptr[p] = i * N + col_ptr[p];
+                }
+            }
+        }
+        Tensor flat_idx = flat_idx_cpu.to(dense_tangent.device());
+        Tensor dense_flat = tenzor::reshape(dense_tangent, {M * N});
+        values_tangent = tenzor::index_select(dense_flat, 0, flat_idx);
+    }
+
+    Tensor crow_tangent = tenzor::zeros_like(C_crow);
+    Tensor col_tangent = tenzor::zeros_like(C_col);
+
+    JvpMultiResult result;
+    result.primals  = { std::move(C_crow), std::move(C_col), std::move(C_values) };
+    result.tangents = { std::move(crow_tangent), std::move(col_tangent),
+                         std::move(values_tangent) };
+    return result;
 }
 
 // SparseTrsv: L @ x = b ; x = L^{-1} b (with L lower or upper triangular).
@@ -8267,7 +8597,13 @@ JvpMultiResult jvp_adapter_linalg_svd_s15(std::span<const Tensor> primals,
     Tensor F = tenzor::div(diff, tenzor::add(tenzor::mul(diff, diff), eps2));
 
     Tensor Sd   = tenzor::linalg::diag_embed(S, 0, -2, -1);
-    Tensor Sinv = tenzor::linalg::diag_embed(tenzor::reciprocal(S), 0, -2, -1);
+    // M3: regularize Sinv the same way F above is regularized (Lorentzian
+    // broadening with the same eps2) instead of an unguarded reciprocal — a
+    // zero (or near-zero) singular value otherwise makes Sinv blow up to
+    // +Inf here, which can poison dU/dV with NaN even where the true JVP
+    // contribution is finite.
+    Tensor Sinv = tenzor::linalg::diag_embed(
+        tenzor::div(S, tenzor::add(tenzor::mul(S, S), eps2)), 0, -2, -1);
 
     Tensor C = tenzor::mul(F, tenzor::add(tenzor::matmul(P, Sd), tenzor::matmul(Sd, Pt)));
     Tensor D = tenzor::mul(F, tenzor::add(tenzor::matmul(Sd, P), tenzor::matmul(Pt, Sd)));
@@ -8414,9 +8750,20 @@ JvpResult jvp_adapter_linalg_householder_s15(std::span<const Tensor> primals,
     Tensor dR   = jvp_zeros_like_or(reflectors, tangents.empty()    ? Tensor() : tangents[0]);
     Tensor dtau = jvp_zeros_like_or(tau,        tangents.size() < 2 ? Tensor() : tangents[1]);
 
-    auto [Q, dQ] = householder_q_and_dq(reflectors, dR, tau, dtau);
+    // L3: the primal comes from the real dispatched op (LAPACK orgqr via
+    // OpId::LinalgHouseholder), matching every sibling S15 rule that needs a
+    // primal (SVD, Eig, LDLFactor, LDLSolve, Geqrf) instead of the naive
+    // sequential-reflector reconstruction below. householder_q_and_dq's own
+    // Q is discarded — it's only still computed here because dQ's recurrence
+    // needs the intermediate Q_i at each step — but dQ itself remains a
+    // valid tangent for the dispatched Q: it's an exact differentiation of
+    // the SAME mathematical Q(reflectors,tau) LAPACK computes, so the two
+    // primals agree up to rounding and dQ carries over unchanged.
+    auto [Q_naive, dQ] = householder_q_and_dq(reflectors, dR, tau, dtau);
+    (void)Q_naive;
+    auto outs = tenzor::dispatch(OpId::LinalgHouseholder, std::vector<Tensor>{reflectors, tau}, OpAttributes{});
     const int64_t n = reflectors.shape()[reflectors.ndim() - 1];
-    return JvpResult{ Q.slice(1, 0, n), dQ.slice(1, 0, n) };
+    return JvpResult{ outs[0], dQ.slice(1, 0, n) };
 }
 
 // Ormqr: Y = op(Q) B (left) or B op(Q) (right), op = transpose? Qᵀ : Q.
@@ -8437,8 +8784,36 @@ JvpResult jvp_adapter_ormqr_s15(std::span<const Tensor> primals,
     Tensor dtau = jvp_zeros_like_or(tau,        tangents.size() < 2 ? Tensor() : tangents[1]);
     Tensor dB   = jvp_zeros_like_or(B,          tangents.size() < 3 ? Tensor() : tangents[2]);
 
-    auto [Q, dQ] = householder_q_and_dq(reflectors, dR, tau, dtau);
-    Tensor opQ  = trans ? tenzor::transpose(Q,  -1, -2) : Q;
+    // L3: get the real op(Q) by dispatching OpId::Ormqr itself against an
+    // identity "other" operand (op(Q) @ I = op(Q), or I @ op(Q) = op(Q) on
+    // the right) — matching every sibling S15 rule that needs a primal.
+    // OpId::LinalgHouseholder (orgqr) isn't usable here: its (m,n) economy
+    // output isn't guaranteed to match Ormqr's implicit (order,order) Q when
+    // reflectors' column count differs from `order` (Ormqr only requires
+    // cols(reflectors) >= k, not == order). Using Ormqr's own kernel with
+    // B=I sidesteps that shape mismatch entirely, and folds `trans` in for
+    // free (the dispatch attrs already carry TransposeQ). The tangent dQ
+    // still comes from the naive sequential-reflector recurrence, which is
+    // an exact differentiation of the SAME mathematical Q(reflectors,tau)
+    // Ormqr computes, so it remains a valid tangent for the real primal.
+    auto [Q_naive, dQ] = householder_q_and_dq(reflectors, dR, tau, dtau);
+    (void)Q_naive;
+    std::vector<int64_t> B_shape(B.shape().begin(), B.shape().end());
+    const int64_t bndim = static_cast<int64_t>(B_shape.size());
+    const int64_t order = left ? B_shape[bndim - 2] : B_shape[bndim - 1];
+    Tensor I_order = tenzor::eye(order, std::nullopt, B.dtype(), B.device());
+    if (bndim > 2) {
+        std::vector<int64_t> full_shape(B_shape.begin(), B_shape.end() - 2);
+        full_shape.push_back(order);
+        full_shape.push_back(order);
+        for (int64_t i = 0; i < bndim - 2; ++i) {
+            I_order = tenzor::unsqueeze(I_order, 0);
+        }
+        I_order = tenzor::expand(I_order, full_shape);
+    }
+    auto ormqr_outs = tenzor::dispatch(OpId::Ormqr,
+        std::vector<Tensor>{reflectors, tau, I_order}, attrs);
+    Tensor opQ  = ormqr_outs[0];
     Tensor dopQ = trans ? tenzor::transpose(dQ, -1, -2) : dQ;
 
     Tensor Y, dY;
@@ -9336,7 +9711,7 @@ void register_builtin_jvp_rules() {
     // tangent. Register as NonDifferentiable until a multi-output JVP path
     // exists to return the values tangent (gather of dx at nonzero positions).
     register_jvp_rule(OpId::DenseToSparse,    &jvp_adapter_nondiff_dense_to_sparse);
-    register_jvp_rule(OpId::SparseSpGEMM,     &jvp_adapter_sparse_spgemm_s15);
+    register_jvp_rule_multi(OpId::SparseSpGEMM, &jvp_adapter_sparse_spgemm_s15);
     register_jvp_rule(OpId::SparseTrsv,       &jvp_adapter_sparse_trsv_s15);
     register_jvp_rule(OpId::SparseTrsm,       &jvp_adapter_sparse_trsm_s15);
     register_jvp_rule(OpId::SparseSoftmax,    &jvp_adapter_sparse_softmax_s15);

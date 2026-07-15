@@ -612,7 +612,8 @@ namespace oneapi {
                            bool count_include_pad, sycl::queue& queue) -> Tensor;
     auto avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& kernel_size,
                              const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
-                             const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+                             const std::vector<int64_t>& input_shape, bool count_include_pad,
+                             sycl::queue& queue) -> Tensor;
     auto adaptive_maxpool3d_forward(const Tensor& input, const std::vector<int64_t>& output_size,
                                      sycl::queue& queue) -> std::vector<Tensor>;
     auto adaptive_maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
@@ -782,12 +783,12 @@ namespace oneapi {
                     sycl::queue& queue) -> Tensor;
     auto roi_align_kernel(const Tensor& features, const Tensor& rois,
                           int64_t output_height, int64_t output_width,
-                          float spatial_scale, int64_t sampling_ratio, bool aligned,
+                          double spatial_scale, int64_t sampling_ratio, bool aligned,
                           sycl::queue& queue) -> Tensor;
     auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
                                    int64_t batch_size, int64_t channels,
                                    int64_t feat_height, int64_t feat_width,
-                                   float spatial_scale, int64_t sampling_ratio, bool aligned,
+                                   double spatial_scale, int64_t sampling_ratio, bool aligned,
                                    sycl::queue& queue) -> Tensor;
     auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& indices,
                                               int64_t num_positions, int64_t num_heads,
@@ -2533,7 +2534,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             std::vector<int64_t> st{s[0], s[1], s[2]};
             std::vector<int64_t> pd{p[0], p[1], p[2]};
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            return {oneapi::avgpool3d_backward(inputs[0], ks, st, pd, input_shape, get_q(inputs))};
+            // H14: PyTorch AvgPool3d default count_include_pad=true, matching
+            // the forward registration above.
+            const bool cip = attrs.get_bool(AttrKey::CountIncludePad, true);
+            return {oneapi::avgpool3d_backward(inputs[0], ks, st, pd, input_shape, cip, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d,
@@ -4070,9 +4074,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t output_height = attrs.get_int(AttrKey::OutputSizeH, 0);
             int64_t output_width = attrs.get_int(AttrKey::OutputSizeW, 0);
-            float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0));
+            // L4: default matches CPU/CUDA/ROCm (1/16, the standard ResNet
+            // C4/C5 feature-stride convention), not OneAPI's previous 1.0 —
+            // dead today (every call site sets this explicitly), but a
+            // latent trap for any future direct-dispatch caller that omits it.
+            double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
             int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
-            bool aligned = attrs.get_bool(AttrKey::Aligned, false);
+            // L4: default matches CPU/CUDA/ROCm (true), not OneAPI's
+            // previous false — see spatial_scale's comment above.
+            bool aligned = attrs.get_bool(AttrKey::Aligned, true);
             return {oneapi::roi_align_kernel(inputs[0], inputs[1], output_height, output_width,
                                               spatial_scale, sampling_ratio, aligned, get_q(inputs))};
         });
@@ -4083,9 +4093,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t channels = inputs[0].shape()[1];
             int64_t feat_height = attrs.get_int(AttrKey::FeatHeight, 0);
             int64_t feat_width = attrs.get_int(AttrKey::FeatWidth, 0);
-            float spatial_scale = static_cast<float>(attrs.get_float(AttrKey::SpatialScale, 1.0));
+            // L4: default matches CPU/CUDA/ROCm (1/16, the standard ResNet
+            // C4/C5 feature-stride convention), not OneAPI's previous 1.0 —
+            // dead today (every call site sets this explicitly), but a
+            // latent trap for any future direct-dispatch caller that omits it.
+            double spatial_scale = attrs.get_float(AttrKey::SpatialScale, 1.0 / 16.0);
             int64_t sampling_ratio = attrs.get_int(AttrKey::SamplingRatio, 0);
-            bool aligned = attrs.get_bool(AttrKey::Aligned, false);
+            // L4: default matches CPU/CUDA/ROCm (true), not OneAPI's
+            // previous false — see spatial_scale's comment above.
+            bool aligned = attrs.get_bool(AttrKey::Aligned, true);
             return {oneapi::roi_align_backward_kernel(inputs[0], inputs[1], batch_size, channels,
                                                        feat_height, feat_width, spatial_scale,
                                                        sampling_ratio, aligned, get_q(inputs))};

@@ -282,7 +282,13 @@ auto LBFGS::gather_flat_grad() const -> Tensor {
         if (!p) continue;
         auto& t = p->tensor();
         if (p->has_grad()) {
-            const auto& g = *p->grad();
+            // Dangling-reference fix: grad() returns optional<Tensor> BY
+            // VALUE; *grad() dereferences that temporary and returns a
+            // reference that is NOT lifetime-extended (operator* is
+            // &&-qualified on a prvalue), so binding a reference here
+            // dangled past this statement — manifested as "Cannot reshape
+            // null tensor" below. Bind by value.
+            const Tensor g = *p->grad();
             auto flat = reshape(g, {g.numel()});
             if (flat.dtype() != target_dt) {
                 flat = flat.to(target_dt);

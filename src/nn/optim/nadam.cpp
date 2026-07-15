@@ -82,7 +82,8 @@ auto NAdam::step_impl() -> void {
 
         const double bias_correction2 = 1.0 - std::pow(hp.beta2, t);
 
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
 
         // R.16: half-precision params run the math in the state dtype.
         const DType param_dt = param.tensor().dtype();

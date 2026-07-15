@@ -81,7 +81,8 @@ void main() {
                                 uint(in_y) * params.in_width + uint(in_x);
                 float value = readF16Element(input_idx);
 
-                if (value > max_val) {
+                // L2: NaN-propagating (see non-f16 variant's comment).
+                if (value > max_val || value != value) {
                     max_val = value;
                     max_idx = int(uint(in_y) * params.in_width + uint(in_x));  // plane-local (see non-f16 variant)
                 }

@@ -157,4 +157,91 @@ TEST_P(AutogradThreadSafety, MultiPathGraph) {
     EXPECT_NEAR(grad_sum, 18.0f, 1e-4f);
 }
 
+TEST_P(AutogradThreadSafety, ConcurrentGradReadWithoutMakeThreadSafe) {
+    // L1: Variable::grad()/has_grad()/accumulate_grad()/zero_grad() used to
+    // only take grad_mutex_ when make_thread_safe() had been called, while
+    // BackwardEngine::execute()'s leaf-accumulation lock took it
+    // unconditionally on every leaf regardless of that flag — an easy-to-
+    // miss asymmetry: a user thread reading .grad() without opting in raced
+    // against a concurrent backward() writing it under lock. Locking is now
+    // unconditional on both sides, so this must be race-free WITHOUT calling
+    // make_thread_safe() at all — the opposite of the tests above, which
+    // exercise the (now-legacy no-op) opt-in path.
+    //
+    // This is a best-effort stress test, not a guaranteed race detector: a
+    // plain (non-TSAN) build can't deterministically prove the old
+    // unconditional-vs-conditional lock asymmetry was unsafe, since the
+    // race window is a few pointer-sized reads/writes. It does exercise the
+    // exact interleaving the finding describes under real contention, and
+    // will reliably crash/corrupt under ThreadSanitizer (-DTENZOR_ENABLE_TSAN)
+    // if the accessor-side lock is ever made conditional again.
+    auto w = Variable(randn({8, 8}, DType::Float32, device), true);
+    // Deliberately NOT calling w.make_thread_safe().
+
+    constexpr int num_writer_threads = 4;
+    constexpr int num_reader_threads = 4;
+    constexpr int iters = 200;
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> writer_done{0};
+    std::atomic<int> reader_iterations{0};
+    std::vector<std::thread> threads;
+
+    tenzor::Device dev = device;
+    for (int t = 0; t < num_writer_threads; ++t) {
+        threads.emplace_back([&w, &writer_done, dev]() {
+            for (int i = 0; i < iters; ++i) {
+                auto x = Variable(randn({8, 8}, DType::Float32, dev), false);
+                auto y = x * w;
+                auto loss = tenzor::sum(y);
+                loss.backward();
+                w.zero_grad();
+            }
+            ++writer_done;
+        });
+    }
+    for (int t = 0; t < num_reader_threads; ++t) {
+        threads.emplace_back([&w, &stop, &reader_iterations]() {
+            // has_grad() and grad() are each individually synchronized, but
+            // NOT as one atomic transaction across both calls — a writer's
+            // zero_grad() can legitimately land between them, so checking
+            // has_grad()==true implies a later grad().has_value()==true
+            // would be a test bug, not a real race. Instead, call grad()
+            // alone and check that WHATEVER it returns is internally
+            // well-formed (a torn/half-written optional<Tensor> would show
+            // up as a Tensor with a null/garbage data pointer or a shape
+            // that doesn't match w's).
+            int local_iters = 0;
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto g = w.grad();
+                if (g.has_value()) {
+                    EXPECT_NE(g->data_ptr(), nullptr)
+                        << "grad() returned a value with a null data "
+                           "pointer — torn read of grad_ under concurrent "
+                           "accumulation";
+                    auto g_shape = std::vector<int64_t>(g->shape().begin(), g->shape().end());
+                    auto w_shape = std::vector<int64_t>(w.tensor().shape().begin(), w.tensor().shape().end());
+                    EXPECT_EQ(g_shape, w_shape)
+                        << "grad() returned a value with the wrong shape — "
+                           "torn read of grad_ under concurrent accumulation";
+                }
+                ++local_iters;
+            }
+            reader_iterations += local_iters;
+        });
+    }
+
+    for (int t = 0; t < num_writer_threads; ++t) {
+        threads[t].join();
+    }
+    stop.store(true, std::memory_order_relaxed);
+    for (int t = num_writer_threads; t < num_writer_threads + num_reader_threads; ++t) {
+        threads[t].join();
+    }
+
+    EXPECT_EQ(writer_done.load(), num_writer_threads);
+    EXPECT_GT(reader_iterations.load(), 0)
+        << "Reader threads should have observed at least one iteration";
+}
+
 INSTANTIATE_BACKEND_TESTS(AutogradThreadSafety);

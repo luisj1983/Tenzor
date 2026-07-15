@@ -18,7 +18,8 @@ layout(push_constant) uniform PushConstants {
 
 // Helper to compute start index for adaptive pooling
 int start_index(int a, int b, int c) {
-    return int(floor(float(a * c) / float(b)));
+    // M14: pure integer division — see adaptive_pooling.comp for rationale.
+    return (a * c) / b;
 }
 
 // Helper to compute end index for adaptive pooling

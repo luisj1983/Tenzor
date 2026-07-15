@@ -632,6 +632,10 @@ auto erfinv(const Variable& input) -> Variable;
 /// Gamma function Γ(x). Grad: Γ(x)*ψ(x)
 auto gamma(const Variable& input) -> Variable;
 
+/// M2: ldexp(x, n) = x * 2^n. Grad: grad_x = ldexp(grad, n); n is
+/// integer/non-differentiable (grad_n is zero).
+auto ldexp(const Variable& x, const Variable& n) -> Variable;
+
 /// Log-gamma ln|Γ(x)|. Grad: ψ(x) (digamma)
 auto lgamma(const Variable& input) -> Variable;
 

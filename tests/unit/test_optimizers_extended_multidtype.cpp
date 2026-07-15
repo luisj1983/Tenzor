@@ -285,12 +285,26 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradLearningRateDecay) {
 
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
 
+    // get_lr() intentionally always reports the base (undecayed) learning
+    // rate — matching set_lr()'s unit and RMSprop/Adadelta's get_lr() — so
+    // that LR schedulers (ReduceLROnPlateau, cyclic, etc.) compose correctly
+    // even when lr_decay > 0. The decayed value is exposed separately via
+    // effective_lr() = lr / (1 + (step_count - 1) * lr_decay), which (as in
+    // PyTorch's Adagrad) leaves step 1 undecayed and only starts decaying
+    // from step 2 onward.
     param1_->set_grad(createOnes({2, 3}));
     param2_->set_grad(createOnes({4}));
     optimizer.step();
 
-    // Learning rate should decay
-    EXPECT_LT(optimizer.get_lr(), 0.1);
+    EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
+    EXPECT_FLOAT_EQ(optimizer.effective_lr(), 0.1);
+
+    param1_->set_grad(createOnes({2, 3}));
+    param2_->set_grad(createOnes({4}));
+    optimizer.step();
+
+    EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
+    EXPECT_LT(optimizer.effective_lr(), 0.1);
 }
 
 TEST_P(OptimizersExtendedMultiDTypeTest, AdagradInitialAccumulator) {
@@ -459,8 +473,19 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaConvergence) {
 //==============================================================================
 
 TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropNumericalStability) {
+    // RMSprop update = lr * g / (sqrt(v) + eps), v = (1-alpha)*g^2 after one
+    // step from a zero-initialized square_avg. With g too large relative to
+    // eps, sqrt(v) = sqrt(1-alpha)*|g| can itself dominate eps rather than
+    // eps dominating sqrt(v) — the previous g=1e-7 with default alpha=0.99,
+    // eps=1e-8 gave sqrt(v)=0.1*1e-7=1e-8, i.e. exactly comparable to eps,
+    // so the update was ~0.5 (lr*g/(2*eps)), not "slight". That was a wrong
+    // test expectation, not an optimizer bug: verified the RMSprop formula
+    // itself (src/nn/optim/rmsprop.cpp) exactly matches the standard
+    // update (denom = sqrt(square_avg) + eps, eps added AFTER sqrt,
+    // matching PyTorch). Use g=1e-10 so sqrt(v)=1e-11 << eps=1e-8 and eps
+    // genuinely dominates: update ≈ lr*g/eps = 0.1*1e-10/1e-8 = 1e-3.
     auto param = std::make_shared<Variable>(createOnes({10}), true);
-    param->set_grad(createFull({10}, 1e-7));
+    param->set_grad(createFull({10}, 1e-10));
 
     auto optimizer = RMSprop(std::vector<std::shared_ptr<Variable>>{param}, 0.1);
 

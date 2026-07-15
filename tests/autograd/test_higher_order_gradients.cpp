@@ -7,12 +7,14 @@
  */
 
 #include <gtest/gtest.h>
+#include <cstring>
 #include "../backend_test_fixture.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -271,6 +273,249 @@ TEST_P(HigherOrderGradTest, ChainedOpsCreateGraph) {
         EXPECT_NEAR(x_grad.data<float>()[i], 7.0f, 1e-4f)
             << "x grad wrong on " << device.to_string();
     }
+}
+
+// ============================================================================
+// M17-M24: bmm/linear/erfinv/det/inv/solve/lu/slogdet forward wrappers used
+// to never call save_variables_for_backward(), so backward_with_variables()
+// always fell back to a detached Variable(saved_tensors_[...], false). The
+// FIRST-order gradient (tested above, e.g. MatMulBackwardWithVariables) was
+// still numerically correct, but create_graph=true produced a gradient with
+// NO further graph connection back to the input — a second .backward()
+// through it silently left the second-order gradient at zero, with no
+// error. Mirrors Conv2d_DoubleBackward in test_higher_order_nn.cpp (same bug
+// class, found there as H18/H19): read grad_variable() (populated by
+// create_graph=true) instead of re-wrapping .grad(), zero_grad() the target
+// leaf so the second backward's contribution isn't masked by the
+// already-nonzero first-order value, then assert EXPECT_GRAD_FLOWS.
+// ============================================================================
+
+namespace {
+// Diagonally dominant, symmetric, well-conditioned 3x3 — safe for det/inv/
+// solve/lu/slogdet (det ~= 50, condition number small) without needing a
+// random-matrix invertibility retry loop.
+auto well_conditioned_3x3(Device device) -> Variable {
+    Tensor t = zeros({3, 3}, DType::Float64, Device::cpu());
+    double vals[9] = {4, 1, 0, 1, 4, 1, 0, 1, 4};
+    std::memcpy(t.data_ptr(), vals, sizeof(vals));
+    return Variable(t.to(device), true);
+}
+}  // namespace
+
+// M17-M24's save_variables_for_backward() calls are gated on
+// is_creating_graph() || higher_order_graph_retention_enabled(), checked at
+// FORWARD time — per higher_order_graph_retention_enabled()'s own doc
+// comment, retention is off by default (a bare create_graph=true backward
+// after an ordinary forward pass does NOT retroactively enable it) and must
+// be opted into for the forward pass via HigherOrderGraphRetentionGuard,
+// exactly as hvp()/hessian() do internally (see functional.cpp). Each test
+// below wraps forward + the first create_graph=true backward in that guard.
+
+TEST_P(HigherOrderGradTest, Bmm_DoubleBackward) {
+    // grad_b = a_t @ grad_out depends on saved `a` — verify d(grad_b)/d(a)
+    // is nonzero, i.e. backward_with_variables used the live `a`, not a
+    // detached copy.
+    auto a = Variable(randn({2, 3, 3}, DType::Float64, device) * 0.5, true);
+    auto b = Variable(randn({2, 3, 3}, DType::Float64, device) * 0.5, true);
+    Variable grad_b_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto y = tenzor::bmm(a, b);
+        auto loss = tenzor::sum(y);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        ASSERT_TRUE(b.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable() for b";
+        grad_b_var = b.grad_variable().value();
+    }
+    a.zero_grad();
+    auto grad_norm = tenzor::sum(grad_b_var * grad_b_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(a);
+}
+
+TEST_P(HigherOrderGradTest, Linear_DoubleBackward) {
+    // grad_w = grad_out.T @ x depends on saved `x` — verify d(grad_w)/d(x)
+    // is nonzero.
+    auto x = Variable(randn({4, 8}, DType::Float64, device), true);
+    auto w = Variable(randn({16, 8}, DType::Float64, device), true);
+    auto b = Variable(zeros({16}, DType::Float64, device), false);
+    Variable grad_w_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto y = tenzor::linear(x, w, b);
+        auto loss = tenzor::sum(y);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        ASSERT_TRUE(w.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable() for w";
+        grad_w_var = w.grad_variable().value();
+    }
+    x.zero_grad();
+    auto grad_norm = tenzor::sum(grad_w_var * grad_w_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(x);
+}
+
+TEST_P(HigherOrderGradTest, ErfInv_DoubleBackward) {
+    Tensor t = zeros({2, 3}, DType::Float64, Device::cpu());
+    double vals[6] = {-0.7, -0.3, 0.1, 0.4, 0.6, 0.2};
+    std::memcpy(t.data_ptr(), vals, sizeof(vals));
+    auto x = Variable(t.to(device), true);
+    Variable grad_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto y = tenzor::erfinv(x);
+        auto loss = tenzor::sum(y);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        EXPECT_GRAD_FLOWS(x);
+        ASSERT_TRUE(x.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable()";
+        grad_var = x.grad_variable().value();
+    }
+    x.zero_grad();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(x);
+}
+
+TEST_P(HigherOrderGradTest, Det_DoubleBackward) {
+    auto A = well_conditioned_3x3(device);
+    Variable grad_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto y = tenzor::det(A);
+        auto loss = tenzor::sum(y);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        EXPECT_GRAD_FLOWS(A);
+        ASSERT_TRUE(A.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable()";
+        grad_var = A.grad_variable().value();
+    }
+    A.zero_grad();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(A);
+}
+
+TEST_P(HigherOrderGradTest, Inv_DoubleBackward) {
+    auto A = well_conditioned_3x3(device);
+    Variable grad_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto y = tenzor::inv(A);
+        auto loss = tenzor::sum(y);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        EXPECT_GRAD_FLOWS(A);
+        ASSERT_TRUE(A.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable()";
+        grad_var = A.grad_variable().value();
+    }
+    A.zero_grad();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(A);
+}
+
+TEST_P(HigherOrderGradTest, Solve_DoubleBackward) {
+    auto A = well_conditioned_3x3(device);
+    auto B = Variable(randn({3, 2}, DType::Float64, device), false);
+    Variable grad_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto y = tenzor::solve(A, B);
+        auto loss = tenzor::sum(y);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        EXPECT_GRAD_FLOWS(A);
+        ASSERT_TRUE(A.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable()";
+        grad_var = A.grad_variable().value();
+    }
+    A.zero_grad();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(A);
+}
+
+TEST_P(HigherOrderGradTest, Lu_DoubleBackward) {
+    auto A = well_conditioned_3x3(device);
+    Variable grad_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto [L, U, pivots] = tenzor::lu(A);
+        auto loss = tenzor::sum(L) + tenzor::sum(U);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        EXPECT_GRAD_FLOWS(A);
+        ASSERT_TRUE(A.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable()";
+        grad_var = A.grad_variable().value();
+    }
+    A.zero_grad();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(A);
+}
+
+TEST_P(HigherOrderGradTest, Slogdet_DoubleBackward) {
+    auto A = well_conditioned_3x3(device);
+    Variable grad_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto [sign, logabsdet] = tenzor::slogdet(A);
+        auto loss = tenzor::sum(logabsdet);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        EXPECT_GRAD_FLOWS(A);
+        ASSERT_TRUE(A.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable()";
+        grad_var = A.grad_variable().value();
+    }
+    A.zero_grad();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(A);
+}
+
+TEST_P(HigherOrderGradTest, GumbelSoftmax_DoubleBackward) {
+    // M32: grad_logits = y_soft * (grad_out - sum(grad_out*y_soft, dim)) / tau
+    // depends on y_soft, which itself depends on logits (y_soft =
+    // softmax((logits+Gumbel)/tau)) — verify d(grad_logits)/d(logits) is
+    // nonzero, i.e. the forward built a genuinely graph-connected y_soft
+    // Variable to save (not a pre-detached copy, which silently zeroed this
+    // term regardless of has_saved_variables()).
+    //
+    // loss must be chosen so grad_out (=d(loss)/dy) is a plain CONSTANT with
+    // no graph of its own — otherwise grad_out's own chain back to logits
+    // (via y's grad_fn) would make the second backward nonzero even with the
+    // bug, defeating the test. sum(y) doesn't work either: it makes
+    // grad_out a constant ones-vector, but softmax always sums to 1, so its
+    // Jacobian applied to a constant vector is identically zero regardless
+    // of y_soft's connectivity (grad_logits would be zero even when fixed).
+    // sum(y * w) for a fixed, non-differentiable w gives grad_out = w
+    // exactly (no graph) while keeping grad_logits generically nonzero —
+    // isolating the y_soft_v-connectivity bug precisely.
+    auto logits = Variable(randn({4, 5}, DType::Float64, device), true);
+    auto w = Variable(randn({4, 5}, DType::Float64, device), false);
+    Variable grad_logits_var;
+    {
+        HigherOrderGraphRetentionGuard guard;
+        auto y = tenzor::gumbel_softmax(logits, /*tau=*/1.0, /*hard=*/false, /*dim=*/-1);
+        auto loss = tenzor::sum(y * w);
+        loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        ASSERT_TRUE(logits.grad_variable().has_value())
+            << "create_graph=true must populate grad_variable() for logits";
+        grad_logits_var = logits.grad_variable().value();
+    }
+    logits.zero_grad();
+    auto grad_norm = tenzor::sum(grad_logits_var * grad_logits_var);
+    grad_norm.backward();
+
+    EXPECT_GRAD_FLOWS(logits);
 }
 
 INSTANTIATE_BACKEND_TESTS(HigherOrderGradTest);

@@ -285,6 +285,37 @@ TEST_F(JVPTest, FunctionalJVPSquare) {
     EXPECT_NEAR(tp[2], 6.0f, 0.1f);
 }
 
+// M25: jvp_used_fd_fallback() is the programmatic signal for the FD
+// degradation previously visible only via an stderr print.
+TEST_F(JVPTest, UsedFdFallback_FalseForRegisteredOp) {
+    auto x = Variable(tenzor::ones({3}, DType::Float32, Device::cpu()), true);
+    auto v = tenzor::ones({3}, DType::Float32, Device::cpu());
+    auto f = [](const Variable& inp) -> Variable { return inp * inp; };
+
+    jvp(f, x, v);
+
+    EXPECT_FALSE(jvp_used_fd_fallback())
+        << "x*x has a registered JVP rule (Mul) — should take the exact "
+           "graph-walk path, not FD";
+}
+
+TEST_F(JVPTest, UsedFdFallback_TrueWhenGraphSevered) {
+    // A func whose output has no grad_fn (raw-tensor op, requires_grad=false)
+    // gives try_traverse_jvp nothing to walk, forcing the FD fallback —
+    // deterministic without needing to hunt down a genuinely-unregistered op.
+    auto x = Variable(tenzor::ones({3}, DType::Float32, Device::cpu()), true);
+    auto v = tenzor::ones({3}, DType::Float32, Device::cpu());
+    auto f = [](const Variable& inp) -> Variable {
+        return Variable(tenzor::mul(inp.tensor(), inp.tensor()), false);
+    };
+
+    jvp(f, x, v);
+
+    EXPECT_TRUE(jvp_used_fd_fallback())
+        << "func returns a Variable with no grad_fn — jvp() must fall back "
+           "to finite differences and report that it did";
+}
+
 // ============================================================================
 // Reduction JVP tests
 // ============================================================================

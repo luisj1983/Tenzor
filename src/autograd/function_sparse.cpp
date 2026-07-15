@@ -172,6 +172,13 @@ auto SparseTriSolveBackward::backward_with_variables(std::vector<Variable> grad_
 // grad_dense projected onto the pattern.  Positions outside the pattern were
 // structural zeros in the forward (no functional dependence on any value),
 // so they receive zero gradient.
+//
+// L7: the "Forward (executed by the dispatcher in ops.cpp...)" comment above
+// describes the INTENDED wiring — no such dispatcher entry actually exists.
+// SparseTensor::to_dense() is a raw utility method with no Variable-level
+// autograd wrapper (see the @note on SparseToDenseBackward's class doc in
+// function.hpp), so this Function is currently unreachable. Kept as
+// correctly-implemented, ready-to-wire logic rather than removed.
 
 auto SparseToDenseBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
     throw std::runtime_error("SparseToDenseBackward::forward should not be called directly");

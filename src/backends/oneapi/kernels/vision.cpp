@@ -344,7 +344,7 @@ auto roi_align_kernel(
     const Tensor& rois,
     int64_t output_height,
     int64_t output_width,
-    float spatial_scale,
+    double spatial_scale,
     int64_t sampling_ratio,
     bool aligned,
     sycl::queue& queue
@@ -394,6 +394,11 @@ auto roi_align_kernel(
         float* output_ptr = get_data_ptr<float>(output);
 
         const float offset = aligned ? 0.5f : 0.0f;
+        // M15: narrow spatial_scale to float BEFORE lambda capture so this
+        // pure-Float32 compute path never introduces a double-typed operand —
+        // some SYCL devices lack cl_khr_fp64 and this branch must keep working
+        // on those.
+        const float spatial_scale_f32 = static_cast<float>(spatial_scale);
 
         queue.parallel_for<ROIAlignKernelFloat32>(
             sycl::range<1>(total_elements),
@@ -414,10 +419,10 @@ auto roi_align_kernel(
                     output_ptr[idx] = 0;
                     return;
                 }
-                float roi_x1 = roi[1] * spatial_scale - offset;
-                float roi_y1 = roi[2] * spatial_scale - offset;
-                float roi_x2 = roi[3] * spatial_scale - offset;
-                float roi_y2 = roi[4] * spatial_scale - offset;
+                float roi_x1 = roi[1] * spatial_scale_f32 - offset;
+                float roi_y1 = roi[2] * spatial_scale_f32 - offset;
+                float roi_x2 = roi[3] * spatial_scale_f32 - offset;
+                float roi_y2 = roi[4] * spatial_scale_f32 - offset;
 
                 float roi_width = roi_x2 - roi_x1;
                 float roi_height = roi_y2 - roi_y1;
@@ -643,7 +648,7 @@ auto roi_align_backward_kernel(
     int64_t channels,
     int64_t feat_height,
     int64_t feat_width,
-    float spatial_scale,
+    double spatial_scale,
     int64_t sampling_ratio,
     bool aligned,
     sycl::queue& queue
@@ -707,6 +712,8 @@ auto roi_align_backward_kernel(
         queue.fill(grad_feat_ptr, 0.0f, feat_size);
 
         const float offset = aligned ? 0.5f : 0.0f;
+        // M15: see roi_align_kernel's forward Float32 branch for rationale.
+        const float spatial_scale_f32 = static_cast<float>(spatial_scale);
 
         queue.parallel_for<ROIAlignBackwardKernelFloat32>(
             sycl::range<1>(total_elements),
@@ -725,10 +732,10 @@ auto roi_align_backward_kernel(
                 if (batch_idx < 0 || batch_idx >= batch_size) {
                     return;
                 }
-                float roi_x1 = roi[1] * spatial_scale - offset;
-                float roi_y1 = roi[2] * spatial_scale - offset;
-                float roi_x2 = roi[3] * spatial_scale - offset;
-                float roi_y2 = roi[4] * spatial_scale - offset;
+                float roi_x1 = roi[1] * spatial_scale_f32 - offset;
+                float roi_y1 = roi[2] * spatial_scale_f32 - offset;
+                float roi_x2 = roi[3] * spatial_scale_f32 - offset;
+                float roi_y2 = roi[4] * spatial_scale_f32 - offset;
 
                 float roi_width = roi_x2 - roi_x1;
                 float roi_height = roi_y2 - roi_y1;

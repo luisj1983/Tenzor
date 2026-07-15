@@ -251,6 +251,12 @@ Tensor mps_maxpool2d_backward_kernel(
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
 
         uint32_t num_output = static_cast<uint32_t>(grad_output.numel());
+        // M13: indices are now (n,c)-plane-local (matching every other
+        // backend); reconstruct the full offset here the same way
+        // mps_adaptive_maxpool3d_backward_kernel does.
+        auto go_shape = grad_output.shape();  // [N, C, H_out, W_out]
+        uint32_t out_spatial = static_cast<uint32_t>(go_shape[2] * go_shape[3]);
+        uint32_t in_plane = static_cast<uint32_t>(input_shape[2] * input_shape[3]);
 
         auto pipeline = get_pipeline(shader_for_dtype("maxpool2d_backward_kernel", grad_output.dtype()));
         id<MTLBuffer> buf_grad_out = get_buffer(grad_output);
@@ -263,7 +269,9 @@ Tensor mps_maxpool2d_backward_kernel(
         [enc setBuffer:buf_grad_out offset:0 atIndex:0];
         [enc setBuffer:buf_indices  offset:0 atIndex:1];
         [enc setBuffer:buf_grad_in  offset:0 atIndex:2];
-        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&out_spatial length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&in_plane length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:5];
         dispatch_1d(enc, pipeline, num_output);
         [enc endEncoding];
         [cmd commit];
@@ -531,6 +539,10 @@ Tensor mps_adaptive_maxpool2d_backward_kernel(
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
 
         uint32_t num_output = static_cast<uint32_t>(grad_output.numel());
+        // M13: indices are now (n,c)-plane-local — see mps_maxpool2d_backward_kernel above.
+        auto go_shape = grad_output.shape();  // [N, C, H_out, W_out]
+        uint32_t out_spatial = static_cast<uint32_t>(go_shape[2] * go_shape[3]);
+        uint32_t in_plane = static_cast<uint32_t>(input_shape[2] * input_shape[3]);
 
         auto pipeline = get_pipeline(shader_for_dtype("adaptive_maxpool2d_backward_kernel", grad_output.dtype()));
         id<MTLBuffer> buf_grad_out = get_buffer(grad_output);
@@ -543,7 +555,9 @@ Tensor mps_adaptive_maxpool2d_backward_kernel(
         [enc setBuffer:buf_grad_out offset:0 atIndex:0];
         [enc setBuffer:buf_indices  offset:0 atIndex:1];
         [enc setBuffer:buf_grad_in  offset:0 atIndex:2];
-        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&out_spatial length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&in_plane length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:5];
         dispatch_1d(enc, pipeline, num_output);
         [enc endEncoding];
         [cmd commit];
@@ -558,12 +572,12 @@ Tensor mps_adaptive_maxpool3d_backward_kernel(
     const Tensor& grad_output, const Tensor& indices,
     const std::vector<int64_t>& input_shape)
 {
-    // 3D analogue of the 2D adaptive max-pool backward above. The forward
-    // (`adaptive_maxpool3d_forward_kernel` in pool3d.metal) emits a linear
-    // input index per output element; backward atomically accumulates
-    // grad_output into grad_input at that index. Native Metal — replaces
-    // the previous mps_accelerate_single CPU roundtrip for
-    // OpId::AdaptiveMaxPool3dBackward.
+    // The forward for this op is registered as an mps_accelerate_multi
+    // CPU-roundtrip (cpu::adaptive_maxpool3d_impl), which emits Int64 indices
+    // LOCAL to each (n,c) plane — the same convention every other backend
+    // uses. Backward here is native Metal, so it must read that Int64 buffer
+    // at its true stride and re-add the (n,c) plane base offset itself
+    // (audit CR2) rather than assume a self-produced global index.
     @autoreleasepool {
         // F16/BF16 path: Metal lacks half atomics so the *_f16 kernel does a
         // non-atomic read-modify-write. Under ceil_mode (or any scatter where
@@ -581,12 +595,17 @@ Tensor mps_adaptive_maxpool3d_backward_kernel(
         size_t bytes = grad_input.numel() * dtype_size(grad_input.dtype());
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
 
+        auto go_shape = grad_output.shape();  // [N, C, D_out, H_out, W_out]
+        uint32_t out_spatial = static_cast<uint32_t>(go_shape[2] * go_shape[3] * go_shape[4]);
+        uint32_t in_plane = static_cast<uint32_t>(input_shape[2] * input_shape[3] * input_shape[4]);
         uint32_t num_output = static_cast<uint32_t>(grad_output.numel());
+
+        Tensor indices_i64 = indices.dtype() == DType::Int64 ? indices : indices.to(DType::Int64);
 
         auto pipeline = get_pipeline(shader_for_dtype(
             "adaptive_maxpool3d_backward_kernel", grad_output.dtype()));
         id<MTLBuffer> buf_grad_out = get_buffer(grad_output);
-        id<MTLBuffer> buf_indices  = get_buffer(indices);
+        id<MTLBuffer> buf_indices  = get_buffer(indices_i64);
         id<MTLBuffer> buf_grad_in  = get_buffer(grad_input);
 
         id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
@@ -595,7 +614,9 @@ Tensor mps_adaptive_maxpool3d_backward_kernel(
         [enc setBuffer:buf_grad_out offset:0 atIndex:0];
         [enc setBuffer:buf_indices  offset:0 atIndex:1];
         [enc setBuffer:buf_grad_in  offset:0 atIndex:2];
-        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&out_spatial length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&in_plane length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:5];
         dispatch_1d(enc, pipeline, num_output);
         [enc endEncoding];
         [cmd commit];
@@ -666,6 +687,10 @@ Tensor mps_maxpool1d_backward_kernel(
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
 
         uint32_t num_output = static_cast<uint32_t>(grad_output.numel());
+        // M13: indices are now (n,c)-plane-local — see mps_maxpool2d_backward_kernel above.
+        auto go_shape = grad_output.shape();  // [N, C, L_out]
+        uint32_t out_spatial = static_cast<uint32_t>(go_shape[2]);
+        uint32_t in_plane = static_cast<uint32_t>(input_shape[2]);
 
         auto pipeline = get_pipeline(shader_for_dtype("maxpool1d_backward_kernel", grad_output.dtype()));
         id<MTLBuffer> buf_grad_out = get_buffer(grad_output);
@@ -678,7 +703,9 @@ Tensor mps_maxpool1d_backward_kernel(
         [enc setBuffer:buf_grad_out offset:0 atIndex:0];
         [enc setBuffer:buf_indices  offset:0 atIndex:1];
         [enc setBuffer:buf_grad_in  offset:0 atIndex:2];
-        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&out_spatial length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&in_plane length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:5];
         dispatch_1d(enc, pipeline, num_output);
         [enc endEncoding];
         [cmd commit];
@@ -928,6 +955,10 @@ Tensor mps_adaptive_maxpool1d_backward_kernel(
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
 
         uint32_t num_output = static_cast<uint32_t>(grad_output.numel());
+        // M13: indices are now (n,c)-plane-local — see mps_maxpool2d_backward_kernel above.
+        auto go_shape = grad_output.shape();  // [N, C, L_out]
+        uint32_t out_spatial = static_cast<uint32_t>(go_shape[2]);
+        uint32_t in_plane = static_cast<uint32_t>(input_shape[2]);
 
         auto pipeline = get_pipeline(shader_for_dtype("adaptive_maxpool1d_backward_kernel", grad_output.dtype()));
         id<MTLBuffer> buf_grad_out = get_buffer(grad_output);
@@ -940,7 +971,9 @@ Tensor mps_adaptive_maxpool1d_backward_kernel(
         [enc setBuffer:buf_grad_out offset:0 atIndex:0];
         [enc setBuffer:buf_indices  offset:0 atIndex:1];
         [enc setBuffer:buf_grad_in  offset:0 atIndex:2];
-        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&out_spatial length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&in_plane length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&num_output length:sizeof(uint32_t) atIndex:5];
         dispatch_1d(enc, pipeline, num_output);
         [enc endEncoding];
         [cmd commit];

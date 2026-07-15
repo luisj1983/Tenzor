@@ -11,6 +11,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/tenzor.hpp"
 #include "../backend_test_fixture.hpp"
 #include <cmath>
@@ -75,6 +76,40 @@ TEST_F(VmapTest, VmapSquare) {
     auto diff = tenzor::abs(tenzor::sub(result.tensor(), expected));
     float max_diff = *tenzor::max(diff).data<float>();
     EXPECT_LT(max_diff, 1e-6f);
+}
+
+// H15: vmap() used to select a batching rule by probing only the OUTERMOST
+// op of a composed function. relu(sum(x, dim=0)) probes as ReLUBackward
+// (raw single-shot passthrough-eligible), so the WHOLE composition ran in
+// one shot on the batched tensor — sum(x, dim=0) then reduced over the BATCH
+// axis instead of each unbatched row's own axis 0. Correct per-row sums for
+// rows [1,2,3]/[4,5,6] are [6,15] (shape (2,)); the bug produced column sums
+// [5,7,9] (shape (3,)) — wrong shape AND wrong values, no error raised.
+TEST_F(VmapTest, VmapComposedInnerDimOpNotShadowedByOuterPassthrough) {
+    auto data = tenzor::zeros({2, 3}, DType::Float32, Device::cpu());
+    float* dp = data.data<float>();
+    dp[0] = 1.0f; dp[1] = 2.0f; dp[2] = 3.0f;
+    dp[3] = 4.0f; dp[4] = 5.0f; dp[5] = 6.0f;
+    // requires_grad=true is essential: vmap()'s probe only builds a grad_fn
+    // graph (and therefore only reaches the batching-rule dispatch this bug
+    // lives in) when the input requires grad. A requires_grad=false probe
+    // has no grad_fn at all and silently takes the always-safe
+    // vmap_loop_and_stack fallback regardless of this bug's fix state —
+    // exactly the test-coverage gap the audit finding itself called out.
+    Variable input(data, true);
+
+    auto f = [](const Variable& x) -> Variable {
+        return tenzor::nn::relu(tenzor::sum(x, /*dim=*/0, /*keepdim=*/false));
+    };
+
+    auto result = vmap(f, input, 0);
+    auto result_shape = result.tensor().shape();
+    ASSERT_EQ(result_shape.size(), 1u);
+    EXPECT_EQ(result_shape[0], 2);
+
+    float* rp = result.tensor().data<float>();
+    EXPECT_NEAR(rp[0], 6.0f, 1e-5f);
+    EXPECT_NEAR(rp[1], 15.0f, 1e-5f);
 }
 
 TEST_F(VmapTest, VmapSum) {

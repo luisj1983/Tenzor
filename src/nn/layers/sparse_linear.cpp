@@ -9,6 +9,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <cmath>
 #include <random>
 #include <utility>
@@ -108,16 +109,78 @@ public:
 
     auto backward_with_variables(std::vector<Variable> grad_outputs)
         -> std::vector<Variable> override {
-        auto result_tensors = backward({grad_outputs[0].tensor()});
-        std::vector<Variable> results;
-        results.reserve(result_tensors.size());
-        for (auto& t : result_tensors) {
-            results.emplace_back(t, grad_outputs[0].requires_grad());
+        // M30: this used to unconditionally call backward({grad_outputs[0]
+        // .tensor()}) and rewrap the results as fresh, grad_fn-less
+        // Variables — severing grad_outputs[0]'s own graph and silently
+        // dropping ALL second-order contributions, while
+        // supports_higher_order() claimed full support (the engine's
+        // HigherOrderGradMode::Error safety net never fires because
+        // is_higher_order_stub() stays false — see function.hpp — so the
+        // failure was completely silent). Fixed per-term:
+        //
+        //  - grad_input_t = S^T @ grad_result_t is exactly linear in
+        //    grad_result_t (S is a fixed-pattern snapshot here, same as
+        //    SpMMBackward's own treatment of its sparse operand — see
+        //    SpMMBackward::backward_with_variables in function_sparse.cpp).
+        //    Routing through the Variable-aware tenzor::spmm() keeps
+        //    grad_outputs[0]'s own graph alive, giving genuinely correct
+        //    higher-order gradients for any chain flowing through input_t
+        //    (e.g. a Hessian-vector product w.r.t. the layer's dense input).
+        //
+        //  - grad_values is the bilinear SDDMM term
+        //    sddmm(pattern, grad_result_t, input_t).values() — no
+        //    Variable-level (autograd-tracked) sddmm exists in this
+        //    codebase, only the raw-Tensor sparse::sddmm(), so its
+        //    dependence on input_t/values (the mixed partial
+        //    d^2(result_t)/d(values)d(input_t), the only nonzero second
+        //    derivative block of this bilinear form) cannot be threaded
+        //    into the graph without a new differentiable SDDMM Function —
+        //    out of scope here. Rather than silently claim a live graph for
+        //    this term, warn once and return it genuinely disconnected so
+        //    the gap is visible instead of silent.
+        require_saved_tensors(1);
+        const auto& input_t = saved_tensors()[0];  // (K, N) dense
+        const auto& grad_result_t_var = grad_outputs[0];
+
+        std::vector<Variable> result(2);  // [0]=grad_values, [1]=grad_input_t
+
+        if (sparse_.has_value()) {
+            const DType orig = grad_result_t_var.tensor().dtype();
+            const bool widen =
+                (orig == DType::Float16 || orig == DType::BFloat16);
+
+            Tensor gr = widen ? grad_result_t_var.tensor().to(DType::Float32)
+                               : grad_result_t_var.tensor();
+            Tensor in = widen ? input_t.to(DType::Float32) : input_t;
+
+            SparseTensor pat = sparse_.value();
+            if (widen) {
+                pat = SparseTensor::sparse_csr(
+                    pat.crow_indices(), pat.col_indices(),
+                    pat.values().to(DType::Float32), pat.shape());
+            }
+
+            SparseTensor grad_values_sparse = sparse::sddmm(pat, gr, in);
+            Tensor grad_values = grad_values_sparse.values();
+            if (widen) {
+                grad_values = grad_values.to(orig);
+            }
+            TENZOR_WARN_ONCE(
+                "[SparseLinearBackward] grad_values (the SDDMM term) has no "
+                "Variable-level differentiable formula in this codebase; its "
+                "dependence on input_t/values is dropped under "
+                "create_graph=true (second derivatives through this term "
+                "will be zero).");
+            result[0] = Variable(std::move(grad_values),
+                                  grad_result_t_var.requires_grad());
+
+            result[1] = tenzor::spmm(sparse_.value().transpose(), grad_result_t_var);
         }
-        return results;
+
+        return result;
     }
 
-    auto supports_higher_order() const -> bool override { return true; }
+    auto supports_higher_order() const -> bool override { return false; }
     auto name() const -> std::string override { return "SparseLinearBackward"; }
 
 private:

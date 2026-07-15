@@ -422,6 +422,43 @@ TEST_P(IndexingParity, Gather_Dim1_GradientParity) {
         input, idx, "Gather_Dim1_Grad");
 }
 
+// H3: GatherBackward's incoming gradient must not be assumed contiguous.
+// The above Gather_Dim*_GradientParity tests only ever backward() a bare
+// sum(gather_output), whose upstream gradient is a fresh (contiguous) ones
+// tensor — never exercising this path. CatBackward (function_shape.cpp
+// CatBackward::backward) distributes gradient to each cat input via
+// slice(grad_output, dim, offset, offset+size) with NO .contiguous() call
+// (unlike Transpose/PermuteBackward, which both explicitly `.contiguous()`
+// their result) — slicing a non-leading dimension yields a genuinely
+// strided view. Route the gather output through cat() along its inner
+// (non-leading) dimension so GatherBackward receives exactly that
+// non-contiguous slice view, the case Vulkan's dispatchScatterAdd used to
+// mishandle (it read/wrote via raw data_ptr() with strides computed purely
+// from .shape(), silently scattering into the wrong flat positions on
+// Vulkan only — every other backend already materializes a contiguous copy
+// first).
+TEST_P(IndexingParity, Gather_Dim1_NonContiguousGradParity) {
+    auto input = randn({8, 8}, DType::Float32, Device::cpu());
+    auto idx = randint(0, 8, {8, 4}, DType::Int64, Device::cpu());
+    index_grad_parity(
+        [](const Variable& in, const Tensor& idx_dev) {
+            Variable g = gather(in, 1, idx_dev);              // shape [8, 4]
+            Variable other = Variable(
+                zeros({8, 4}, in.tensor().dtype(), in.tensor().device()), false);
+            // dim=1 (inner dim): CatBackward's per-input slice is strided,
+            // not contiguous.
+            Variable combined = cat({g, other}, 1);           // shape [8, 8]
+            // sum(combined) alone produces a UNIFORM (all-ones) upstream
+            // gradient — a stride/offset miscalculation in scatter_add would
+            // read the wrong memory location but that location is *also*
+            // 1.0, hiding the bug. Squaring first makes the gradient
+            // data-dependent (2*combined) so a misread lands a visibly wrong
+            // (nonzero-vs-zero) value.
+            return combined * combined;
+        },
+        input, idx, "Gather_Dim1_NonContigGrad");
+}
+
 INSTANTIATE_BACKEND_TESTS(IndexingParity);
 
 

@@ -131,8 +131,13 @@ void run_grid_sample_forward(sycl::queue& queue, const std::string& mode,
                 ix = gs_reflect_coord<T>(ix, W_in, align_corners);
                 iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
-            int nx = static_cast<int>(sycl::round(ix));
-            int ny = static_cast<int>(sycl::round(iy));
+            // L5: sycl::rint = round-half-to-even (current rounding mode),
+            // matching CPU std::nearbyint / CUDA rint / PyTorch-ATen
+            // grid_sampler nearest — sycl::round is half-away-from-zero and
+            // diverges at exact .5 offsets. Same convention already used for
+            // quantization (see quantization.cpp's sycl::rint comment).
+            int nx = static_cast<int>(sycl::rint(ix));
+            int ny = static_cast<int>(sycl::rint(iy));
             T val = T(0);
             if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
                 val = input_ptr[((n * C + c) * H_in + ny) * W_in + nx];
@@ -294,8 +299,15 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                 sum_dy += go * (wx0 * (-fetch(y0, x0) + fetch(y1, x0)) +
                                 wx1 * (-fetch(y0, x1) + fetch(y1, x1)));
             }
-            T sx = (pad_mode == 0 && !in_bounds_ix) ? T(0) : dix_dgx;
-            T sy = (pad_mode == 0 && !in_bounds_iy) ? T(0) : diy_dgy;
+            // H11: gate ONLY border (pad_mode == 1) — the previous condition
+            // used pad_mode == 0 (zeros), inverted relative to the correct
+            // CPU/CUDA convention (zeros must NOT be gated: fetch()/scatter()
+            // above already return/skip 0 for out-of-bounds corners, so
+            // sum_dx/sum_dy already contain only in-bounds contributions;
+            // border's clamp derivative is 0 outside [0, size-1], so a
+            // clamped border sample must not produce a spurious grad_grid).
+            T sx = (pad_mode == 1 && !in_bounds_ix) ? T(0) : dix_dgx;
+            T sy = (pad_mode == 1 && !in_bounds_iy) ? T(0) : diy_dgy;
             gg_ptr[grid_idx]     = sum_dx * sx;
             gg_ptr[grid_idx + 1] = sum_dy * sy;
         });
@@ -315,8 +327,13 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                 ix = gs_reflect_coord<T>(ix, W_in, align_corners);
                 iy = gs_reflect_coord<T>(iy, H_in, align_corners);
             }
-            int nx = static_cast<int>(sycl::round(ix));
-            int ny = static_cast<int>(sycl::round(iy));
+            // L5: sycl::rint = round-half-to-even (current rounding mode),
+            // matching CPU std::nearbyint / CUDA rint / PyTorch-ATen
+            // grid_sampler nearest — sycl::round is half-away-from-zero and
+            // diverges at exact .5 offsets. Same convention already used for
+            // quantization (see quantization.cpp's sycl::rint comment).
+            int nx = static_cast<int>(sycl::rint(ix));
+            int ny = static_cast<int>(sycl::rint(iy));
             gg_ptr[grid_idx]     = T(0);
             gg_ptr[grid_idx + 1] = T(0);
             if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
@@ -335,6 +352,8 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
             int grid_idx = ((n * H_out + h) * W_out + w) * 2;
             T ix = gs_denormalize<T>(grid_ptr[grid_idx], W_in, align_corners);
             T iy = gs_denormalize<T>(grid_ptr[grid_idx + 1], H_in, align_corners);
+            bool in_bounds_ix = (ix >= T(0) && ix <= static_cast<T>(W_in - 1));
+            bool in_bounds_iy = (iy >= T(0) && iy <= static_cast<T>(H_in - 1));
             // Reflection contributes a ±1 fold-sign to the coordinate gradient;
             // capture it from the PRE-reflection coordinate before overwrite.
             T refl_sign_x = T(1), refl_sign_y = T(1);
@@ -403,8 +422,14 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                 sum_dx += go * dval_dix;
                 sum_dy += go * dval_diy;
             }
-            gg_ptr[grid_idx]     = sum_dx * dix_dgx;
-            gg_ptr[grid_idx + 1] = sum_dy * diy_dgy;
+            // H12: bicubic backward had no border-mode zero-gradient gate at
+            // all. Border's clamp derivative is 0 outside [0, size-1], so a
+            // clamped border sample must not produce a spurious grad_grid
+            // (matches CPU/CUDA bicubic backward and the bilinear path above).
+            T sx = (pad_mode == 1 && !in_bounds_ix) ? T(0) : dix_dgx;
+            T sy = (pad_mode == 1 && !in_bounds_iy) ? T(0) : diy_dgy;
+            gg_ptr[grid_idx]     = sum_dx * sx;
+            gg_ptr[grid_idx + 1] = sum_dy * sy;
         });
     } else {
         throw std::invalid_argument(
@@ -628,8 +653,15 @@ auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
     if (theta.dtype() == DType::Float64) {
         return run_affine_grid<double>(theta, N, H, W, align_corners, queue);
     }
-    Tensor theta_f32 = (theta.dtype() == DType::Float32) ? theta : theta.to(DType::Float32);
-    return run_affine_grid<float>(theta_f32, N, H, W, align_corners, queue);
+    // M10: Float16/BFloat16 theta widened to Float32 for the compute kernel
+    // (run_affine_grid<float> creates its output grid in theta_f32's dtype,
+    // i.e. Float32) must be narrowed back to theta's original dtype before
+    // returning — otherwise a Float16/BFloat16 theta silently upcasts the
+    // whole affine_grid -> grid_sample pipeline's dtype.
+    DType orig_dt = theta.dtype();
+    Tensor theta_f32 = (orig_dt == DType::Float32) ? theta : theta.to(DType::Float32);
+    Tensor grid_f32 = run_affine_grid<float>(theta_f32, N, H, W, align_corners, queue);
+    return (orig_dt == DType::Float32) ? grid_f32 : grid_f32.to(orig_dt);
 }
 
 }  // namespace oneapi

@@ -603,7 +603,18 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // For wide V (N > K): add U · S^{-1} · grad_Vh · (I - V V^T).
     int64_t M = U.shape()[ndim - 2];
     int64_t N = Vh.shape()[Vh.ndim() - 1];
-    auto S_inv = reciprocal(S);
+    // M3: regularize S_inv the same way F was regularized above (Lorentzian
+    // broadening: s / (s^2 + eps^2) instead of an unguarded 1/s). K=min(M,N)
+    // always for the thin SVD used throughout the autograd path, so any
+    // rank-deficient or exactly-singular non-square A gives S[j]=0 for some
+    // j -> reciprocal(S)[j]=+Inf, and even when the true gradient there is
+    // finite (grad_U/grad_Vh exactly zero along that projector term), the
+    // unconditional 0 * Inf = NaN below poisons grad_A. Reuses rel_eps from
+    // the F regularization above; eps scales with S's own magnitude (not
+    // S^2, which eps_tol above was sized for).
+    auto max_s = tenzor::max(S, S.ndim() - 1, /*keepdim=*/true);  // (..., 1)
+    auto eps_s = add(mul(max_s, rel_eps), rel_eps);               // (..., 1)
+    auto S_inv = div(S, add(mul(S, S), mul(eps_s, eps_s)));
     auto S_inv_diag = linalg::diag_embed(S_inv, 0, -2, -1);  // (..., K, K)
     if (M > K) {
         // (I - U U^T) is (M, M)
@@ -878,12 +889,18 @@ auto SpMVBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto DetBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // dL/dA = dL/dy * det(A) * A^{-T}
-    // Use saved Variables if available, otherwise wrap saved Tensors
+    // M20: recompute det_val/inv_A from the saved INPUT Variable (matching
+    // the Softmax/Exp/LogAddExp higher-order pattern) rather than saving the
+    // det()/inv() OUTPUTS directly — det_val in particular is this function's
+    // own output, and saving it as a Variable would make grad_fn's
+    // saved_variables_ hold a shared_ptr back to the Variable whose grad_fn_
+    // IS this DetBackward instance, a self-referential shared_ptr cycle that
+    // never gets collected.
     Variable det_val, inv_A;
     if (has_saved_variables()) {
-        require_saved_variables(2);
-        det_val = saved_variables_[0];
-        inv_A = saved_variables_[1];
+        require_saved_variables(1);
+        det_val = tenzor::det(saved_variables_[0]);
+        inv_A = tenzor::inv(saved_variables_[0]);
     } else {
         require_saved_tensors(2);
         det_val = Variable(saved_tensors_[0], false);
@@ -907,10 +924,13 @@ auto DetBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
 auto InvBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // dL/dA = -Y^T @ dL/dY @ Y^T  where Y = A^{-1}
+    // M21: recompute inv_A from the saved INPUT Variable rather than saving
+    // this function's own output — see DetBackward::backward_with_variables
+    // for the self-referential-cycle rationale.
     Variable inv_A;
     if (has_saved_variables()) {
         require_saved_variables(1);
-        inv_A = saved_variables_[0];
+        inv_A = tenzor::inv(saved_variables_[0]);
     } else {
         require_saved_tensors(1);
         inv_A = Variable(saved_tensors_[0], false);
@@ -927,11 +947,16 @@ auto InvBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
 auto SolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // dL/dB = solve(A^T, dL/dX), dL/dA = -dL/dB @ X^T
+    // M22: recompute X = solve(A, B) from the saved INPUT Variables (A, B)
+    // rather than saving this function's own output X directly — see
+    // DetBackward::backward_with_variables for the self-referential-cycle
+    // rationale. A itself has no such issue (it's a genuine input, not this
+    // function's output) but is recomputed identically for symmetry/clarity.
     Variable A, X;
     if (has_saved_variables()) {
         require_saved_variables(2);
         A = saved_variables_[0];
-        X = saved_variables_[1];
+        X = tenzor::solve(saved_variables_[0], saved_variables_[1]);
     } else {
         require_saved_tensors(2);
         A = Variable(saved_tensors_[0], false);
@@ -994,10 +1019,15 @@ auto NormBackward_Linalg::backward_with_variables(std::vector<Variable> grad_out
 
 auto SlogdetBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // dL/dA = dL/d(logabsdet) * A^{-T} (sign gradient is zero)
+    // M24: recompute inv_A = inv(A) from the saved INPUT Variable — inv_A is
+    // not this function's own output (that's sign/logabsdet), so there is no
+    // self-referential-cycle concern here (unlike Det/Inv/Solve/LU above),
+    // but recomputing from the input keeps the higher-order path consistent
+    // and correctly graph-connected back through A.
     Variable inv_A;
     if (has_saved_variables()) {
         require_saved_variables(1);
-        inv_A = saved_variables_[0];
+        inv_A = tenzor::inv(saved_variables_[0]);
     } else {
         require_saved_tensors(1);
         inv_A = Variable(saved_tensors_[0], false);
@@ -1207,7 +1237,12 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     int64_t M = saved_tensors_[0].shape()[ndim - 2];
     int64_t N = saved_tensors_[2].shape()[saved_tensors_[2].ndim() - 1];
     if (M > K || N > K) {
-        auto S_inv = reciprocal(S);
+        // M3: regularize S_inv the same way as the Tensor path above
+        // (Lorentzian broadening) instead of an unguarded reciprocal — see
+        // that path's comment for the full rationale.
+        auto max_s = tenzor::max(S, S.shape().size() - 1, /*keepdim=*/true);
+        auto eps_s = max_s * rel_eps + rel_eps;
+        auto S_inv = S / (S * S + eps_s * eps_s);
         auto S_inv_diag = diag_embed_var(S_inv);
         if (M > K) {
             auto eye_M = Variable(eye(M, std::nullopt, S_tensor.dtype(), S_tensor.device()), false);
@@ -1558,11 +1593,17 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     // tenzor::solve (general linear solve) used elsewhere in this file; the
     // pivot permutation P^T is applied as a left matmul by a constant
     // permutation matrix, which preserves the graph carried by grad_A.
+    // M23: recompute L/U from the saved INPUT Variable A rather than saving
+    // this function's own L/U outputs directly — see
+    // DetBackward::backward_with_variables for the self-referential-cycle
+    // rationale (L_var's grad_fn is grad_fn_L / U_var's is grad_fn_U, so
+    // grad_fn_L saving L_var directly would cycle back to itself).
     Variable L, U;
     if (has_saved_variables()) {
-        require_saved_variables(2);
-        L = saved_variables_[0];
-        U = saved_variables_[1];
+        require_saved_variables(1);
+        auto lu_result = tenzor::lu(saved_variables_[0]);
+        L = std::get<0>(lu_result);
+        U = std::get<1>(lu_result);
     } else {
         require_saved_tensors(2);
         L = Variable(saved_tensors_[0], false);

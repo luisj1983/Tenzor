@@ -150,7 +150,10 @@ kernel void maxpool2d_forward_kernel(
             float val = input[idx];
             if (isnan(val) || val > max_val) {
                 max_val = val;
-                max_idx = int(idx);
+                // M13: (n,c)-plane-local index, matching every other backend
+                // (CPU/CUDA/ROCm/Vulkan/OneAPI) — see maxpool3d_forward_kernel
+                // in pool3d.metal for the full rationale.
+                max_idx = int(idx - input_base);
             }
         }
     }
@@ -159,20 +162,29 @@ kernel void maxpool2d_forward_kernel(
     indices[tid] = max_idx;
 }
 
+// Dead code: OpId::MaxPool2dBackward is wired to a CPU round-trip
+// (mps_accelerate_single in mps_kernel_registry.mm), not this native kernel.
+// Kept convention-consistent with the forward kernel above (plane-local
+// index, reconstructed here) so it isn't a landmine if ever wired up
+// natively — audit M13, matching M11/CR2's precedent.
 kernel void maxpool2d_backward_kernel(
     device const float* grad_output [[buffer(0)]],
     device const int* indices       [[buffer(1)]],
     device float* grad_input        [[buffer(2)]],
-    constant uint& num_output       [[buffer(3)]],
+    constant uint& out_spatial      [[buffer(3)]],
+    constant uint& in_plane         [[buffer(4)]],
+    constant uint& num_output       [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
         // Use atomic add since multiple output positions can map to the
         // same input position (overlapping pooling windows with stride < kernel).
-        device atomic_float* dst = reinterpret_cast<device atomic_float*>(&grad_input[idx]);
-        atomic_fetch_add_explicit(dst, grad_output[tid], memory_order_relaxed);
+        device atomic_float* d = reinterpret_cast<device atomic_float*>(&grad_input[dst]);
+        atomic_fetch_add_explicit(d, grad_output[tid], memory_order_relaxed);
     }
 }
 
@@ -210,7 +222,8 @@ kernel void maxpool2d_forward_kernel_f16(
             float val = float(input[idx]);
             if (isnan(val) || val > max_val) {
                 max_val = val;
-                max_idx = int(idx);
+                // M13: (n,c)-plane-local index — see maxpool2d_forward_kernel above.
+                max_idx = int(idx - input_base);
             }
         }
     }
@@ -219,11 +232,15 @@ kernel void maxpool2d_forward_kernel_f16(
     indices[tid] = max_idx;
 }
 
+// Dead code — see maxpool2d_backward_kernel above (F32 variant) for the
+// live-dispatch and convention notes; this F16 variant is equally unreachable.
 kernel void maxpool2d_backward_kernel_f16(
     device const half* grad_output [[buffer(0)]],
     device const int* indices      [[buffer(1)]],
     device half* grad_input        [[buffer(2)]],
-    constant uint& num_output      [[buffer(3)]],
+    constant uint& out_spatial     [[buffer(3)]],
+    constant uint& in_plane        [[buffer(4)]],
+    constant uint& num_output      [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     // Overlapping max-pool windows (stride < kernel) can map several output
@@ -232,7 +249,9 @@ kernel void maxpool2d_backward_kernel_f16(
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        atomic_add_half(grad_input, dst, float(grad_output[tid]));
     }
 }
 
@@ -600,7 +619,8 @@ kernel void adaptive_maxpool2d_forward_kernel(
             float val = input[idx];
             if (isnan(val) || val > max_val) {
                 max_val = val;
-                max_idx = int(idx);
+                // M13: (n,c)-plane-local index — see maxpool2d_forward_kernel above.
+                max_idx = int(idx - input_base);
             }
         }
     }
@@ -609,18 +629,24 @@ kernel void adaptive_maxpool2d_forward_kernel(
     indices[tid] = max_idx;
 }
 
+// Dead code: OpId::AdaptiveMaxPool2dBackward is wired to a CPU round-trip
+// (mps_accelerate_single) — see maxpool2d_backward_kernel above.
 kernel void adaptive_maxpool2d_backward_kernel(
     device const float* grad_output  [[buffer(0)]],
     device const int* indices        [[buffer(1)]],
     device float* grad_input         [[buffer(2)]],
-    constant uint& num_output        [[buffer(3)]],
+    constant uint& out_spatial       [[buffer(3)]],
+    constant uint& in_plane          [[buffer(4)]],
+    constant uint& num_output        [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        device atomic_float* dst = reinterpret_cast<device atomic_float*>(&grad_input[idx]);
-        atomic_fetch_add_explicit(dst, grad_output[tid], memory_order_relaxed);
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        device atomic_float* d = reinterpret_cast<device atomic_float*>(&grad_input[dst]);
+        atomic_fetch_add_explicit(d, grad_output[tid], memory_order_relaxed);
     }
 }
 
@@ -659,7 +685,8 @@ kernel void adaptive_maxpool2d_forward_kernel_f16(
             float val = float(input[idx]);
             if (isnan(val) || val > max_val) {
                 max_val = val;
-                max_idx = int(idx);
+                // M13: (n,c)-plane-local index — see maxpool2d_forward_kernel above.
+                max_idx = int(idx - input_base);
             }
         }
     }
@@ -668,17 +695,22 @@ kernel void adaptive_maxpool2d_forward_kernel_f16(
     indices[tid] = max_idx;
 }
 
+// Dead code — see adaptive_maxpool2d_backward_kernel above (F32 variant).
 kernel void adaptive_maxpool2d_backward_kernel_f16(
     device const half* grad_output   [[buffer(0)]],
     device const int* indices        [[buffer(1)]],
     device half* grad_input          [[buffer(2)]],
-    constant uint& num_output        [[buffer(3)]],
+    constant uint& out_spatial       [[buffer(3)]],
+    constant uint& in_plane          [[buffer(4)]],
+    constant uint& num_output        [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        atomic_add_half(grad_input, dst, float(grad_output[tid]));
     }
 }
 
@@ -712,7 +744,8 @@ kernel void maxpool1d_forward_kernel(
         float val = input[idx];
         if (isnan(val) || val > max_val) {
             max_val = val;
-            max_idx = int(idx);
+            // M13: (n,c)-plane-local index — see maxpool2d_forward_kernel above.
+            max_idx = int(idx - input_base);
         }
     }
 
@@ -720,18 +753,24 @@ kernel void maxpool1d_forward_kernel(
     indices[tid] = max_idx;
 }
 
+// Dead code: OpId::MaxPool1dBackward is wired to a CPU round-trip
+// (mps_accelerate_single) — see maxpool2d_backward_kernel above.
 kernel void maxpool1d_backward_kernel(
     device const float* grad_output [[buffer(0)]],
     device const int* indices       [[buffer(1)]],
     device float* grad_input        [[buffer(2)]],
-    constant uint& num_output       [[buffer(3)]],
+    constant uint& out_spatial      [[buffer(3)]],
+    constant uint& in_plane         [[buffer(4)]],
+    constant uint& num_output       [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        device atomic_float* dst = reinterpret_cast<device atomic_float*>(&grad_input[idx]);
-        atomic_fetch_add_explicit(dst, grad_output[tid], memory_order_relaxed);
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        device atomic_float* d = reinterpret_cast<device atomic_float*>(&grad_input[dst]);
+        atomic_fetch_add_explicit(d, grad_output[tid], memory_order_relaxed);
     }
 }
 
@@ -765,7 +804,8 @@ kernel void maxpool1d_forward_kernel_f16(
         float val = float(input[idx]);
         if (isnan(val) || val > max_val) {
             max_val = val;
-            max_idx = int(idx);
+            // M13: (n,c)-plane-local index — see maxpool2d_forward_kernel above.
+            max_idx = int(idx - input_base);
         }
     }
 
@@ -773,17 +813,22 @@ kernel void maxpool1d_forward_kernel_f16(
     indices[tid] = max_idx;
 }
 
+// Dead code — see maxpool1d_backward_kernel above (F32 variant).
 kernel void maxpool1d_backward_kernel_f16(
     device const half* grad_output [[buffer(0)]],
     device const int* indices      [[buffer(1)]],
     device half* grad_input        [[buffer(2)]],
-    constant uint& num_output      [[buffer(3)]],
+    constant uint& out_spatial     [[buffer(3)]],
+    constant uint& in_plane        [[buffer(4)]],
+    constant uint& num_output      [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        atomic_add_half(grad_input, dst, float(grad_output[tid]));
     }
 }
 
@@ -1082,7 +1127,8 @@ kernel void adaptive_maxpool1d_forward_kernel(
         float val = input[idx];
         if (isnan(val) || val > max_val) {
             max_val = val;
-            max_idx = int(idx);
+            // M13: (n,c)-plane-local index — see maxpool2d_forward_kernel above.
+            max_idx = int(idx - input_base);
         }
     }
 
@@ -1090,18 +1136,24 @@ kernel void adaptive_maxpool1d_forward_kernel(
     indices[tid] = max_idx;
 }
 
+// Dead code: OpId::AdaptiveMaxPool1dBackward is wired to a CPU round-trip
+// (mps_accelerate_single) — see maxpool2d_backward_kernel above.
 kernel void adaptive_maxpool1d_backward_kernel(
     device const float* grad_output  [[buffer(0)]],
     device const int* indices        [[buffer(1)]],
     device float* grad_input         [[buffer(2)]],
-    constant uint& num_output        [[buffer(3)]],
+    constant uint& out_spatial       [[buffer(3)]],
+    constant uint& in_plane          [[buffer(4)]],
+    constant uint& num_output        [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        device atomic_float* dst = reinterpret_cast<device atomic_float*>(&grad_input[idx]);
-        atomic_fetch_add_explicit(dst, grad_output[tid], memory_order_relaxed);
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        device atomic_float* d = reinterpret_cast<device atomic_float*>(&grad_input[dst]);
+        atomic_fetch_add_explicit(d, grad_output[tid], memory_order_relaxed);
     }
 }
 
@@ -1136,7 +1188,8 @@ kernel void adaptive_maxpool1d_forward_kernel_f16(
         float val = float(input[idx]);
         if (isnan(val) || val > max_val) {
             max_val = val;
-            max_idx = int(idx);
+            // M13: (n,c)-plane-local index — see maxpool2d_forward_kernel above.
+            max_idx = int(idx - input_base);
         }
     }
 
@@ -1144,16 +1197,21 @@ kernel void adaptive_maxpool1d_forward_kernel_f16(
     indices[tid] = max_idx;
 }
 
+// Dead code — see adaptive_maxpool1d_backward_kernel above (F32 variant).
 kernel void adaptive_maxpool1d_backward_kernel_f16(
     device const half* grad_output   [[buffer(0)]],
     device const int* indices        [[buffer(1)]],
     device half* grad_input          [[buffer(2)]],
-    constant uint& num_output        [[buffer(3)]],
+    constant uint& out_spatial       [[buffer(3)]],
+    constant uint& in_plane          [[buffer(4)]],
+    constant uint& num_output        [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= num_output) return;
     int idx = indices[tid];
     if (idx >= 0) {
-        atomic_add_half(grad_input, uint(idx), float(grad_output[tid]));
+        uint plane = tid / out_spatial;
+        uint dst = plane * in_plane + uint(idx);
+        atomic_add_half(grad_input, dst, float(grad_output[tid]));
     }
 }

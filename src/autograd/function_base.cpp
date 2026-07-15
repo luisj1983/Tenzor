@@ -106,11 +106,27 @@ auto Function::should_offload(const Tensor& t) const -> bool {
 }
 
 auto Function::set_next_functions(std::vector<std::shared_ptr<Function>> funcs) -> void {
+    // M1: this is the sole place next_functions_ is ever mutated (both
+    // ordinary graph construction and the engine's cleanup-time
+    // set_next_functions({}) go through here), so maintaining each child's
+    // parent_count_ here — decrement what's being replaced, increment what's
+    // being installed — keeps it a globally-accurate Function-to-Function
+    // edge count with no separate bookkeeping required at call sites.
+    for (const auto& old_child : next_functions_) {
+        if (old_child) old_child->parent_count_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    for (const auto& new_child : funcs) {
+        if (new_child) new_child->parent_count_.fetch_add(1, std::memory_order_relaxed);
+    }
     next_functions_ = std::move(funcs);
 }
 
 auto Function::next_functions() const -> const std::vector<std::shared_ptr<Function>>& {
     return next_functions_;
+}
+
+auto Function::parent_count() const -> int {
+    return parent_count_.load(std::memory_order_relaxed);
 }
 
 auto Function::set_input_variables(std::vector<Variable> inputs) -> void {

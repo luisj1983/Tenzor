@@ -396,7 +396,8 @@ auto pack_bucket_flat(GradBucket& bucket) -> void {
     for (size_t i = 0; i < bucket.params.size(); ++i) {
         auto& p = bucket.params[i];
         if (!p || !p->has_grad()) continue;
-        const Tensor& g = p->grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor g = p->grad().value();
         const size_t n = static_cast<size_t>(g.numel());
         const DType dt = g.dtype();
         const Device dev = g.device();
@@ -425,7 +426,8 @@ auto pack_bucket_flat(GradBucket& bucket) -> void {
         for (size_t k = 0; k < grp.param_indices.size(); ++k) {
             const size_t pi = grp.param_indices[k];
             const size_t n  = grp.numels[k];
-            const Tensor& g = bucket.params[pi]->grad().value();
+            // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+            const Tensor g = bucket.params[pi]->grad().value();
             Tensor g_flat = g.reshape({static_cast<int64_t>(n)}).contiguous();
             grp.flat = slice_scatter(grp.flat, g_flat, /*dim=*/0,
                                      static_cast<int64_t>(offset),

@@ -1091,6 +1091,11 @@ auto bmm(const Variable& a, const Variable& b) -> Variable {
 
     // Save input tensors for backward pass
     grad_fn->save_for_backward({a.tensor(), b.tensor()});
+    // M17: also save the input Variables so backward_with_variables can walk
+    // the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({a, b});
+    }
 
     // Set up backward graph - MUST maintain index correspondence with input_grads!
     // Use nullptr for leaf variables to preserve indices
@@ -1173,6 +1178,12 @@ auto linear(const Variable& x, const Variable& w, const Variable& b) -> Variable
 
     // Save all input tensors for backward pass
     grad_fn->save_for_backward({x.tensor(), w.tensor(), b.tensor()});
+    // M18: also save x/w as Variables (matching LinearBackward::backward_with_variables,
+    // which only needs saved_variables_[0]/[1] — grad_b doesn't depend on b's value)
+    // so backward_with_variables can walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({x, w});
+    }
 
     // Set up backward graph - maintain index correspondence
     std::vector<std::shared_ptr<Function>> next_funcs;
@@ -1570,6 +1581,12 @@ auto erfinv(const Variable& input) -> Variable {
     auto grad_fn = std::make_shared<ErfInvBackward>();
     auto result = tenzor::erfinv(input.tensor());
     grad_fn->save_for_backward({result});  // Save output
+    // M19: ErfInvBackward::backward_with_variables recomputes erfinv(x) from
+    // saved_variables_[0] as the INPUT (not the output tensor saved above),
+    // so it can walk the upstream graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -1580,6 +1597,27 @@ auto erfinv(const Variable& input) -> Variable {
 auto gamma(const Variable& input) -> Variable {
     return unary_autograd<GammaBackward>(input,
         [](const Tensor& t) { return tenzor::gamma(t); });
+}
+
+// M2: tenzor::ldexp only existed as a raw-Tensor free function — LdexpBackward
+// was fully implemented (forward/backward) but never wired to any
+// Variable-level call site, so x.requires_grad through ldexp silently
+// carried no grad_fn back to x. LdexpBackward::forward() already does the
+// actual compute + save_for_backward() + shape capture (those members are
+// private, set only via forward()), so this wrapper calls it directly
+// rather than duplicating that logic — matching how Function subclasses
+// with a real forward() override are meant to be invoked.
+auto ldexp(const Variable& x, const Variable& n) -> Variable {
+    if (!x.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::ldexp(x.tensor(), n.tensor()), false);
+    }
+    auto grad_fn = std::make_shared<LdexpBackward>();
+    auto outputs = grad_fn->forward({x, n});
+    grad_fn->set_next_functions({x.grad_fn(), n.grad_fn()});
+    grad_fn->set_input_variables({x, n});
+    Variable output = outputs[0];
+    output.set_grad_fn(grad_fn);
+    return output;
 }
 
 auto lgamma(const Variable& input) -> Variable {
@@ -2131,6 +2169,11 @@ auto det(const Variable& input) -> Variable {
 
     auto grad_fn = std::make_shared<DetBackward>();
     grad_fn->save_for_backward({result_tensor, inv_tensor});
+    // M20: also save the input Variable so backward_with_variables can
+    // recompute det(A)/inv(A) on the live graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -2148,6 +2191,11 @@ auto inv(const Variable& input) -> Variable {
 
     auto grad_fn = std::make_shared<InvBackward>();
     grad_fn->save_for_backward({result_tensor});
+    // M21: also save the input Variable so backward_with_variables can
+    // recompute inv(A) on the live graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -2165,6 +2213,11 @@ auto solve(const Variable& A, const Variable& B) -> Variable {
 
     auto grad_fn = std::make_shared<SolveBackward>();
     grad_fn->save_for_backward({A.tensor(), result_tensor});
+    // M22: also save the input Variables so backward_with_variables can
+    // recompute X = solve(A, B) on the live graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({A, B});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
     next_funcs.push_back(A.grad_fn());
@@ -2226,13 +2279,19 @@ auto lu(const Variable& A) -> std::tuple<Variable, Variable, Variable> {
     // audit-2026-05-03 — separate backward instances for L and U so the
     // per-output gradients accumulate at distinct engine slots. Pivots are
     // non-differentiable; pivots_var has requires_grad=false.
+    // M23: also save the input Variable so backward_with_variables can
+    // recompute L/U = lu(A) on the live graph for higher-order autograd.
+    const bool retain_graph = is_creating_graph() || higher_order_graph_retention_enabled();
+
     auto grad_fn_L = std::make_shared<LUBackward>(/*output_slot=*/0);
     grad_fn_L->save_for_backward({L_t, U_t, pivots_t});
+    if (retain_graph) grad_fn_L->save_variables_for_backward({A});
     grad_fn_L->set_next_functions({A.grad_fn()});
     grad_fn_L->set_input_variables({A});
 
     auto grad_fn_U = std::make_shared<LUBackward>(/*output_slot=*/1);
     grad_fn_U->save_for_backward({L_t, U_t, pivots_t});
+    if (retain_graph) grad_fn_U->save_variables_for_backward({A});
     grad_fn_U->set_next_functions({A.grad_fn()});
     grad_fn_U->set_input_variables({A});
 
@@ -2521,6 +2580,11 @@ auto slogdet(const Variable& input) -> std::tuple<Variable, Variable> {
 
     auto grad_fn = std::make_shared<SlogdetBackward>();
     grad_fn->save_for_backward({inv_tensor});
+    // M24: also save the input Variable so backward_with_variables can
+    // recompute inv(A) on the live graph for higher-order autograd.
+    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 
@@ -5093,10 +5157,42 @@ auto segment_reduce(const Variable& data, const Tensor& offsets,
 // PyTorch's `(y_hard - y_soft).detach() + y_soft` STE semantics.
 auto gumbel_softmax(const Variable& logits, double tau, bool hard, int64_t dim)
     -> Variable {
-    // Always sample the SOFT Gumbel-softmax first; that's what carries the
-    // gradient (PyTorch STE).
-    auto y_soft = tenzor::gumbel_softmax(logits.tensor(), tau,
-                                         /*hard=*/false, dim);
+    // M32: when higher-order graph retention is active, build y_soft via
+    // Variable-level ops instead of the raw-Tensor tenzor::gumbel_softmax()
+    // dispatch, so d(y_soft)/d(logits) stays graph-connected and
+    // save_variables_for_backward() below saves a genuinely differentiable
+    // Variable (not a pre-detached one, which silently dropped the
+    // second-order term through y_soft regardless of has_saved_variables()).
+    // This is the EXACT formula every backend's OpId::GumbelSoftmax kernel
+    // already uses internally (see e.g. cpu_kernel_registry.cpp /
+    // cuda_kernel_registry.cpp, both literally commented "composition of
+    // existing dispatched ops": Gumbel noise -log(-log(U)), (logits+noise)/
+    // tau, softmax) — this only moves that same sequence up one layer so
+    // the softmax step runs through the Variable-aware tenzor::softmax()
+    // instead of the raw dispatch; the sampled distribution and numerics
+    // are unchanged. The noise itself is exogenous (independent of logits),
+    // so it's drawn as a plain, non-differentiable Tensor.
+    const bool need_graph = logits.requires_grad() && is_grad_enabled() &&
+        (is_creating_graph() || higher_order_graph_retention_enabled());
+
+    Tensor y_soft;
+    Variable y_soft_var;  // only populated when need_graph
+    if (need_graph) {
+        auto shape_vec = std::vector<int64_t>(logits.shape().begin(), logits.shape().end());
+        Tensor u = rand(shape_vec, logits.tensor().dtype(), logits.tensor().device());
+        Tensor eps_tensor = full(shape_vec, 1e-20, logits.tensor().dtype(), logits.tensor().device());
+        u = add(u, eps_tensor);  // avoid exact zeros
+        Tensor gumbels = neg(log(neg(log(u))));
+        Variable gumbels_var(gumbels, false);
+        auto scaled = (logits + gumbels_var) / tau;
+        y_soft_var = tenzor::softmax(scaled, dim);
+        y_soft = y_soft_var.tensor();
+    } else {
+        // Always sample the SOFT Gumbel-softmax first; that's what carries
+        // the gradient (PyTorch STE).
+        y_soft = tenzor::gumbel_softmax(logits.tensor(), tau,
+                                        /*hard=*/false, dim);
+    }
 
     Tensor result_tensor;
     if (hard) {
@@ -5125,8 +5221,11 @@ auto gumbel_softmax(const Variable& logits, double tau, bool hard, int64_t dim)
     auto grad_fn = std::make_shared<GumbelSoftmaxBackward>(tau, hard, dim);
     // Save y_soft for the STE backward.
     grad_fn->save_for_backward({y_soft});
-    if (is_creating_graph() || higher_order_graph_retention_enabled()) {
-        grad_fn->save_variables_for_backward({Variable(y_soft, false)});
+    if (need_graph) {
+        // y_soft_var carries a live grad_fn back to logits (built above via
+        // Variable ops) — genuinely graph-connected, unlike the previous
+        // Variable(y_soft, false).
+        grad_fn->save_variables_for_backward({y_soft_var});
     }
     grad_fn->set_next_functions({logits.grad_fn()});
     grad_fn->set_input_variables({logits});

@@ -64,7 +64,8 @@ auto RAdam::step_impl() -> void {
         const RAdamHP hp = resolve(i);
         const double rho_inf = 2.0 / (1.0 - hp.beta2) - 1.0;
 
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
 
         // R.16: half-precision params run the math in the state dtype.
         const DType param_dt = param.tensor().dtype();

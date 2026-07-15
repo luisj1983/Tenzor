@@ -110,7 +110,73 @@ void run_kvcache_parity(int64_t seq_len_q, int64_t seq_len_k, bool causal) {
     }
 }
 
+// H20: ROCm's fused Float32 FlashAttentionBackward fast path used to pass
+// the ORIGINAL 4D [B,H,S,D] tensors straight into flash_attention_backward_hip
+// with no reshape, even though that kernel reads Q.shape()[0] directly as
+// batch_heads and Q.shape()[1] as seq_len (3D [B*H,S,D] contract) — silently
+// reinterpreting the head axis as sequence length and the sequence axis as
+// head_dim for any B>1 or H>1 call (i.e. any standard MHA/GQA shape). Compare
+// dQ/dK/dV against the CPU reference for B=2,H=4 so the bug (if reintroduced)
+// is unambiguous, not masked by a degenerate batch_heads=1 collapse.
+void run_backward_parity(int64_t B, int64_t H, int64_t seq_len, int64_t head_dim) {
+    require_rocm_or_skip();
+    if (::testing::Test::HasFatalFailure() || ::testing::Test::IsSkipped()) return;
+
+    auto Q_cpu = random_f32({B, H, seq_len, head_dim}, Device::cpu());
+    auto K_cpu = random_f32({B, H, seq_len, head_dim}, Device::cpu());
+    auto V_cpu = random_f32({B, H, seq_len, head_dim}, Device::cpu());
+    auto dO_cpu = random_f32({B, H, seq_len, head_dim}, Device::cpu());
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Scale, static_cast<double>(1.0 / std::sqrt(static_cast<double>(head_dim))));
+    attrs.set(AttrKey::Causal, false);
+    attrs.set(AttrKey::DropoutP, 0.0);
+    attrs.set(AttrKey::IsTraining, false);
+
+    std::vector<Tensor> cpu_fwd_inputs = {Q_cpu, K_cpu, V_cpu};
+    auto cpu_fwd = dispatch(OpId::FlashAttention, cpu_fwd_inputs, attrs);
+    ASSERT_GE(cpu_fwd.size(), 2u);
+    std::vector<Tensor> cpu_bwd_inputs = {dO_cpu, Q_cpu, K_cpu, V_cpu, cpu_fwd[0], cpu_fwd[1]};
+    auto cpu_bwd = dispatch(OpId::FlashAttentionBackward, cpu_bwd_inputs, attrs);
+    ASSERT_GE(cpu_bwd.size(), 3u);
+
+    auto Q_r = Q_cpu.to(Device::rocm(0));
+    auto K_r = K_cpu.to(Device::rocm(0));
+    auto V_r = V_cpu.to(Device::rocm(0));
+    auto dO_r = dO_cpu.to(Device::rocm(0));
+    std::vector<Tensor> rocm_fwd_inputs = {Q_r, K_r, V_r};
+    auto rocm_fwd = dispatch(OpId::FlashAttention, rocm_fwd_inputs, attrs);
+    ASSERT_GE(rocm_fwd.size(), 2u);
+    std::vector<Tensor> rocm_bwd_inputs = {dO_r, Q_r, K_r, V_r, rocm_fwd[0], rocm_fwd[1]};
+    auto rocm_bwd = dispatch(OpId::FlashAttentionBackward, rocm_bwd_inputs, attrs);
+    ASSERT_GE(rocm_bwd.size(), 3u);
+
+    const char* names[3] = {"dQ", "dK", "dV"};
+    for (int idx = 0; idx < 3; ++idx) {
+        Tensor cpu_g = cpu_bwd[idx];
+        Tensor rocm_g = rocm_bwd[idx].to(Device::cpu());
+        ASSERT_EQ(cpu_g.shape().size(), rocm_g.shape().size()) << names[idx];
+        for (size_t i = 0; i < cpu_g.shape().size(); ++i) {
+            ASSERT_EQ(cpu_g.shape()[i], rocm_g.shape()[i])
+                << names[idx] << " dim " << i << " (B=" << B << ",H=" << H
+                << ",S=" << seq_len << ",D=" << head_dim << ")";
+        }
+        auto* cp = cpu_g.data<float>();
+        auto* rp = rocm_g.data<float>();
+        int64_t n = cpu_g.numel();
+        for (int64_t i = 0; i < n; ++i) {
+            EXPECT_NEAR(cp[i], rp[i], 5e-3f)
+                << names[idx] << " elem " << i << " (B=" << B << ",H=" << H
+                << ",S=" << seq_len << ",D=" << head_dim << ")";
+        }
+    }
+}
+
 }  // namespace
+
+TEST_F(FlashAttentionKvCacheParity, Backward_StandardMHA_MatchesCPU) {
+    run_backward_parity(/*B=*/2, /*H=*/4, /*seq_len=*/24, /*head_dim=*/64);
+}
 
 // Self-attention (seq_len_q == seq_len_k): the pre-existing, already-correct
 // case (causal_offset == 0) -- a no-regression baseline.

@@ -56,7 +56,8 @@ auto Lion::step_impl() -> void {
 
         const LionHP hp = resolve(i);
 
-        const Tensor& grad = param.grad().value();
+        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
+        const Tensor grad = param.grad().value();
 
         // R.16: run math in optimiser state dtype (Float32 for halves).
         const DType param_dt = param.tensor().dtype();

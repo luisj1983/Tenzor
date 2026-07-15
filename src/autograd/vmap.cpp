@@ -8,6 +8,8 @@
 #include "tenzor/ops/math.hpp"
 #include <vector>
 #include <mutex>
+#include <unordered_set>
+#include <type_traits>
 
 namespace tenzor {
 
@@ -24,6 +26,18 @@ static std::unordered_map<std::string, BatchingRule>& batching_rules() {
 static std::unordered_map<OpId, BatchingRule>& batching_rules_by_opid() {
     static std::unordered_map<OpId, BatchingRule> rules;
     return rules;
+}
+
+// H15: OpIds/names registered against the raw (single-shot, non-slicing)
+// passthrough_rule — see init_builtin_batching_rules for why this specific
+// rule needs whole-graph verification before vmap() can safely use it.
+static std::unordered_set<OpId>& passthrough_safe_opids() {
+    static std::unordered_set<OpId> ids;
+    return ids;
+}
+static std::unordered_set<std::string>& passthrough_safe_names() {
+    static std::unordered_set<std::string> names;
+    return names;
 }
 
 static std::once_flag init_flag;
@@ -107,6 +121,30 @@ void init_builtin_batching_rules() {
         return func(batched_input);
     };
 
+    // H15: raw passthrough_rule evaluates func(batched_input) in ONE shot
+    // with no per-slice re-basing, which is only correct when EVERY op in
+    // func's composition is axis-order-agnostic (true elementwise). vmap()
+    // used to pick a rule by probing only the OUTERMOST op — so
+    // relu(sum(x, dim=0)) picked ReLUBackward's passthrough rule and ran
+    // sum(x, dim=0) directly on the batched tensor, reducing over the batch
+    // axis instead of the user's intended axis. Every OTHER registered rule
+    // (binary_passthrough_rule, dim_shifted_passthrough) already routes
+    // through vmap_loop_and_stack, which calls func() on a genuinely
+    // unbatched slice and is therefore safe under ARBITRARY nesting — so the
+    // fast single-shot path is only sound when the ENTIRE reachable graph,
+    // not just the outermost node, resolves to this exact raw passthrough
+    // rule. register_pt_generic marks each OpId/name registered here as
+    // "raw-passthrough-safe" so vmap() can verify that before taking the
+    // fast path (see all_nodes_passthrough_safe below).
+    auto register_pt_generic = [&](auto key) {
+        register_batching_rule(key, passthrough_rule);
+        if constexpr (std::is_same_v<std::decay_t<decltype(key)>, OpId>) {
+            passthrough_safe_opids().insert(key);
+        } else {
+            passthrough_safe_names().insert(std::string(key));
+        }
+    };
+
     // F021: binary / multi-operand element-wise ops (Add/Sub/Mul/Div/Pow,
     // Where, MaskedFill) capture the OTHER, UNBATCHED (slice-shaped) operand in
     // `func`. Raw passthrough right-aligns the batched input against that
@@ -149,7 +187,7 @@ void init_builtin_batching_rules() {
         "ErfInvBackward", "BesselI0Backward", "BesselI1Backward",
         "SincBackward"
     }) {
-        register_batching_rule(name, passthrough_rule);
+        register_pt_generic(name);
     }
 
     // F021: binary element-wise ops that capture the other operand — must handle
@@ -177,7 +215,7 @@ void init_builtin_batching_rules() {
         OpId::Erf, OpId::Lgamma, OpId::Digamma,
         OpId::Conj, OpId::Real, OpId::Imag,
     }) {
-        register_batching_rule(op, passthrough_rule);
+        register_pt_generic(op);
     }
 
     // F021: binary element-wise ops — batch_dim-aware passthrough.
@@ -220,7 +258,7 @@ void init_builtin_batching_rules() {
     // ====================================================================
     // Linear: batch dim is naturally dim 0 (batch x features)
     // ====================================================================
-    register_batching_rule("LinearBackward", passthrough_rule);
+    register_pt_generic("LinearBackward");
 
     // ====================================================================
     // Shape ops: reshape, transpose, permute, squeeze, unsqueeze, flatten
@@ -318,8 +356,8 @@ void init_builtin_batching_rules() {
     // ====================================================================
     // Fused ops
     // ====================================================================
-    register_batching_rule("FusedLinearReLUBackward", passthrough_rule);
-    register_batching_rule("BmmBackward", passthrough_rule);
+    register_pt_generic("FusedLinearReLUBackward");
+    register_pt_generic("BmmBackward");
 
     // ====================================================================
     // Convolution ops: batch dim is naturally dim 0 (N in NCHW/NCDHW)
@@ -351,15 +389,15 @@ void init_builtin_batching_rules() {
     // ====================================================================
     // Regularization: element-wise masking, trivially batchable
     // ====================================================================
-    register_batching_rule("DropoutBackward", passthrough_rule);
-    register_batching_rule("Dropout2dBackward", passthrough_rule);
-    register_batching_rule("AlphaDropoutBackward", passthrough_rule);
-    register_batching_rule("DropPathBackward", passthrough_rule);
+    register_pt_generic("DropoutBackward");
+    register_pt_generic("Dropout2dBackward");
+    register_pt_generic("AlphaDropoutBackward");
+    register_pt_generic("DropPathBackward");
 
     // ====================================================================
     // Embedding: lookup is per-element on the index tensor
     // ====================================================================
-    register_batching_rule("EmbeddingBackward", passthrough_rule);
+    register_pt_generic("EmbeddingBackward");
 
     // ====================================================================
     // Attention: batch dim is naturally dim 0 (batch x heads x seq x dim)
@@ -508,9 +546,9 @@ void init_builtin_batching_rules() {
         return vmap_loop_and_stack(func, batched_input, batch_dim);
     };
     register_batching_rule("NarrowBackward", narrow_rule);
-    register_batching_rule("IndexBackward", passthrough_rule);
+    register_pt_generic("IndexBackward");
     register_batching_rule("MaskedFillBackward", binary_passthrough_rule);  // F021: captures mask/value
-    register_batching_rule("MaskedSelectBackward", passthrough_rule);
+    register_pt_generic("MaskedSelectBackward");
     auto roll_dim_rule = dim_shifted_passthrough(AttrKey::Dim);
     register_batching_rule("RollBackward", roll_dim_rule);
     register_batching_rule(OpId::Roll, roll_dim_rule);
@@ -541,7 +579,7 @@ void init_builtin_batching_rules() {
     // ====================================================================
     register_batching_rule("SpMMBackward", shape_passthrough);
     register_batching_rule("SpMVBackward", shape_passthrough);
-    register_batching_rule("SparseAddBackward", passthrough_rule);
+    register_pt_generic("SparseAddBackward");
 
     // ====================================================================
     // Upsample/Interpolation
@@ -619,6 +657,42 @@ static auto vmap_loop_and_stack(const std::function<Variable(const Variable&)>& 
     return tenzor::cat(per_slice_outputs, insert_axis);
 }
 
+// H15: verifies that EVERY node reachable from `fn` (via next_functions(),
+// stopping at leaf boundaries where the edge is null) is ALSO registered
+// against the raw single-shot passthrough_rule. Only when this holds for the
+// WHOLE graph — not just the outermost node vmap() probes — is it sound to
+// evaluate func(batched_input) in one shot; otherwise an inner op with axis
+// semantics (e.g. sum(x, dim=0) nested under relu(...)) would silently see
+// the full batched tensor with its intended axis shifted by the batch
+// dimension. `visited` dedupes shared subgraph nodes (e.g. an operand used
+// twice) so a diamond-shaped graph is still checked in bounded time.
+static bool all_nodes_passthrough_safe(const std::shared_ptr<Function>& fn,
+                                       std::unordered_set<const Function*>& visited) {
+    if (!fn) {
+        return true;  // leaf boundary (original input) — nothing more to check
+    }
+    if (!visited.insert(fn.get()).second) {
+        return true;  // already verified this node via another path
+    }
+
+    OpId id = fn->op_id();
+    bool node_safe = (id != OpId::Unknown && passthrough_safe_opids().count(id) > 0);
+    if (!node_safe) {
+        auto name = fn->name();
+        node_safe = !name.empty() && passthrough_safe_names().count(name) > 0;
+    }
+    if (!node_safe) {
+        return false;
+    }
+
+    for (const auto& next : fn->next_functions()) {
+        if (!all_nodes_passthrough_safe(next, visited)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 auto vmap(std::function<Variable(const Variable&)> func,
           const Variable& batched_input,
           int64_t batch_dim) -> Variable {
@@ -658,6 +732,17 @@ auto vmap(std::function<Variable(const Variable&)> func,
             if (probed_op_id != OpId::Unknown) {
                 auto it = batching_rules_by_opid().find(probed_op_id);
                 if (it != batching_rules_by_opid().end()) {
+                    // H15: the matched rule is the raw single-shot
+                    // passthrough — only take it if the WHOLE graph (not
+                    // just this outermost node) is safe for it; otherwise an
+                    // inner dim-aware op would be silently mis-evaluated.
+                    if (passthrough_safe_opids().count(probed_op_id) > 0) {
+                        std::unordered_set<const Function*> visited;
+                        if (all_nodes_passthrough_safe(grad_fn, visited)) {
+                            return it->second(func, batched_input, batch_dim);
+                        }
+                        return vmap_loop_and_stack(func, batched_input, batch_dim);
+                    }
                     return it->second(func, batched_input, batch_dim);
                 }
             }
@@ -667,6 +752,13 @@ auto vmap(std::function<Variable(const Variable&)> func,
             if (!name.empty()) {
                 auto it = batching_rules().find(name);
                 if (it != batching_rules().end()) {
+                    if (passthrough_safe_names().count(name) > 0) {
+                        std::unordered_set<const Function*> visited;
+                        if (all_nodes_passthrough_safe(grad_fn, visited)) {
+                            return it->second(func, batched_input, batch_dim);
+                        }
+                        return vmap_loop_and_stack(func, batched_input, batch_dim);
+                    }
                     return it->second(func, batched_input, batch_dim);
                 }
             }

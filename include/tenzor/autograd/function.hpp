@@ -469,6 +469,29 @@ public:
     auto next_functions() const -> const std::vector<std::shared_ptr<Function>>&;
 
     /**
+     * @brief M1: number of OTHER Functions that currently list this Function
+     * as one of their own next_functions() entries.
+     *
+     * Maintained centrally by set_next_functions() (increment new children,
+     * decrement old children on every call — the sole place next_functions_
+     * is ever mutated), so this reflects a TRUE global count, not just what
+     * a single walk starting from one root can see. Deliberately does NOT
+     * count a Variable's own grad_fn_ reference to this Function — that's
+     * an entry point into the graph, not a Function-to-Function graph edge,
+     * so a Variable merely holding a live reference to this node (e.g. a
+     * still-in-scope intermediate that is never itself used as a backward()
+     * root) does not inflate this count. Used by GraphOptimizer to detect
+     * when a node is shared by more than one Function elsewhere in the live
+     * program (e.g. two sibling Variables built from a common
+     * retain_graph=true intermediate) before mutating a parent's edge to it
+     * — a local reachable-set walk from a single root cannot see such
+     * external sharing.
+     *
+     * @return Number of distinct parent Functions currently referencing this node.
+     */
+    auto parent_count() const -> int;
+
+    /**
      * @brief Set input variables for gradient accumulation.
      *
      * Stores Variables by value for gradient accumulation during backward pass.
@@ -657,6 +680,7 @@ protected:
     mutable std::atomic<bool> tensors_offloaded_{false};            ///< Whether saved tensors are on CPU due to offloading
     mutable std::mutex offload_mutex_;                              ///< Guards offload/reload of saved tensors
     std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
+    std::atomic<int> parent_count_{0};                               ///< M1: number of Functions listing this one as a next_functions() entry (see parent_count())
     std::vector<Variable> input_variables_;                          ///< Input variables for gradient accumulation (stored by value)
     OffloadPolicy offload_policy_{OffloadPolicy::Inherit};           ///< Per-function offload policy
     size_t offload_min_bytes_{0};                                    ///< Minimum tensor size to offload (0=all)
@@ -3078,6 +3102,21 @@ private:
  *
  * The sparsity pattern is captured at forward time as a 0/1 mask (saved via
  * save_for_backward()) so the backward is a single elementwise multiply.
+ *
+ * @note L7 (currently unreachable): nothing in this codebase constructs this
+ * Function. SparseTensor::to_dense() (sparse_tensor.hpp) is a raw utility
+ * method, not a Variable-level autograd op — per the JIT tracer's own
+ * documented convention (tracer.hpp, near the sparse-op-list comment),
+ * SparseTensor's own conversions (to_dense/coalesce/transpose/etc.) operate
+ * on raw component tensors (crow/col/values) by design and are deliberately
+ * NOT auto-mapped through dispatch<OpId>-level Variable tracking, unlike
+ * spmm/spmv/sparse_add/sparse_triangular_solve (include/tenzor/autograd/
+ * ops.hpp), which DO have real Variable-level wrappers because they're the
+ * ops actually used for training with a fixed sparse pattern (see
+ * SparseLinear). This backward is fully implemented and was deliberately
+ * fixed for higher-order correctness (see backward_with_variables' "audit-11
+ * RR.3" comment in function_sparse.cpp), but has no live forward entry
+ * point wiring it up — do not assume it is exercised by any test.
  */
 class SparseToDenseBackward : public Function {
 public:
@@ -3104,6 +3143,10 @@ public:
  *     grad_D = grad_Y_dense * mask
  * where grad_Y_dense is the dense projection of the sparse gradient and
  * `mask` is the 0/1 selection tensor saved at forward time.
+ *
+ * @note L7 (currently unreachable): see SparseToDenseBackward's @note —
+ * the same applies here. Nothing constructs this Function; dense_to_sparse
+ * conversion has no live Variable-level autograd entry point.
  */
 class DenseToSparseBackward : public Function {
 public:

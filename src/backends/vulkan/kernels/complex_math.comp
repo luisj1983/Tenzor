@@ -25,9 +25,21 @@ void main() {
         case 1: rr = ar - br; ri = ai - bi; break;
         case 2: rr = ar * br - ai * bi; ri = ar * bi + ai * br; break;
         case 3: {
-            float denom = br * br + bi * bi;
-            rr = (ar * br + ai * bi) / denom;
-            ri = (ai * br - ar * bi) / denom;
+            // L8: Smith's algorithm — avoids overflow in br*br+bi*bi for a
+            // large-magnitude divisor (matches CPU std::complex / CUDA-ROCm
+            // complex_div_kernel), unlike the naive (ar*br+ai*bi)/(br^2+bi^2)
+            // formula this replaced.
+            if (abs(br) >= abs(bi)) {
+                float r = bi / br;
+                float d = br + bi * r;
+                rr = (ar + ai * r) / d;
+                ri = (ai - ar * r) / d;
+            } else {
+                float r = br / bi;
+                float d = bi + br * r;
+                rr = (ar * r + ai) / d;
+                ri = (ai * r - ar) / d;
+            }
             break;
         }
         default: rr = 0.0; ri = 0.0; break;

@@ -849,6 +849,75 @@ Tensor mps_box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_ty
     return output;
 }
 
+// M16: native Metal ROIAlign forward (was a full CPU round-trip via
+// mps_accelerate_multi). roi_align_forward_kernel is float32-only (device
+// const float* for input/rois/output) and has no double-precision path —
+// Metal Shading Language has no double type at all (matches box_iou/
+// grid_sample above), so Float64 still falls back to the CPU kernel table
+// one level up in the registry lambda; this only replaces the F32/F16/BF16
+// path. No native backward kernel exists (ROIAlignBackward is unaffected —
+// it stays on the CPU round-trip, and backward recomputes ROI/bin geometry
+// independently from rois+shapes rather than consuming any forward-produced
+// buffer, so there is no forward/backward convention mismatch risk here).
+Tensor mps_roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
+                                    int64_t output_h, int64_t output_w,
+                                    float spatial_scale, int64_t sampling_ratio,
+                                    bool aligned) {
+    ensure_initialized();
+    // Caller (registry lambda) only reaches this function for Float32/Float16/
+    // BFloat16 features; Float64 stays on the existing CPU round-trip since
+    // Metal has no double type at all.
+    if (features.dtype() == DType::Float16 || features.dtype() == DType::BFloat16) {
+        Tensor out32 = mps_roi_align_forward_kernel(
+            features.to(DType::Float32), rois.to(DType::Float32),
+            output_h, output_w, spatial_scale, sampling_ratio, aligned);
+        return out32.to(features.dtype());
+    }
+    // rois may arrive in a different dtype than features (e.g. Float32 boxes
+    // with Float16 features) — the shader always reads them as float32.
+    const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
+
+    auto s = features.shape();
+    int64_t channels = s[1], in_h = s[2], in_w = s[3];
+    int64_t num_rois = rois.shape()[0];
+
+    Tensor output({num_rois, channels, output_h, output_w}, features.dtype(), features.device());
+    if (num_rois == 0) return output;
+
+    auto pipeline = get_pipeline("roi_align_forward_kernel");
+    id<MTLBuffer> buf_in = get_buffer(features);
+    id<MTLBuffer> buf_rois = get_buffer(rois_f32);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    uint32_t u_channels = (uint32_t)channels, u_in_h = (uint32_t)in_h, u_in_w = (uint32_t)in_w;
+    uint32_t u_pool_h = (uint32_t)output_h, u_pool_w = (uint32_t)output_w;
+    uint32_t u_sampling_ratio = (uint32_t)sampling_ratio;
+    uint32_t u_aligned = aligned ? 1u : 0u;
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:buf_in offset:0 atIndex:0];
+    [enc setBuffer:buf_rois offset:0 atIndex:1];
+    [enc setBuffer:buf_out offset:0 atIndex:2];
+    [enc setBytes:&u_channels length:sizeof(uint32_t) atIndex:3];
+    [enc setBytes:&u_in_h length:sizeof(uint32_t) atIndex:4];
+    [enc setBytes:&u_in_w length:sizeof(uint32_t) atIndex:5];
+    [enc setBytes:&u_pool_h length:sizeof(uint32_t) atIndex:6];
+    [enc setBytes:&u_pool_w length:sizeof(uint32_t) atIndex:7];
+    [enc setBytes:&spatial_scale length:sizeof(float) atIndex:8];
+    [enc setBytes:&u_sampling_ratio length:sizeof(uint32_t) atIndex:9];
+    [enc setBytes:&u_aligned length:sizeof(uint32_t) atIndex:10];
+
+    size_t total = output.numel();
+    MTLSize gridsz = MTLSizeMake(total, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(total));
+    [enc dispatchThreads:gridsz threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted]; ::tenzor::mps::mps_cmd_check(cmd, __func__);
+    return output;
+}
+
 // NMS: use shared memory (zero-copy) + CPU loop (serial by nature)
 Tensor mps_nms_kernel(const Tensor& boxes, const Tensor& scores, float iou_threshold) {
     int64_t N = boxes.shape()[0];

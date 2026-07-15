@@ -369,6 +369,279 @@ TEST_P(JVPRulesTest, JVP_Corrcoef_MatchesFD) {
     EXPECT_LT(max_abs_diff_d(out.tangent, fd), 5e-2);
 }
 
+// ---- Embedding JVP: (weight, indices) argument order (H8) ----
+// OpId::Embedding's universal convention is (weight, indices) — matching
+// every real call site (cpu_kernel_registry.cpp, nn/layers/embedding.cpp,
+// nn/functional.cpp). This rule previously assumed (indices, weight).
+TEST_P(JVPRulesTest, JVP_Embedding_WeightIndicesOrder) {
+    auto weight  = randn({5, 3}, DType::Float64, device);
+    auto dweight = randn({5, 3}, DType::Float64, device);
+    int64_t idx_data[] = {0, 2, 4, 1};
+    auto indices = Tensor::from_blob(idx_data, {4}, DType::Int64, Device::cpu())
+                       .clone().to(device);
+    OpAttributes attrs;
+    std::array<Tensor, 2> p{weight, indices};
+    std::array<Tensor, 2> t{dweight, Tensor()};
+    auto out = tenzor::dispatch_jvp(OpId::Embedding, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& w) {
+        return tenzor::dispatch(OpId::Embedding, std::vector<Tensor>{w, indices}, attrs)[0];
+    }, weight, dweight);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-6);
+}
+
+// ---- Fmax / Fmin JVP: NaN-ignoring semantics (H7) ----
+// fmax/fmin are NaN-IGNORING (IEEE 754-2008 maxNum/minNum), unlike
+// maximum/minimum which propagate NaN — confirmed at
+// src/backends/cpu/kernels/advanced.cpp:1133-1161.
+TEST_P(JVPRulesTest, JVP_Fmax_MatchesFD) {
+    auto a  = randn({6}, DType::Float64, device) + 1.0;
+    auto b  = randn({6}, DType::Float64, device) + 1.0;
+    auto da = randn({6}, DType::Float64, device);
+    auto db = randn({6}, DType::Float64, device);
+    OpAttributes attrs;
+    std::array<Tensor, 2> p{a, b}, t{da, db};
+    auto out = tenzor::dispatch_jvp(OpId::Fmax, p, t, attrs);
+    auto fd = fd_jvp2([&](const Tensor& xx, const Tensor& yy) {
+        return tenzor::dispatch(OpId::Fmax, std::vector<Tensor>{xx, yy}, attrs)[0];
+    }, a, da, b, db);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
+}
+
+TEST_P(JVPRulesTest, JVP_Fmin_MatchesFD) {
+    auto a  = randn({6}, DType::Float64, device) + 1.0;
+    auto b  = randn({6}, DType::Float64, device) + 1.0;
+    auto da = randn({6}, DType::Float64, device);
+    auto db = randn({6}, DType::Float64, device);
+    OpAttributes attrs;
+    std::array<Tensor, 2> p{a, b}, t{da, db};
+    auto out = tenzor::dispatch_jvp(OpId::Fmin, p, t, attrs);
+    auto fd = fd_jvp2([&](const Tensor& xx, const Tensor& yy) {
+        return tenzor::dispatch(OpId::Fmin, std::vector<Tensor>{xx, yy}, attrs)[0];
+    }, a, da, b, db);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
+}
+
+TEST_P(JVPRulesTest, JVP_Fmax_NaNIgnoring) {
+    double nan = std::nan("");
+    double a_data[]  = {1.0, nan};
+    double b_data[]  = {nan, 2.0};
+    double da_data[] = {3.0, 100.0};
+    double db_data[] = {100.0, 5.0};
+    auto a  = Tensor::from_blob(a_data,  {2}, DType::Float64, Device::cpu()).clone().to(device);
+    auto b  = Tensor::from_blob(b_data,  {2}, DType::Float64, Device::cpu()).clone().to(device);
+    auto da = Tensor::from_blob(da_data, {2}, DType::Float64, Device::cpu()).clone().to(device);
+    auto db = Tensor::from_blob(db_data, {2}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    std::array<Tensor, 2> p{a, b}, t{da, db};
+    auto out = tenzor::dispatch_jvp(OpId::Fmax, p, t, attrs);
+    auto primal_cpu  = out.primal.to(Device::cpu());
+    auto tangent_cpu = out.tangent.to(Device::cpu());
+    auto* prim = primal_cpu.data<double>();
+    auto* tan  = tangent_cpu.data<double>();
+    EXPECT_NEAR(prim[0], 1.0, 1e-12);   // fmax(1.0, NaN) ignores NaN -> 1.0
+    EXPECT_NEAR(prim[1], 2.0, 1e-12);   // fmax(NaN, 2.0) ignores NaN -> 2.0
+    EXPECT_NEAR(tan[0], 3.0, 1e-12);    // b NaN -> tangent comes entirely from a
+    EXPECT_NEAR(tan[1], 5.0, 1e-12);    // a NaN -> tangent comes entirely from b
+}
+
+TEST_P(JVPRulesTest, JVP_Fmin_NaNIgnoring) {
+    double nan = std::nan("");
+    double a_data[]  = {1.0, nan};
+    double b_data[]  = {nan, 2.0};
+    double da_data[] = {3.0, 100.0};
+    double db_data[] = {100.0, 5.0};
+    auto a  = Tensor::from_blob(a_data,  {2}, DType::Float64, Device::cpu()).clone().to(device);
+    auto b  = Tensor::from_blob(b_data,  {2}, DType::Float64, Device::cpu()).clone().to(device);
+    auto da = Tensor::from_blob(da_data, {2}, DType::Float64, Device::cpu()).clone().to(device);
+    auto db = Tensor::from_blob(db_data, {2}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    std::array<Tensor, 2> p{a, b}, t{da, db};
+    auto out = tenzor::dispatch_jvp(OpId::Fmin, p, t, attrs);
+    auto primal_cpu  = out.primal.to(Device::cpu());
+    auto tangent_cpu = out.tangent.to(Device::cpu());
+    auto* prim = primal_cpu.data<double>();
+    auto* tan  = tangent_cpu.data<double>();
+    EXPECT_NEAR(prim[0], 1.0, 1e-12);
+    EXPECT_NEAR(prim[1], 2.0, 1e-12);
+    EXPECT_NEAR(tan[0], 3.0, 1e-12);
+    EXPECT_NEAR(tan[1], 5.0, 1e-12);
+}
+
+// ---- CumProd JVP: exact zero-safe tangent (H17) ----
+// The old `cumsum(dx/x) * y` closed form divides by x directly, so a single
+// zero anywhere in the prefix poisons every SUBSEQUENT position via NaN
+// propagation through cumsum, even though positions strictly after the zero
+// have a well-defined, finite analytic tangent (matching CumProdBackward's
+// own already-fixed exact-prefix-product-excluding-self VJP).
+TEST_P(JVPRulesTest, JVP_CumProd_ZeroInPrefix_TangentFinite) {
+    double x_data[]  = {1.0, 0.0, 2.0, 3.0};
+    double dx_data[] = {1.0, 1.0, 1.0, 1.0};
+    auto x  = Tensor::from_blob(x_data,  {4}, DType::Float64, Device::cpu()).clone().to(device);
+    auto dx = Tensor::from_blob(dx_data, {4}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, int64_t{0});
+    std::array<Tensor, 1> p{x}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::CumProd, p, t, attrs);
+
+    auto tangent_cpu = out.tangent.to(Device::cpu());
+    auto* tan = tangent_cpu.data<double>();
+    // primal = [1, 0, 0, 0]; analytic tangent at k=2: sum_i dx_i * prod_{j<=2,j!=i} x_j
+    //   i=0: dx0 * (x1*x2) = 1 * (0*2) = 0
+    //   i=1: dx1 * (x0*x2) = 1 * (1*2) = 2
+    //   i=2: dx2 * (x0*x1) = 1 * (1*0) = 0   => tangent[2] = 2
+    // at k=3: i=0: dx0*x1*x2*x3=0; i=1: dx1*x0*x2*x3=1*1*2*3=6; i=2: dx2*x0*x1*x3=0;
+    //         i=3: dx3*x0*x1*x2=0 => tangent[3] = 6
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_TRUE(std::isfinite(tan[i])) << "tangent[" << i << "] is not finite: " << tan[i];
+    }
+    EXPECT_NEAR(tan[2], 2.0, 1e-9);
+    EXPECT_NEAR(tan[3], 6.0, 1e-9);
+}
+
+TEST_P(JVPRulesTest, JVP_CumProd_MatchesFD_NoZeros) {
+    auto x = randn({5}, DType::Float64, device) + 2.0;  // keep away from 0
+    auto dx = randn({5}, DType::Float64, device);
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, int64_t{0});
+    std::array<Tensor, 1> p{x}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::CumProd, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& xx) {
+        return tenzor::dispatch(OpId::CumProd, std::vector<Tensor>{xx}, attrs)[0];
+    }, x, dx);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
+}
+
+// ---- M6/M7/M26: zero-safety gaps vs. their VJP siblings ----
+TEST_P(JVPRulesTest, JVP_Xlogy_ZeroXFinite) {
+    double x_data[]  = {0.0};
+    double y_data[]  = {0.0};
+    double dx_data[] = {0.0};
+    double dy_data[] = {1.0};
+    auto x  = Tensor::from_blob(x_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto y  = Tensor::from_blob(y_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto dx = Tensor::from_blob(dx_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto dy = Tensor::from_blob(dy_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    std::array<Tensor, 2> p{x, y}, t{dx, dy};
+    auto out = tenzor::dispatch_jvp(OpId::XLogY, p, t, attrs);
+    auto tan_cpu = out.tangent.to(Device::cpu());
+    EXPECT_TRUE(std::isfinite(tan_cpu.data<double>()[0]));
+    EXPECT_NEAR(tan_cpu.data<double>()[0], 0.0, 1e-9);
+}
+
+TEST_P(JVPRulesTest, JVP_Addcdiv_ZeroDenominatorFinite) {
+    double a_data[] = {0.0};
+    double b_data[] = {1.0};
+    double c_data[] = {0.0};
+    double da_data[] = {0.0};
+    double db_data[] = {1.0};
+    double dc_data[] = {1.0};
+    auto a  = Tensor::from_blob(a_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto b  = Tensor::from_blob(b_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto c  = Tensor::from_blob(c_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto da = Tensor::from_blob(da_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto db = Tensor::from_blob(db_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto dc = Tensor::from_blob(dc_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    attrs.set(AttrKey::Alpha, 1.0);
+    std::array<Tensor, 3> p{a, b, c}, t{da, db, dc};
+    auto out = tenzor::dispatch_jvp(OpId::Addcdiv, p, t, attrs);
+    auto tan_cpu = out.tangent.to(Device::cpu());
+    EXPECT_TRUE(std::isfinite(tan_cpu.data<double>()[0]))
+        << "addcdiv JVP tangent not finite at c==0: " << tan_cpu.data<double>()[0];
+}
+
+// Discovered while fixing M7: jvp_adapter_addcdiv/addcmul read AttrKey::Value
+// instead of AttrKey::Alpha (the key the real dispatcher — ops/math.cpp
+// addcdiv()/addcmul() — always sets), silently using the wrong scale factor
+// whenever alpha != 1.0. alpha=1.0 alone can't distinguish "read the right
+// key" from "read the wrong key and defaulted to 1.0 anyway" — use alpha=3.0
+// so a value/alpha mixup is unambiguous.
+TEST_P(JVPRulesTest, JVP_Addcdiv_NonUnitAlphaScalesTangent) {
+    double a_data[] = {0.0}, b_data[] = {2.0}, c_data[] = {1.0};
+    double da_data[] = {0.0}, db_data[] = {1.0}, dc_data[] = {0.0};
+    auto a  = Tensor::from_blob(a_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto b  = Tensor::from_blob(b_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto c  = Tensor::from_blob(c_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto da = Tensor::from_blob(da_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto db = Tensor::from_blob(db_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto dc = Tensor::from_blob(dc_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    attrs.set(AttrKey::Alpha, 3.0);
+    std::array<Tensor, 3> p{a, b, c}, t{da, db, dc};
+    auto out = tenzor::dispatch_jvp(OpId::Addcdiv, p, t, attrs);
+    auto tan_cpu = out.tangent.to(Device::cpu());
+    // tangent = da + alpha*(db/c - b*dc/c^2) = 0 + 3*(1/1 - 0) = 3.0
+    EXPECT_NEAR(tan_cpu.data<double>()[0], 3.0, 1e-9);
+}
+
+TEST_P(JVPRulesTest, JVP_Addcmul_NonUnitAlphaScalesTangent) {
+    double a_data[] = {0.0}, b_data[] = {2.0}, c_data[] = {3.0};
+    double da_data[] = {0.0}, db_data[] = {1.0}, dc_data[] = {0.0};
+    auto a  = Tensor::from_blob(a_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto b  = Tensor::from_blob(b_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto c  = Tensor::from_blob(c_data,  {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto da = Tensor::from_blob(da_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto db = Tensor::from_blob(db_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    auto dc = Tensor::from_blob(dc_data, {1}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    attrs.set(AttrKey::Alpha, 3.0);
+    std::array<Tensor, 3> p{a, b, c}, t{da, db, dc};
+    auto out = tenzor::dispatch_jvp(OpId::Addcmul, p, t, attrs);
+    auto tan_cpu = out.tangent.to(Device::cpu());
+    // tangent = da + alpha*(db*c + b*dc) = 0 + 3*(1*3 + 0) = 9.0
+    EXPECT_NEAR(tan_cpu.data<double>()[0], 9.0, 1e-9);
+}
+
+// Exact worked example from the audit finding: x=[2.0, 0.0, 3.0], dx=[1,1,1].
+// prod(x)=0; correct tangent = 6 (only the zero position contributes,
+// weight = product of the other elements: 2*3=6).
+TEST_P(JVPRulesTest, JVP_Prod_OneZero_MatchesExactFormula) {
+    double x_data[]  = {2.0, 0.0, 3.0};
+    double dx_data[] = {1.0, 1.0, 1.0};
+    auto x  = Tensor::from_blob(x_data,  {3}, DType::Float64, Device::cpu()).clone().to(device);
+    auto dx = Tensor::from_blob(dx_data, {3}, DType::Float64, Device::cpu()).clone().to(device);
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, int64_t{0});
+    std::array<Tensor, 1> p{x}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::Prod, p, t, attrs);
+    auto tan_cpu = out.tangent.to(Device::cpu());
+    EXPECT_TRUE(std::isfinite(tan_cpu.data<double>()[0]));
+    EXPECT_NEAR(tan_cpu.data<double>()[0], 6.0, 1e-9);
+}
+
+// M27: near-degenerate (not exactly equal) eigenvalues must not blow up to
+// astronomically large / non-finite tangents — the old hard-threshold F
+// matrix produced F_ij ~ 1e7 for a 1e-7 gap.
+TEST_P(JVPRulesTest, JVP_LinalgEigh_NearDegenerateEigenvaluesFinite) {
+    if (device != Device::cpu()) return;
+    // Symmetric 2x2 matrix with eigenvalues very close together (but not
+    // identical): eigenvalues of [[a,b],[b,a]] are a+b, a-b. Float32 so the
+    // gap (1e-7) sits within the dtype's Lorentzian damping band
+    // (rel_eps=1e-6 for Float32): diff << eps_tol, so the fixed F is bounded
+    // to O(1/eps_tol), while the old hard-threshold F ~ 1/diff is ~100x
+    // larger and finite-but-unbounded as the gap shrinks further.
+    float eps = 1e-7f;
+    float a_data[] = {1.0f + eps / 2.0f, eps / 2.0f, eps / 2.0f, 1.0f - eps / 2.0f};
+    float da_data[] = {1.0f, 0.5f, 0.5f, 1.0f};
+    auto A  = Tensor::from_blob(a_data,  {2, 2}, DType::Float32, Device::cpu()).clone();
+    auto dA = Tensor::from_blob(da_data, {2, 2}, DType::Float32, Device::cpu()).clone();
+    OpAttributes attrs;
+    std::array<Tensor, 1> p{A}, t{dA};
+    auto out = tenzor::dispatch_jvp_multi(OpId::LinalgEigh, p, t, attrs);
+    ASSERT_EQ(out.tangents.size(), 2u);
+    auto dV_cpu = out.tangents[1].to(Device::cpu());
+    auto* dvp = dV_cpu.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < dV_cpu.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(dvp[i])) << "dV[" << i << "] not finite: " << dvp[i];
+        max_abs = std::max(max_abs, std::abs(dvp[i]));
+    }
+    // Naive 1/diff would give ~1e7; the Lorentzian-bounded fix keeps this
+    // comfortably below 1e6 for this gap/dtype combination.
+    EXPECT_LT(max_abs, 1e6f) << "dV unreasonably large (hard-threshold blowup): " << max_abs;
+}
+
 // ---- SparseToDense JVP ----
 TEST_P(JVPRulesTest, JVP_SparseToDense_S15_LinearMatchesFD) {
     int64_t M = 4, K = 5;
@@ -481,6 +754,44 @@ void w4_verify_single(OpId op, std::vector<Tensor> primals, std::vector<int> dif
 
 }  // namespace
 
+// H16: jvp_adapter_layer_norm's mean/rstd (and their tangents) must match
+// the real kernel's flat {batch_size} contract (nn_kernels.cpp
+// layer_norm_kernel_with_stats), not a keepdim=true [B,T,1] layout — a
+// consumer matching saved_tensors()[1]/[2] by data_ptr (e.g. the
+// create_graph=true double-backward walker) would otherwise get a
+// shape-mismatched tangent for every LayerNorm call.
+TEST_P(JVPRulesTest, LayerNorm_JVP_StatsShapeMatchesKernel) {
+    if (device != Device::cpu()) return;
+    auto x = w4_randf64({2, 3, 4}, 21);
+    auto gamma = w4_randf64({4}, 22);
+    auto beta = w4_randf64({4}, 23);
+    OpAttributes attrs;
+    attrs.set(AttrKey::NormalizedShape, std::to_string(4));
+    attrs.set(AttrKey::Eps, 1e-5);
+
+    // Real forward's mean/rstd shape (ground truth): flat {batch_size} where
+    // batch_size = numel(x)/norm_size = 2*3 = 6.
+    auto real = tenzor::dispatch(OpId::LayerNorm, std::vector<Tensor>{x, gamma, beta}, attrs);
+    std::vector<int64_t> real_mean_shape(real[1].shape().begin(), real[1].shape().end());
+    std::vector<int64_t> real_rstd_shape(real[2].shape().begin(), real[2].shape().end());
+
+    std::vector<Tensor> primals{x, gamma, beta};
+    std::vector<Tensor> tangents{
+        w4_randf64({2, 3, 4}, 24), w4_randf64({4}, 25), w4_randf64({4}, 26)};
+    auto out = tenzor::dispatch_jvp_multi(OpId::LayerNorm, primals, tangents, attrs);
+
+    ASSERT_EQ(out.primals.size(), 3u);
+    ASSERT_EQ(out.tangents.size(), 3u);
+    std::vector<int64_t> mean_primal_shape(out.primals[1].shape().begin(), out.primals[1].shape().end());
+    std::vector<int64_t> rstd_primal_shape(out.primals[2].shape().begin(), out.primals[2].shape().end());
+    std::vector<int64_t> mean_tangent_shape(out.tangents[1].shape().begin(), out.tangents[1].shape().end());
+    std::vector<int64_t> rstd_tangent_shape(out.tangents[2].shape().begin(), out.tangents[2].shape().end());
+    EXPECT_EQ(mean_primal_shape, real_mean_shape) << "mean primal shape mismatch";
+    EXPECT_EQ(rstd_primal_shape, real_rstd_shape) << "rstd primal shape mismatch";
+    EXPECT_EQ(mean_tangent_shape, real_mean_shape) << "mean tangent shape mismatch";
+    EXPECT_EQ(rstd_tangent_shape, real_rstd_shape) << "rstd tangent shape mismatch";
+}
+
 TEST_P(JVPRulesTest, GroupNorm_JVP_MatchesFD) {
     if (device != Device::cpu()) return;  // Float64 reference is CPU-side.
     OpAttributes a;
@@ -505,6 +816,44 @@ TEST_P(JVPRulesTest, RMSNorm_JVP_MatchesFD) {
     OpAttributes a;
     a.set(AttrKey::Eps, 1e-5);
     w4_verify(OpId::RMSNorm, { w4_randf64({2,8},7), w4_randf64({8},8) }, {0,1}, 0, a, 1e-5);
+}
+
+// H4: SparseSpGEMM values-tangent (dC.values = dA.values @ B + A @ dB.values)
+// against a central-difference reference, perturbing A.values and B.values
+// independently (diff_primals {2,5}) and jointly, checking output slot 2
+// (C.values). Structural outputs (crow=0, col=1) are never perturbed —
+// integer/non-differentiable, matching every other sparse JVP rule in this
+// file.
+TEST_P(JVPRulesTest, SparseSpGEMM_JVP_ValuesMatchesFD) {
+    if (device != Device::cpu()) return;
+    int64_t M = 4, K = 5, N = 3;
+    std::vector<int64_t> A_crow_d = {0, 2, 3, 5, 6};
+    std::vector<int64_t> A_col_d  = {0, 2, 1, 3, 4, 0};
+    std::vector<int64_t> B_crow_d = {0, 1, 2, 3, 3, 4};
+    std::vector<int64_t> B_col_d  = {0, 2, 1, 0};
+
+    auto A_crow = Tensor::from_blob(A_crow_d.data(), {M + 1}, DType::Int64, Device::cpu())
+                      .clone();
+    auto A_col = Tensor::from_blob(A_col_d.data(), {static_cast<int64_t>(A_col_d.size())},
+                                    DType::Int64, Device::cpu())
+                     .clone();
+    auto B_crow = Tensor::from_blob(B_crow_d.data(), {K + 1}, DType::Int64, Device::cpu())
+                      .clone();
+    auto B_col = Tensor::from_blob(B_col_d.data(), {static_cast<int64_t>(B_col_d.size())},
+                                    DType::Int64, Device::cpu())
+                     .clone();
+    auto A_values = w4_randf64({static_cast<int64_t>(A_col_d.size())}, 11);
+    auto B_values = w4_randf64({static_cast<int64_t>(B_col_d.size())}, 12);
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::M, M);
+    attrs.set(AttrKey::K, K);
+    attrs.set(AttrKey::N, N);
+
+    std::vector<Tensor> primals{A_crow, A_col, A_values, B_crow, B_col, B_values};
+    w4_verify(OpId::SparseSpGEMM, primals, {2}, 2, attrs, 1e-4);
+    w4_verify(OpId::SparseSpGEMM, primals, {5}, 2, attrs, 1e-4);
+    w4_verify(OpId::SparseSpGEMM, primals, {2, 5}, 2, attrs, 1e-4);
 }
 
 TEST_P(JVPRulesTest, Chunk_JVP_MatchesFD) {
@@ -841,6 +1190,86 @@ TEST_P(JVPRulesTest, Ormqr_JVP_MatchesFD) {
     auto qr = tenzor::dispatch(OpId::Geqrf, std::vector<Tensor>{A}, OpAttributes{});
     Tensor B = w4_randf64({4,2}, 184);
     w4_verify_single(OpId::Ormqr, {qr[0], qr[1], B}, {0,1,2}, a, 1e-4);
+}
+
+// L3 regression: the JVP's PRIMAL must come from the real dispatched op
+// (LAPACK orgqr/ormqr), not a naive sequential-reflector reconstruction —
+// every sibling S15 rule needing a primal (SVD, Eig, LDLFactor, LDLSolve,
+// Geqrf) already does this. Use a larger matrix (more reflectors) where the
+// naive host-side accumulation visibly drifts from LAPACK's blocked
+// compact-WY algorithm, and assert the JVP-returned primal is essentially
+// EXACT against the real op's own output (both now literally dispatch the
+// same kernel) rather than merely "close" (which the naive reconstruction
+// would also satisfy, just not to LAPACK-exact precision).
+TEST_P(JVPRulesTest, LinalgHouseholder_JVP_PrimalMatchesRealOp) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    // 200x200: large enough to push LAPACK's dorgqr past its blocked/
+    // unblocked crossover (dorg2r), so the naive reconstruction's drift
+    // from the blocked compact-WY algorithm is actually visible — a smaller
+    // matrix stays under the blocking threshold, where LAPACK itself falls
+    // through to the same unblocked recurrence and the two primals agree
+    // almost to the bit even with the bug present.
+    const int64_t N = 500;
+    Tensor A = w4_randf64({N, N}, 281) * 0.3;
+    { double* d = A.data<double>(); for (int i = 0; i < N; ++i) d[i*N+i] += 5.0; }
+    auto qr = tenzor::dispatch(OpId::Geqrf, std::vector<Tensor>{A}, OpAttributes{});
+    Tensor reflectors = qr[0], tau = qr[1];
+
+    Tensor real_Q = tenzor::dispatch(OpId::LinalgHouseholder,
+        std::vector<Tensor>{reflectors, tau}, a)[0];
+
+    std::array<Tensor, 2> p{reflectors, tau};
+    std::array<Tensor, 2> t{tenzor::zeros_like(reflectors), tenzor::zeros_like(tau)};
+    auto out = tenzor::dispatch_jvp(OpId::LinalgHouseholder, p, t, a);
+
+    EXPECT_LT(max_abs_diff_d(out.primal, real_Q), 1e-15)
+        << "JVP primal must come from the real dispatched op, not a "
+           "numerically-drifted naive reconstruction";
+}
+
+// Ormqr shape-safety net (NOT a pre-fix-vs-post-fix regression reproduction
+// — see below): reflectors' column count (n) deliberately LESS than `order`
+// (the Q dimension Ormqr implicitly multiplies against, = rows(B) for
+// left). LAPACK ?ormqr only requires cols(reflectors) >= k (the reflector
+// count), not cols(reflectors) == order. The original naive
+// householder_q_and_dq reconstruction always builds a full (order,order) Q
+// directly (via eye(m)), so it was already shape-safe here and this test
+// does NOT fail against it — confirmed empirically during development. It
+// WOULD have failed against an intermediate, incorrect version of this fix
+// that substituted OpId::LinalgHouseholder (orgqr, which returns an (m,n)
+// economy Q) for the primal: that silently returns the WRONG SHAPE whenever
+// n < order. The shipped fix instead re-dispatches OpId::Ormqr itself
+// against an identity "other" operand to materialize the correctly-shaped
+// (order,order) op(Q), which cannot suffer this mismatch since it's the
+// exact same kernel/shape contract as the real call. Kept as a permanent
+// structural safety net against ever reintroducing that class of mistake.
+TEST_P(JVPRulesTest, Ormqr_JVP_PrimalMatchesRealOp_RectangularReflectors) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Left, true);
+    a.set(AttrKey::TransposeQ, false);
+    const int64_t M = 100, N = 20;  // reflectors: (M,N), N < M=order (left, rows(B)=M)
+    Tensor A = w4_randf64({M, N}, 283) * 0.3;
+    { double* d = A.data<double>(); for (int i = 0; i < N; ++i) d[i*N+i] += 5.0; }
+    auto qr = tenzor::dispatch(OpId::Geqrf, std::vector<Tensor>{A}, OpAttributes{});
+    Tensor reflectors = qr[0], tau = qr[1];
+    ASSERT_EQ(reflectors.shape()[1], N) << "sanity: cols(reflectors) == N < order == M";
+    Tensor B = w4_randf64({M, 5}, 284);
+
+    Tensor real_Y = tenzor::dispatch(OpId::Ormqr,
+        std::vector<Tensor>{reflectors, tau, B}, a)[0];
+
+    std::array<Tensor, 3> p{reflectors, tau, B};
+    std::array<Tensor, 3> t{tenzor::zeros_like(reflectors), tenzor::zeros_like(tau),
+                             tenzor::zeros_like(B)};
+    auto out = tenzor::dispatch_jvp(OpId::Ormqr, p, t, a);
+
+    ASSERT_EQ(out.primal.shape()[0], M);
+    ASSERT_EQ(out.primal.shape()[1], 5);
+    EXPECT_LT(max_abs_diff_d(out.primal, real_Y), 1e-9)
+        << "JVP primal must come from the real dispatched op, correctly "
+           "shaped even when cols(reflectors) != order";
 }
 
 // Helper: symmetric diagonally dominant matrix (=> sytrf picks 1x1 pivots in

@@ -55,7 +55,6 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
     // higher-order (var) gradient, so rewriting next_functions covers both.
     {
         std::unordered_map<Function*, std::shared_ptr<Function>> reachable;
-        std::unordered_map<Function*, int> consumers;
         // Iterative DFS (explicit stack) — avoids stack overflow on deep chains.
         auto walk = [&](const std::shared_ptr<Function>& start) {
             std::vector<std::shared_ptr<Function>> stack{start};
@@ -65,10 +64,7 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
                 if (!fn || reachable.count(fn.get())) continue;
                 reachable[fn.get()] = fn;
                 for (const auto& nf : fn->next_functions()) {
-                    if (nf) {
-                        consumers[nf.get()]++;
-                        if (!reachable.count(nf.get())) stack.push_back(nf);
-                    }
+                    if (nf && !reachable.count(nf.get())) stack.push_back(nf);
                 }
             }
         };
@@ -106,11 +102,27 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
             std::vector<std::shared_ptr<Function>> nfs = P->next_functions();
             bool changed = false;
             for (size_t i = 0; i < nfs.size(); ++i) {
-                const std::shared_ptr<Function> T1 = nfs[i];
-                if (!is_transpose(T1) || consumers[T1.get()] != 1) continue;
+                const std::shared_ptr<Function>& T1 = nfs[i];
+                if (!is_transpose(T1)) continue;
+                // M1: parent_count() is a GLOBAL count maintained centrally by
+                // Function::set_next_functions() (see function_base.cpp) —
+                // every Function anywhere in the live program that currently
+                // lists T1/T2 as one of its own next_functions() entries,
+                // not just the ones reachable by walking from THIS `root`.
+                // A local walk-only count (the previous "consumers" map)
+                // cannot see a sibling Variable built from a shared
+                // sub-expression under retain_graph=true (`a = f(y);
+                // b = g(y);`) whose independently-held grad_fn chain also
+                // reaches T1/T2 — splicing P's edge here would silently
+                // corrupt that other Variable's graph too. parent_count()
+                // deliberately excludes a Variable's own grad_fn_ reference
+                // (that's an entry point, not a graph edge), so a merely
+                // still-in-scope intermediate Variable that is never itself
+                // used as a backward() root does not block the splice.
+                if (T1->parent_count() != 1) continue;
                 if (T1->next_functions().size() != 1) continue;
-                std::shared_ptr<Function> T2 = T1->next_functions()[0];
-                if (!is_transpose(T2) || consumers[T2.get()] != 1) continue;
+                const std::shared_ptr<Function>& T2 = T1->next_functions()[0];
+                if (!is_transpose(T2) || T2->parent_count() != 1) continue;
                 if (tdims(T1) != tdims(T2)) continue;  // must be an inverse pair
                 // Don't drop a leaf / retained-grad accumulation held by either
                 // transpose, and require a real (non-null) downstream node to

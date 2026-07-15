@@ -25,6 +25,17 @@
 namespace tenzor {
 
 namespace {
+// M25: thread-local signal so callers can programmatically detect that the
+// most recent jvp() call degraded to a finite-difference approximation
+// (previously only an stderr print — invisible to code, not just humans).
+thread_local bool g_jvp_used_fd_fallback{false};
+}  // namespace
+
+auto jvp_used_fd_fallback() -> bool {
+    return g_jvp_used_fd_fallback;
+}
+
+namespace {
 
 // A.4 multi-op JVP traversal: walk the autograd graph rooted at `out_grad_fn`
 // in reverse-topological (i.e. forward-execution) order and chain
@@ -306,9 +317,15 @@ auto jvp(std::function<Variable(const Variable&)> func,
         const void* user_ptr = input.tensor().data_ptr();
         const void* output_ptr = output.tensor().data_ptr();
         if (auto tangent_opt = try_traverse_jvp(grad_fn, user_ptr, tangent, output_ptr)) {
+            g_jvp_used_fd_fallback = false;
             return {output, std::move(*tangent_opt)};
         }
     }
+
+    // M25: mark this call as FD-degraded before doing any of the fallback
+    // work below, so jvp_used_fd_fallback() is correct even if a caller
+    // inspects it from within a nested/recursive jvp() invocation.
+    g_jvp_used_fd_fallback = true;
 
     // ---- Fallback: central finite differences ----------------------------
     // Warn on EVERY fallback (not once-per-process): the previous std::once
@@ -522,7 +539,19 @@ auto hvp(std::function<Variable(const Variable&)> func,
         scalar.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
         const auto& gv = pv.grad_variable();
         if (gv) {
-            return *gv;
+            // H2: pv is a fresh, single-use leaf discarded at the end of this
+            // call. Its grad_with_graph_impl_ strongly references gv's graph,
+            // which (via save_variables_for_backward retaining live Variables
+            // under HigherOrderGraphRetentionGuard) strongly references pv
+            // right back — a shared_ptr cycle that would otherwise leak pv's
+            // VariableImpl, and its device tensor storage, forever on every
+            // hvp()/vhp()/hessian() call. Take our own independent copy of
+            // the graph-connected gradient first, then zero_grad() to clear
+            // pv's own back-reference to it — result already holds what we
+            // need, so nothing is lost.
+            Variable result = *gv;
+            pv.zero_grad();
+            return result;
         }
         // Output does not depend on p — gradient is zero everywhere.
         return Variable(tenzor::zeros_like(pv.tensor()), false);

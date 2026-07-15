@@ -60,7 +60,12 @@ void main() {
                                 uint(in_y) * params.in_width + uint(in_x);
                 float value = input_data[input_idx];
 
-                if (value > max_val) {
+                // L2: NaN-propagating (matches max_pool1d.comp/max_pool3d.comp/
+                // adaptive_pooling.comp) — `value != value` is true only for
+                // NaN, so a NaN anywhere in the window always wins, instead of
+                // being silently skipped by a plain `>` comparison (NaN > x is
+                // always false).
+                if (value > max_val || value != value) {
                     max_val = value;
                     // Plane-local index (in_y*W + in_x): matches CPU/PyTorch and
                     // max_unpool; the backward reconstructs the global offset.

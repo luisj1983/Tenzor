@@ -17,6 +17,8 @@
  * Backends physically absent on the host are skipped by BackendTest::SetUp.
  */
 
+#include <cmath>
+
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/gradcheck.hpp>
@@ -48,6 +50,18 @@ Tensor make_tall(int64_t m, int64_t n, const Device& device) {
     return tenzor::add(x, eye_pad);
 }
 
+// Build a tall (M > N) matrix with an exact zero column, guaranteeing rank
+// <= N-1 and thus at least one singular value exactly 0. Used to reproduce
+// the M3 SvdBackward NaN: the non-square projector term unconditionally
+// computes S_inv_diag = diag(1/S), and even though grad_U/grad_Vh are exact
+// zero tensors when only S is differentiated, matmul(zero, diag(1/0=Inf))
+// yields 0 * Inf = NaN in that matmul's reduction.
+Tensor make_rank_deficient_tall(int64_t m, int64_t n, const Device& device) {
+    auto x = randn({m, n - 1}, DType::Float64, device) * 0.5;
+    auto zero_col = zeros({m, 1}, DType::Float64, device);
+    return tenzor::cat({x, zero_col}, 1);
+}
+
 }  // namespace
 
 // ============================================================================
@@ -72,6 +86,36 @@ TEST_P(GradCheckPhase7, SVD_FullMatricesFalse) {
     };
     bool ok = gradcheck(f, x, 1e-6, 5e-3, 5e-3);
     EXPECT_TRUE(ok) << "SVD (sum of singular values) gradcheck failed";
+}
+
+TEST_P(GradCheckPhase7, SVD_RankDeficientTallNoNaN) {
+    // M3 regression: SvdBackward's non-square (M > K) projector term used an
+    // unregularized reciprocal(S). For a tall (M > N) matrix with a genuinely
+    // zero singular value (here forced via an exact zero column), S_inv had
+    // an Inf entry; even differentiating through S alone (grad_U is an exact
+    // zero tensor) hit `matmul(zero_tensor, S_inv_diag)`, and 0 * Inf = NaN
+    // poisoned the entire grad_A, not just the degenerate direction.
+    // gradcheck is not used here because finite differences are themselves
+    // unstable exactly at a rank-deficient point (S[j]=0 is a branch point of
+    // the SVD, non-differentiable in the naive numerical sense even though
+    // sum(S) has a well-defined analytical subgradient here); instead we
+    // assert the analytical gradient is finite everywhere.
+    Variable x(make_rank_deficient_tall(4, 3, device), true);
+    auto [U, S, Vh] = tenzor::svd(x, /*full_matrices=*/false);
+    auto loss = tenzor::sum(S);
+    loss.backward();
+
+    auto grad = x.grad();
+    ASSERT_TRUE(grad.has_value()) << "SVD backward produced no gradient";
+    auto grad_cpu = grad->to(Device::cpu()).contiguous();
+    ASSERT_EQ(grad_cpu.dtype(), DType::Float64);
+    const double* data = static_cast<const double*>(grad_cpu.data_ptr());
+    int64_t numel = grad_cpu.numel();
+    for (int64_t i = 0; i < numel; ++i) {
+        EXPECT_TRUE(std::isfinite(data[i]))
+            << "grad_A[" << i << "] = " << data[i]
+            << " (non-finite gradient from unregularized S_inv projector term)";
+    }
 }
 
 TEST_P(GradCheckPhase7, QR_TraceR) {

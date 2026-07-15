@@ -74,7 +74,7 @@ __device__ inline T bilinear_interpolate_device(const T* data, int64_t height,
 template<typename T>
 __global__ void roi_align_forward_kernel(
     const T* features,       // (N, C, H, W)
-    const float* rois,       // (num_rois, 5): (batch_idx, x1, y1, x2, y2) — always float
+    const T* rois,           // (num_rois, 5): (batch_idx, x1, y1, x2, y2) — same precision as T (M15)
     T* output,               // (num_rois, C, output_h, output_w)
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t batch_size,
@@ -91,7 +91,7 @@ __global__ void roi_align_forward_kernel(
     const int64_t c = (index / (output_w * output_h)) % channels;
     const int64_t roi_idx = index / (output_w * output_h * channels);
 
-    const float* roi = rois + roi_idx * 5;
+    const T* roi = rois + roi_idx * 5;
     const int64_t batch_idx = static_cast<int64_t>(roi[0]);
 
     // Validate the user-supplied ROI batch index before using it to address
@@ -159,7 +159,7 @@ __global__ void roi_align_forward_kernel(
 template<typename T>
 __global__ void roi_align_backward_kernel(
     const T* grad_output,    // (num_rois, C, output_h, output_w)
-    const float* rois,       // (num_rois, 5) — always float
+    const T* rois,           // (num_rois, 5) — same precision as T (M15)
     T* grad_features,        // (N, C, H, W)
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t batch_size,
@@ -176,7 +176,7 @@ __global__ void roi_align_backward_kernel(
     const int64_t c = (index / (output_w * output_h)) % channels;
     const int64_t roi_idx = index / (output_w * output_h * channels);
 
-    const float* roi = rois + roi_idx * 5;
+    const T* roi = rois + roi_idx * 5;
     const int64_t batch_idx = static_cast<int64_t>(roi[0]);
 
     // Out-of-range ROI batch index: skip the scatter (would otherwise write to
@@ -476,7 +476,7 @@ __global__ void f32_grad_to_fp16_kernel(const float* src, __half* dst, int64_t n
 
 auto roi_align_forward(const Tensor& features, const Tensor& rois,
                        int64_t output_h, int64_t output_w,
-                       float spatial_scale, int64_t sampling_ratio,
+                       double spatial_scale, int64_t sampling_ratio,
                        bool aligned, cudaStream_t stream) -> Tensor {
     // The kernels index features with flat contiguous-NCHW offsets; materialize
     // a contiguous copy so a sliced/permuted/channels-last view is read correctly.
@@ -498,12 +498,18 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
         return output;
     }
 
-    // ROI coordinates (batch_idx, x1, y1, x2, y2) are always processed as Float32.
-    // This is a single conversion shared across all feature dtype branches, and is
-    // a no-op when rois are already Float32 (the common case). Make it contiguous
-    // too since the kernel reads roi rows flat (roi_idx*5).
-    const Tensor rois_f32 = ((rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32)).contiguous();
-    const float* rois_ptr = rois_f32.data<float>();
+    // M15: ROI coordinates (batch_idx, x1, y1, x2, y2) and spatial_scale now
+    // match the feature dtype's precision (Float64 features -> Float64 ROIs
+    // and spatial_scale) instead of always narrowing to Float32, which
+    // truncated bin boundaries to ~7 accurate digits regardless of the
+    // requested Float64 precision. Float16/BFloat16 features still compute
+    // via the fp16 path below (Float32 ROIs — lossless, matches CPU's own
+    // fp16 upcast-to-float32 convention).
+    const bool compute_f64 = (dtype == DType::Float64);
+    const DType roi_compute_dtype = compute_f64 ? DType::Float64 : DType::Float32;
+    const Tensor rois_c = ((rois.dtype() == roi_compute_dtype) ? rois : rois.to(roi_compute_dtype)).contiguous();
+    const float* rois_ptr = compute_f64 ? nullptr : rois_c.data<float>();
+    const double* rois_ptr_f64 = compute_f64 ? rois_c.data<double>() : nullptr;
 
     int min_grid_size, block_size;
 
@@ -514,15 +520,15 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
         roi_align_forward_kernel<float><<<blocks, block_size, 0, stream>>>(
             features_c.data<float>(), rois_ptr, output.data<float>(),
             num_rois, channels, feat_height, feat_width, batch_size,
-            output_h, output_w, spatial_scale, sampling_ratio, aligned);
+            output_h, output_w, static_cast<float>(spatial_scale), sampling_ratio, aligned);
     } else if (dtype == DType::Float64) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
                                            roi_align_forward_kernel<double>, 0, 0);
         const int blocks = (total_outputs + block_size - 1) / block_size;
         roi_align_forward_kernel<double><<<blocks, block_size, 0, stream>>>(
-            features_c.data<double>(), rois_ptr, output.data<double>(),
+            features_c.data<double>(), rois_ptr_f64, output.data<double>(),
             num_rois, channels, feat_height, feat_width, batch_size,
-            output_h, output_w, static_cast<double>(spatial_scale),
+            output_h, output_w, spatial_scale,
             sampling_ratio, aligned);
     } else if (dtype == DType::Float16) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
@@ -533,7 +539,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
             rois_ptr,
             reinterpret_cast<__half*>(output.data_ptr()),
             num_rois, channels, feat_height, feat_width, batch_size,
-            output_h, output_w, spatial_scale, sampling_ratio, aligned);
+            output_h, output_w, static_cast<float>(spatial_scale), sampling_ratio, aligned);
     } else {
         throw std::runtime_error("roi_align_forward: Unsupported dtype");
     }
@@ -545,7 +551,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
 
 auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                         int64_t batch_size, int64_t feat_height, int64_t feat_width,
-                        float spatial_scale, int64_t sampling_ratio,
+                        double spatial_scale, int64_t sampling_ratio,
                         bool aligned, cudaStream_t stream) -> Tensor {
     // Kernels index grad_output flat (NCHW); materialize a contiguous copy.
     const Tensor grad_output_c = grad_output.contiguous();
@@ -560,10 +566,13 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     int64_t total_features = batch_size * channels * feat_height * feat_width;
     int64_t total_grads = num_rois * channels * output_h * output_w;
 
-    // ROI coordinates always processed as Float32, shared across all branches.
-    // Contiguous because roi rows are read flat (roi_idx*5).
-    const Tensor rois_f32 = ((rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32)).contiguous();
-    const float* rois_ptr = rois_f32.data<float>();
+    // M15: ROI coordinates match the grad_output/feature dtype's precision
+    // instead of always narrowing to Float32 — see roi_align_forward above.
+    const bool compute_f64 = (dtype == DType::Float64);
+    const DType roi_compute_dtype = compute_f64 ? DType::Float64 : DType::Float32;
+    const Tensor rois_c = ((rois.dtype() == roi_compute_dtype) ? rois : rois.to(roi_compute_dtype)).contiguous();
+    const float* rois_ptr = compute_f64 ? nullptr : rois_c.data<float>();
+    const double* rois_ptr_f64 = compute_f64 ? rois_c.data<double>() : nullptr;
 
     int min_grid_size, block_size;
 
@@ -578,7 +587,7 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
         roi_align_backward_kernel<float><<<blocks, block_size, 0, stream>>>(
             grad_output_c.data<float>(), rois_ptr, grad_features.data<float>(),
             num_rois, channels, feat_height, feat_width, batch_size,
-            output_h, output_w, spatial_scale, sampling_ratio, aligned);
+            output_h, output_w, static_cast<float>(spatial_scale), sampling_ratio, aligned);
         ROI_CUDA_CHECK(cudaGetLastError());
         return grad_features;
     } else if (dtype == DType::Float64) {
@@ -590,9 +599,9 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                                            roi_align_backward_kernel<double>, 0, 0);
         const int blocks = (total_grads + block_size - 1) / block_size;
         roi_align_backward_kernel<double><<<blocks, block_size, 0, stream>>>(
-            grad_output_c.data<double>(), rois_ptr, grad_features.data<double>(),
+            grad_output_c.data<double>(), rois_ptr_f64, grad_features.data<double>(),
             num_rois, channels, feat_height, feat_width, batch_size,
-            output_h, output_w, static_cast<double>(spatial_scale),
+            output_h, output_w, spatial_scale,
             sampling_ratio, aligned);
         ROI_CUDA_CHECK(cudaGetLastError());
         return grad_features;
@@ -610,7 +619,7 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                 rois_ptr,
                 grad_features_f32.data<float>(),
                 num_rois, channels, feat_height, feat_width, batch_size,
-                output_h, output_w, spatial_scale, sampling_ratio, aligned);
+                output_h, output_w, static_cast<float>(spatial_scale), sampling_ratio, aligned);
             ROI_CUDA_CHECK(cudaGetLastError());
         }
 

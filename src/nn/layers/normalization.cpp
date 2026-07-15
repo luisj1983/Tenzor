@@ -422,8 +422,14 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
         std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
         auto results = dispatch<OpId::LayerNormBackward>(inputs_vec, attrs);
 
-        if (needs_upcast && results.size() >= 1) {
-            results[0] = results[0].to(orig_dt);
+        // H5: narrow every result back to the parameter dtype, not just
+        // grad_input. grad_weight/grad_bias (results[1]/results[2]) come back
+        // Float32 from the upcast dispatch above; leaving them unnarrowed
+        // returns a Float32 gradient against a Float16/BFloat16 weight/bias.
+        // Matches GroupNormBackward's `for (auto& r : results) r = r.to(...)`
+        // pattern.
+        if (needs_upcast) {
+            for (auto& r : results) r = r.to(orig_dt);
         }
         return results;
     }
@@ -1358,27 +1364,34 @@ public:
         // Reshape grad_output from 5D to 4D
         Tensor grad_output_4d = grad_output_5d.reshape({N, C, D_ * H_, W_});
 
+        // L9: matches InstanceNorm1dBackwardFn's upcast (this class is
+        // currently unreachable — InstanceNorm3d::forward_impl delegates to
+        // InstanceNorm2d — but was missing this entirely, unlike its 1D
+        // sibling, and would call weight.data<half>() on the Float32
+        // mean/rstd/weight the forward always saves, for a half input).
+        const DType compute_dt =
+            (original_dtype == DType::Float16 || original_dtype == DType::BFloat16)
+                ? DType::Float32 : original_dtype;
+
         std::vector<Tensor> inputs_vec;
         if (original_device.type != Device::Type::CPU) {
-            inputs_vec = {grad_output_4d.contiguous(), input_4d.contiguous(),
-                         weight.contiguous(), mean.contiguous(), rstd.contiguous()};
+            inputs_vec = {grad_output_4d.to(compute_dt).contiguous(), input_4d.to(compute_dt).contiguous(),
+                         weight.to(compute_dt).contiguous(), mean.to(compute_dt).contiguous(), rstd.to(compute_dt).contiguous()};
         } else {
-            inputs_vec = {grad_output_4d.to(Device::cpu()).contiguous(),
-                         input_4d.to(Device::cpu()).contiguous(),
-                         weight.to(Device::cpu()).contiguous(),
-                         mean.to(Device::cpu()).contiguous(),
-                         rstd.to(Device::cpu()).contiguous()};
+            inputs_vec = {grad_output_4d.to(Device::cpu()).to(compute_dt).contiguous(),
+                         input_4d.to(Device::cpu()).to(compute_dt).contiguous(),
+                         weight.to(Device::cpu()).to(compute_dt).contiguous(),
+                         mean.to(Device::cpu()).to(compute_dt).contiguous(),
+                         rstd.to(Device::cpu()).to(compute_dt).contiguous()};
         }
         auto results = dispatch<OpId::InstanceNormBackward>(inputs_vec);
 
-        // Reshape grad_input from 4D back to 5D
+        // Reshape grad_input from 4D back to 5D, then narrow all grads back
+        // to the original dtype/device (results are in compute_dt).
         Tensor grad_input = results[0].reshape({N, C, D_, H_, W_});
-        if (original_device.type == Device::Type::CPU) {
-            return {grad_input.to(original_dtype).to(original_device).contiguous(),
-                    results[1].to(original_dtype).to(original_device).contiguous(),
-                    results[2].to(original_dtype).to(original_device).contiguous()};
-        }
-        return {grad_input, results[1], results[2]};
+        return {grad_input.to(original_dtype).to(original_device).contiguous(),
+                results[1].to(original_dtype).to(original_device).contiguous(),
+                results[2].to(original_dtype).to(original_device).contiguous()};
     }
 
     auto name() const -> std::string override { return "InstanceNorm3dBackwardFn"; }
@@ -1913,19 +1926,37 @@ public:
             auto rm = rrms_orig.contiguous();
             auto wt = weight_orig.contiguous();
 
-            // Ensure all tensors share input's dtype — backend kernels
-            // typically reinterpret pointers to a single dtype and would
-            // throw "Type mismatch" if go/rm/wt differ from inp. Same root
-            // cause as the RMSNorm forward fix.
+            // H6: unlike LayerNorm/GroupNorm/InstanceNorm's GPU backward
+            // wrappers, this one used to just match go/rm/wt to inp's dtype
+            // with no Float32 upcast — so a Float16/BFloat16 call dispatched
+            // half-precision buffers straight to the kernel. CUDA's own
+            // fused_ops.cu kernel deliberately allocates grad_weight at
+            // Float32 regardless of input dtype (its own "H1 fix" for rstd
+            // dynamic range), so grad_weight came back Float32 against a
+            // Float16/BFloat16 weight parameter with nothing here to narrow
+            // it. Upcasting centrally (matching every sibling norm op's
+            // wrapper) and narrowing every result back afterward fixes this
+            // for CUDA and is a no-op precision improvement elsewhere.
             DType in_dt = inp.dtype();
-            if (go.dtype() != in_dt) go = go.to(in_dt);
-            if (rm.dtype() != in_dt) rm = rm.to(in_dt);
-            if (wt.dtype() != in_dt) wt = wt.to(in_dt);
+            bool needs_upcast = (in_dt == DType::Float16 || in_dt == DType::BFloat16);
+            if (needs_upcast) {
+                go = go.to(DType::Float32);
+                inp = inp.to(DType::Float32);
+                rm = rm.to(DType::Float32);
+                wt = wt.to(DType::Float32);
+            } else {
+                if (go.dtype() != in_dt) go = go.to(in_dt);
+                if (rm.dtype() != in_dt) rm = rm.to(in_dt);
+                if (wt.dtype() != in_dt) wt = wt.to(in_dt);
+            }
 
             NewOpAttributes attrs;
             attrs.set(AttrKey::NormalizedShape, std::to_string(normalized_size_));
             std::vector<Tensor> inputs_vec = {go, inp, rm, wt};
             auto results = dispatch<OpId::RMSNormBackward>(inputs_vec, attrs);
+            if (needs_upcast) {
+                for (auto& r : results) r = r.to(in_dt);
+            }
             return results;
         }
 
