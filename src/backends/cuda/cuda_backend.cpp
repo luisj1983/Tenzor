@@ -172,9 +172,7 @@ namespace cuda {
     auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
 
     // Fill operations
-    auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
-    auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto fill_kernel(const Tensor& tensor, double value, cudaStream_t stream) -> Tensor;
 
     // Random operations
@@ -289,6 +287,26 @@ public:
         // device") when the real cause is e.g. a driver/runtime mismatch.
         cudaError_t err = cudaGetDeviceCount(&count);
         if (err != cudaSuccess) {
+            // cudaErrorNoDevice is the ordinary "no GPU hardware present"
+            // case and is silently folded into count=0 below, same as
+            // always. Any OTHER error code (driver too old, broken CUDA
+            // install, etc.) used to vanish into that same "0 devices"
+            // signal with zero discoverable diagnostic. Surface it once via
+            // this codebase's structured logging facade -- not on every
+            // call, since device_count()/is_available() may be probed
+            // repeatedly -- while still returning 0/false exactly as before
+            // (the graceful-degradation contract is unchanged).
+            if (err != cudaErrorNoDevice) {
+                static std::once_flag warned_once;
+                std::call_once(warned_once, [err]() {
+                    TENZOR_LOG_WARN(
+                        "[CUDA] cudaGetDeviceCount() failed with {} ({}); "
+                        "reporting 0 CUDA devices. This may indicate a "
+                        "driver/runtime mismatch or broken CUDA install rather "
+                        "than a genuine absence of GPU hardware.",
+                        static_cast<int>(err), cudaGetErrorString(err));
+                });
+            }
             // No usable CUDA device: clear the sticky error and report zero so
             // is_available() degrades cleanly rather than throwing at load time.
             cudaGetLastError();
@@ -722,7 +740,11 @@ private:
         peer_access_.resize(count, std::vector<bool>(count, false));
 
         int saved_device = 0;
-        cudaGetDevice(&saved_device);
+        // Unchecked, a failed cudaGetDevice would leave saved_device at its
+        // default (0) while the real current device silently differs — the
+        // restore below then lands on the wrong device, unlike the adjacent
+        // cudaDeviceEnablePeerAccess result which IS checked/recorded.
+        CUDA_CHECK(cudaGetDevice(&saved_device));
 
         for (int i = 0; i < count; ++i) {
             for (int j = 0; j < count; ++j) {
@@ -730,7 +752,13 @@ private:
                 int can_access = 0;
                 cudaDeviceCanAccessPeer(&can_access, i, j);
                 if (can_access) {
-                    cudaSetDevice(i);
+                    // Unchecked, a failed cudaSetDevice(i) would leave the
+                    // CUDA context on whatever device was current instead of
+                    // device i, so the cudaDeviceEnablePeerAccess result
+                    // below would be stamped into peer_access_[i][j] as if
+                    // it applied to device i, silently corrupting the matrix
+                    // copy()'s D2D fast path relies on.
+                    CUDA_CHECK(cudaSetDevice(i));
                     cudaError_t err = cudaDeviceEnablePeerAccess(j, 0);
                     if (err == cudaSuccess) {
                         peer_access_[i][j] = true;

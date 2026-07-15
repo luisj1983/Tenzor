@@ -1929,7 +1929,10 @@ auto tanh_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
 }
 
 // In-place LeakyReLU wrapper
-auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) -> void {
+// alpha is kept as double end-to-end (matches the non-inplace LeakyReLU/
+// LeakyReLUBackward path and CPU) so Float64 tensors do not lose precision
+// via an intermediate float32 narrowing of the slope.
+auto leaky_relu_inplace_kernel(Tensor& input, double alpha, cudaStream_t stream) -> void {
     int64_t n = input.numel();
     if (n == 0) return;
 
@@ -1937,19 +1940,19 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) 
 
     if (input.dtype() == DType::Float32) {
         leaky_relu_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<float>(), alpha, n);
+            input.data<float>(), static_cast<float>(alpha), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         leaky_relu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<double>(), static_cast<double>(alpha), n);
+            input.data<double>(), alpha, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         leaky_relu_inplace_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<__half*>(input.data_ptr()), alpha, n);
+            reinterpret_cast<__half*>(input.data_ptr()), static_cast<float>(alpha), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         leaky_relu_inplace_bf16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), alpha, n);
+            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()), static_cast<float>(alpha), n);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("LeakyReLU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
@@ -4101,12 +4104,68 @@ __global__ void rrelu_backward_f32(const float* grad, const float* input, float*
     }
 }
 
+// Native double-precision RReLU kernels (no float32 round-trip) so Float64
+// tensors keep full double precision through the RNG draw, the threshold
+// compare, and the slope multiply — matching CPU's rrelu_kernel, which
+// computes entirely in scalar_t (double) for Float64 input.
+__global__ void rrelu_eval_f64(const double* input, double* output, int64_t n, double slope) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double x = input[idx];
+        output[idx] = (x >= 0.0) ? x : slope * x;
+    }
+}
+
+__global__ void rrelu_train_f64(const double* input, double* output, int64_t n,
+                                 double lower, double upper, unsigned long long seed) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double x = input[idx];
+        if (x >= 0.0) {
+            output[idx] = x;
+        } else {
+            unsigned long long state = seed + static_cast<unsigned long long>(idx) * 6364136223846793005ULL;
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            // Draw from the top 53 bits (double's mantissa width) rather than
+            // the 31 bits used for the Float32 path, so the random slope
+            // itself carries full double precision instead of being quantized
+            // to a float32-representable value.
+            double u = static_cast<double>(state >> 11) * (1.0 / 9007199254740992.0); // 1/2^53
+            double slope = lower + u * (upper - lower);
+            output[idx] = slope * x;
+        }
+    }
+}
+
+__global__ void rrelu_backward_f64(const double* grad, const double* input, double* output,
+                                    int64_t n, double slope) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = (input[idx] >= 0.0) ? grad[idx] : slope * grad[idx];
+    }
+}
+
+// Seed from the library's global RNG so manual_seed is honored / RReLU is
+// reproducible. Fold in a process-wide monotonic counter with SplitMix64
+// mixing so two invocations within the same clock tick cannot collide,
+// exactly as dropout_forward_kernel does. Shared by the Float32 and Float64
+// training paths.
+static unsigned long long rrelu_next_seed() {
+    static std::atomic<uint64_t> rrelu_call_counter{0};
+    uint64_t mix = rrelu_call_counter.fetch_add(1, std::memory_order_relaxed);
+    mix = (mix + 0x9E3779B97F4A7C15ULL);
+    mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
+    mix = mix ^ (mix >> 31);
+    return static_cast<unsigned long long>(::tenzor::get_global_seed() ^ mix);
+}
+
 Tensor rrelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
-    float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
-    float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+    double lower_d = attrs.get_float(AttrKey::Lower, 0.125);
+    double upper_d = attrs.get_float(AttrKey::High, 0.333);
+    float lower = static_cast<float>(lower_d);
+    float upper = static_cast<float>(upper_d);
     bool training = attrs.get_bool(AttrKey::Training, false);
     float mid = (lower + upper) / 2.0f;
+    double mid_d = (lower_d + upper_d) / 2.0;
 
     int64_t n = inputs[0].numel();
     std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());
@@ -4116,23 +4175,21 @@ Tensor rrelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
 
     if (inputs[0].dtype() == DType::Float32) {
         if (training) {
-            // Seed from the library's global RNG so manual_seed is honored /
-            // RReLU is reproducible. Fold in a process-wide monotonic counter
-            // with SplitMix64 mixing so two invocations within the same clock
-            // tick cannot collide, exactly as dropout_forward_kernel does.
-            static std::atomic<uint64_t> rrelu_call_counter{0};
-            uint64_t mix = rrelu_call_counter.fetch_add(1, std::memory_order_relaxed);
-            mix = (mix + 0x9E3779B97F4A7C15ULL);
-            mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
-            mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
-            mix = mix ^ (mix >> 31);
-            unsigned long long seed =
-                static_cast<unsigned long long>(::tenzor::get_global_seed() ^ mix);
+            unsigned long long seed = rrelu_next_seed();
             rrelu_train_f32<<<grid, block, 0, stream>>>(
                 inputs[0].data<float>(), result.data<float>(), n, lower, upper, seed);
         } else {
             rrelu_eval_f32<<<grid, block, 0, stream>>>(
                 inputs[0].data<float>(), result.data<float>(), n, mid);
+        }
+    } else if (inputs[0].dtype() == DType::Float64) {
+        if (training) {
+            unsigned long long seed = rrelu_next_seed();
+            rrelu_train_f64<<<grid, block, 0, stream>>>(
+                inputs[0].data<double>(), result.data<double>(), n, lower_d, upper_d, seed);
+        } else {
+            rrelu_eval_f64<<<grid, block, 0, stream>>>(
+                inputs[0].data<double>(), result.data<double>(), n, mid_d);
         }
     } else {
         auto f32 = inputs[0].to(DType::Float32);
@@ -4146,9 +4203,12 @@ Tensor rrelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
 
 Tensor rrelu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
-    float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
-    float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+    double lower_d = attrs.get_float(AttrKey::Lower, 0.125);
+    double upper_d = attrs.get_float(AttrKey::High, 0.333);
+    float lower = static_cast<float>(lower_d);
+    float upper = static_cast<float>(upper_d);
     float mid = (lower + upper) / 2.0f;
+    double mid_d = (lower_d + upper_d) / 2.0;
 
     int64_t n = inputs[0].numel();
     std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());
@@ -4159,6 +4219,9 @@ Tensor rrelu_backward_dispatch(std::span<const Tensor> inputs, const OpAttribute
     if (inputs[0].dtype() == DType::Float32) {
         rrelu_backward_f32<<<grid, block, 0, stream>>>(
             inputs[0].data<float>(), inputs[1].data<float>(), result.data<float>(), n, mid);
+    } else if (inputs[0].dtype() == DType::Float64) {
+        rrelu_backward_f64<<<grid, block, 0, stream>>>(
+            inputs[0].data<double>(), inputs[1].data<double>(), result.data<double>(), n, mid_d);
     } else {
         auto f32_g = inputs[0].to(DType::Float32);
         auto f32_in = inputs[1].to(DType::Float32);

@@ -36,6 +36,13 @@ namespace cpu {
  *                     correction term -act_zp * sum_k(w[k,n]) is applied to the
  *                     int32 accumulator. INT4 weights are symmetric so no weight
  *                     zero-point term is needed. Defaults to 0 (symmetric).
+ * @param weight_scales Optional per-channel (per-output-feature) weight scales
+ *                     [N], indexed by output feature n. When non-null, output
+ *                     column n is dequantized with act_scale * weight_scales[n]
+ *                     instead of the single scalar act_scale * weight_scale
+ *                     (mirrors quantized_linear_int4_cuda's optional
+ *                     weight_scales pointer in quantized_linear.cu). Defaults
+ *                     to nullptr (per-tensor, using the scalar weight_scale).
  */
 inline void fused_qlinear_dequant(
     const int8_t* act,
@@ -44,7 +51,8 @@ inline void fused_qlinear_dequant(
     float* output,
     int64_t M, int64_t N, int64_t K,
     float act_scale, float weight_scale,
-    int32_t act_zp = 0) {
+    int32_t act_zp = 0,
+    const float* weight_scales = nullptr) {
 
     const float combined_scale = act_scale * weight_scale;
     const int64_t KN = K * N;
@@ -112,7 +120,12 @@ inline void fused_qlinear_dequant(
     }
     const int64_t* col_sum_w_ptr = col_sum_w.empty() ? nullptr : col_sum_w.data();
 
-    #pragma omp parallel for schedule(static) if(M * N * K > 4096)
+    // Parallelization threshold: match the project-wide OpenMP convention of
+    // ~65536 elements (see CLAUDE.md's "CPU Optimization Patterns" — OpenMP
+    // for large tensors, threshold ~65536), rather than the previously
+    // unexplained 4096. M*N*K is the total number of INT8xINT4 MACs, the same
+    // unit the other quantized-linear kernels threshold on.
+    #pragma omp parallel for schedule(static) if(M * N * K > 65536)
     for (int64_t m = 0; m < M; ++m) {
         const int8_t* act_row = act + m * K;
         for (int64_t n = 0; n < N; ++n) {
@@ -130,7 +143,10 @@ inline void fused_qlinear_dequant(
                 acc -= static_cast<int64_t>(act_zp) * col_sum_w_ptr[n];
             }
 
-            float result = static_cast<float>(acc) * combined_scale;
+            // Per-channel (F076): column n uses act_scale * weight_scales[n]
+            // instead of the precomputed per-tensor combined_scale.
+            float scale_n = weight_scales ? (act_scale * weight_scales[n]) : combined_scale;
+            float result = static_cast<float>(acc) * scale_n;
             if (bias) {
                 result += bias[n];
             }
@@ -149,9 +165,10 @@ inline void fused_qlinear_dequant_relu(
     float* output,
     int64_t M, int64_t N, int64_t K,
     float act_scale, float weight_scale,
-    int32_t act_zp = 0) {
+    int32_t act_zp = 0,
+    const float* weight_scales = nullptr) {
 
-    fused_qlinear_dequant(act, weights, bias, output, M, N, K, act_scale, weight_scale, act_zp);
+    fused_qlinear_dequant(act, weights, bias, output, M, N, K, act_scale, weight_scale, act_zp, weight_scales);
     for (int64_t i = 0; i < M * N; ++i) {
         if (output[i] < 0.0f) output[i] = 0.0f;
     }

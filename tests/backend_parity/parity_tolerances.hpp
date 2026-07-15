@@ -39,7 +39,9 @@ inline constexpr float TRANSCENDENTAL_ATOL = 1e-7f;
 //
 // All backends compute FP32 GEMM at true single precision: CPU(MKL),
 // Vulkan(`float` accumulators), OneAPI(oneMKL compute_mode::standard),
-// ROCm(rocBLAS), and CUDA(CUBLAS_COMPUTE_32F once TF32 is disabled). Verified:
+// ROCm(rocBLAS), and CUDA(CUBLAS_COMPUTE_32F once TF32 is disabled — which is
+// tenzor's own out-of-the-box default since F-108; TENZOR_ENABLE_TF32=1 opts
+// into the faster/lossier TF32 path). Verified:
 // against a Float64 reference every backend's max abs error is ~4e-6 for a
 // 32x32 GEMM — true FP32, well within 1e-4. (An earlier ~6-9e-3 divergence was
 // a real bug: CUDA TF32 was left enabled because its disable flag was resolved

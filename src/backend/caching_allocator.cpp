@@ -231,6 +231,33 @@ void CachingAllocator::empty_cache(int device) {
     }
 }
 
+bool CachingAllocator::release_cached_memory_locked(int device) {
+    // Caller (allocate_new_block(), via allocate()) already holds
+    // device_allocators_[device].mutex -- do NOT take map_mutex_ or the
+    // device mutex here, unlike empty_cache(). Otherwise identical logic to
+    // empty_cache()'s single-device branch: release every free block back to
+    // the driver and drain the event pool.
+    auto& device_alloc = device_allocators_[device];
+    const size_t reserved_before = device_alloc.stats.reserved_bytes;
+
+    std::vector<Block*> blocks_to_release;
+    blocks_to_release.reserve(device_alloc.free_blocks.size());
+    for (Block* block : device_alloc.free_blocks) {
+        blocks_to_release.push_back(block);
+    }
+
+    for (Block* block : blocks_to_release) {
+        release_block(block);
+    }
+
+    destroy_event_pool(device_alloc.event_pool);
+
+    // Recovery is only meaningful if memory was actually returned to the
+    // device (reserved bytes dropped), giving a retried cudaMalloc a chance
+    // to succeed (mirrors RocmCachingAllocator::handle_allocation_failure()).
+    return device_alloc.stats.reserved_bytes < reserved_before;
+}
+
 size_t CachingAllocator::memory_allocated(int device) const {
     std::lock_guard<std::mutex> map_lock(map_mutex_);
 
@@ -453,9 +480,34 @@ Block* CachingAllocator::allocate_new_block(size_t size, int device, cudaStream_
                                  std::string(cudaGetErrorString(err)));
     }
 
-    // Allocate from device
+    // Allocate from device. A single failed cudaMalloc must not be fatal while
+    // gigabytes may be sitting idle in this device's free-block cache: mirror
+    // the CPU allocator's "release cache, retry" step
+    // (cpu_caching_allocator.cpp::allocate) and the ROCm sibling's 3-attempt
+    // eviction/retry loop (rocm_caching_allocator.hip.cpp::allocate) so all
+    // three backends behave the same way under memory pressure.
     void* ptr = nullptr;
     err = cudaMalloc(&ptr, size);
+
+    if (err != cudaSuccess) {
+        constexpr int max_retries = 3;
+        int retry_count = 0;
+        while (err != cudaSuccess && retry_count < max_retries) {
+            ALLOC_DEBUG("cudaMalloc failed for size=" << size << " device=" << device
+                        << " (" << cudaGetErrorString(err) << "), attempting cache eviction");
+            // release_cached_memory_locked() must be called here (not
+            // empty_cache()) because device_alloc.mutex is already held by
+            // allocate() -- empty_cache() would try to re-lock it and deadlock.
+            if (!release_cached_memory_locked(device)) {
+                break;  // nothing left to evict; retrying would just fail again
+            }
+            ++retry_count;
+            ALLOC_DEBUG("Retrying cudaMalloc after cache eviction (attempt "
+                        << retry_count << "/" << max_retries << ")");
+            err = cudaMalloc(&ptr, size);
+        }
+    }
+
     if (err != cudaSuccess) {
         throw std::runtime_error("CUDA memory allocation failed: " +
                                  std::string(cudaGetErrorString(err)));

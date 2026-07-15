@@ -2,7 +2,7 @@
  * @file roi_align.cu
  * @brief CUDA implementation of ROI Align with bilinear interpolation
  *
- * Supports Float32, Float64, and Float16 feature dtypes via templated kernels.
+ * Supports Float32, Float64, Float16, and BFloat16 feature dtypes.
  * ROI coordinates are always processed as Float32 regardless of feature dtype,
  * matching the convention used by torchvision and Detectron2. This avoids
  * unnecessary per-branch dtype conversions and eliminates redundant temporary
@@ -10,6 +10,10 @@
  *
  * Float16 features use a specialized kernel that reads __half, computes in
  * float, and writes __half — avoiding full-tensor FP16→FP32→FP16 conversion.
+ *
+ * BFloat16 has no native kernel; it widens to Float32 and narrows back at the
+ * host-function level, matching the CPU backend's Float16/BFloat16 handling
+ * (src/backends/cpu/kernels/vision.cpp).
  */
 
 #include "tenzor/core/tensor.hpp"
@@ -540,6 +544,15 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
             reinterpret_cast<__half*>(output.data_ptr()),
             num_rois, channels, feat_height, feat_width, batch_size,
             output_h, output_w, static_cast<float>(spatial_scale), sampling_ratio, aligned);
+    } else if (dtype == DType::BFloat16) {
+        // No native BFloat16 kernel yet; widen to Float32, compute, narrow back —
+        // matches CPU's Float16/BFloat16 widen path (vision.cpp
+        // roi_align_forward_kernel) instead of throwing on a supported dtype.
+        const Tensor features_f32 = features_c.to(DType::Float32);
+        const Tensor rois_f32 = rois.to(DType::Float32);
+        Tensor output_f32 = roi_align_forward(features_f32, rois_f32, output_h, output_w,
+                                              spatial_scale, sampling_ratio, aligned, stream);
+        return output_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("roi_align_forward: Unsupported dtype");
     }
@@ -634,6 +647,16 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
             total_features);
         ROI_CUDA_CHECK(cudaGetLastError());
         return grad_features;
+    } else if (dtype == DType::BFloat16) {
+        // No native BFloat16 kernel yet; widen to Float32, compute, narrow back —
+        // matches CPU's Float16/BFloat16 widen path (vision.cpp
+        // roi_align_backward_kernel) instead of throwing on a supported dtype.
+        const Tensor grad_output_f32 = grad_output_c.to(DType::Float32);
+        const Tensor rois_f32 = rois.to(DType::Float32);
+        Tensor grad_features_f32 = roi_align_backward(grad_output_f32, rois_f32, batch_size,
+                                                       feat_height, feat_width, spatial_scale,
+                                                       sampling_ratio, aligned, stream);
+        return grad_features_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("roi_align_backward: Unsupported dtype");
     }

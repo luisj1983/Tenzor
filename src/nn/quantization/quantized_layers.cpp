@@ -508,10 +508,14 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     if (weight_data_cpu.dtype() == DType::QInt4x2) {
         const uint8_t* weight_packed = weight_data_cpu.data<uint8_t>();
         float weight_scale = weight_scale_cpu.data<const float>()[0];
+        // F073: input_zp was already computed above (asymmetric activation
+        // zero-point) and IS passed to the int8 kernels below — pass it here
+        // too so asymmetric activation quantization is correctly applied for
+        // INT4 weights as well, instead of silently defaulting act_zp to 0.
         cpu::fused_qlinear_dequant(
             input_data, weight_packed, bias_data, output_data,
             batch_size, out_features_, in_features_,
-            input_scale, weight_scale);
+            input_scale, weight_scale, input_zp);
         if (out_shape.size() != 2) output = output.reshape(out_shape);
         return output.to(original_device);
     }
@@ -745,6 +749,18 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
     // Remember original device
     auto original_device = input.device();
 
+    // F075: reject a non-positive stride BEFORE it is used as a divisor below
+    // — a zero stride is an integer divide-by-zero (UB/SIGFPE). Previously
+    // this was only caught AFTER the fact by the h_out<=0/w_out<=0 check
+    // below, by which point the division had already executed. Mirrors the
+    // identical guard in cpu_kernel_registry.cpp / cuda_kernel_registry.cpp's
+    // OpId::QuantizedConv2d entries.
+    if (stride_ < 1) {
+        throw std::invalid_argument(
+            "QuantizedConv2d::forward_quantized: stride must be >= 1, got " +
+            std::to_string(stride_));
+    }
+
     // Compute output dimensions
     int64_t h_out = (h_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
     int64_t w_out = (w_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
@@ -753,6 +769,89 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
             "QuantizedConv2d: computed output dims h_out=" + std::to_string(h_out) +
             " w_out=" + std::to_string(w_out) +
             " are non-positive; check kernel/stride/padding/dilation");
+    }
+
+    // GPU dispatch fast-path (F077): for the common per-tensor INT8 case on a
+    // non-CPU device, route through the registered OpId::QuantizedConv2d
+    // kernel (every backend has a native kernel registered — see
+    // src/backends/cuda/kernels/quantization/quantized_conv2d.cu) instead of
+    // unconditionally round-tripping input/weight/bias through host memory.
+    // Mirrors QuantizedLinear::forward_quantized's dispatch_eligible block
+    // above exactly (same eligibility checks, same fallback-to-CPU-round-trip
+    // structure for anything that doesn't qualify). Unlike Linear there is no
+    // INT4 branch to gate on: QuantizedConv2d::from_float rejects INT4/UINT4
+    // weight quantization outright, so weight_ is always Int8/UInt8 here.
+    {
+        const auto& input_params = input.params();
+        const auto& weight_params = weight_.params();
+        bool wt_per_channel = (weight_params.scheme == QuantizationScheme::PerChannelSymmetric ||
+                               weight_params.scheme == QuantizationScheme::PerChannelAsymmetric);
+        bool dispatch_eligible =
+            original_device.type != Device::Type::CPU &&
+            input.data().dtype() == DType::Int8 &&
+            weight_.data().dtype() == DType::Int8;
+
+        if (dispatch_eligible) {
+            // The OpId::QuantizedConv2d contract is per-tensor scalar attrs
+            // (plus optional per-channel weight scale/zp tensors), so read
+            // four small Int32/Float32 scalars to host. The tensor data
+            // (input/weight/bias) stays on the device.
+            Tensor in_scale_cpu  = input_params.scale.to(Device::cpu());
+            Tensor wt_scale_cpu  = weight_params.scale.to(Device::cpu());
+            Tensor in_zp_cpu     = input_params.zero_point.to(Device::cpu());
+            Tensor wt_zp_cpu     = weight_params.zero_point.to(Device::cpu());
+
+            float in_scale  = in_scale_cpu.data<const float>()[0];
+            float wt_scale  = wt_scale_cpu.data<const float>()[0];
+            int32_t in_zp   = in_zp_cpu.data<int32_t>()[0];
+            int32_t wt_zp   = wt_zp_cpu.data<int32_t>()[0];
+
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::InputScale,      static_cast<double>(in_scale));
+            attrs.set(AttrKey::WeightScaleQ,    static_cast<double>(wt_scale));
+            attrs.set(AttrKey::InputZeroPoint,  static_cast<int64_t>(in_zp));
+            attrs.set(AttrKey::WeightZeroPoint, static_cast<int64_t>(wt_zp));
+            attrs.set(AttrKey::Stride,   stride_);
+            attrs.set(AttrKey::Padding,  padding_);
+            attrs.set(AttrKey::Dilation, dilation_);
+            attrs.set(AttrKey::Groups,   groups_);
+
+            std::vector<Tensor> inputs_vec;
+            inputs_vec.push_back(input.data());
+
+            // JIT-R103-style device reconciliation: weight_ stays wherever the
+            // module was constructed (CPU by default) until moved, unlike
+            // input which already carries the real device.
+            Tensor weight_dev = weight_.data();
+            if (weight_dev.device() != original_device) weight_dev = weight_dev.to(original_device);
+            inputs_vec.push_back(weight_dev);
+
+            // Always occupy the bias slot (inputs[2]) — empty when absent —
+            // so the per-channel weight scale/zp land at the fixed
+            // inputs[3]/[4] positions the kernel expects (mirrors
+            // QuantizedLinear's dispatch_eligible block above).
+            if (bias_.has_value()) {
+                Tensor bias_dev = *bias_;
+                if (bias_dev.dtype() != DType::Float32) bias_dev = bias_dev.to(DType::Float32);
+                if (bias_dev.device() != original_device) bias_dev = bias_dev.to(original_device);
+                inputs_vec.push_back(bias_dev);
+            } else {
+                inputs_vec.push_back(Tensor({0}, DType::Float32, original_device));
+            }
+            if (wt_per_channel) {
+                Tensor wscale = weight_params.scale;
+                if (wscale.dtype() != DType::Float32) wscale = wscale.to(DType::Float32);
+                if (wscale.device() != original_device) wscale = wscale.to(original_device);
+                Tensor wzp = weight_params.zero_point;
+                if (wzp.dtype() != DType::Int32) wzp = wzp.to(DType::Int32);
+                if (wzp.device() != original_device) wzp = wzp.to(original_device);
+                inputs_vec.push_back(wscale.contiguous());
+                inputs_vec.push_back(wzp.contiguous());
+            }
+
+            auto& table = ::tenzor::DispatchTableRegistry::get_table(original_device.type);
+            return table.dispatch(OpId::QuantizedConv2d, inputs_vec, attrs)[0];
+        }
     }
 
     // Allocate output on CPU

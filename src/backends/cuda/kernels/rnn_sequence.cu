@@ -17,7 +17,9 @@
 #include <cublas_v2.h>
 #include <vector>
 #include <stdexcept>
+#include <string>
 #include <algorithm>
+#include <utility>
 #include "../cuda_stream_pool.hpp"
 
 namespace tenzor {
@@ -186,12 +188,50 @@ auto lstm_forward_cuda(
     const Tensor& h0,        // (batch, hidden)
     const Tensor& c0         // (batch, hidden)
 ) -> std::vector<Tensor> {
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "lstm_forward_cuda: input must be 3-D (seq_len, batch, input_size), got rank " +
+            std::to_string(input.shape().size()));
+    }
+    if (h0.shape().size() != 2) {
+        throw std::invalid_argument(
+            "lstm_forward_cuda: h0 must be 2-D (batch, hidden), got rank " +
+            std::to_string(h0.shape().size()));
+    }
     auto shape = input.shape();
     int64_t seq_len = shape[0];
     int64_t batch = shape[1];
     int64_t input_size = shape[2];
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 4 * hidden;
+
+    // F-071: validate degenerate/mismatched dimensions before any GEMM/kernel
+    // launch. Previously a zero/negative seq_len/batch/input_size/hidden, or a
+    // h0/c0 batch-dimension disagreement with input, surfaced as a confusing
+    // low-level cuBLAS/cuDNN failure (or silent garbage) instead of a clear
+    // error naming the bad argument.
+    if (seq_len <= 0) {
+        throw std::invalid_argument("lstm_forward_cuda: seq_len must be positive, got " + std::to_string(seq_len));
+    }
+    if (batch <= 0) {
+        throw std::invalid_argument("lstm_forward_cuda: batch must be positive, got " + std::to_string(batch));
+    }
+    if (input_size <= 0) {
+        throw std::invalid_argument("lstm_forward_cuda: input_size must be positive, got " + std::to_string(input_size));
+    }
+    if (hidden <= 0) {
+        throw std::invalid_argument("lstm_forward_cuda: hidden must be positive, got " + std::to_string(hidden));
+    }
+    if (h0.shape()[0] != batch) {
+        throw std::invalid_argument(
+            "lstm_forward_cuda: h0 batch dimension (" + std::to_string(h0.shape()[0]) +
+            ") does not match input batch (" + std::to_string(batch) + ")");
+    }
+    if (c0.shape().size() != 2 || c0.shape()[0] != batch || c0.shape()[1] != hidden) {
+        throw std::invalid_argument(
+            "lstm_forward_cuda: c0 must have shape (batch=" + std::to_string(batch) +
+            ", hidden=" + std::to_string(hidden) + ")");
+    }
 
     // The portable per-timestep path below only launches the LSTM cell and the
     // bias adds for Float32/Float64. A Float16/BFloat16 LSTM would otherwise
@@ -332,12 +372,45 @@ auto gru_forward_cuda(
     const Tensor& h0,        // (batch, hidden)
     const Tensor& bias_hh    // bias_hh: (3*hidden) or empty
 ) -> std::vector<Tensor> {
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "gru_forward_cuda: input must be 3-D (seq_len, batch, input_size), got rank " +
+            std::to_string(input.shape().size()));
+    }
+    if (h0.shape().size() != 2) {
+        throw std::invalid_argument(
+            "gru_forward_cuda: h0 must be 2-D (batch, hidden), got rank " +
+            std::to_string(h0.shape().size()));
+    }
     auto shape = input.shape();
     int64_t seq_len = shape[0];
     int64_t batch = shape[1];
     int64_t input_size = shape[2];
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 3 * hidden;
+
+    // F-071: validate degenerate/mismatched dimensions before any GEMM/kernel
+    // launch. Previously a zero/negative seq_len/batch/input_size/hidden, or a
+    // h0 batch-dimension disagreement with input, surfaced as a confusing
+    // low-level cuBLAS/cuDNN failure (or silent garbage) instead of a clear
+    // error naming the bad argument.
+    if (seq_len <= 0) {
+        throw std::invalid_argument("gru_forward_cuda: seq_len must be positive, got " + std::to_string(seq_len));
+    }
+    if (batch <= 0) {
+        throw std::invalid_argument("gru_forward_cuda: batch must be positive, got " + std::to_string(batch));
+    }
+    if (input_size <= 0) {
+        throw std::invalid_argument("gru_forward_cuda: input_size must be positive, got " + std::to_string(input_size));
+    }
+    if (hidden <= 0) {
+        throw std::invalid_argument("gru_forward_cuda: hidden must be positive, got " + std::to_string(hidden));
+    }
+    if (h0.shape()[0] != batch) {
+        throw std::invalid_argument(
+            "gru_forward_cuda: h0 batch dimension (" + std::to_string(h0.shape()[0]) +
+            ") does not match input batch (" + std::to_string(batch) + ")");
+    }
 
     // The portable per-timestep path below only launches gru_cell_fused_kernel
     // for Float32/Float64, and the cuDNN fast path is Float32-only. A
@@ -479,6 +552,46 @@ auto gru_forward_cuda(
     return {output, h_buf[seq_len & 1]};
 }
 
+// F-070: LSTMMultiLayerForward/GRUMultiLayerForward carry exactly ONE bias
+// tensor per layer at the wire (dispatch-input) level. CUDA's cuDNN/native
+// multi-layer paths used to assume it was always an 8*hidden (LSTM) /
+// 6*hidden (GRU) concatenation of [bias_ih ; bias_hh] and blindly split it in
+// half; CPU (rnn_kernels.cpp) treated the same tensor as bias_ih only
+// (4*hidden/3*hidden), silently dropping bias_hh. Feeding CPU's 4*hidden
+// convention into CUDA's blind half-split sliced a single gate's bias vector
+// across a gate boundary into two meaningless halves. This helper (mirrored
+// exactly in rnn_kernels.cpp's split_multilayer_bias, and again in
+// cudnn_rnn.cu since these are separate translation units) makes both
+// backends agree on one convention, keyed off the tensor's actual size,
+// without changing the wire format or breaking the existing bias_ih-only
+// callers:
+//   - empty                -> (empty, empty)           no bias at all
+//   - numel == gate_size    -> (bias, empty)            bias_ih only; bias_hh
+//                              is implicitly zero (the long-standing, still
+//                              backward-compatible convention)
+//   - numel == 2*gate_size  -> split at the midpoint into (bias_ih, bias_hh)
+// gate_size is 4*hidden for LSTM, 3*hidden for GRU. Any other size is a
+// malformed bias tensor -- throw rather than silently mis-slicing it.
+static std::pair<Tensor, Tensor> split_multilayer_bias(
+    const Tensor& bias, int64_t gate_size, const char* op_name) {
+    if (bias.numel() == 0) {
+        return {Tensor{}, Tensor{}};
+    }
+    if (bias.numel() == gate_size) {
+        return {bias.contiguous(), Tensor{}};
+    }
+    if (bias.numel() == 2 * gate_size) {
+        Tensor c = bias.contiguous();
+        return {c.slice(0, 0, gate_size).contiguous(),
+                c.slice(0, gate_size, 2 * gate_size).contiguous()};
+    }
+    throw std::invalid_argument(
+        std::string(op_name) + ": layer bias has " + std::to_string(bias.numel()) +
+        " elements; expected " + std::to_string(gate_size) +
+        " (bias_ih only) or " + std::to_string(2 * gate_size) +
+        " (concatenated bias_ih+bias_hh)");
+}
+
 // ============================================================================
 // Multi-layer LSTM Forward
 // ============================================================================
@@ -522,14 +635,15 @@ auto lstm_multi_layer_forward_cuda(
         Tensor h_l = h0.slice(0, l, l + 1).squeeze(0).contiguous();
         Tensor c_l = c0.slice(0, l, l + 1).squeeze(0).contiguous();
 
-        // Split bias into bias_ih and bias_hh if present
-        Tensor bias_ih, bias_hh;
-        if (bias_list[l].numel() > 0) {
-            // bias_list[l] is combined (8*hidden for LSTM: 4*hidden bias_ih + 4*hidden bias_hh)
-            int64_t half = bias_list[l].numel() / 2;
-            bias_ih = bias_list[l].slice(0, 0, half).contiguous();
-            bias_hh = bias_list[l].slice(0, half, half + half).contiguous();
-        }
+        // Split this layer's single wire-format bias tensor into bias_ih and
+        // bias_hh using the shared size convention (see split_multilayer_bias
+        // above) -- previously this unconditionally treated the tensor as an
+        // 8*hidden concatenation and divided by two, which sliced a genuine
+        // 4*hidden bias_ih-only tensor (the convention CPU/ROCm/Vulkan/OneAPI
+        // all use, and what every existing caller/test actually sends) across
+        // a gate boundary into two meaningless halves.
+        auto [bias_ih, bias_hh] = split_multilayer_bias(
+            bias_list[l], 4 * hidden, "lstm_multi_layer_forward_cuda");
 
         auto result = lstm_forward_cuda(
             layer_input, W_ih_list[l], W_hh_list[l],
@@ -584,9 +698,17 @@ auto gru_multi_layer_forward_cuda(
     for (int64_t l = 0; l < num_layers; ++l) {
         Tensor h_l = h0.slice(0, l, l + 1).squeeze(0).contiguous();
 
+        // Split this layer's bias using the same shared convention as LSTM
+        // (see split_multilayer_bias). Previously bias_hh was always dropped
+        // here (Tensor{} hardcoded) even when a caller had genuinely packed
+        // one in; splitting-by-size lets a real bias_hh reach gru_forward_cuda,
+        // which already keeps b_hn inside the reset-gate multiply.
+        auto [bias_ih, bias_hh] = split_multilayer_bias(
+            bias_list[l], 3 * hidden, "gru_multi_layer_forward_cuda");
+
         auto result = gru_forward_cuda(
             layer_input, W_ih_list[l], W_hh_list[l],
-            bias_list[l], h_l, Tensor{});
+            bias_ih, h_l, bias_hh);
 
         layer_input = result[0];
 

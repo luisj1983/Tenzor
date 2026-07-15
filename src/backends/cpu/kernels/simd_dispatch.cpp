@@ -12,6 +12,7 @@
 
 #include "simd_dispatch.hpp"
 #include "tenzor/backend/runtime_simd.hpp"
+#include "tenzor/utils/logging.hpp"
 #include "simd_fast_math.hpp"
 #include <cmath>
 #include <cstdlib>
@@ -26,9 +27,8 @@ namespace dispatch {
 // Global dispatch table — all nullptrs until init_dispatch() runs.
 SIMDDispatch g_dispatch = {
     nullptr, nullptr, nullptr, nullptr,  // add, sub, mul, div (f32)
-    nullptr, nullptr, nullptr, nullptr,  // sqrt, exp, log, fma (f32)
+    nullptr,                             // sqrt (f32)
     nullptr, nullptr,                    // neg, abs_f32
-    nullptr, nullptr, nullptr, nullptr,  // relu, sigmoid, tanh, gelu
     nullptr, nullptr, nullptr, nullptr,  // add_f64, sub_f64, mul_f64, div_f64
     nullptr, nullptr, nullptr,           // sqrt_f64, neg_f64, abs_f64
     false,                               // initialized
@@ -375,15 +375,8 @@ static void populate_avx512() {
     g_dispatch.mul   = avx512::mul;
     g_dispatch.div   = avx512::div;
     g_dispatch.sqrt  = avx512::sqrt;
-    g_dispatch.exp   = avx512::exp;
-    g_dispatch.log   = avx512::log;
-    g_dispatch.fma   = avx512::fma;
     g_dispatch.neg   = tenzor::cpu::avx512_f64_impl::neg_f32;
     g_dispatch.abs_f32 = tenzor::cpu::avx512_f64_impl::abs_f32;
-    g_dispatch.relu  = avx512::relu;
-    g_dispatch.sigmoid = avx512::sigmoid;
-    g_dispatch.tanh  = avx512::tanh;
-    g_dispatch.gelu  = avx512::gelu;
     g_dispatch.add_f64  = tenzor::cpu::avx512_f64_impl::add_f64;
     g_dispatch.sub_f64  = tenzor::cpu::avx512_f64_impl::sub_f64;
     g_dispatch.mul_f64  = tenzor::cpu::avx512_f64_impl::mul_f64;
@@ -401,15 +394,8 @@ static void populate_avx2() {
     g_dispatch.mul   = avx2_impl::mul;
     g_dispatch.div   = avx2_impl::div;
     g_dispatch.sqrt  = avx2_impl::sqrt;
-    g_dispatch.exp   = avx2_impl::exp;
-    g_dispatch.log   = avx2_impl::log;
-    g_dispatch.fma   = avx2_impl::fma;
     g_dispatch.neg   = avx2_impl::neg;
     g_dispatch.abs_f32 = avx2_impl::abs_f32;
-    g_dispatch.relu  = avx2_impl::relu;
-    g_dispatch.sigmoid = avx2_impl::sigmoid;
-    g_dispatch.tanh  = avx2_impl::tanh;
-    g_dispatch.gelu  = avx2_impl::gelu;
     g_dispatch.add_f64  = avx2_impl::add_f64;
     g_dispatch.sub_f64  = avx2_impl::sub_f64;
     g_dispatch.mul_f64  = avx2_impl::mul_f64;
@@ -427,15 +413,8 @@ static void populate_scalar() {
     g_dispatch.mul   = scalar_impl::mul;
     g_dispatch.div   = scalar_impl::div;
     g_dispatch.sqrt  = scalar_impl::sqrt;
-    g_dispatch.exp   = scalar_impl::exp;
-    g_dispatch.log   = scalar_impl::log;
-    g_dispatch.fma   = scalar_impl::fma;
     g_dispatch.neg   = scalar_impl::neg;
     g_dispatch.abs_f32 = scalar_impl::abs_f32;
-    g_dispatch.relu  = scalar_impl::relu;
-    g_dispatch.sigmoid = scalar_impl::sigmoid;
-    g_dispatch.tanh  = scalar_impl::tanh;
-    g_dispatch.gelu  = scalar_impl::gelu;
     g_dispatch.add_f64  = scalar_impl::add_f64;
     g_dispatch.sub_f64  = scalar_impl::sub_f64;
     g_dispatch.mul_f64  = scalar_impl::mul_f64;
@@ -458,6 +437,15 @@ static const char* resolve_simd_level() {
         if (std::strcmp(env, "sse2")   == 0) return "sse2";   // treated as scalar here
         if (std::strcmp(env, "avx2")   == 0) return "avx2";
         if (std::strcmp(env, "avx512") == 0) return "avx512";
+        // Recognized-but-unusual configuration: the env var is set but doesn't
+        // match any accepted value (typo, wrong case, "avx-512", ...). Warn so
+        // a test author forcing a specific ISA for a bug repro doesn't silently
+        // get hardware auto-detection instead. Auto-detect fallback below is
+        // unchanged — this is diagnostics only.
+        TENZOR_WARN_ONCE(
+            "TENZOR_FORCE_SIMD_LEVEL is set to an unrecognized value \"" + std::string(env) +
+            "\" — expected one of: \"scalar\", \"sse2\", \"avx2\", \"avx512\". "
+            "Falling back to hardware auto-detection.");
     }
     // Auto-detect
     const auto& cpu = ::tenzor::backend::get_simd_features();

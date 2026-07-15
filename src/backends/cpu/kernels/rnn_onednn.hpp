@@ -1202,7 +1202,11 @@ inline std::shared_ptr<LSTMMultiLayerCachedPrimitive>& get_lstm_multilayer_cache
  * @param input Input sequence (seq_len, batch, input_size)
  * @param W_ih_list Input-to-hidden weights for each layer
  * @param W_hh_list Hidden-to-hidden weights for each layer
- * @param bias_list Bias for each layer (or nullptr)
+ * @param bias_list Combined per-gate bias for each layer (bias_ih + bias_hh
+ *        already summed by the caller -- LSTM's bias always enters the same
+ *        gate pre-activation additively, so pre-summing is exact; this
+ *        differs from GRU, whose reset-gated new-gate term cannot be
+ *        pre-summed, see gru_multilayer_forward_onednn), or nullptr
  * @param h0 Initial hidden states (num_layers, batch, hidden)
  * @param c0 Initial cell states (num_layers, batch, hidden)
  * @param output Output sequence (seq_len, batch, hidden)
@@ -1402,7 +1406,11 @@ inline std::shared_ptr<GRUMultiLayerCachedPrimitive>& get_gru_multilayer_cached(
  * @param input Input sequence (seq_len, batch, input_size)
  * @param W_ih_list Input-to-hidden weights for each layer
  * @param W_hh_list Hidden-to-hidden weights for each layer
- * @param bias_list Bias for each layer (or nullptr)
+ * @param bias_ih_list Input-to-hidden [r,z,n] bias for each layer (or nullptr)
+ * @param bias_hh_list Recurrent [r,z,n] bias for each layer (or nullptr). The
+ *        new-gate component (b_hn) is kept inside the reset-gate multiply via
+ *        pack_lbr_gru_bias, matching the single-layer path exactly -- it is
+ *        NOT summed with bias_ih_list (unlike LSTM, which can pre-sum).
  * @param h0 Initial hidden states (num_layers, batch, hidden)
  * @param output Output sequence (seq_len, batch, hidden)
  * @param h_n Final hidden states (num_layers, batch, hidden)
@@ -1411,7 +1419,8 @@ inline bool gru_multilayer_forward_onednn(
     const float* input,
     const std::vector<const float*>& W_ih_list,
     const std::vector<const float*>& W_hh_list,
-    const std::vector<const float*>& bias_list,
+    const std::vector<const float*>& bias_ih_list,
+    const std::vector<const float*>& bias_hh_list,
     const float* h0,
     float* output,
     float* h_n,
@@ -1424,22 +1433,26 @@ inline bool gru_multilayer_forward_onednn(
     if (num_layers < 1 || W_ih_list.size() != static_cast<size_t>(num_layers)) {
         return false;
     }
-    // bias_list must be empty or length-aligned to the layer count with nullptr
-    // entries for bias-less layers. A compacted bias vector would make the
-    // bias_list[src_layer] indexing below select the wrong layer's bias and read
-    // OOB on the trailing index for mixed-bias configs.
-    if (!bias_list.empty() && bias_list.size() != static_cast<size_t>(num_layers)) {
+    // bias_ih_list/bias_hh_list must each be empty or length-aligned to the
+    // layer count with nullptr entries for bias-less layers. A compacted bias
+    // vector would make the bias_*_list[src_layer] indexing below select the
+    // wrong layer's bias and read OOB on the trailing index for mixed-bias
+    // configs.
+    if (!bias_ih_list.empty() && bias_ih_list.size() != static_cast<size_t>(num_layers)) {
+        return false;
+    }
+    if (!bias_hh_list.empty() && bias_hh_list.size() != static_cast<size_t>(num_layers)) {
         return false;
     }
 
-    // For single layer, delegate to optimized single-layer kernel.
-    // The multi-layer caller carries only a single (fused) bias per layer in
-    // bias_list (the input-to-hidden bias); there is no separate recurrent
-    // bias_hh at this entry point, so pass nullptr for bias_hh.
+    // For single layer, delegate to optimized single-layer kernel, which
+    // already keeps bias_ih and bias_hh separate (b_hn stays inside the
+    // reset-gate multiply via pack_lbr_gru_bias).
     if (num_layers == 1) {
         return gru_forward_onednn(
             input, W_ih_list[0], W_hh_list[0],
-            bias_list.empty() ? nullptr : bias_list[0], nullptr,
+            bias_ih_list.empty() ? nullptr : bias_ih_list[0],
+            bias_hh_list.empty() ? nullptr : bias_hh_list[0],
             h0, output, h_n, seq_len, batch, input_size, hidden_size
         );
     }
@@ -1450,11 +1463,14 @@ inline bool gru_multilayer_forward_onednn(
         auto& cached = get_gru_multilayer_cached();
 
         // The primitive must be built WITH a bias slot whenever ANY layer has a
-        // bias (mixed-bias configs are permitted by the invariant above). Using
-        // only layer 0 would zero out a later layer's real bias. Per-layer
-        // packing below is gated on bias_list[src_layer] != nullptr, so
-        // bias-less layers in a biased primitive still pack to zero correctly.
-        bool has_bias = std::any_of(bias_list.begin(), bias_list.end(),
+        // bias_ih or bias_hh (mixed-bias configs are permitted by the invariant
+        // above). Using only layer 0 would zero out a later layer's real bias.
+        // Per-layer packing below is gated on bias_ih_list[src_layer] != nullptr
+        // / bias_hh_list[src_layer] != nullptr, so bias-less layers in a biased
+        // primitive still pack to zero correctly.
+        bool has_bias = std::any_of(bias_ih_list.begin(), bias_ih_list.end(),
+                                    [](const float* p) { return p != nullptr; }) ||
+                        std::any_of(bias_hh_list.begin(), bias_hh_list.end(),
                                     [](const float* p) { return p != nullptr; });
 
         // Content fingerprint over all layers' GRU weights (3 gates: r, z, n).
@@ -1463,16 +1479,19 @@ inline bool gru_multilayer_forward_onednn(
         // packed weights — mirrors GRUCachedPrimitive::weight_fp handling.
         uint64_t weight_fp = compute_multilayer_fingerprint(
             W_ih_list, W_hh_list, input_size, hidden_size, /*gates_per_cell=*/3);
-        // Fold every layer's bias VALUES into the fingerprint so a bias-only
-        // in-place update (unchanged weights) still trips need_rebuild and the
-        // packed bias_mem is regenerated; each entry is the [r,z,n] input-to-
-        // hidden bias of length 3*hidden_size. A layer index is rotated in so a
-        // bias moved between layers still changes the digest.
+        // Fold every layer's bias_ih AND bias_hh VALUES into the fingerprint so
+        // a bias-only in-place update (unchanged weights) still trips
+        // need_rebuild and the packed bias_mem is regenerated; each entry is
+        // the [r,z,n] bias of length 3*hidden_size. A layer index is rotated in
+        // so a bias moved between layers still changes the digest.
         if (has_bias) {
-            for (size_t l = 0; l < bias_list.size(); ++l) {
-                if (bias_list[l] != nullptr) {
-                    uint64_t bfp =
-                        compute_bias_fingerprint(bias_list[l], 3 * hidden_size);
+            size_t n_layers_for_fp = std::max(bias_ih_list.size(), bias_hh_list.size());
+            for (size_t l = 0; l < n_layers_for_fp; ++l) {
+                const float* bih = (l < bias_ih_list.size()) ? bias_ih_list[l] : nullptr;
+                const float* bhh = (l < bias_hh_list.size()) ? bias_hh_list[l] : nullptr;
+                if (bih != nullptr || bhh != nullptr) {
+                    uint64_t bfp = compute_bias_fingerprint(
+                        bih, 3 * hidden_size, bhh, 3 * hidden_size);
                     weight_fp ^= bfp ^ static_cast<uint64_t>(l);
                     weight_fp = (weight_fp << 7) | (weight_fp >> 57);
                 }
@@ -1592,15 +1611,18 @@ inline bool gru_multilayer_forward_onednn(
                         hidden_size, hidden_size
                     );
 
-                    // Pack the LBR 4-term bias from this layer's [r,z,n] bias_ih.
-                    // The multi-layer entry point has no separate recurrent
-                    // bias_hh, so b_{c_h} packs to zero (bias_hh=nullptr).
-                    // Gate solely on this layer's own bias pointer: with the
-                    // any_of has_bias above, the primitive has a bias slot when
-                    // ANY layer is biased, and bias-less layers pack to zero.
+                    // Pack the LBR 4-term bias from this layer's [r,z,n]
+                    // bias_ih AND bias_hh, keeping the recurrent new-gate term
+                    // (b_hn) inside the reset-gate multiply exactly as
+                    // pack_lbr_gru_bias / the single-layer path already do.
+                    // Gate on either pointer being present: with the any_of
+                    // has_bias above, the primitive has a bias slot when ANY
+                    // layer is biased, and bias-less layers pack to zero.
                     float* dst_bias = bias_packed.data() + l * 4 * hidden_size;
-                    if (!bias_list.empty() && bias_list[src_layer] != nullptr) {
-                        pack_lbr_gru_bias(bias_list[src_layer], nullptr, dst_bias, hidden_size);
+                    const float* src_bih = (!bias_ih_list.empty()) ? bias_ih_list[src_layer] : nullptr;
+                    const float* src_bhh = (!bias_hh_list.empty()) ? bias_hh_list[src_layer] : nullptr;
+                    if (src_bih != nullptr || src_bhh != nullptr) {
+                        pack_lbr_gru_bias(src_bih, src_bhh, dst_bias, hidden_size);
                     } else {
                         std::memset(dst_bias, 0, 4 * hidden_size * sizeof(float));
                     }
@@ -1654,10 +1676,11 @@ inline bool gru_multilayer_forward_onednn(
             bool layer0_ok = gru_forward_onednn(
                 input,
                 W_ih_list[0], W_hh_list[0],
-                // Use layer 0's OWN bias: with mixed-bias configs, has_bias
-                // (any layer) must not force a bias onto a bias-less layer 0,
-                // nor suppress layer 0's bias when only it is biased.
-                (!bias_list.empty()) ? bias_list[0] : nullptr, nullptr,
+                // Use layer 0's OWN bias_ih/bias_hh: with mixed-bias configs,
+                // has_bias (any layer) must not force a bias onto a bias-less
+                // layer 0, nor suppress layer 0's bias when only it is biased.
+                (!bias_ih_list.empty()) ? bias_ih_list[0] : nullptr,
+                (!bias_hh_list.empty()) ? bias_hh_list[0] : nullptr,
                 h0,  // First layer's h0
                 intermediate_output.data(),
                 intermediate_h.data(),

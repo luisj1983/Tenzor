@@ -262,6 +262,36 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
 
     // Launch greedy suppression — 256 threads cooperate on inner chunk-OR loop
     size_t shared_bytes = num_chunks * sizeof(uint64_t) + sizeof(int64_t);
+
+    // The default per-block dynamic shared memory limit is 48KB. Past
+    // ~380-400K boxes (num_chunks = ceil(num_boxes/64)), shared_bytes exceeds
+    // that default and the launch below would fail outright with
+    // cudaErrorInvalidValue. Opt in to a larger limit via cudaFuncSetAttribute
+    // (mirrors the pattern used by the TopK kernel in advanced.cu and the
+    // FlashAttention kernels in flash_attention_f64.cu / fused_ops.cu), but
+    // only up to the device's actual maximum opt-in shared memory per block —
+    // beyond that there is no way to satisfy the request, so throw a clear
+    // error rather than silently truncating results.
+    constexpr size_t kDefaultSmemLimit = 48 * 1024;
+    if (shared_bytes > kDefaultSmemLimit) {
+        int max_optin_smem = 0;
+        TENZOR_CUDA_CHECK(cudaDeviceGetAttribute(
+            &max_optin_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
+        if (shared_bytes > static_cast<size_t>(max_optin_smem)) {
+            throw std::invalid_argument(
+                "nms_cuda: num_boxes=" + std::to_string(num_boxes) + " requires " +
+                std::to_string(shared_bytes) + " bytes of per-block shared "
+                "memory for greedy suppression, which exceeds this device's "
+                "maximum opt-in shared memory per block (" +
+                std::to_string(max_optin_smem) + " bytes). Reduce num_boxes "
+                "(e.g. pre-filter by score threshold) before calling NMS.");
+        }
+        TENZOR_CUDA_CHECK(cudaFuncSetAttribute(
+            reinterpret_cast<const void*>(nms_greedy_suppression_kernel),
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(shared_bytes)));
+    }
+
     nms_greedy_suppression_kernel<<<1, 256, shared_bytes, stream>>>(
         d_suppression_mask, d_sorted_indices, keep_indices, d_num_keep,
         num_boxes, num_chunks);

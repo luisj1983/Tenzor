@@ -21,6 +21,7 @@
 #include "cuda_launch_utils.cuh"
 #include <stdexcept>
 #include <vector>
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 #include <cub/cub.cuh>
@@ -282,14 +283,30 @@ auto index_select_kernel(const Tensor& input_orig, int64_t dim, const Tensor& in
 
 namespace { constexpr int MAX_GATHER_DIMS = 16; }
 
+// Per-dim value accessor: `data` backs ndim <= MAX_GATHER_DIMS (byte-identical
+// to the original raw array, zero overhead for the common case); `overflow`,
+// when non-null, points at a device buffer holding `ndim` values, used for
+// ndim > MAX_GATHER_DIMS instead of throwing (F-038/F-041). gather_kernel_impl
+// below only ever reads via operator[] in a single decode-and-relinearise
+// pass (no per-thread scratch array sized to the rank), so this is a
+// drop-in replacement requiring no kernel-body changes.
+struct GatherRankArray {
+    int64_t data[MAX_GATHER_DIMS];
+    const int64_t* overflow = nullptr;
+
+    __host__ __device__ __forceinline__ int64_t operator[](int64_t d) const {
+        return overflow != nullptr ? overflow[d] : data[d];
+    }
+};
+
 // Per-dimension metadata: the index/output shape (to decode the flat output
 // coordinate per axis) and the INPUT's contiguous strides (to re-linearise).
 // The old collapsed outer/inner formula was only correct when input and index
 // shared extents on every non-dim axis; PyTorch/CPU allow the index extent to
 // be smaller on a non-dim axis, which requires this per-dim decode.
 struct GatherMeta {
-    int64_t idx_shape[MAX_GATHER_DIMS];
-    int64_t in_strides[MAX_GATHER_DIMS];
+    GatherRankArray idx_shape;
+    GatherRankArray in_strides;
 };
 
 template<typename T, typename IndexT>
@@ -346,9 +363,6 @@ auto gather_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_or
     if (dim < 0 || dim >= ndim) {
         throw std::invalid_argument("gather: dimension out of range");
     }
-    if (ndim > MAX_GATHER_DIMS) {
-        throw std::invalid_argument("gather: tensor rank exceeds supported maximum");
-    }
 
     // PyTorch gather requires index to match input's rank and, on every axis
     // other than `dim`, index.size(d) <= input.size(d). The kernel maps the
@@ -387,17 +401,41 @@ auto gather_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_or
     const int dim_i = static_cast<int>(dim);
 
     // Per-dim metadata: index shape (to decode the flat output coordinate) and
-    // the input's contiguous strides (to re-linearise).
-    GatherMeta meta;
-    {
+    // the input's contiguous strides (to re-linearise). ndim > MAX_GATHER_DIMS
+    // packs both arrays into one device buffer (gather_overflow_buf, freed
+    // once this function returns) instead of throwing -- see GatherRankArray
+    // above (F-038/F-041).
+    GatherMeta meta{};
+    CudaAsyncBuffer gather_overflow_buf;
+    if (ndim <= MAX_GATHER_DIMS) {
         auto in_shape = input.shape();
         auto idx_shape = index.shape();
         int64_t stride = 1;
         for (int d = ndim_i - 1; d >= 0; --d) {
-            meta.in_strides[d] = stride;
+            meta.in_strides.data[d] = stride;
             stride *= in_shape[d];
-            meta.idx_shape[d] = idx_shape[d];
+            meta.idx_shape.data[d] = idx_shape[d];
         }
+    } else {
+        auto in_shape = input.shape();
+        auto idx_shape = index.shape();
+        std::vector<int64_t> host_idx_shape(ndim), host_strides(ndim);
+        int64_t stride = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            host_strides[d] = stride;
+            stride *= in_shape[d];
+            host_idx_shape[d] = idx_shape[d];
+        }
+        std::vector<int64_t> host_buf(static_cast<size_t>(ndim) * 2);
+        std::copy(host_idx_shape.begin(), host_idx_shape.end(), host_buf.begin());
+        std::copy(host_strides.begin(), host_strides.end(), host_buf.begin() + ndim);
+
+        gather_overflow_buf = CudaAsyncBuffer(host_buf.size() * sizeof(int64_t), stream);
+        auto* d_buf = gather_overflow_buf.as<int64_t>();
+        CUDA_CHECK(cudaMemcpyAsync(d_buf, host_buf.data(), host_buf.size() * sizeof(int64_t),
+                                   cudaMemcpyHostToDevice, stream));
+        meta.idx_shape.overflow = d_buf;
+        meta.in_strides.overflow = d_buf + ndim;
     }
 
     int num_blocks = get_num_blocks(total_output);
@@ -528,14 +566,30 @@ __global__ void copy_kernel_impl(const T* input, T* output, int64_t n) {
 
 namespace { constexpr int MAX_SCATTER_DIMS = 16; }
 
+// Per-dim value accessor: `data` backs ndim <= MAX_SCATTER_DIMS (byte-identical
+// to the original raw array, zero overhead for the common case); `overflow`,
+// when non-null, points at a device buffer holding `ndim` values, used for
+// ndim > MAX_SCATTER_DIMS instead of throwing (F-038/F-041). All 3
+// ScatterMeta consumers below only ever read via operator[] in a single
+// decode-and-relinearise pass (no per-thread scratch array sized to the
+// rank), so this is a drop-in replacement requiring no kernel-body changes.
+struct ScatterRankArray {
+    int64_t data[MAX_SCATTER_DIMS];
+    const int64_t* overflow = nullptr;
+
+    __host__ __device__ __forceinline__ int64_t operator[](int64_t d) const {
+        return overflow != nullptr ? overflow[d] : data[d];
+    }
+};
+
 // Per-dim metadata for scatter: the index/src shape (to decode the flat src
 // coordinate per axis) and the OUTPUT's contiguous strides (to re-linearise).
 // The old collapsed outer/inner formula was only correct when index/src shared
 // extents with the output on every non-dim axis; PyTorch/CPU allow the index
 // extent to be smaller, which requires this per-dim decode.
 struct ScatterMeta {
-    int64_t idx_shape[MAX_SCATTER_DIMS];
-    int64_t out_strides[MAX_SCATTER_DIMS];
+    ScatterRankArray idx_shape;
+    ScatterRankArray out_strides;
 };
 
 // Kernel 2: Scatter src values into output at indexed positions
@@ -593,9 +647,6 @@ auto scatter_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_o
     if (dim < 0 || dim >= ndim) {
         throw std::invalid_argument("scatter: dimension out of range");
     }
-    if (ndim > MAX_SCATTER_DIMS) {
-        throw std::invalid_argument("scatter: tensor rank exceeds supported maximum");
-    }
 
     // PyTorch/CPU shape contract: index and src must share shape, and
     // index.size(d) <= input.size(d) for every non-scatter axis d. Without
@@ -642,16 +693,40 @@ auto scatter_kernel(const Tensor& input_orig, int64_t dim, const Tensor& index_o
     const int dim_i = static_cast<int>(dim);
 
     // Per-dim metadata: index/src shape + output's contiguous strides.
-    ScatterMeta meta;
-    {
+    // ndim > MAX_SCATTER_DIMS packs both arrays into one device buffer
+    // (scatter_overflow_buf, freed once this function returns) instead of
+    // throwing -- see ScatterRankArray above (F-038/F-041).
+    ScatterMeta meta{};
+    CudaAsyncBuffer scatter_overflow_buf;
+    if (ndim <= MAX_SCATTER_DIMS) {
         auto out_shape = output.shape();
         auto idx_shape = index.shape();
         int64_t stride = 1;
         for (int d = ndim_i - 1; d >= 0; --d) {
-            meta.out_strides[d] = stride;
+            meta.out_strides.data[d] = stride;
             stride *= out_shape[d];
-            meta.idx_shape[d] = idx_shape[d];
+            meta.idx_shape.data[d] = idx_shape[d];
         }
+    } else {
+        auto out_shape = output.shape();
+        auto idx_shape = index.shape();
+        std::vector<int64_t> host_idx_shape(ndim), host_strides(ndim);
+        int64_t stride = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            host_strides[d] = stride;
+            stride *= out_shape[d];
+            host_idx_shape[d] = idx_shape[d];
+        }
+        std::vector<int64_t> host_buf(static_cast<size_t>(ndim) * 2);
+        std::copy(host_idx_shape.begin(), host_idx_shape.end(), host_buf.begin());
+        std::copy(host_strides.begin(), host_strides.end(), host_buf.begin() + ndim);
+
+        scatter_overflow_buf = CudaAsyncBuffer(host_buf.size() * sizeof(int64_t), stream);
+        auto* d_buf = scatter_overflow_buf.as<int64_t>();
+        CUDA_CHECK(cudaMemcpyAsync(d_buf, host_buf.data(), host_buf.size() * sizeof(int64_t),
+                                   cudaMemcpyHostToDevice, stream));
+        meta.idx_shape.overflow = d_buf;
+        meta.out_strides.overflow = d_buf + ndim;
     }
 
     bool idx_is_int32 = (index.dtype() == DType::Int32);
@@ -1055,9 +1130,6 @@ auto scatter_add_kernel(const Tensor& input_orig, int64_t dim, const Tensor& ind
     if (dim < 0 || dim >= ndim) {
         throw std::invalid_argument("scatter_add: dimension out of range");
     }
-    if (ndim > MAX_SCATTER_DIMS) {
-        throw std::invalid_argument("scatter_add: tensor rank exceeds supported maximum");
-    }
 
     // PyTorch/CPU shape contract: index and src must share shape, and
     // index.size(d) <= input.size(d) for every non-scatter axis d (otherwise
@@ -1102,16 +1174,40 @@ auto scatter_add_kernel(const Tensor& input_orig, int64_t dim, const Tensor& ind
     const int dim_i = static_cast<int>(dim);
 
     // Per-dim metadata: index/src shape + output's contiguous strides.
-    ScatterMeta meta;
-    {
+    // ndim > MAX_SCATTER_DIMS packs both arrays into one device buffer
+    // (scatter_overflow_buf, freed once this function returns) instead of
+    // throwing -- see ScatterRankArray above (F-038/F-041).
+    ScatterMeta meta{};
+    CudaAsyncBuffer scatter_overflow_buf;
+    if (ndim <= MAX_SCATTER_DIMS) {
         auto out_shape = output.shape();
         auto idx_shape = index.shape();
         int64_t stride = 1;
         for (int d = ndim_i - 1; d >= 0; --d) {
-            meta.out_strides[d] = stride;
+            meta.out_strides.data[d] = stride;
             stride *= out_shape[d];
-            meta.idx_shape[d] = idx_shape[d];
+            meta.idx_shape.data[d] = idx_shape[d];
         }
+    } else {
+        auto out_shape = output.shape();
+        auto idx_shape = index.shape();
+        std::vector<int64_t> host_idx_shape(ndim), host_strides(ndim);
+        int64_t stride = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            host_strides[d] = stride;
+            stride *= out_shape[d];
+            host_idx_shape[d] = idx_shape[d];
+        }
+        std::vector<int64_t> host_buf(static_cast<size_t>(ndim) * 2);
+        std::copy(host_idx_shape.begin(), host_idx_shape.end(), host_buf.begin());
+        std::copy(host_strides.begin(), host_strides.end(), host_buf.begin() + ndim);
+
+        scatter_overflow_buf = CudaAsyncBuffer(host_buf.size() * sizeof(int64_t), stream);
+        auto* d_buf = scatter_overflow_buf.as<int64_t>();
+        CUDA_CHECK(cudaMemcpyAsync(d_buf, host_buf.data(), host_buf.size() * sizeof(int64_t),
+                                   cudaMemcpyHostToDevice, stream));
+        meta.idx_shape.overflow = d_buf;
+        meta.out_strides.overflow = d_buf + ndim;
     }
 
     bool idx_is_int32 = (index.dtype() == DType::Int32);
@@ -1378,6 +1474,27 @@ auto scatter_add_kernel(const Tensor& input_orig, int64_t dim, const Tensor& ind
 auto masked_select_kernel(const Tensor& input, const Tensor& mask,
                           cudaStream_t stream) -> Tensor {
     validate_mask_dtype(mask, "masked_select");
+
+    // cub::DeviceSelect::Flagged below reads exactly n = input.numel() bool
+    // flags from the mask buffer. Without an explicit shape check, a mask
+    // sized differently than input (bypassing the op-layer's pre-broadcast,
+    // e.g. a future direct dispatch<OpId::MaskedSelect> caller) would read
+    // past the end of a smaller mask buffer — an out-of-bounds device read.
+    // CPU's masked_select_kernel (indexing.cpp) explicitly validates
+    // input.shape() == mask.shape(); match its exception type/message here,
+    // before any CUB call.
+    auto input_shape = input.shape();
+    auto mask_shape = mask.shape();
+    bool shapes_match = input_shape.size() == mask_shape.size();
+    if (shapes_match) {
+        for (size_t i = 0; i < input_shape.size(); ++i) {
+            if (input_shape[i] != mask_shape[i]) { shapes_match = false; break; }
+        }
+    }
+    if (!shapes_match) {
+        throw std::invalid_argument("masked_select: input and mask must have same shape");
+    }
+
     int64_t n = input.numel();
 
     if (n == 0) {
@@ -1538,6 +1655,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
         case DType::Int64:   LAUNCH_MASKED_FILL(int64_t, value); break;
         case DType::Int8:    LAUNCH_MASKED_FILL(int8_t, value); break;
         case DType::UInt8:   LAUNCH_MASKED_FILL(uint8_t, value); break;
+        case DType::Bool:    LAUNCH_MASKED_FILL(bool, value); break;
         case DType::Float16: {
             __half fill_val = __float2half(static_cast<float>(value));
             auto [grid_size, block_size] = optimal_launch_config(
@@ -1818,25 +1936,32 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     // indices: [*] (any shape of int64 indices)
     // output: [*, embedding_dim]
 
-    auto w_shape = weight.shape();
-    auto idx_shape = indices.shape();
+    // data<T>()/data_ptr() ignore strides — operate on contiguous copies (see
+    // clamp_kernel in the CPU backend for the analogous guard). A tied/sliced
+    // embedding table (non-contiguous weight) or a transposed/sliced index
+    // view would otherwise be walked with flat offsets and silently misread.
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor indices_c = indices.is_contiguous() ? indices : indices.contiguous();
+
+    auto w_shape = weight_c.shape();
+    auto idx_shape = indices_c.shape();
 
     int64_t embedding_dim = w_shape[1];
     int64_t num_embeddings = w_shape[0];
-    int64_t num_indices = indices.numel();
+    int64_t num_indices = indices_c.numel();
 
     // Build output shape: indices shape + embedding_dim
     std::vector<int64_t> output_shape(idx_shape.begin(), idx_shape.end());
     output_shape.push_back(embedding_dim);
 
-    Tensor output(output_shape, weight.dtype(), weight.device());
+    Tensor output(output_shape, weight_c.dtype(), weight_c.device());
 
     if (num_indices == 0) return output;
 
     int64_t total_elements = num_indices * embedding_dim;
 
-    bool idx_is_int32 = (indices.dtype() == DType::Int32);
-    bool idx_is_int64 = (indices.dtype() == DType::Int64);
+    bool idx_is_int32 = (indices_c.dtype() == DType::Int32);
+    bool idx_is_int64 = (indices_c.dtype() == DType::Int64);
     if (!idx_is_int32 && !idx_is_int64) {
         throw std::invalid_argument("embedding: indices must be Int32 or Int64");
     }
@@ -1848,7 +1973,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     // cuda_drain_index_errors(). This removes the per-call cudaMalloc/cudaFree
     // (the old CudaBuffer) AND the blocking cudaStreamSynchronize, matching
     // PyTorch's no-per-call-sync forward.
-    const int err_dev = weight.device().index;
+    const int err_dev = weight_c.device().index;
     int* err_flag = nullptr;
     {
         std::lock_guard<std::mutex> lk(g_index_err_mutex);
@@ -1867,31 +1992,31 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     #define LAUNCH_EMBEDDING(T) \
         if (idx_is_int32) { \
             embedding_kernel_impl<T, int32_t><<<emb_grid, emb_block, 0, stream>>>( \
-                weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
+                weight_c.data<T>(), indices_c.data<int32_t>(), output.data<T>(), \
                 num_indices, embedding_dim, num_embeddings, padding_idx, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
         } else { \
             embedding_kernel_impl<T, int64_t><<<emb_grid, emb_block, 0, stream>>>( \
-                weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
+                weight_c.data<T>(), indices_c.data<int64_t>(), output.data<T>(), \
                 num_indices, embedding_dim, num_embeddings, padding_idx, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
         }
 
-    switch (weight.dtype()) {
+    switch (weight_c.dtype()) {
         case DType::Float32: LAUNCH_EMBEDDING(float); break;
         case DType::Float64: LAUNCH_EMBEDDING(double); break;
         case DType::Float16:
             if (idx_is_int32) {
                 embedding_kernel_impl<__half, int32_t><<<emb_grid, emb_block, 0, stream>>>(
-                    reinterpret_cast<const __half*>(weight.data_ptr()),
-                    indices.data<int32_t>(),
+                    reinterpret_cast<const __half*>(weight_c.data_ptr()),
+                    indices_c.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 embedding_kernel_impl<__half, int64_t><<<emb_grid, emb_block, 0, stream>>>(
-                    reinterpret_cast<const __half*>(weight.data_ptr()),
-                    indices.data<int64_t>(),
+                    reinterpret_cast<const __half*>(weight_c.data_ptr()),
+                    indices_c.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
@@ -1900,15 +2025,15 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
         case DType::BFloat16:
             if (idx_is_int32) {
                 embedding_kernel_impl<__nv_bfloat16, int32_t><<<emb_grid, emb_block, 0, stream>>>(
-                    reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
-                    indices.data<int32_t>(),
+                    reinterpret_cast<const __nv_bfloat16*>(weight_c.data_ptr()),
+                    indices_c.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 embedding_kernel_impl<__nv_bfloat16, int64_t><<<emb_grid, emb_block, 0, stream>>>(
-                    reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
-                    indices.data<int64_t>(),
+                    reinterpret_cast<const __nv_bfloat16*>(weight_c.data_ptr()),
+                    indices_c.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     num_indices, embedding_dim, num_embeddings, padding_idx, err_flag);
                 CUDA_CHECK(cudaGetLastError());
@@ -2386,7 +2511,7 @@ __global__ void take_kernel_impl(
     }
 }
 
-auto take_kernel(const Tensor& input_orig, const Tensor& indices, cudaStream_t stream) -> Tensor {
+auto take_kernel(const Tensor& input_orig, const Tensor& indices_orig, cudaStream_t stream) -> Tensor {
     // take() indexes the tensor as if flattened in logical (row-major
     // contiguous) order, but the kernel reads input.data<T>() — the physical
     // buffer. A non-contiguous input (transposed/sliced/permuted view) maps the
@@ -2394,6 +2519,19 @@ auto take_kernel(const Tensor& input_orig, const Tensor& indices, cudaStream_t s
     // (which materializes input.contiguous() at indexing.cpp:225). Contiguify.
     Tensor input = input_orig.contiguous();
     int64_t input_size = input.numel();
+
+    // The op-layer's validate_flat_index() (src/ops/indexing.cpp) explicitly
+    // allows Int32 OR Int64 index tensors, but every dtype-templated launch
+    // below reads indices.data<int64_t>() unconditionally. Widen Int32 to
+    // Int64 here (mirrors validate_and_cast_index() used by gather/scatter/
+    // index_select) before any pointer-cast access, so an Int32 index buffer
+    // is never byte-reinterpreted as int64_t.
+    if (indices_orig.dtype() != DType::Int32 && indices_orig.dtype() != DType::Int64) {
+        throw std::invalid_argument("take: indices must have dtype Int32 or Int64");
+    }
+    Tensor indices = (indices_orig.dtype() == DType::Int32)
+        ? indices_orig.to(DType::Int64)
+        : indices_orig;
     int64_t indices_size = indices.numel();
 
     Tensor output({indices_size}, input.dtype(), input.device());
@@ -2764,7 +2902,15 @@ auto put_kernel(Tensor& input, const Tensor& indices_orig, const Tensor& source_
             "put: source has fewer elements (" + std::to_string(source_orig.numel()) +
             ") than indices (" + std::to_string(num_indices) + ")");
     }
-    Tensor indices = indices_orig.contiguous();
+    // Same Int32/Int64 index-dtype contract as take_kernel above — widen
+    // Int32 to Int64 before any pointer-cast access so it is never
+    // byte-reinterpreted as int64_t.
+    if (indices_orig.dtype() != DType::Int32 && indices_orig.dtype() != DType::Int64) {
+        throw std::invalid_argument("put: indices must have dtype Int32 or Int64");
+    }
+    Tensor indices = (indices_orig.dtype() == DType::Int32)
+        ? indices_orig.to(DType::Int64).contiguous()
+        : indices_orig.contiguous();
     Tensor source = source_orig.contiguous();
 
     int blocks = get_num_blocks(num_indices);
@@ -3297,13 +3443,30 @@ namespace {
 constexpr int MAX_TAKE_ALONG_DIM_DIMS = 16;
 }
 
+// Per-dim value accessor: `data` backs ndim <= MAX_TAKE_ALONG_DIM_DIMS
+// (byte-identical to the original raw array, zero overhead for the common
+// case); `overflow`, when non-null, points at a device buffer holding `ndim`
+// values, used for ndim > MAX_TAKE_ALONG_DIM_DIMS instead of throwing
+// (F-038/F-041). take_along_dim_cuda_kernel below only ever reads via
+// operator[] in a single decode-and-relinearise pass (no per-thread scratch
+// array sized to the rank), so this is a drop-in replacement requiring no
+// kernel-body changes.
+struct TakeAlongDimRankArray {
+    int64_t data[MAX_TAKE_ALONG_DIM_DIMS];
+    const int64_t* overflow = nullptr;
+
+    __host__ __device__ __forceinline__ int64_t operator[](int64_t d) const {
+        return overflow != nullptr ? overflow[d] : data[d];
+    }
+};
+
 // Per-dimension metadata for take_along_dim: the index shape (used to decode the
 // flat output coordinate per axis) and the INPUT's contiguous strides (used to
 // re-linearise each decoded coordinate). These differ from the index strides
 // whenever the index extent is smaller than the input on a non-dim axis.
 struct TakeAlongDimMeta {
-    int64_t idx_shape[MAX_TAKE_ALONG_DIM_DIMS];
-    int64_t in_strides[MAX_TAKE_ALONG_DIM_DIMS];
+    TakeAlongDimRankArray idx_shape;
+    TakeAlongDimRankArray in_strides;
 };
 
 template<typename T>
@@ -3369,9 +3532,6 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     if (static_cast<int64_t>(idx_shape.size()) != ndim) {
         throw std::invalid_argument("take_along_dim CUDA: indices must have same rank as input");
     }
-    if (ndim > MAX_TAKE_ALONG_DIM_DIMS) {
-        throw std::runtime_error("take_along_dim CUDA: ndim exceeds MAX_TAKE_ALONG_DIM_DIMS");
-    }
     for (int64_t d = 0; d < ndim; ++d) {
         if (d == dim) continue;
         if (idx_shape[d] > in_shape[d]) {
@@ -3392,14 +3552,36 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     // INPUT's contiguous strides (to re-linearise every non-dim coordinate and
     // the substituted index on the `dim` axis). The collapsed outer/inner formula
     // cannot reproduce this when index and input differ on a non-dim extent.
+    // ndim > MAX_TAKE_ALONG_DIM_DIMS packs both arrays into one device buffer
+    // (take_overflow_buf, freed once this function returns) instead of
+    // throwing -- see TakeAlongDimRankArray above (F-038/F-041).
     TakeAlongDimMeta meta{};
-    {
+    CudaAsyncBuffer take_overflow_buf;
+    if (ndim <= MAX_TAKE_ALONG_DIM_DIMS) {
         int64_t s = 1;
         for (int64_t d = ndim - 1; d >= 0; --d) {
-            meta.idx_shape[d] = idx_shape[d];
-            meta.in_strides[d] = s;
+            meta.idx_shape.data[d] = idx_shape[d];
+            meta.in_strides.data[d] = s;
             s *= in_shape[d];
         }
+    } else {
+        std::vector<int64_t> host_idx_shape(ndim), host_strides(ndim);
+        int64_t s = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            host_idx_shape[d] = idx_shape[d];
+            host_strides[d] = s;
+            s *= in_shape[d];
+        }
+        std::vector<int64_t> host_buf(static_cast<size_t>(ndim) * 2);
+        std::copy(host_idx_shape.begin(), host_idx_shape.end(), host_buf.begin());
+        std::copy(host_strides.begin(), host_strides.end(), host_buf.begin() + ndim);
+
+        take_overflow_buf = CudaAsyncBuffer(host_buf.size() * sizeof(int64_t), stream);
+        auto* d_buf = take_overflow_buf.as<int64_t>();
+        CUDA_CHECK(cudaMemcpyAsync(d_buf, host_buf.data(), host_buf.size() * sizeof(int64_t),
+                                   cudaMemcpyHostToDevice, stream));
+        meta.idx_shape.overflow = d_buf;
+        meta.in_strides.overflow = d_buf + ndim;
     }
 
     int ndim_i = static_cast<int>(ndim);

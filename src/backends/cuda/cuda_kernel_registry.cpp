@@ -142,7 +142,7 @@ namespace cuda {
     auto relu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
     auto sigmoid_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
     auto tanh_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
-    auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) -> void;
+    auto leaky_relu_inplace_kernel(Tensor& input, double alpha, cudaStream_t stream) -> void;
     auto gelu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
 
     // Unary operations
@@ -334,7 +334,7 @@ namespace cuda {
                            const std::string& norm, cudaStream_t stream) -> Tensor;
 
     // Fused operations
-    auto fused_conv2d_bn_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias, const Tensor& bn_mean, const Tensor& bn_var, const Tensor& bn_gamma, const Tensor& bn_beta, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, int64_t dilation_h, int64_t dilation_w, float momentum, float eps, bool training) -> Tensor;
+    auto fused_conv2d_bn_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias, const Tensor& bn_mean, const Tensor& bn_var, const Tensor& bn_gamma, const Tensor& bn_beta, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, int64_t dilation_h, int64_t dilation_w, float momentum, float eps, bool training, int64_t groups) -> Tensor;
     auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     auto fused_batchnorm_relu_cuda(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor;
@@ -1223,7 +1223,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) -> Tensor& {
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.01);  // keep F64 precision
         cuda::leaky_relu_inplace_kernel(target, alpha, get_cuda_stream(attrs));
         return target;
     });
@@ -1882,10 +1882,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         }
         cuda::batchnorm2d_update_running_stats(running_mean, running_var, batch_mean, running_batch_var, momentum, stream);
 
-        // Compute saved_inv_var for backward pass
-        // inv_var = 1 / sqrt(var + eps) — computed on device via existing kernels
-        // For simplicity, use the batch_var directly (backward will recompute inv_var)
-        return std::vector<Tensor>{output, running_mean, running_var, batch_mean, batch_var};
+        // F068: the 5th output must be invstd = 1/sqrt(var + eps), matching the
+        // cuDNN path's contract (cudnn_batchnorm2d_forward_training's
+        // saved_inv_var) and what BatchNorm2dBackward's non-cuDNN branch
+        // actually assumes (`variance = reciprocal(square(inputs[4])) - eps`).
+        // batchnorm2d_forward_affine already computes exactly this quantity
+        // internally (rsqrtf(variance + epsilon)) per output element; we
+        // recompute the same formula once per channel here via existing
+        // tensor ops so backward gets invstd instead of raw variance.
+        Tensor saved_inv_var = tenzor::rsqrt(tenzor::add(batch_var, static_cast<double>(epsilon)));
+        return std::vector<Tensor>{output, running_mean, running_var, batch_mean, saved_inv_var};
     });
 
     // Custom CUDA kernel backward - fallback when cuDNN is not available.
@@ -2719,6 +2725,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         bool training = attrs.get_bool(AttrKey::Training, false);
+        // F061: read groups the same way FusedConv2dReLU does — previously
+        // this always silently defaulted to 1 regardless of the source conv.
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = inputs.size() > 2 && inputs[2].numel() > 0 ? &inputs[2] : nullptr;
         // CPU registration: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
         // CUDA func expects: (input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta, ...)
@@ -2727,7 +2736,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::fused_conv2d_bn_relu_cuda(inputs[0], inputs[1], bias,
             inputs[5], inputs[6], inputs[3], inputs[4],
             stride[0], stride[1], padding[0], padding[1],
-            dilation[0], dilation[1], momentum, eps, training);
+            dilation[0], dilation[1], momentum, eps, training, groups);
     });
 
     table.register_single_output_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
@@ -3981,7 +3990,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cuda::all_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::LogSumExp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{cuda::logsumexp_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
     });
@@ -5838,7 +5847,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Nested Tensor Operations
     // =========================================================================
     table.register_single_output_kernel(OpId::NestedSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         DType d = inputs[0].dtype();
         if (d == DType::Float16 || d == DType::BFloat16) {  // widen-narrow like the other nested wrappers
             auto r = cuda::nested_softmax_cuda(inputs[0].to(DType::Float32), inputs[1], dim, get_cuda_stream(attrs));
@@ -5848,7 +5857,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::NestedLogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         DType d = inputs[0].dtype();
         if (d == DType::Float16 || d == DType::BFloat16) {
             auto r = cuda::nested_log_softmax_cuda(inputs[0].to(DType::Float32), inputs[1], dim, get_cuda_stream(attrs));

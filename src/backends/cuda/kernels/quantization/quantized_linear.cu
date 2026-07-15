@@ -148,9 +148,17 @@ auto quantized_linear_cuda(
     const float* weight_scales,
     const int32_t* weight_zps
 ) -> void {
-    float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
-    float combined_scale = input_scale * weight_scale / safe_output_scale;
-    float input_over_output = input_scale / safe_output_scale;
+    // F074: match the CPU kernels' output_scale contract exactly
+    // (quantized_linear.cpp / quantized_linear_int4.cpp throw on
+    // output_scale<=0.0f) instead of silently substituting 1.0 for exact zero
+    // and accepting negative values outright (which would flip the sign of
+    // every output element with no warning).
+    if (output_scale <= 0.0f) {
+        throw std::invalid_argument(
+            "quantized_linear_cuda: output_scale must be > 0");
+    }
+    float combined_scale = input_scale * weight_scale / output_scale;
+    float input_over_output = input_scale / output_scale;
 
     // Precondition for the int4 (16-byte) vectorized load path. Each row
     // pointer is `base + r * in_features`. A 16-byte int4 load requires every
@@ -256,9 +264,16 @@ auto quantized_linear_int4_cuda(
     if (in_features % 2 != 0) {
         throw std::invalid_argument("quantized_linear_int4_cuda: in_features must be even");
     }
-    float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
-    float combined_scale = input_scale * weight_scale / safe_output_scale;
-    float input_over_output = input_scale / safe_output_scale;
+    // F074: match the CPU INT4 kernel's output_scale contract exactly
+    // (quantized_linear_int4.cpp throws on output_scale<=0.0f) instead of
+    // silently substituting 1.0 for exact zero and accepting negative values
+    // outright (which would flip the sign of every output element).
+    if (output_scale <= 0.0f) {
+        throw std::invalid_argument(
+            "quantized_linear_int4_cuda: output_scale must be > 0");
+    }
+    float combined_scale = input_scale * weight_scale / output_scale;
+    float input_over_output = input_scale / output_scale;
 
     dim3 block(256);
     dim3 grid(static_cast<unsigned>((out_features + 255) / 256),

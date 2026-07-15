@@ -4,6 +4,7 @@
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/widen_narrow.hpp"  // S2: Float16/BFloat16 widen-narrow helper
 #include "tenzor/utils/log.hpp"   // TENZOR_LOG_WARN (F.4)
+#include "tenzor/ops/creation.hpp"  // tenzor::get_global_seed / detail:: manual-seed accessors (RReLU reproducible RNG)
 #include "broadcast.hpp"
 #include <cstdlib>  // std::getenv for TENZOR_STRICT_BACKEND
 #include "gemm_optimized.hpp"
@@ -2139,6 +2140,18 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 // Batched matrix multiplication kernel (uses MKL batch SGEMM/DGEMM)
+// Overflow-checked multiplication for batch-stride calculations (F-110).
+// Mirrors tenzor::cuda::checked_stride_mul (src/backends/cuda/kernels/matmul.cu),
+// which CUDA's batched_matmul_f32/f64/f16/bf16 already use for the identical
+// M*K / K*N / M*N per-batch stride computation; CPU's bmm_kernel previously
+// had no equivalent guard anywhere.
+inline int64_t checked_stride_mul(int64_t a, int64_t b) {
+    if (a != 0 && std::abs(b) > std::numeric_limits<int64_t>::max() / std::abs(a)) {
+        throw std::overflow_error("Stride overflow in bmm_kernel");
+    }
+    return a * b;
+}
+
 auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     // Validate inputs are 3D
     if (a.shape().size() != 3 || b.shape().size() != 3) {
@@ -2168,10 +2181,12 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     // Create output tensor
     Tensor output = Tensor::empty_uninitialized({batch_size, M, N}, a.dtype(), Device::cpu());
 
-    // Batch strides
-    int64_t a_batch_stride = M * K;
-    int64_t b_batch_stride = K * N;
-    int64_t c_batch_stride = M * N;
+    // Batch strides (F-110: overflow-checked, consistent with CUDA's
+    // batched_matmul_f32/f64/f16/bf16, which already guard this same
+    // M*K / K*N / M*N computation via checked_stride_mul).
+    int64_t a_batch_stride = checked_stride_mul(M, K);
+    int64_t b_batch_stride = checked_stride_mul(K, N);
+    int64_t c_batch_stride = checked_stride_mul(M, N);
 
 #ifdef TENZOR_USE_MKL
     // cblas_*gemm_batch_strided takes MKL_INT (32-bit under the LP64 build) for
@@ -2740,6 +2755,15 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
             out_data[i] = -in_data[i];
         }
 
+    } else if (input.dtype() == DType::Int64) {
+        // Matches CUDA's neg_kernel (Int64 branch, math.cu neg_kernel_device<int64_t>).
+        const int64_t* in_data = input.data<int64_t>();
+        int64_t* out_data = result.data<int64_t>();
+
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = -in_data[i];
+        }
+
     } else if (input.dtype() == DType::Complex64) {
         const auto* in_data  = reinterpret_cast<const std::complex<float>*>(input.data<uint8_t>());
         auto*       out_data = reinterpret_cast<std::complex<float>*>(result.data<uint8_t>());
@@ -2757,7 +2781,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         }
 
     } else {
-        throw std::runtime_error("neg operation only supports Float32, Float64, Float16, BFloat16, Int32, Complex64, and Complex128 dtypes");
+        throw std::runtime_error("neg operation only supports Float32, Float64, Float16, BFloat16, Int32, Int64, Complex64, and Complex128 dtypes");
     }
 
     return result;
@@ -2877,8 +2901,15 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         const int32_t* in_data = input.data<int32_t>();
         int32_t* out_data = result.data<int32_t>();
 
+        // std::abs(INT32_MIN) is UB (signed negation overflow at this exact
+        // storage width -- unlike Int8/Int16 below, which negate through an
+        // implicitly-promoted `int` and never hit the overflow). Detect that
+        // one value explicitly and return it unchanged: the conventional,
+        // well-defined wraparound result NumPy/PyTorch document for
+        // abs(INT_MIN).
         for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::abs(in_data[i]);
+            int32_t v = in_data[i];
+            out_data[i] = (v == std::numeric_limits<int32_t>::min()) ? v : std::abs(v);
         }
 
     } else if (input.dtype() == DType::Int8) {
@@ -2894,8 +2925,11 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
     } else if (input.dtype() == DType::Int64) {
         const int64_t* in_data = input.data<int64_t>();
         int64_t* out_data = result.data<int64_t>();
-        for (size_t i = 0; i < n; ++i)
-            out_data[i] = std::abs(in_data[i]);
+        // std::abs(INT64_MIN) is UB -- same reasoning as Int32 above.
+        for (size_t i = 0; i < n; ++i) {
+            int64_t v = in_data[i];
+            out_data[i] = (v == std::numeric_limits<int64_t>::min()) ? v : std::abs(v);
+        }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
@@ -5795,9 +5829,22 @@ auto fmod_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto remainder_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    // Divisor-sign convention (matches Python/NumPy/PyTorch `%`/`remainder`:
+    // a - floor(a/b)*b), NOT IEEE round-to-nearest-even std::remainder.
+    // e.g. remainder(-7, 3) == 2, not -1. Implemented via fmod (sign of the
+    // dividend) with a correction term when the fmod result's sign disagrees
+    // with the divisor's sign.
     return binary_math_kernel(a, b,
-        [](float x, float y) { return std::remainder(x, y); },
-        [](double x, double y) { return std::remainder(x, y); }, "remainder");
+        [](float x, float y) {
+            float r = std::fmod(x, y);
+            if (r != 0.0f && ((r < 0.0f) != (y < 0.0f))) r += y;
+            return r;
+        },
+        [](double x, double y) {
+            double r = std::fmod(x, y);
+            if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
+            return r;
+        }, "remainder");
 }
 
 auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor {
@@ -5817,6 +5864,14 @@ auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor {
         std::vector<Tensor> upcast_inputs = {start_f32, end_f32, weight_f32};
         Tensor result_f32 = lerp_kernel(upcast_inputs);
         return result_f32.to(orig_dtype);
+    }
+
+    if (end.numel() != start.numel() ||
+        (weight.numel() != 1 && weight.numel() != start.numel())) {
+        throw std::invalid_argument(
+            "lerp: end must have the same number of elements as start, and "
+            "weight must either be a scalar (numel==1) or match start's "
+            "element count (broadcast at the op layer before dispatch)");
     }
 
     auto shape_vec = std::vector<int64_t>(start.shape().begin(), start.shape().end());
@@ -5971,7 +6026,13 @@ static void minimum_typed(const T* a_data, const T* b_data, T* c_data,
     }
 }
 
-auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+auto minimum_kernel(const Tensor& a_in, const Tensor& b_in) -> Tensor {
+    // Contiguify: minimum_typed's same-shape fast path indexes a_data[i]/b_data[i]
+    // flat, and its broadcast path (detail::broadcast_op) derives operand strides
+    // from shape (contiguous assumption); data<T>() ignores actual strides (see
+    // clamp_kernel / binary_math_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -6026,7 +6087,13 @@ static void maximum_typed(const T* a_data, const T* b_data, T* c_data,
     }
 }
 
-auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+auto maximum_kernel(const Tensor& a_in, const Tensor& b_in) -> Tensor {
+    // Contiguify: maximum_typed's same-shape fast path indexes a_data[i]/b_data[i]
+    // flat, and its broadcast path (detail::broadcast_op) derives operand strides
+    // from shape (contiguous assumption); data<T>() ignores actual strides (see
+    // clamp_kernel / binary_math_kernel).
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -7106,12 +7173,62 @@ auto log_sigmoid_backward_kernel(const Tensor& grad, const Tensor& input) -> Ten
     return output;
 }
 
-auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
-        auto result = rrelu_kernel(f32, lower, upper, training);
-        return result.to(input.dtype());
+namespace {
+// Manual-seed-aware thread-local RNG for RReLU's training-mode draw. Mirrors
+// nn_kernels.cpp's tl_rng(): reseed from tenzor::get_global_seed() whenever a
+// manual_seed(...) is newly set (or changed), so tz.manual_seed(N) makes
+// RReLU reproducible; fall back to std::random_device otherwise, exactly as
+// before this fix.
+inline std::mt19937& rrelu_tl_rng() {
+    static thread_local std::mt19937 rng(std::random_device{}());
+    static thread_local bool initialised_from_manual_seed = false;
+    static thread_local uint64_t last_manual_seed_value = 0;
+
+    const bool manual_set = ::tenzor::detail::get_global_manual_seed_set();
+    if (manual_set) {
+        const uint64_t cur = ::tenzor::detail::get_global_manual_seed_value();
+        if (!initialised_from_manual_seed || cur != last_manual_seed_value) {
+            // Pull one value through the public seed API so RReLU shares the
+            // same incrementing stream as rand/randn/dropout (each consumer
+            // gets a distinct deterministic seed).
+            const uint64_t s = ::tenzor::get_global_seed();
+            rng.seed(static_cast<std::mt19937::result_type>(s));
+            initialised_from_manual_seed = true;
+            last_manual_seed_value = ::tenzor::detail::get_global_manual_seed_value();
+        }
+    } else if (initialised_from_manual_seed) {
+        // Operator switched off manual mode — fall back to nondeterministic.
+        rng.seed(std::random_device{}());
+        initialised_from_manual_seed = false;
     }
+    return rng;
+}
+
+// Counter-based per-element uniform in [0,1), deterministic in (seed, index)
+// so a parallel RReLU draw produces the SAME slope regardless of OpenMP
+// thread count/scheduling. Same construction as nn_kernels.cpp's
+// counter_uniform() (splitmix64 mixing, top 24 bits -> float).
+inline float rrelu_counter_uniform(uint64_t seed, uint64_t index) {
+    uint64_t z = seed + (index + 1) * 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    return static_cast<float>(z >> 40) * (1.0f / 16777216.0f);
+}
+} // namespace
+
+auto rrelu_kernel(const Tensor& input_in, float lower, float upper, bool training) -> Tensor {
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto f32 = input_in.to(DType::Float32);
+        auto result = rrelu_kernel(f32, lower, upper, training);
+        return result.to(input_in.dtype());
+    }
+
+    // data<T>() returns storage+offset WITHOUT applying strides, so a
+    // non-contiguous view would be read as if contiguous (wrong data). Operate
+    // on a contiguous copy, matching sqrt_kernel/neg_kernel/clamp_kernel.
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& input = input_cont;
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
@@ -7121,15 +7238,22 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training) 
         const scalar_t* in_data = input.data<scalar_t>();
         scalar_t* out_data = output.data<scalar_t>();
         if (training) {
-            // Each element gets a random slope in [lower, upper]
-            std::mt19937 gen(std::random_device{}());
-            std::uniform_real_distribution<float> dist(lower, upper);
+            // Each element gets a random slope in [lower, upper]. Draw ONE
+            // base seed on the calling thread (honors tenzor::manual_seed via
+            // rrelu_tl_rng()), then derive each element's draw from
+            // (base_seed, index) so the result does not depend on OpenMP
+            // thread count/scheduling — mirrors dropout_kernel's pattern in
+            // nn_kernels.cpp.
+            const uint64_t base_seed = static_cast<uint64_t>(rrelu_tl_rng()());
+            _Pragma("omp parallel for if(n > 10000)")
             for (int64_t i = 0; i < n; i++) {
                 scalar_t x = in_data[i];
                 if (x >= scalar_t(0)) {
                     out_data[i] = x;
                 } else {
-                    out_data[i] = static_cast<scalar_t>(dist(gen)) * x;
+                    float u = rrelu_counter_uniform(base_seed, static_cast<uint64_t>(i));
+                    float rslope = lower + u * (upper - lower);
+                    out_data[i] = static_cast<scalar_t>(rslope) * x;
                 }
             }
         } else {
@@ -7145,13 +7269,20 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training) 
     return output;
 }
 
-auto rrelu_backward_kernel(const Tensor& grad, const Tensor& input, float lower, float upper) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32_g = grad.to(DType::Float32);
-        auto f32_in = input.to(DType::Float32);
+auto rrelu_backward_kernel(const Tensor& grad_in, const Tensor& input_in, float lower, float upper) -> Tensor {
+    if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
+        auto f32_g = grad_in.to(DType::Float32);
+        auto f32_in = input_in.to(DType::Float32);
         auto result = rrelu_backward_kernel(f32_g, f32_in, lower, upper);
-        return result.to(input.dtype());
+        return result.to(input_in.dtype());
     }
+
+    // Same contiguity guard as rrelu_kernel above — both operands are read
+    // via flat data<T>() pointers below.
+    Tensor grad_cont = grad_in.is_contiguous() ? grad_in : grad_in.contiguous();
+    Tensor input_cont = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    const Tensor& grad = grad_cont;
+    const Tensor& input = input_cont;
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
@@ -8100,9 +8231,9 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
 
     Tensor output = Tensor::empty_uninitialized({B, M, N}, batch1.dtype(), Device::cpu());
 
-    int64_t a_stride = M * K;
-    int64_t b_stride = K * N;
-    int64_t c_stride = M * N;
+    int64_t a_stride = checked_stride_mul(M, K);
+    int64_t b_stride = checked_stride_mul(K, N);
+    int64_t c_stride = checked_stride_mul(M, N);
 
     if (batch1.dtype() == DType::Float32) {
         float* out_data = output.data<float>();
@@ -8674,9 +8805,27 @@ auto isneginf_kernel(const Tensor& input_in) -> Tensor {
 }
 
 auto isreal_kernel(const Tensor& input) -> Tensor {
-    bool is_real = (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128);
-    Tensor result({}, DType::Bool, input.device());
-    result.data<bool>()[0] = is_real;
+    // Input-shaped Bool predicate (NOT a 0-d scalar): real dtypes are
+    // unconditionally true for every element; Complex64/Complex128 are real
+    // per-element iff the imaginary part is exactly zero. Matches the
+    // composed tenzor::isreal contract in src/ops/math.cpp, which checks
+    // imag(x) == 0 elementwise for complex input.
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, DType::Bool, input.device());
+    int64_t n = input.numel();
+    bool* out = result.data<bool>();
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        for (int64_t i = 0; i < n; ++i) out[i] = true;
+        return result;
+    }
+    Tensor im = imag_kernel(input);
+    if (im.dtype() == DType::Float32) {
+        const float* im_d = im.data<float>();
+        for (int64_t i = 0; i < n; ++i) out[i] = (im_d[i] == 0.0f);
+    } else {
+        const double* im_d = im.data<double>();
+        for (int64_t i = 0; i < n; ++i) out[i] = (im_d[i] == 0.0);
+    }
     return result;
 }
 

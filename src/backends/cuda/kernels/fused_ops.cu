@@ -114,6 +114,17 @@ inline Tensor cuda_sum_device(const Tensor& t, float scale = 1.0f) {
 // Fused Linear + ReLU: cuBLAS matmul + fused bias+ReLU kernel
 // ==============================================================================
 
+// F-090: accumulator type for the fused bias+ReLU kernel. Float16/BFloat16
+// widen to float for the bias-add and ReLU-threshold compare — mirroring
+// CPU's widen_narrow_compute, which wraps the ENTIRE matmul+bias-add+ReLU
+// pipeline in Float32 for F16/BF16 input and narrows only the final output —
+// instead of computing the bias-add directly in half precision (an extra
+// half-precision rounding step the CPU reference doesn't have). Float32/
+// Float64 are unaffected (accumulator == T, same as before).
+template<typename T> struct BiasReluAcc { using type = T; };
+template<> struct BiasReluAcc<__half> { using type = float; };
+template<> struct BiasReluAcc<__nv_bfloat16> { using type = float; };
+
 /**
  * @brief Fused bias + ReLU kernel: out[i] = max(0, out[i] + bias[i % out_features])
  */
@@ -124,11 +135,12 @@ __global__ void bias_relu_kernel(
     int64_t total_elements,
     int64_t out_features
 ) {
+    using Acc = typename BiasReluAcc<T>::type;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < total_elements; i += stride) {
-        T val = output[i] + bias[i % out_features];
-        output[i] = (val > T(0)) ? val : T(0);
+        Acc val = static_cast<Acc>(output[i]) + static_cast<Acc>(bias[i % out_features]);
+        output[i] = static_cast<T>((val > Acc(0)) ? val : Acc(0));
     }
 }
 
@@ -1129,8 +1141,12 @@ __global__ void fused_layer_norm_backward_kernel(
     const T* mean,           // Saved mean from forward pass
     const T* inv_std,        // Saved 1/sqrt(var + eps) from forward pass
     T* grad_input,           // Output: gradient w.r.t. input
-    T* grad_weight,          // Output: gradient w.r.t. weight (accumulated)
-    T* grad_bias,            // Output: gradient w.r.t. bias (accumulated)
+    double* grad_weight_accum, // Output: double-precision scratch accumulator for
+                                // grad_weight (F-085); narrowed to T by
+                                // narrow_layer_norm_grad_accum_kernel once every
+                                // block has contributed.
+    double* grad_bias_accum,   // Output: double-precision scratch accumulator for
+                                // grad_bias (F-085); see grad_weight_accum above.
     int64_t batch_size,
     int64_t norm_size
 ) {
@@ -1158,9 +1174,19 @@ __global__ void fused_layer_norm_backward_kernel(
         sum_grad_out += static_cast<double>(grad_out_weighted);
         sum_grad_out_normalized += static_cast<double>(grad_out_weighted) * static_cast<double>(normalized);
 
-        // Accumulate weight and bias gradients atomically
-        atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
-        atomicAdd(&grad_bias[i], batch_grad_out[i]);
+        // F-085: accumulate weight/bias gradients atomically in double
+        // precision across every block (batch element), matching CPU's
+        // double accumulation in fused_layer_norm_backward_impl. Narrowing to
+        // T happens exactly once, in narrow_layer_norm_grad_accum_kernel,
+        // after all blocks have contributed — this avoids the float32
+        // accumulator precision loss that atomicAdd'ing directly into a
+        // T-typed buffer would incur for large batch sizes. Native double
+        // atomicAdd requires only compute capability >= 6.0, well below this
+        // build's minimum target architecture (see CMAKE_CUDA_ARCHITECTURES
+        // in src/backends/cuda/CMakeLists.txt, minimum 70).
+        atomicAdd(&grad_weight_accum[i],
+                  static_cast<double>(batch_grad_out[i]) * static_cast<double>(normalized));
+        atomicAdd(&grad_bias_accum[i], static_cast<double>(batch_grad_out[i]));
     }
 
     shared_sum1[threadIdx.x] = sum_grad_out;
@@ -1186,6 +1212,26 @@ __global__ void fused_layer_norm_backward_kernel(
 
         batch_grad_in[i] = static_cast<T>((static_cast<double>(grad_out_weighted) - mean_grad_out -
                            static_cast<double>(normalized) * mean_grad_out_normalized) * static_cast<double>(batch_inv_std));
+    }
+}
+
+// F-085: narrows the double-precision grad_weight_accum/grad_bias_accum
+// scratch buffers (populated via atomicAdd across every block in the kernel
+// above) down to T exactly once, after all blocks have finished contributing
+// their per-feature partial sums — mirroring CPU's accumulate-in-double,
+// narrow-to-T-once approach in fused_layer_norm_backward_impl.
+template<typename T>
+__global__ void narrow_layer_norm_grad_accum_kernel(
+    const double* grad_weight_accum,
+    const double* grad_bias_accum,
+    T* grad_weight,
+    T* grad_bias,
+    int64_t norm_size
+) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < norm_size) {
+        grad_weight[i] = static_cast<T>(grad_weight_accum[i]);
+        grad_bias[i] = static_cast<T>(grad_bias_accum[i]);
     }
 }
 
@@ -1219,7 +1265,11 @@ auto fused_layer_norm_backward_cuda(
     // F16/BF16: accumulate in Float32. A half-precision accumulator corrupts
     // grad_weight/grad_bias and diverges from the CPU (double/Float32) reference,
     // so widen, run the Float32 path, then narrow back — mirroring the forward
-    // (fused_layer_norm_cuda) and the RMSNorm backward.
+    // (fused_layer_norm_cuda) and the RMSNorm backward. Because of this
+    // unconditional early return, dtype is guaranteed to be Float32 or
+    // Float64 for the rest of this function (F-087: this used to be followed
+    // by unreachable __half/__nv_bfloat16 kernel-launch branches, which have
+    // been removed).
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         auto [gi, gw, gb] = fused_layer_norm_backward_cuda(
@@ -1233,9 +1283,16 @@ auto fused_layer_norm_backward_cuda(
     Tensor grad_input = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device());
     Tensor grad_weight = create_cuda_zeros({norm_size}, input.dtype(), input.device());
     Tensor grad_bias = create_cuda_zeros({norm_size}, input.dtype(), input.device());
+    // F-085: double-precision scratch accumulators, atomicAdd'd into by every
+    // block/batch element in fused_layer_norm_backward_kernel, then narrowed
+    // to input.dtype() in a single pass (narrow_layer_norm_grad_accum_kernel)
+    // once the main kernel completes.
+    Tensor grad_weight_accum = create_cuda_zeros({norm_size}, DType::Float64, input.device());
+    Tensor grad_bias_accum = create_cuda_zeros({norm_size}, DType::Float64, input.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
+    int narrow_blocks = static_cast<int>((norm_size + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
     if (input.dtype() == DType::Float32) {
         fused_layer_norm_backward_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1245,10 +1302,15 @@ auto fused_layer_norm_backward_cuda(
             mean.data<float>(),
             inv_std.data<float>(),
             grad_input.data<float>(),
-            grad_weight.data<float>(),
-            grad_bias.data<float>(),
+            grad_weight_accum.data<double>(),
+            grad_bias_accum.data<double>(),
             batch_size,
             norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        narrow_layer_norm_grad_accum_kernel<float><<<narrow_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
+            grad_weight.data<float>(), grad_bias.data<float>(), norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
@@ -1259,38 +1321,15 @@ auto fused_layer_norm_backward_cuda(
             mean.data<double>(),
             inv_std.data<double>(),
             grad_input.data<double>(),
-            grad_weight.data<double>(),
-            grad_bias.data<double>(),
+            grad_weight_accum.data<double>(),
+            grad_bias_accum.data<double>(),
             batch_size,
             norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float16) {
-        fused_layer_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<const __half*>(grad_output.data_ptr()),
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<const __half*>(weight.data_ptr()),
-            reinterpret_cast<const __half*>(mean.data_ptr()),
-            reinterpret_cast<const __half*>(inv_std.data_ptr()),
-            reinterpret_cast<__half*>(grad_input.data_ptr()),
-            reinterpret_cast<__half*>(grad_weight.data_ptr()),
-            reinterpret_cast<__half*>(grad_bias.data_ptr()),
-            batch_size,
-            norm_size
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::BFloat16) {
-        fused_layer_norm_backward_kernel<__nv_bfloat16, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(mean.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(inv_std.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(grad_bias.data_ptr()),
-            batch_size,
-            norm_size
+        narrow_layer_norm_grad_accum_kernel<double><<<narrow_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
+            grad_weight.data<double>(), grad_bias.data<double>(), norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
@@ -1735,11 +1774,20 @@ __global__ void fused_conv2d_bn_relu_kernel(
     int64_t dilation_h,
     int64_t dilation_w,
     T eps,
-    bool has_bias
+    bool has_bias,
+    int64_t groups
 ) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = batch_size * out_channels * out_h * out_w;
     int64_t stride_loop = blockDim.x * gridDim.x;
+
+    // F061: groups>1 restricts each output channel to its own input-channel
+    // window; `weight` is laid out [C_out, C_in/groups, kH, kW] (standard
+    // grouped-conv layout — same as plain Conv2d), so the weight index uses
+    // in_channels_per_group as the per-output-channel stride, not the full
+    // in_channels.
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t in_channels_per_group = in_channels / groups;
 
     for (int64_t idx = tid; idx < total_elements; idx += stride_loop) {
         // Decode output position
@@ -1747,10 +1795,13 @@ __global__ void fused_conv2d_bn_relu_kernel(
         int64_t h_out = (idx / out_w) % out_h;
         int64_t c_out = (idx / (out_w * out_h)) % out_channels;
         int64_t n = idx / (out_w * out_h * out_channels);
+        int64_t g = c_out / out_channels_per_group;
+        int64_t in_start = g * in_channels_per_group;
 
         // Compute convolution
         T conv_sum = 0;
-        for (int64_t c_in = 0; c_in < in_channels; ++c_in) {
+        for (int64_t c_in_local = 0; c_in_local < in_channels_per_group; ++c_in_local) {
+            int64_t c_in = in_start + c_in_local;
             for (int64_t kh = 0; kh < kernel_h; ++kh) {
                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
                     int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
@@ -1758,7 +1809,7 @@ __global__ void fused_conv2d_bn_relu_kernel(
 
                     if (h_in >= 0 && h_in < in_h && w_in >= 0 && w_in < in_w) {
                         int64_t input_idx = ((n * in_channels + c_in) * in_h + h_in) * in_w + w_in;
-                        int64_t weight_idx = ((c_out * in_channels + c_in) * kernel_h + kh) * kernel_w + kw;
+                        int64_t weight_idx = ((c_out * in_channels_per_group + c_in_local) * kernel_h + kh) * kernel_w + kw;
                         conv_sum += input[input_idx] * weight[weight_idx];
                     }
                 }
@@ -1790,7 +1841,7 @@ static void launch_fused_conv2d_bn_relu(
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
     int64_t dilation_h, int64_t dilation_w,
-    float eps, cudaStream_t stream)
+    float eps, cudaStream_t stream, int64_t groups)
 {
     int64_t total_elements = batch_size * out_channels * out_h * out_w;
     int min_grid_size, block_size;
@@ -1804,7 +1855,7 @@ static void launch_fused_conv2d_bn_relu(
         output.data<T>(),
         batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
         kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
-        dilation_h, dilation_w, static_cast<T>(eps), bias != nullptr);
+        dilation_h, dilation_w, static_cast<T>(eps), bias != nullptr, groups);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
@@ -1822,28 +1873,35 @@ __global__ void fused_conv2d_raw_kernel(
     int64_t in_h, int64_t in_w, int64_t out_h, int64_t out_w,
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
-    int64_t dilation_h, int64_t dilation_w, bool has_bias)
+    int64_t dilation_h, int64_t dilation_w, bool has_bias, int64_t groups)
 {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = batch_size * out_channels * out_h * out_w;
     int64_t step = blockDim.x * gridDim.x;
+    // F061: same grouped-conv channel-offset scheme as fused_conv2d_bn_relu_kernel.
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t in_channels_per_group = in_channels / groups;
     for (int64_t idx = tid; idx < total; idx += step) {
         int64_t w_out = idx % out_w;
         int64_t h_out = (idx / out_w) % out_h;
         int64_t c_out = (idx / (out_w * out_h)) % out_channels;
         int64_t n = idx / (out_w * out_h * out_channels);
+        int64_t g = c_out / out_channels_per_group;
+        int64_t in_start = g * in_channels_per_group;
         T s = 0;
-        for (int64_t c_in = 0; c_in < in_channels; ++c_in)
+        for (int64_t c_in_local = 0; c_in_local < in_channels_per_group; ++c_in_local) {
+            int64_t c_in = in_start + c_in_local;
             for (int64_t kh = 0; kh < kernel_h; ++kh)
                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
                     int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
                     int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
                     if (h_in >= 0 && h_in < in_h && w_in >= 0 && w_in < in_w) {
                         int64_t ii = ((n * in_channels + c_in) * in_h + h_in) * in_w + w_in;
-                        int64_t wi = ((c_out * in_channels + c_in) * kernel_h + kh) * kernel_w + kw;
+                        int64_t wi = ((c_out * in_channels_per_group + c_in_local) * kernel_h + kh) * kernel_w + kw;
                         s += input[ii] * weight[wi];
                     }
                 }
+        }
         if (has_bias) s += bias[c_out];
         conv_out[idx] = s;
     }
@@ -1926,7 +1984,7 @@ static void launch_fused_conv2d_bn_relu_training(
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
     int64_t dilation_h, int64_t dilation_w,
-    float momentum, float eps, cudaStream_t stream)
+    float momentum, float eps, cudaStream_t stream, int64_t groups)
 {
     int64_t spatial = out_h * out_w;
     int64_t total = batch_size * out_channels * spatial;
@@ -1943,7 +2001,7 @@ static void launch_fused_conv2d_bn_relu_training(
         input.data<T>(), weight.data<T>(), bias_ptr, conv_out.data<T>(),
         batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
         kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
-        dilation_h, dilation_w, bias != nullptr);
+        dilation_h, dilation_w, bias != nullptr, groups);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 
     int stat_block = 256;
@@ -1977,8 +2035,17 @@ auto fused_conv2d_bn_relu_cuda(
     int64_t dilation_w,
     float momentum,
     float eps,
-    bool training
+    bool training,
+    int64_t groups
 ) -> Tensor {
+    // F061: groups previously had no parameter at all on this kernel — it
+    // silently behaved as groups=1 regardless of the source conv's config.
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "fused_conv2d_bn_relu_cuda: groups must be positive (got " +
+            std::to_string(groups) + ")");
+    }
+
     // Float16/BFloat16: widen to Float32 on device, compute, narrow back (on-GPU
     // casts). Mirrors the CPU kernel: the running-stat update in training mode
     // lands on the Float32 copies (as on CPU), so neither backend writes the
@@ -1993,7 +2060,7 @@ auto fused_conv2d_bn_relu_cuda(
             bn_mean.to(DType::Float32), bn_var.to(DType::Float32),
             bn_gamma.to(DType::Float32), bn_beta.to(DType::Float32),
             stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
-            momentum, eps, training);
+            momentum, eps, training, groups);
         return out.to(orig);
     }
 
@@ -2023,12 +2090,12 @@ auto fused_conv2d_bn_relu_cuda(
             launch_fused_conv2d_bn_relu_training<float>(input, weight, bias, rm, rv, bn_gamma, bn_beta,
                 output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
                 kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
-                dilation_h, dilation_w, momentum, eps, stream);
+                dilation_h, dilation_w, momentum, eps, stream, groups);
         } else if (input.dtype() == DType::Float64) {
             launch_fused_conv2d_bn_relu_training<double>(input, weight, bias, rm, rv, bn_gamma, bn_beta,
                 output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
                 kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
-                dilation_h, dilation_w, momentum, eps, stream);
+                dilation_h, dilation_w, momentum, eps, stream, groups);
         } else {
             throw std::runtime_error("fused_conv2d_bn_relu_cuda: unsupported dtype");
         }
@@ -2036,12 +2103,12 @@ auto fused_conv2d_bn_relu_cuda(
         launch_fused_conv2d_bn_relu<float>(input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta,
             output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
-            dilation_h, dilation_w, eps, stream);
+            dilation_h, dilation_w, eps, stream, groups);
     } else if (input.dtype() == DType::Float64) {
         launch_fused_conv2d_bn_relu<double>(input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta,
             output, batch_size, in_channels, out_channels, in_h, in_w, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w,
-            dilation_h, dilation_w, eps, stream);
+            dilation_h, dilation_w, eps, stream, groups);
     } else {
         throw std::runtime_error("fused_conv2d_bn_relu_cuda: unsupported dtype");
     }
@@ -2052,186 +2119,25 @@ auto fused_conv2d_bn_relu_cuda(
 }
 
 // ==============================================================================
-// Fused MatMul + Add (Bias) CUDA Kernel
+// F-088: fused_matmul_add_cuda / fused_elementwise_chain_cuda removed.
+//
+// These were fully-implemented, Float32-only kernels with no OpId in
+// include/tenzor/ops/op_id.hpp and no call site in cuda_kernel_registry.cpp —
+// dead code. Verified this is not a CUDA-only gap: OneAPI only forward-
+// declares an equivalent fused_matmul_add_kernel in oneapi_kernel_registry.cpp
+// (src/backends/oneapi/oneapi_kernel_registry.cpp:688) but never registers it
+// under any OpId either, and has no fused_elementwise_chain at all. ROCm
+// implements both fused_matmul_add_hip and fused_elementwise_chain_hip
+// (src/backends/rocm/kernels/fused_ops.hip.cpp) but rocm_kernel_registry.cpp
+// never references either symbol — equally dead there. The only other
+// reference in the whole tree is tests/benchmarks/bench_fusion.cpp, which is
+// not wired into any CMakeLists.txt (not built) and calls a free function
+// `fused_elementwise_chain` that isn't declared in any public header —
+// itself dead/orphaned. Since neither op is part of any documented public
+// API or reachable on any backend, removal (rather than inventing a new
+// OpId nothing else uses) is the root-cause fix; this comment intentionally
+// stays put as a signpost.
 // ==============================================================================
-
-/**
- * @brief Fused matrix multiplication with bias addition
- *
- * Computes: C = A @ B + bias
- * Optimized for batch processing with tiling.
- */
-template<typename T, int TILE_SIZE = 16>
-__global__ void fused_matmul_add_kernel(
-    const T* A,
-    const T* B,
-    const T* bias,
-    T* C,
-    int64_t M,
-    int64_t N,
-    int64_t K,
-    bool has_bias
-) {
-    __shared__ T As[TILE_SIZE][TILE_SIZE];
-    __shared__ T Bs[TILE_SIZE][TILE_SIZE];
-
-    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
-    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
-
-    T sum = 0;
-
-    for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
-        // Load tiles into shared memory
-        if (row < M && t * TILE_SIZE + threadIdx.x < K) {
-            As[threadIdx.y][threadIdx.x] = A[row * K + t * TILE_SIZE + threadIdx.x];
-        } else {
-            As[threadIdx.y][threadIdx.x] = 0;
-        }
-
-        if (col < N && t * TILE_SIZE + threadIdx.y < K) {
-            Bs[threadIdx.y][threadIdx.x] = B[(t * TILE_SIZE + threadIdx.y) * N + col];
-        } else {
-            Bs[threadIdx.y][threadIdx.x] = 0;
-        }
-
-        __syncthreads();
-
-        // Compute partial products
-        #pragma unroll
-        for (int k = 0; k < TILE_SIZE; ++k) {
-            sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
-        }
-
-        __syncthreads();
-    }
-
-    // Write result with bias
-    if (row < M && col < N) {
-        if (has_bias) {
-            C[row * N + col] = sum + bias[col];
-        } else {
-            C[row * N + col] = sum;
-        }
-    }
-}
-
-auto fused_matmul_add_cuda(
-    const Tensor& A,
-    const Tensor& B,
-    const Tensor* bias
-) -> Tensor {
-    // Assume A: (M, K), B: (K, N), bias: (N,)
-    int64_t M = A.shape()[0];
-    int64_t K = A.shape()[1];
-    int64_t N = B.shape()[1];
-
-    Tensor C = create_cuda_zeros({M, N}, A.dtype(), A.device());
-
-    constexpr int TILE_SIZE = 16;
-    dim3 threads(TILE_SIZE, TILE_SIZE);
-    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-
-    int32_t device_id = A.device().index;
-    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
-    cudaStream_t stream = stream_guard.get();
-
-    if (A.dtype() == DType::Float32) {
-        const float* bias_ptr = bias ? bias->data<float>() : nullptr;
-        fused_matmul_add_kernel<float, TILE_SIZE><<<blocks, threads, 0, stream>>>(
-            A.data<float>(),
-            B.data<float>(),
-            bias_ptr,
-            C.data<float>(),
-            M,
-            N,
-            K,
-            bias != nullptr
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else {
-        throw std::runtime_error("fused_matmul_add_cuda: Only Float32 supported");
-    }
-
-    TENZOR_CUDA_POST_LAUNCH_CHECK();
-
-    return C;
-}
-
-// ==============================================================================
-// Fused Element-wise Chain CUDA Kernel
-// ==============================================================================
-
-/**
- * @brief Fused element-wise operations: add + mul + relu
- *
- * Computes: relu((a + b) * c)
- * Can be extended for arbitrary element-wise chains.
- */
-template<typename T>
-__global__ void fused_elementwise_chain_kernel(
-    const T* a,
-    const T* b,
-    const T* c,
-    T* output,
-    int64_t n,
-    int op_type  // 0: add+mul+relu, 1: mul+add+relu, etc.
-) {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t stride = blockDim.x * gridDim.x;
-
-    for (int64_t i = tid; i < n; i += stride) {
-        T result;
-        switch (op_type) {
-            case 0:  // (a + b) * c + relu
-                result = (a[i] + b[i]) * c[i];
-                result = (result > T(0)) ? result : T(0);
-                break;
-            case 1:  // (a * b) + c + relu
-                result = a[i] * b[i] + c[i];
-                result = (result > T(0)) ? result : T(0);
-                break;
-            default:
-                result = a[i];
-        }
-        output[i] = result;
-    }
-}
-
-auto fused_elementwise_chain_cuda(
-    const Tensor& a,
-    const Tensor& b,
-    const Tensor& c,
-    int op_type
-) -> Tensor {
-    Tensor output = create_cuda_zeros(to_vector(a.shape()), a.dtype(), a.device());
-
-    int64_t n = a.numel();
-    int min_grid_size, block_size;
-    int32_t device_id = a.device().index;
-    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
-    cudaStream_t stream = stream_guard.get();
-
-    if (a.dtype() == DType::Float32) {
-        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                           fused_elementwise_chain_kernel<float>, 0, 0);
-        int blocks = clamp_blocks((n + block_size - 1) / block_size);
-        fused_elementwise_chain_kernel<<<blocks, block_size, 0, stream>>>(
-            a.data<float>(),
-            b.data<float>(),
-            c.data<float>(),
-            output.data<float>(),
-            n,
-            op_type
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else {
-        throw std::runtime_error("fused_elementwise_chain_cuda: Only Float32 supported");
-    }
-
-    TENZOR_CUDA_POST_LAUNCH_CHECK();
-
-    return output;
-}
 
 // ==============================================================================
 // Philox4x32-10 Counter-Based PRNG (CUDA device port of CPU Philox4x32 in

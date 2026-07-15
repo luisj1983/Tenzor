@@ -902,7 +902,15 @@ auto frac(const Tensor& input) -> Tensor {
 }
 
 auto heaviside(const Tensor& input, const Tensor& values) -> Tensor {
-    return detail::binary_op_promoted<OpId::Heaviside>("heaviside", input, values);
+    // heaviside's backend kernels (CUDA/ROCm/OneAPI/Vulkan) index `input` and
+    // `values` with a single shared linear index and no per-operand broadcast
+    // strides — only the CPU kernel handles broadcasting internally. Expand
+    // both operands to their common broadcast shape here (mirrors hypot/
+    // copysign/nextafter/gcd/lcm below) so a scalar/smaller `values` tensor
+    // never causes an out-of-bounds device read on those backends. CPU's
+    // kernel still special-cases equal-shape operands, so pre-broadcasting
+    // here is a no-op for it beyond skipping its internal broadcast path.
+    return detail::binary_op_promoted_broadcast<OpId::Heaviside>("heaviside", input, values);
 }
 
 auto nan_to_num(const Tensor& input, double nan, double posinf, double neginf) -> Tensor {

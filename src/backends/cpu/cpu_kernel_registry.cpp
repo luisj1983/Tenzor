@@ -26,6 +26,7 @@
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
+#include "kernels/fused_quantized_ops.hpp"  // cpu::fused_qlinear_dequant (F072: QuantizedLinear QInt4x2 dispatch)
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -444,7 +445,7 @@ namespace cpu {
     auto fused_gelu_kernel(const Tensor& input) -> Tensor;
     auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> std::tuple<Tensor, Tensor, Tensor>;
     auto fused_layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& mean, const Tensor& inv_std, const Tensor& weight) -> std::vector<Tensor>;
-    auto fused_conv2d_bn_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor& conv_bias, const Tensor& bn_gamma, const Tensor& bn_beta, const Tensor& bn_running_mean, const Tensor& bn_running_var, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, int64_t dilation_h, int64_t dilation_w, float bn_momentum, float bn_eps, bool training) -> Tensor;
+    auto fused_conv2d_bn_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor& conv_bias, const Tensor& bn_gamma, const Tensor& bn_beta, const Tensor& bn_running_mean, const Tensor& bn_running_var, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, int64_t dilation_h, int64_t dilation_w, float bn_momentum, float bn_eps, bool training, int64_t groups) -> Tensor;
 
     // Creation
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
@@ -1912,7 +1913,18 @@ static void register_cpu_kernels_convolution(BackendDispatchTable& table) {
         // Build 4D input shape from 3D: [N,C,L] -> [N,C,1,L]
         auto in_shape = inputs[1].shape();
         std::vector<int64_t> input_shape_4d = {in_shape[0], in_shape[1], 1, in_shape[2]};
-        auto result_4d = cpu::conv2d_backward_input_kernel(grad_4d, weight_4d, input_shape_4d, stride, padding, dilation, groups);
+        // F062: the unsqueezed H axis is a singleton and must stay unpadded
+        // (pad_h=0, stride_h=1, dil_h=1) — mirrors Conv1dForward above. The
+        // scalar `padding` overload used previously applied the real conv's
+        // stride/padding/dilation to BOTH axes; with padding!=0 that made
+        // col2im_cpu's H-axis bounds evaluate to an empty range (since the
+        // H extent is 1), silently zeroing grad_input. Use the per-axis
+        // overload to pad/stride/dilate the W (length) axis alone.
+        auto result_4d = cpu::conv2d_backward_input_kernel(
+            grad_4d, weight_4d, input_shape_4d,
+            /*stride_h=*/1, /*stride_w=*/stride,
+            /*pad_h=*/0,    /*pad_w=*/padding,
+            /*dil_h=*/1,    /*dil_w=*/dilation, groups);
         return std::vector<Tensor>{result_4d.squeeze(2)};
     });
 
@@ -1928,7 +1940,14 @@ static void register_cpu_kernels_convolution(BackendDispatchTable& table) {
         // Build 4D weight shape from 3D: [out,in/g,kL] -> [out,in/g,1,kL]
         auto wt_shape = inputs[2].shape();
         std::vector<int64_t> weight_shape_4d = {wt_shape[0], wt_shape[1], 1, wt_shape[2]};
-        auto result_4d = cpu::conv2d_backward_weight_kernel(grad_4d, input_4d, weight_shape_4d, stride, padding, dilation, groups);
+        // F062: same H-axis-must-stay-unpadded fix as Conv1dBackwardInput
+        // above — the scalar overload's isotropic padding zeroed grad_weight
+        // via the same col2im_cpu empty-range bug whenever padding!=0.
+        auto result_4d = cpu::conv2d_backward_weight_kernel(
+            grad_4d, input_4d, weight_shape_4d,
+            /*stride_h=*/1, /*stride_w=*/stride,
+            /*pad_h=*/0,    /*pad_w=*/padding,
+            /*dil_h=*/1,    /*dil_w=*/dilation, groups);
         return std::vector<Tensor>{result_4d.squeeze(2)};
     });
 
@@ -2452,18 +2471,21 @@ static void register_cpu_kernels_pooling(BackendDispatchTable& table) {
         // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
         // Audit QQ.10: per-axis stride / padding / dilation with scalar fallback,
         // mirroring the Conv2dForward / FusedConv2dReLU pattern (audit F.11).
+        // F061: also read groups the same way FusedConv2dReLU does — previously
+        // this always silently defaulted to 1 regardless of the source conv.
         const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         float bn_momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
         float bn_eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         bool training = attrs.get_bool(AttrKey::Training, false);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         return cpu::fused_conv2d_bn_relu_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6],
             stride[0], stride[1],
             padding[0], padding[1],
             dilation[0], dilation[1],
-            bn_momentum, bn_eps, training);
+            bn_momentum, bn_eps, training, groups);
     });
 
 } // register_cpu_kernels_pooling
@@ -3773,16 +3795,14 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::Zeros, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::zeros_kernel(shape, dtype, device)};
     });
 
     table.register_kernel(OpId::Ones, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::ones_kernel(shape, dtype, device)};
     });
@@ -3790,8 +3810,7 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
     table.register_kernel(OpId::Full, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
         double value = attrs.get_float(AttrKey::Value, 0.0);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::full_kernel(shape, value, dtype, device)};
     });
@@ -3823,8 +3842,7 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
         double start = attrs.get_float(AttrKey::Start, 0.0);
         double end = attrs.get_float(AttrKey::End, 0.0);
         double step = attrs.get_float(AttrKey::Step, 1.0);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::arange_kernel(start, end, step, dtype, device)};
     });
@@ -3833,8 +3851,7 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
         double start = attrs.get_float(AttrKey::Start, 0.0);
         double end = attrs.get_float(AttrKey::End, 1.0);
         int64_t steps = attrs.get_int(AttrKey::Steps, 100);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::linspace_kernel(start, end, steps, dtype, device)};
     });
@@ -3842,8 +3859,7 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
     table.register_kernel(OpId::Eye, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t n = attrs.get_int(AttrKey::N, 0);
         int64_t m = attrs.get_int(AttrKey::M, -1);
-        int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
-        DType dtype = static_cast<DType>(dtype_int);
+        DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         Device device = Device::cpu();
         return std::vector<Tensor>{cpu::eye_kernel(n, m, dtype, device)};
     });
@@ -4310,19 +4326,86 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
         // the wrong element order. Mirror the AdvancedIndex/SelectScatter
         // wrappers which contiguify before dispatch.
         Tensor input = inputs[0].contiguous();
-        Tensor weight = inputs[1].contiguous();
 
         auto input_shape = input.shape();
-        auto weight_shape = weight.shape();
         int64_t batch_size = input_shape[0];
         int64_t in_features = input_shape[1];
-        int64_t out_features = weight_shape[0];
 
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
         float output_scale = static_cast<float>(attrs.get_float(AttrKey::OutputScale, 1.0));
         int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
         int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
+
+        // F031/F072: QInt4x2 (packed INT4) weight. Falling through to the int8
+        // path below would call weight.contiguous().data<int8_t>() on a
+        // QInt4x2 tensor, which throws (dtype mismatch) — mirror CUDA's
+        // registry entry (cuda_kernel_registry.cpp), which checks
+        // weight.dtype()==QInt4x2 up front and routes to the dedicated INT4
+        // kernel instead. Route to the same fused dequantizing kernel
+        // nn::QuantizedLinear's CPU eager path already uses for INT4 weights
+        // (quantized_layers.cpp's forward_quantized), so raw dispatch / JIT
+        // replay / future ONNX import also get correct INT4 support instead
+        // of only the nn-layer's special-cased bypass.
+        if (inputs[1].dtype() == DType::QInt4x2) {
+            // Matches the other quantized kernels' output_scale contract
+            // (combined_scale = input_scale * weight_scale / output_scale);
+            // fused_qlinear_dequant itself has no output_scale parameter, so
+            // fold it into the weight-side scale(s) below instead.
+            if (output_scale <= 0.0f) {
+                throw std::invalid_argument(
+                    "QuantizedLinear (CPU, INT4): output_scale must be > 0");
+            }
+
+            Tensor weight4 = inputs[1].contiguous();
+            int64_t out_features4 = weight4.shape()[0];
+
+            Tensor output4({batch_size, out_features4}, DType::Float32, Device::cpu());
+
+            const int8_t* input_data4 = input.data<int8_t>();
+            // Byte-level access is dtype-agnostic (see Tensor::data<uint8_t>()),
+            // matching quantized_layers.cpp's weight_data_cpu.data<uint8_t>().
+            const uint8_t* weight_packed = weight4.data<uint8_t>();
+            const float* bias_data4 = nullptr;
+            Tensor bias_contig4;
+            if (inputs.size() > 2 && inputs[2].numel() > 0) {
+                bias_contig4 = inputs[2].contiguous();
+                bias_data4 = bias_contig4.data<const float>();
+            }
+
+            // Optional per-channel weight scale (F076): inputs[3] =
+            // weight_scales (Float32, [out_features]); absent/scalar => the
+            // per-tensor scalar weight_scale attr above.
+            const float* weight_scales_data4 = nullptr;
+            Tensor scales_contig4;
+            if (inputs.size() > 3 && inputs[3].numel() > 1) {
+                scales_contig4 = inputs[3].contiguous();
+                weight_scales_data4 = scales_contig4.data<const float>();
+            }
+
+            std::vector<float> adjusted_scales4;
+            const float* effective_weight_scales4 = nullptr;
+            float effective_weight_scale4 = weight_scale / output_scale;
+            if (weight_scales_data4) {
+                adjusted_scales4.resize(static_cast<size_t>(out_features4));
+                for (int64_t o = 0; o < out_features4; ++o) {
+                    adjusted_scales4[static_cast<size_t>(o)] = weight_scales_data4[o] / output_scale;
+                }
+                effective_weight_scales4 = adjusted_scales4.data();
+            }
+
+            cpu::fused_qlinear_dequant(
+                input_data4, weight_packed, bias_data4, output4.data<float>(),
+                batch_size, out_features4, in_features,
+                input_scale, effective_weight_scale4, input_zp,
+                effective_weight_scales4
+            );
+            return output4;
+        }
+
+        Tensor weight = inputs[1].contiguous();
+        auto weight_shape = weight.shape();
+        int64_t out_features = weight_shape[0];
 
         Tensor output({batch_size, out_features}, DType::Float32, Device::cpu());
 
@@ -4399,6 +4482,17 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
         int64_t pad_h = padding_a[0], pad_w = padding_a[1];
         int64_t dil_h = dilation_a[0], dil_w = dilation_a[1];
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+
+        // F075: the output-size formula below divides by stride_h / stride_w.
+        // A zero (or negative) stride would be an integer divide-by-zero / UB
+        // before the kernel ever runs, so reject it up front (mirrors CUDA's
+        // guard in cuda_kernel_registry.cpp and the kernel's own defensive
+        // validation of `groups`).
+        if (stride_h < 1 || stride_w < 1) {
+            throw std::invalid_argument(
+                "QuantizedConv2d (CPU): stride must be >= 1, got (" +
+                std::to_string(stride_h) + ", " + std::to_string(stride_w) + ")");
+        }
 
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
@@ -5030,13 +5124,13 @@ static void register_cpu_kernels_nested_misc(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::NestedSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
             return {cpu::nested_softmax_kernel(inputs[0], inputs[1], dim)};
         });
 
     table.register_kernel(OpId::NestedLogSoftmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
             return {cpu::nested_log_softmax_kernel(inputs[0], inputs[1], dim)};
         });
 

@@ -282,6 +282,14 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 }
 
 // MatMulBackward implementation
+//
+// F-108 note: forward() and backward() both re-enter tenzor::matmul(), which
+// on CUDA reads the process-global TF32 flag (tenzor::cuda::matmul::allow_tf32(),
+// src/backends/cuda/kernels/matmul.cu) with no override here. That flag now
+// defaults to TF32-disabled (full IEEE FP32, matching CPU) precisely so this
+// backward path doesn't silently diverge from CPU's exact-FP32 gradient
+// unless a caller has explicitly opted into TF32 (TENZOR_ENABLE_TF32=1 /
+// set_allow_tf32(true)) for speed.
 auto MatMulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     save_for_backward({inputs[0].tensor(), inputs[1].tensor()});
     auto result = matmul(inputs[0].tensor(), inputs[1].tensor());

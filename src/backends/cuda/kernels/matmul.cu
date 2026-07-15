@@ -30,33 +30,44 @@ namespace tenzor::cuda::matmul {
 
 // Process-global configuration flags.
 //
-// The TF32 default is read from TENZOR_DISABLE_TF32 on first access: set
-// this to 1 in the environment (or from a test main()) to force full
-// IEEE 754 FP32 on cuBLAS matmuls. This is needed for CPU↔CUDA parity
-// tests where the default TF32 path silently drops ~13 mantissa bits.
-// Once set, explicit set_allow_tf32() calls still override the default.
+// F-108: DEFAULT IS NOW TF32-DISABLED (full IEEE 754 FP32). Tenzor ships a CPU
+// backend and targets CPU<->CUDA numerical parity as a stated goal; CPU's
+// matmul always computes exact FP32, and MatMulBackward re-enters this same
+// matmul path for grad_a/grad_b with no override, so a TF32-on default would
+// silently make CUDA Float32 matmul AND its gradients diverge from CPU by
+// more than rounding noise for anyone who didn't know to opt out. Opt into
+// TF32 (for the ~2x speedup / ~0.1% reduced precision tradeoff on Ampere+)
+// via TENZOR_ENABLE_TF32=1 in the environment, or set_allow_tf32(true).
+// TENZOR_DISABLE_TF32=1 (the old opt-OUT variable, kept for backward
+// compatibility with existing scripts/tests) is still honored but is now a
+// no-op: it just re-affirms the default.
+// Once resolved, explicit set_allow_tf32() calls still override the default.
 //
 // IMPORTANT: these flags MUST be process-global (atomic), not thread_local.
 // cuBLAS calls dispatched from the runtime can execute on worker threads
 // distinct from the one that called set_allow_tf32() / set the env var, and
-// a thread_local flag would re-read its env default (TF32 *on*) on every such
-// thread — silently re-enabling TF32 and breaking CPU↔CUDA parity even after
-// the test fixture set TENZOR_DISABLE_TF32=1. A process-global atomic ensures
-// the disable is honored on every thread that issues a gemm.
+// a thread_local flag would re-read its env default on every such thread —
+// silently diverging from an explicit override made on another thread. A
+// process-global atomic ensures one resolved value is honored on every
+// thread that issues a gemm.
 static auto tf32_default_from_env() -> bool {
-    const char* v = std::getenv("TENZOR_DISABLE_TF32");
-    if (v && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0)) {
-        return false;
+    const char* enable = std::getenv("TENZOR_ENABLE_TF32");
+    if (enable && (std::strcmp(enable, "1") == 0 || std::strcmp(enable, "true") == 0)) {
+        return true;
     }
-    return true;
+    // TENZOR_DISABLE_TF32 is the pre-F-108 opt-out variable. Disabling is now
+    // the default regardless, so honoring it here is a harmless no-op kept
+    // only so old scripts/tests that still set it behave identically.
+    return false;
 }
 // Tri-state: -1 = unresolved (resolve from env on first read), 0 = TF32
-// disabled, 1 = TF32 allowed. Resolution is LAZY (on first allow_tf32() call,
-// i.e. the first gemm) rather than at static-init: the CUDA backend .so is
-// dlopen'd by tenzor::initialize(), and a test/process that sets
-// TENZOR_DISABLE_TF32=1 just before init would otherwise have the env read at
-// .so load time — which can precede the setenv — leaving TF32 silently on.
-// The first gemm always runs after any such setenv, so a lazy read is correct.
+// disabled (default), 1 = TF32 allowed. Resolution is LAZY (on first
+// allow_tf32() call, i.e. the first gemm) rather than at static-init: the
+// CUDA backend .so is dlopen'd by tenzor::initialize(), and a test/process
+// that sets TENZOR_ENABLE_TF32=1 just before init would otherwise have the
+// env read at .so load time — which can precede the setenv — leaving TF32
+// off when the caller asked for it on. The first gemm always runs after any
+// such setenv, so a lazy read is correct.
 static std::atomic<int> g_allow_tf32{-1};
 static std::atomic<bool> g_warn_fp16_saturation{false};
 
@@ -121,82 +132,74 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 }
 
 // ============================================================================
-// FP16 Saturation Utility
+// FP16 Overflow Warning Utility
 // ============================================================================
+//
+// F-107 fix: CUDA used to clamp FP16 matmul accumulator overflow to
+// +/-65504 (float_to_half_saturated / saturate_fp16, removed here) while CPU's
+// Float16::Float16(float) constructor (src/core/dtype.cpp) always follows
+// strict IEEE-754 rounding, letting overflow narrow to signed Infinity. That
+// was a categorical CPU<->CUDA divergence (Inf vs. a large finite number),
+// not a rounding-noise difference, and the clamp was introduced purely to
+// avoid seeing Inf (see git history: "cuBLAS FP32->FP16 conversion uses
+// standard rounding (not saturation), so accumulated values > 65504 become
+// Inf in FP16") rather than to work around any actual cuBLAS bug. Signed
+// Infinity on overflow is the mathematically correct, standard float16
+// behavior, so CUDA no longer saturates: all FP16 matmul paths below now
+// store plain `__float2half(val)`, matching CPU and IEEE-754 semantics.
+//
+// The `warn_fp16_saturation()` knob is kept, repurposed from "warn when we
+// clamped" to "warn when overflow legitimately produced Inf" -- still an
+// opt-in, informational check (default off, zero overhead: no kernel launch
+// at all unless explicitly enabled) that does NOT alter any output value.
 
 // Largest finite magnitude representable in IEEE-754 binary16 (Float16).
 constexpr float kHalfMaxFinite = 65504.0f;
 
-// Convert a float accumulator to __half with the same overflow semantics as the
-// cuBLAS FP16 paths: clamp out-of-range magnitudes to +/-65504 instead of letting
-// __float2half round them to +/-Inf. Used by ALL custom FP16 matmul result stores
-// (tiled, batched-tiled, WMMA) so every FP16 matmul path shares identical overflow
-// behavior regardless of matrix size/alignment. NaN is preserved (fminf/fmaxf with a
-// NaN argument return the NaN), matching saturate_fp16's element-wise clamp.
-__device__ __forceinline__ __half float_to_half_saturated(float val) {
-    return __float2half(fminf(fmaxf(val, -kHalfMaxFinite), kHalfMaxFinite));
-}
-
-// Clamp ±Inf to ±65504 in-place for Float16 arrays.
-// cuBLAS FP16 output uses standard rounding which can produce Inf for values > 65504.
-// This prevents NaN propagation when Inf interacts with 0 or other Inf values.
-// When saturation_count is non-null, atomically increments it for each saturated element.
-__global__ void matmul_fp16_saturate_kernel(__half* data, int64_t n,
-                                            unsigned long long* saturation_count) {
-    constexpr float kHalfMax = 65504.0f;
+// Count (without altering) FP16 matmul outputs that overflowed to +/-Inf.
+// Uses warp-level ballot to reduce atomic contention: one atomic per warp
+// instead of one per overflowed thread.
+__global__ void matmul_fp16_detect_overflow_kernel(const __half* data, int64_t n,
+                                                    unsigned long long* overflow_count) {
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += blockDim.x * gridDim.x) {
         float val = __half2float(data[idx]);
-        bool saturated = (val > kHalfMax || val < -kHalfMax);
-        if (saturated) {
-            data[idx] = __float2half(fminf(fmaxf(val, -kHalfMax), kHalfMax));
-        }
-        // Use warp-level ballot to reduce atomic contention: one atomic per warp
-        // instead of one per saturated thread
-        if (saturation_count) {
-            unsigned mask = __ballot_sync(0xFFFFFFFF, saturated);
-            if ((threadIdx.x & 31) == 0 && mask) {
-                atomicAdd(saturation_count, static_cast<unsigned long long>(__popc(mask)));
-            }
+        bool overflowed = (val > kHalfMaxFinite || val < -kHalfMaxFinite);
+        unsigned mask = __ballot_sync(0xFFFFFFFF, overflowed);
+        if ((threadIdx.x & 31) == 0 && mask) {
+            atomicAdd(overflow_count, static_cast<unsigned long long>(__popc(mask)));
         }
     }
 }
 
-static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
+static void warn_fp16_overflow(const __half* data, int64_t n, cudaStream_t stream) {
     if (n <= 0) return;
+    if (!matmul::warn_fp16_saturation()) return;  // opt-in; skip the scan entirely when off
 
     unsigned long long* d_count = nullptr;
-    bool do_warn = matmul::warn_fp16_saturation();
-
-    if (do_warn) {
-        TENZOR_CUDA_CHECK(cudaMallocAsync(&d_count, sizeof(unsigned long long), stream));
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(d_count, 0, sizeof(unsigned long long), stream));
-    }
+    TENZOR_CUDA_CHECK(cudaMallocAsync(&d_count, sizeof(unsigned long long), stream));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(d_count, 0, sizeof(unsigned long long), stream));
 
     dim3 grid, block;
-    OCCUPANCY_CONFIG(matmul_fp16_saturate_kernel, n, grid, block);
-    matmul_fp16_saturate_kernel<<<grid, block, 0, stream>>>(data, n, d_count);
+    OCCUPANCY_CONFIG(matmul_fp16_detect_overflow_kernel, n, grid, block);
+    matmul_fp16_detect_overflow_kernel<<<grid, block, 0, stream>>>(data, n, d_count);
 
     // Free d_count on EVERY exit path — a throwing TENZOR_CUDA_CHECK (launch error,
     // memcpy, or sync) between the malloc and the free would otherwise leak it.
     try {
         TENZOR_CUDA_CHECK(cudaGetLastError());
-        if (do_warn && d_count) {
-            unsigned long long h_count = 0;
-            TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(unsigned long long),
-                                              cudaMemcpyDeviceToHost, stream));
-            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
-            if (h_count > 0) {
-                fprintf(stderr, "[tenzor::cuda] Warning: FP16 matmul saturated %llu values to +/-65504\n",
-                        h_count);
-            }
+        unsigned long long h_count = 0;
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_count, sizeof(unsigned long long),
+                                          cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (h_count > 0) {
+            fprintf(stderr, "[tenzor::cuda] Warning: FP16 matmul overflowed to +/-Inf for %llu value(s)\n",
+                    h_count);
         }
     } catch (...) {
-        if (d_count) cudaFreeAsync(d_count, stream);
+        cudaFreeAsync(d_count, stream);
         throw;
     }
-    if (do_warn && d_count) {
-        TENZOR_CUDA_CHECK(cudaFreeAsync(d_count, stream));
-    }
+    TENZOR_CUDA_CHECK(cudaFreeAsync(d_count, stream));
 }
 
 // ============================================================================
@@ -712,7 +715,7 @@ __global__ void matmul_tensor_core_f16_kernel(
                 const int64_t row = cRow + i;
                 const int64_t col = cCol + j;
                 if (row < M && col < N) {
-                    C[row * N + col] = float_to_half_saturated(Cs_float[warpId][i][j]);
+                    C[row * N + col] = __float2half(Cs_float[warpId][i][j]);
                 }
             }
         }
@@ -779,7 +782,7 @@ __global__ void matmul_tiled_f16_kernel(
     }
 
     if (row < M && col < N) {
-        C[row * ldc + col] = float_to_half_saturated(sum);
+        C[row * ldc + col] = __float2half(sum);
     }
 }
 
@@ -847,7 +850,7 @@ __global__ void batched_matmul_tiled_f16_kernel(
     }
 
     if (row < M && col < N) {
-        C_batch[row * ldc + col] = float_to_half_saturated(sum);
+        C_batch[row * ldc + col] = __float2half(sum);
     }
 }
 
@@ -965,7 +968,7 @@ __global__ void batched_matmul_tensor_core_f16_kernel(
                 const int64_t row = cRow + i;
                 const int64_t col = cCol + j;
                 if (row < M && col < N) {
-                    C_batch[row * N + col] = float_to_half_saturated(Cs_float[i][j]);
+                    C_batch[row * N + col] = __float2half(Cs_float[i][j]);
                 }
             }
         }
@@ -1364,10 +1367,10 @@ void matmul_cublas_f16(
         throw std::runtime_error("cuBLAS GemmEx (FP16) failed with status: " + std::to_string(status));
     }
 
-    // Saturate output: clamp ±Inf to ±65504 to prevent NaN propagation.
-    // cuBLAS FP32→FP16 conversion uses standard rounding (not saturation),
-    // so accumulated values > 65504 become Inf in FP16.
-    saturate_fp16(C, M * N, stream);
+    // cuBLAS FP32→FP16 conversion uses standard IEEE-754 rounding, so
+    // accumulated values > 65504 become signed Infinity in FP16 — matching
+    // CPU's Float16 narrowing (F-107). No clamping here; optionally warn.
+    warn_fp16_overflow(C, M * N, stream);
 }
 
 // Batched Float16 cuBLAS matmul
@@ -1407,8 +1410,10 @@ void batched_matmul_cublas_f16(
         }
     }
 
-    // Saturate output: clamp ±Inf to ±65504 to prevent NaN propagation
-    saturate_fp16(C, batch_size * M * N, stream);
+    // cuBLAS FP32→FP16 conversion uses standard IEEE-754 rounding, so
+    // accumulated values > 65504 become signed Infinity in FP16 — matching
+    // CPU's Float16 narrowing (F-107). No clamping here; optionally warn.
+    warn_fp16_overflow(C, batch_size * M * N, stream);
 }
 
 #endif // TENZOR_HAS_CUBLAS
@@ -2627,9 +2632,12 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
         TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, B * M * N * dtype_size(batch1.dtype()), stream));
     }
 
-    int64_t stride_a = M * K;
-    int64_t stride_b = K * N;
-    int64_t stride_c = M * N;
+    // F-110: guard against int64 overflow in the per-batch stride computation,
+    // consistent with batched_matmul_f32/f64/f16/bf16 above (which already use
+    // checked_stride_mul). baddbmm_kernel previously used raw M*K/K*N/M*N here.
+    int64_t stride_a = checked_stride_mul(M, K);
+    int64_t stride_b = checked_stride_mul(K, N);
+    int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
     cublasHandle_t handle = CuBLASHandlePool::get(stream);

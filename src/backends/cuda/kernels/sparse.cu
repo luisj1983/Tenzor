@@ -24,6 +24,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuComplex.h>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -48,6 +49,16 @@ namespace cuda {
 // anonymous namespace below) can coalesce duplicate COO coordinates before
 // coo2csr, matching the CPU reference's duplicate-summing semantics.
 SparseTensor cuda_coalesce(const SparseTensor& sparse);
+
+// Defined later in this TU (native CUDA CSR x CSR SpGEMM, no cuSPARSE
+// dependency — always compiled). Declared here so cuda_spgemm_kernel below
+// can fall back to it for Int32/Int64, which cuSPARSE's generic SpGEMM API
+// does not support (F-096).
+template <typename T>
+auto spgemm_standalone_typed(
+    const Tensor& a_crow, const Tensor& a_col, const Tensor& a_vals,
+    const Tensor& b_crow, const Tensor& b_col, const Tensor& b_vals,
+    int64_t M, int64_t K, int64_t N, cudaStream_t stream) -> std::vector<Tensor>;
 
 namespace {
 
@@ -97,6 +108,8 @@ cudaDataType get_cuda_data_type(DType dtype) {
     switch (dtype) {
         case DType::Float32: return CUDA_R_32F;
         case DType::Float64: return CUDA_R_64F;
+        case DType::Complex64: return CUDA_C_32F;
+        case DType::Complex128: return CUDA_C_64F;
         default:
             throw std::runtime_error("cuda_sparse: unsupported dtype " +
                                      std::string(dtype_name(dtype)));
@@ -699,9 +712,21 @@ SparseTensor cuda_spgemm_kernel(const SparseTensor& a, const SparseTensor& b,
         throw std::runtime_error("cuda_spgemm: dtype mismatch");
     }
     const DType dtype = a.dtype();
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("cuda_spgemm: only Float32 and Float64 supported, got "
-            + std::string(dtype_name(dtype)));
+    // Float16/BFloat16 are widened to Float32 by sparse_ops.cpp's spgemm()
+    // before this kernel is ever called (see the GPU dispatch path there), so
+    // they never reach here as Float16/BFloat16. Complex64/128 are supported
+    // natively by cuSPARSE's generic SpGEMM API (CUDA_C_32F/CUDA_C_64F).
+    // Int32/Int64 are NOT supported by cuSPARSE's SpGEMM (its alpha/beta
+    // scaling is floating-point/complex only), so those bypass cuSPARSE
+    // entirely below and use the native CUDA CSR SpGEMM kernel instead —
+    // matching CPU's Float32/Float64/Float16/BFloat16/Int32/Int64/Complex64/
+    // Complex128 coverage (F-096).
+    if (dtype != DType::Float32 && dtype != DType::Float64 &&
+        dtype != DType::Complex64 && dtype != DType::Complex128 &&
+        dtype != DType::Int32 && dtype != DType::Int64) {
+        throw std::runtime_error("cuda_spgemm: unsupported dtype " +
+            std::string(dtype_name(dtype)) +
+            " (supported: Float32, Float64, Complex64, Complex128, Int32, Int64)");
     }
 
     // Move both operands to CSR on GPU.
@@ -716,6 +741,22 @@ SparseTensor cuda_spgemm_kernel(const SparseTensor& a, const SparseTensor& b,
     auto b_crow = b_csr.crow_indices().contiguous();
     auto b_col  = b_csr.col_indices().contiguous();
     auto b_vals = b_csr.values().contiguous();
+
+    // Int32/Int64: cuSPARSE's generic SpGEMM has no integer-accumulation
+    // support, so use the always-compiled native CSR x CSR kernel directly
+    // (same 3-pass count/prefix-sum/fill algorithm as the no-cuSPARSE
+    // fallback build; it's dtype-generic and works unmodified for integer
+    // types since it only relies on native +=/* on T).
+    if (dtype == DType::Int32) {
+        auto res = spgemm_standalone_typed<int32_t>(
+            a_crow, a_col, a_vals, b_crow, b_col, b_vals, M, K, N, stream);
+        return SparseTensor::sparse_csr(res[0], res[1], res[2], std::vector<int64_t>{M, N});
+    }
+    if (dtype == DType::Int64) {
+        auto res = spgemm_standalone_typed<int64_t>(
+            a_crow, a_col, a_vals, b_crow, b_col, b_vals, M, K, N, stream);
+        return SparseTensor::sparse_csr(res[0], res[1], res[2], std::vector<int64_t>{M, N});
+    }
 
     cusparseHandle_t handle = CuSPARSEHandlePool::get(stream);
     const cudaDataType cuda_dtype = get_cuda_data_type(dtype);
@@ -763,10 +804,16 @@ SparseTensor cuda_spgemm_kernel(const SparseTensor& a, const SparseTensor& b,
 
     float  alpha_f = 1.0f, beta_f = 0.0f;
     double alpha_d = 1.0,  beta_d = 0.0;
-    void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
-                                            : static_cast<void*>(&alpha_d);
-    void* beta  = (dtype == DType::Float32) ? static_cast<void*>(&beta_f)
-                                            : static_cast<void*>(&beta_d);
+    cuFloatComplex  alpha_c = make_cuFloatComplex(1.0f, 0.0f), beta_c = make_cuFloatComplex(0.0f, 0.0f);
+    cuDoubleComplex alpha_z = make_cuDoubleComplex(1.0, 0.0),  beta_z = make_cuDoubleComplex(0.0, 0.0);
+    void* alpha = nullptr;
+    void* beta = nullptr;
+    switch (dtype) {
+        case DType::Float32:   alpha = &alpha_f; beta = &beta_f; break;
+        case DType::Float64:   alpha = &alpha_d; beta = &beta_d; break;
+        case DType::Complex64: alpha = &alpha_c; beta = &beta_c; break;
+        default:                alpha = &alpha_z; beta = &beta_z; break; // Complex128
+    }
 
     // Phase 1: work estimation — determines buffer1 size.
     size_t buffer1_size = 0;
@@ -835,6 +882,127 @@ struct SpSVDescrGuard {
     SpSVDescrGuard& operator=(const SpSVDescrGuard&) = delete;
 };
 
+// Proactive zero/missing-diagonal scan run before handing a triangular matrix
+// to cusparseSpSV_analysis/solve. Whether cuSPARSE's SpSV detects a
+// zero/missing diagonal depends on the algorithm/version — it may instead
+// silently produce Inf/NaN with no diagnostic (F-094). CPU
+// (sparse_ops.cpp's cpu_forward_substitution/cpu_backward_substitution)
+// explicitly scans and throws before any division; mirror that here.
+//
+// Each row's diagonal check is independent (unlike the actual solve, which is
+// sequential), so this runs one thread per row instead of the single-thread
+// device-error-flag pattern used by sparse_trsv_seq_kernel (F-093). To match
+// the row CPU would report first, the violating row nearest the solve's
+// starting point wins: forward substitution (lower, unprocessed rows
+// 0..N-1) reports the MIN violating row; backward substitution (upper, rows
+// N-1..0) reports the MAX violating row.
+// Zero test used by sparse_check_diag_kernel below. Real types compare
+// directly; cuFloatComplex/cuDoubleComplex are plain float2/double2 structs
+// with no operator== or single-scalar constructor, so they need a manual
+// component-wise test.
+template <typename T>
+__device__ __forceinline__ bool sparse_diag_is_zero(const T& v) { return v == T(0); }
+
+__device__ __forceinline__ bool sparse_diag_is_zero(const cuFloatComplex& v) {
+    return v.x == 0.0f && v.y == 0.0f;
+}
+__device__ __forceinline__ bool sparse_diag_is_zero(const cuDoubleComplex& v) {
+    return v.x == 0.0 && v.y == 0.0;
+}
+
+template <typename T>
+__global__ void sparse_check_diag_kernel(
+    const int64_t* __restrict__ crow,
+    const int64_t* __restrict__ col,
+    const T* __restrict__ vals,
+    int64_t N, bool upper,
+    int* __restrict__ error_flag,
+    unsigned long long* __restrict__ error_row)
+{
+    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row >= N) return;
+
+    // Zero-initializes to the additive identity for both scalar T (0.0) and
+    // aggregate complex T (component-wise {0,0}), so a row with no explicit
+    // diagonal entry ends up indistinguishable from an explicit zero one —
+    // matching the CPU reference and sparse_trsv_seq_kernel (F-093).
+    T diag{};
+    for (int64_t j = crow[row]; j < crow[row + 1]; ++j) {
+        if (col[j] == row) { diag = vals[j]; break; }
+    }
+    if (sparse_diag_is_zero(diag)) {
+        atomicExch(error_flag, 1);
+        if (upper) {
+            atomicMax(error_row, static_cast<unsigned long long>(row));
+        } else {
+            atomicMin(error_row, static_cast<unsigned long long>(row));
+        }
+    }
+}
+
+// Launches sparse_check_diag_kernel and throws the same "zero diagonal
+// element at row N" error CPU does if any row's diagonal is missing/zero.
+// crow/col/vals must already be contiguous, device-resident CSR arrays.
+template <typename T>
+void cuda_check_sparse_diag(const int64_t* crow, const int64_t* col,
+                             const T* vals, int64_t N, bool upper,
+                             cudaStream_t stream) {
+    if (N == 0) return;
+    CudaBuffer d_error_flag(sizeof(int));
+    CudaBuffer d_error_row(sizeof(unsigned long long));
+    CUDA_CHECK_SPARSE(cudaMemsetAsync(d_error_flag.as<int>(), 0, sizeof(int), stream));
+    unsigned long long init_row = upper ? 0ULL : static_cast<unsigned long long>(N);
+    CUDA_CHECK_SPARSE(cudaMemcpyAsync(d_error_row.as<unsigned long long>(), &init_row,
+        sizeof(unsigned long long), cudaMemcpyHostToDevice, stream));
+
+    int threads = 256;
+    int blocks = static_cast<int>((N + threads - 1) / threads);
+    sparse_check_diag_kernel<T><<<blocks, threads, 0, stream>>>(
+        crow, col, vals, N, upper, d_error_flag.as<int>(), d_error_row.as<unsigned long long>());
+    CUDA_CHECK_SPARSE(cudaGetLastError());
+
+    int host_error = 0;
+    unsigned long long host_error_row = 0;
+    CUDA_CHECK_SPARSE(cudaMemcpyAsync(&host_error, d_error_flag.as<int>(), sizeof(int),
+        cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE(cudaMemcpyAsync(&host_error_row, d_error_row.as<unsigned long long>(),
+        sizeof(unsigned long long), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
+    if (host_error) {
+        throw std::runtime_error(
+            "sparse_triangular_solve: zero diagonal element at row " +
+            std::to_string(host_error_row));
+    }
+}
+
+// Dispatches cuda_check_sparse_diag<T> for the dtypes cuda_sparse_trsv_kernel
+// / cuda_sparse_trsm_kernel support (Float32/Float64/Complex64/Complex128).
+void cuda_check_sparse_diag_dispatch(const Tensor& crow, const Tensor& col,
+                                      const Tensor& vals, int64_t N, bool upper,
+                                      cudaStream_t stream) {
+    switch (vals.dtype()) {
+        case DType::Float32:
+            cuda_check_sparse_diag<float>(crow.data<int64_t>(), col.data<int64_t>(),
+                vals.data<float>(), N, upper, stream);
+            break;
+        case DType::Float64:
+            cuda_check_sparse_diag<double>(crow.data<int64_t>(), col.data<int64_t>(),
+                vals.data<double>(), N, upper, stream);
+            break;
+        case DType::Complex64:
+            cuda_check_sparse_diag<cuFloatComplex>(crow.data<int64_t>(), col.data<int64_t>(),
+                reinterpret_cast<const cuFloatComplex*>(vals.data_ptr()), N, upper, stream);
+            break;
+        case DType::Complex128:
+            cuda_check_sparse_diag<cuDoubleComplex>(crow.data<int64_t>(), col.data<int64_t>(),
+                reinterpret_cast<const cuDoubleComplex*>(vals.data_ptr()), N, upper, stream);
+            break;
+        default:
+            throw std::runtime_error("cuda_check_sparse_diag: unsupported dtype " +
+                std::string(dtype_name(vals.dtype())));
+    }
+}
+
 Tensor cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
                                 bool upper, void* stream_opaque) {
     cudaStream_t stream = static_cast<cudaStream_t>(stream_opaque);
@@ -852,8 +1020,10 @@ Tensor cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
         throw std::runtime_error("cuda_sparse_trsv: dimension mismatch");
     }
     const DType dtype = b.dtype();
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("cuda_sparse_trsv: only Float32/Float64 supported, got "
+    if (dtype != DType::Float32 && dtype != DType::Float64 &&
+        dtype != DType::Complex64 && dtype != DType::Complex128) {
+        throw std::runtime_error(
+            "cuda_sparse_trsv: only Float32/Float64/Complex64/Complex128 supported, got "
             + std::string(dtype_name(dtype)));
     }
 
@@ -862,6 +1032,13 @@ Tensor cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
     auto L_crow = L_csr.crow_indices().contiguous();
     auto L_col  = L_csr.col_indices().contiguous();
     auto L_vals = L_csr.values().contiguous();
+
+    // Proactive zero/missing-diagonal check (F-094): cuSPARSE's SpSV
+    // analysis/solve below doesn't reliably detect this across
+    // algorithms/versions, unlike CPU's explicit up-front scan. Throws the
+    // same "zero diagonal element at row N" error CPU does instead of letting
+    // cusparseSpSV silently produce Inf/NaN.
+    cuda_check_sparse_diag_dispatch(L_crow, L_col, L_vals, N, upper, stream);
 
     auto b_gpu = (b.device().type != Device::Type::CUDA)
                    ? b.to(Device::cuda()).contiguous()
@@ -907,8 +1084,15 @@ Tensor cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
 
     float  alpha_f = 1.0f;
     double alpha_d = 1.0;
-    void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
-                                            : static_cast<void*>(&alpha_d);
+    cuFloatComplex  alpha_c = make_cuFloatComplex(1.0f, 0.0f);
+    cuDoubleComplex alpha_z = make_cuDoubleComplex(1.0, 0.0);
+    void* alpha = nullptr;
+    switch (dtype) {
+        case DType::Float32:    alpha = static_cast<void*>(&alpha_f); break;
+        case DType::Float64:    alpha = static_cast<void*>(&alpha_d); break;
+        case DType::Complex64:  alpha = static_cast<void*>(&alpha_c); break;
+        default:                alpha = static_cast<void*>(&alpha_z); break; // Complex128
+    }
 
     // Analysis: cuSPARSE inspects the sparsity pattern and computes any
     // internal data structures needed for the solve. The workspace
@@ -956,54 +1140,49 @@ Tensor cuda_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
         throw std::runtime_error("cuda_sparse_trsm: dimension mismatch");
     }
 
+    const DType dtype = B.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64 &&
+        dtype != DType::Complex64 && dtype != DType::Complex128) {
+        throw std::runtime_error(
+            "cuda_sparse_trsm: only Float32/Float64/Complex64/Complex128 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+    const size_t elem_size = dtype_size(dtype);
+
     auto B_gpu = (B.device().type != Device::Type::CUDA)
                    ? B.to(Device::cuda()).contiguous()
                    : B.contiguous();
-    auto X = zeros(std::vector<int64_t>{N, K}, B.dtype(), Device::cuda());
+    auto X = zeros(std::vector<int64_t>{N, K}, dtype, Device::cuda());
 
     // We can't take column views of a row-major matrix cheaply (a column
     // is strided by K), so extract each column to a contiguous buffer,
     // call SpSV, and write back. Each SpSV call re-runs analysis — this
     // is O(K) suboptimal and is flagged as a follow-up: caching the
     // analysis across calls for the same L would eliminate the overhead.
+    //
+    // The 2D copies below operate on raw bytes (elem_size), so the same code
+    // path covers Float32/Float64/Complex64/Complex128 without a per-dtype
+    // branch — Complex64/128 are just 8/16-byte opaque elements here.
     auto B_t = B_gpu;  // alias
     for (int64_t k = 0; k < K; ++k) {
         // Extract B[:, k] (strided by K in the row-major buffer) into a dense
         // contiguous 1-D tensor with a single strided 2D copy instead of N tiny
         // per-element memcpys. Matches sparse_trsm_standalone.
-        Tensor b_col = zeros(std::vector<int64_t>{N}, B.dtype(), Device::cuda());
-        if (B.dtype() == DType::Float32) {
-            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
-                b_col.data<float>(), sizeof(float),
-                B_t.data<float>() + k, K * sizeof(float),
-                sizeof(float), N,
-                cudaMemcpyDeviceToDevice, stream));
-        } else if (B.dtype() == DType::Float64) {
-            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
-                b_col.data<double>(), sizeof(double),
-                B_t.data<double>() + k, K * sizeof(double),
-                sizeof(double), N,
-                cudaMemcpyDeviceToDevice, stream));
-        } else {
-            throw std::runtime_error("cuda_sparse_trsm: only Float32/Float64 supported");
-        }
+        Tensor b_col = zeros(std::vector<int64_t>{N}, dtype, Device::cuda());
+        CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
+            b_col.data_ptr(), elem_size,
+            static_cast<const char*>(B_t.data_ptr()) + k * elem_size, K * elem_size,
+            elem_size, N,
+            cudaMemcpyDeviceToDevice, stream));
 
         auto x_col = cuda_sparse_trsv_kernel(L, b_col, upper, stream_opaque);
 
         // Scatter x_col back into X[:, k] with a single strided 2D copy.
-        if (B.dtype() == DType::Float32) {
-            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
-                X.data<float>() + k, K * sizeof(float),
-                x_col.data<float>(), sizeof(float),
-                sizeof(float), N,
-                cudaMemcpyDeviceToDevice, stream));
-        } else {
-            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
-                X.data<double>() + k, K * sizeof(double),
-                x_col.data<double>(), sizeof(double),
-                sizeof(double), N,
-                cudaMemcpyDeviceToDevice, stream));
-        }
+        CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
+            static_cast<char*>(X.data_ptr()) + k * elem_size, K * elem_size,
+            x_col.data_ptr(), elem_size,
+            elem_size, N,
+            cudaMemcpyDeviceToDevice, stream));
     }
 
     CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
@@ -2316,7 +2495,9 @@ __global__ void sparse_trsv_seq_kernel(
     const T* __restrict__ vals,          // [nnz]
     const T* __restrict__ b,             // [N]
     T* __restrict__ x,                   // [N] output
-    int64_t N, bool upper)
+    int64_t N, bool upper,
+    int* __restrict__ error_flag,        // set to 1 on a missing/zero diagonal
+    int64_t* __restrict__ error_row)     // offending row index (valid iff *error_flag)
 {
     // Single thread drives the whole solve in dependency order.
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
@@ -2328,8 +2509,13 @@ __global__ void sparse_trsv_seq_kernel(
         int64_t row_end = crow[row + 1];
 
         // x[row] = (b[row] - sum(A[row,c]*x[c] for dependent c)) / A[row,row]
+        // diag starts at T(0) (matching the CPU reference, sparse_ops.cpp
+        // cpu_forward_substitution/cpu_backward_substitution) so a structurally
+        // missing diagonal entry (dropped by to_sparse() on an exact-zero
+        // diagonal) is indistinguishable from an explicit zero entry — both must
+        // error out instead of silently solving with an implicit unit diagonal.
         T rhs = b[row];
-        T diag = T(1);
+        T diag = T(0);
         for (int64_t j = row_start; j < row_end; ++j) {
             int64_t c = col[j];
             if (c == row) {
@@ -2337,6 +2523,15 @@ __global__ void sparse_trsv_seq_kernel(
             } else if (upper ? (c > row) : (c < row)) {
                 rhs -= vals[j] * x[c];
             }
+        }
+        if (diag == T(0)) {
+            // Device-side error-flag pattern (mirrors indexing.cu's OOB-index
+            // reporting): stay memory-safe, record the offending row, and let
+            // the host wrapper check the flag after the kernel completes and
+            // throw a proper C++ exception — kernels can't throw directly.
+            atomicExch(error_flag, 1);
+            *error_row = row;
+            return;
         }
         x[row] = rhs / diag;
     }
@@ -2348,19 +2543,47 @@ auto sparse_trsv_standalone(
 {
     auto x = tenzor::zeros({N}, vals.dtype(), vals.device());
 
+    int* d_error_flag = nullptr;
+    int64_t* d_error_row = nullptr;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_error_flag, sizeof(int), stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_error_row, sizeof(int64_t), stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
     if (vals.dtype() == DType::Float32) {
         sparse_trsv_seq_kernel<float><<<1, 1, 0, stream>>>(
             crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<float>(),
-            b.data<float>(), x.data<float>(), N, upper);
+            b.data<float>(), x.data<float>(), N, upper, d_error_flag, d_error_row);
     } else if (vals.dtype() == DType::Float64) {
         sparse_trsv_seq_kernel<double><<<1, 1, 0, stream>>>(
             crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<double>(),
-            b.data<double>(), x.data<double>(), N, upper);
+            b.data<double>(), x.data<double>(), N, upper, d_error_flag, d_error_row);
     } else {
+        CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_error_flag, stream));
+        CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_error_row, stream));
         throw std::runtime_error("sparse_trsv_standalone: only Float32/Float64 supported");
     }
 
     CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+
+    // Bring the error flag back synchronously — mirrors indexing.cu's OOB
+    // check (cudaMemcpyAsync + cudaStreamSynchronize immediately followed by
+    // a host-side throw) since a device kernel cannot itself throw.
+    int host_error = 0;
+    int64_t host_error_row = -1;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+        cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(&host_error_row, d_error_row, sizeof(int64_t),
+        cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaStreamSynchronize(stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_error_flag, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_error_row, stream));
+
+    if (host_error) {
+        throw std::runtime_error(
+            "sparse_triangular_solve: zero diagonal element at row " +
+            std::to_string(host_error_row));
+    }
+
     return x;
 }
 

@@ -224,6 +224,16 @@ TEST_P(ExtendedMathMultiDTypeTest, FmodValues) {
 // Remainder Tests
 // ============================================================================
 
+// Reference oracle for tenzor::remainder's documented contract: the
+// divisor-sign convention (a - floor(a/b)*b), matching Python/NumPy/PyTorch
+// `%`/`remainder` -- NOT libm's IEEE round-to-nearest-even std::remainder.
+// e.g. floor_remainder(-7, 3) == 2, not std::remainder(-7,3) == -1.
+static float floor_remainder(float x, float y) {
+    float r = std::fmod(x, y);
+    if (r != 0.0f && ((r < 0.0f) != (y < 0.0f))) r += y;
+    return r;
+}
+
 TEST_P(ExtendedMathMultiDTypeTest, RemainderValues) {
     // remainder follows the divisor's sign (different from fmod)
     auto a_f32 = tenzor::full({3}, 0.0f, DType::Float32, Device::cpu());
@@ -237,9 +247,10 @@ TEST_P(ExtendedMathMultiDTypeTest, RemainderValues) {
 
     auto result_f32 = result.to(Device::cpu()).to(DType::Float32);
     auto* r = result_f32.data<float>();
-    EXPECT_NEAR(r[0], std::remainder(7.0f, 3.0f), atol());
-    EXPECT_NEAR(r[1], std::remainder(-7.0f, 3.0f), atol());
-    EXPECT_NEAR(r[2], std::remainder(5.5f, 3.0f), atol());
+    // remainder(7,3)=1, remainder(-7,3)=+2 (not -1), remainder(5.5,3)=2.5
+    EXPECT_NEAR(r[0], floor_remainder(7.0f, 3.0f), atol());
+    EXPECT_NEAR(r[1], floor_remainder(-7.0f, 3.0f), atol());
+    EXPECT_NEAR(r[2], floor_remainder(5.5f, 3.0f), atol());
 }
 
 // ============================================================================

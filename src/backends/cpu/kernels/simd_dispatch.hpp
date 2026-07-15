@@ -33,9 +33,6 @@ using UnaryOp = void(*)(const float*, float*, size_t);
 // Binary operations (float32): out[i] = f(a[i], b[i])
 using BinaryOp = void(*)(const float*, const float*, float*, size_t);
 
-// Ternary operations (float32): out[i] = f(a[i], b[i], c[i])
-using TernaryOp = void(*)(const float*, const float*, const float*, float*, size_t);
-
 // Unary operations (float64): out[i] = f(a[i])
 using UnaryOpF64 = void(*)(const double*, double*, size_t);
 
@@ -53,19 +50,10 @@ struct SIMDDispatch {
     BinaryOp mul;
     BinaryOp div;
     UnaryOp sqrt;
-    UnaryOp exp;
-    UnaryOp log;
-    TernaryOp fma;
 
     // Float32 unary ops (in scope: neg, abs)
     UnaryOp neg;
     UnaryOp abs_f32;
-
-    // Float32 activation functions
-    UnaryOp relu;
-    UnaryOp sigmoid;
-    UnaryOp tanh;
-    UnaryOp gelu;
 
     // Float64 binary ops
     BinaryOpF64 add_f64;

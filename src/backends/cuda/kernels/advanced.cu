@@ -290,6 +290,36 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
         size_t cand_pos_bytes = block_size * sizeof(int64_t);
         size_t smem_size = aligned_topk_vals + aligned_topk_idx +
                            aligned_cand_vals + cand_pos_bytes;
+
+        // The default per-block dynamic shared memory limit is 48KB. For large
+        // k (roughly k > ~4000 for Float32) smem_size exceeds that default and
+        // the launch below would fail with cudaErrorInvalidValue. Opt in to a
+        // larger limit via cudaFuncSetAttribute (mirrors the pattern used by
+        // the FlashAttention kernels in flash_attention_f64.cu / fused_ops.cu),
+        // but only up to the device's actual maximum opt-in shared memory per
+        // block — beyond that there is no way to satisfy the request, so throw
+        // a clear error rather than silently truncating k or falling back.
+        constexpr size_t kDefaultSmemLimit = 48 * 1024;
+        if (smem_size > kDefaultSmemLimit) {
+            int device_id = 0;
+            TENZOR_CUDA_CHECK(cudaGetDevice(&device_id));
+            int max_optin_smem = 0;
+            TENZOR_CUDA_CHECK(cudaDeviceGetAttribute(
+                &max_optin_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
+            if (smem_size > static_cast<size_t>(max_optin_smem)) {
+                throw std::invalid_argument(
+                    "topk CUDA: k=" + std::to_string(k) + " requires " +
+                    std::to_string(smem_size) + " bytes of per-block shared "
+                    "memory, which exceeds this device's maximum opt-in shared "
+                    "memory per block (" + std::to_string(max_optin_smem) +
+                    " bytes). Reduce k.");
+            }
+            TENZOR_CUDA_CHECK(cudaFuncSetAttribute(
+                reinterpret_cast<const void*>(topk_slice_kernel<T>),
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                static_cast<int>(smem_size)));
+        }
+
         // Use data_ptr() + reinterpret_cast for CUDA-native types (__half, __nv_bfloat16)
         // that don't have Tensor::data<T>() instantiations in the core library
         auto* input_ptr = reinterpret_cast<const T*>(input_cont.data_ptr());
@@ -427,6 +457,175 @@ __global__ void gather_by_indices_kernel(const HalfT* __restrict__ src, const in
     if (idx < n) dst[idx] = src[indices[idx]];
 }
 
+// ============================================================================
+// F-049: batched cross-slice sort via cub::DeviceSegmentedRadixSort.
+//
+// The straightforward per-slice implementation (extract/sort/scatter in a
+// host-side double loop, one thrust::stable_sort_by_key launch per slice)
+// issues 3+ kernel/library launches PER SLICE. For a [10000, N] tensor sorted
+// along dim=1 that is tens of thousands of tiny serial launches with
+// CPU-GPU sync overhead — a real performance cliff (CPU parallelizes the
+// equivalent loop with `#pragma omp parallel for`, see
+// src/backends/cpu/kernels/advanced.cpp:216-240).
+//
+// This mirrors the existing segmented-argsort pattern in
+// src/backends/cuda/kernels/reduction.cu (launch_argsort_along_dim /
+// argsort_gather_kernel / argsort_scatter_kernel): gather every slice into a
+// single segment-major buffer, sort ALL segments in one
+// cub::DeviceSegmentedRadixSort call (a small constant number of kernel
+// launches total, regardless of how many slices there are), then scatter the
+// per-slice sorted *local* indices back to the strided output layout. Sort
+// additionally needs the sorted *values* (argsort only emits indices), so the
+// final scatter step here also re-reads the original input at the winning
+// local index to populate `values` in the same pass that writes `indices`.
+//
+// NaN handling mirrors argsort_gather_kernel: cub's radix sort orders raw
+// bits with no custom comparator, so floating-point NaNs (whose bit patterns
+// can sort anywhere depending on the sign bit) are remapped to +INFINITY in
+// the gathered SORT KEY only, clustering all NaNs as the maximum value (last
+// ascending / first descending) to match CPU's nan_less/nan_greater
+// comparators and PyTorch. The scatter step re-reads the true (non-remapped)
+// original value, so NaN payloads round-trip unchanged in the output.
+// cub::DeviceRadixSort (and its segmented variant) is a stable radix sort,
+// matching CPU's std::stable_sort / thrust::stable_sort_by_key tie-breaking
+// (equal keys keep ascending original-index order).
+// ============================================================================
+
+template<typename T>
+__global__ void sort_gather_kernel(const T* __restrict__ input, T* __restrict__ gathered,
+                                    int64_t* __restrict__ local_idx,
+                                    int64_t outer_size, int64_t dim_size, int64_t inner_size) {
+    const int64_t total = outer_size * dim_size * inner_size;
+    for (int64_t g = blockIdx.x * blockDim.x + threadIdx.x; g < total;
+         g += blockDim.x * gridDim.x) {
+        int64_t seg = g / dim_size;
+        int64_t i = g % dim_size;
+        int64_t outer = seg / inner_size;
+        int64_t inner = seg % inner_size;
+        int64_t in_off = outer * dim_size * inner_size + i * inner_size + inner;
+        T v = input[in_off];
+        if constexpr (std::is_floating_point_v<T>) {
+            if (v != v) v = static_cast<T>(INFINITY);  // NaN -> +inf sort key only
+        }
+        gathered[g] = v;
+        local_idx[g] = i;
+    }
+}
+
+template<typename T>
+__global__ void sort_scatter_kernel(const T* __restrict__ input,
+                                     const int64_t* __restrict__ sorted_local,
+                                     T* __restrict__ out_vals, int64_t* __restrict__ out_idx,
+                                     int64_t outer_size, int64_t dim_size, int64_t inner_size) {
+    const int64_t total = outer_size * dim_size * inner_size;
+    for (int64_t g = blockIdx.x * blockDim.x + threadIdx.x; g < total;
+         g += blockDim.x * gridDim.x) {
+        int64_t seg = g / dim_size;
+        int64_t i = g % dim_size;
+        int64_t outer = seg / inner_size;
+        int64_t inner = seg % inner_size;
+        int64_t out_off = outer * dim_size * inner_size + i * inner_size + inner;
+        int64_t li = sorted_local[g];
+        int64_t in_off = outer * dim_size * inner_size + li * inner_size + inner;
+        out_vals[out_off] = input[in_off];  // true (non-remapped) original value
+        out_idx[out_off] = li;
+    }
+}
+
+__global__ void sort_segment_offsets_kernel(int* __restrict__ offsets,
+                                            int64_t num_segments, int64_t dim_size) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx <= num_segments) {
+        offsets[idx] = static_cast<int>(idx * dim_size);
+    }
+}
+
+// Sorts every (outer, inner) slice of `d_input` in ONE segmented radix sort
+// call. `d_input`, `d_out_vals` are dim_size-major-contiguous buffers with
+// layout [outer_size, dim_size, inner_size] (same layout as the tensor these
+// slices are cut from). `d_out_idx` receives per-slice LOCAL indices in
+// [0, dim_size), matching this function's pre-existing contract.
+template<typename T>
+static void sort_along_dim_segmented(const T* d_input, T* d_out_vals, int64_t* d_out_idx,
+                                     int64_t outer_size, int64_t dim_size, int64_t inner_size,
+                                     bool descending, cudaStream_t stream) {
+    const int64_t num_segments = outer_size * inner_size;
+    const int64_t total = num_segments * dim_size;
+    if (total == 0) return;
+
+    // cub::DeviceSegmentedRadixSort takes `int num_items` / `int num_segments`
+    // and int begin/end offsets (offsets[idx] = idx * dim_size). For total or
+    // num_segments beyond INT_MAX those silently overflow/garble the sort.
+    // Reject up front with a clear message rather than producing wrong results.
+    if (total > static_cast<int64_t>(std::numeric_limits<int>::max()) ||
+        num_segments > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "sort: per-dim segmented sort exceeds CUB's int32 element/segment "
+            "limit (total elements or segment count > 2^31-1); reduce the "
+            "sorted extent or batch the operation");
+    }
+
+    if (dim_size == 1) {
+        // Every slice is already length-1: values pass through unchanged and
+        // the (only) local index is always 0.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_out_vals, d_input, total * sizeof(T),
+                                          cudaMemcpyDeviceToDevice, stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(d_out_idx, 0, total * sizeof(int64_t), stream));
+        return;
+    }
+
+    backend::CachedMemoryGuard gathered_guard(total * sizeof(T));
+    auto* d_gathered = static_cast<T*>(gathered_guard.get());
+    backend::CachedMemoryGuard local_idx_guard(total * sizeof(int64_t));
+    auto* d_local_idx = static_cast<int64_t*>(local_idx_guard.get());
+    backend::CachedMemoryGuard keys_out_guard(total * sizeof(T));
+    auto* d_keys_out = static_cast<T*>(keys_out_guard.get());
+    backend::CachedMemoryGuard sorted_local_guard(total * sizeof(int64_t));
+    auto* d_sorted_local = static_cast<int64_t*>(sorted_local_guard.get());
+    backend::CachedMemoryGuard offsets_guard((num_segments + 1) * sizeof(int));
+    auto* d_offsets = static_cast<int*>(offsets_guard.get());
+
+    int block = 256;
+    int grid = compute_grid_size(total, block);
+    sort_gather_kernel<T><<<grid, block, 0, stream>>>(
+        d_input, d_gathered, d_local_idx, outer_size, dim_size, inner_size);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    int off_grid = compute_grid_size(num_segments + 1, block);
+    sort_segment_offsets_kernel<<<off_grid, block, 0, stream>>>(d_offsets, num_segments, dim_size);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    if (descending) {
+        cub::DeviceSegmentedRadixSort::SortPairsDescending(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+        backend::CachedMemoryGuard temp_guard(temp_bytes);
+        d_temp = temp_guard.get();
+        cub::DeviceSegmentedRadixSort::SortPairsDescending(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+    } else {
+        cub::DeviceSegmentedRadixSort::SortPairs(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+        backend::CachedMemoryGuard temp_guard(temp_bytes);
+        d_temp = temp_guard.get();
+        cub::DeviceSegmentedRadixSort::SortPairs(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+    }
+
+    sort_scatter_kernel<T><<<grid, block, 0, stream>>>(
+        d_input, d_sorted_local, d_out_vals, d_out_idx, outer_size, dim_size, inner_size);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+}
+
 auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
                  cudaStream_t stream) -> std::pair<Tensor, Tensor>
 {
@@ -447,41 +646,18 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
     auto launch = [&]<typename T>() {
-        // Temp buffers for one slice
-        backend::CachedMemoryGuard slice_guard(dim_size * sizeof(T));
-        T* d_slice = static_cast<T*>(slice_guard.get());
-        backend::CachedMemoryGuard idx_guard(dim_size * sizeof(int64_t));
-        int64_t* d_idx = static_cast<int64_t*>(idx_guard.get());
-
-        int block = 256;
-        int grid = std::min(int((dim_size + block - 1) / block), 1024);
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                // Extract slice
-                extract_slice_kernel<T><<<grid, block, 0, stream>>>(
-                    input_cont.data<T>(), d_slice, dim_size, inner_size, outer, inner);
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-
-                // Sort slice
-                sort_1d_thrust<T>(d_slice, d_slice, d_idx, dim_size, descending, stream);
-
-                // Scatter back
-                scatter_slice_kernel<T><<<grid, block, 0, stream>>>(
-                    d_slice, d_idx, values.data<T>(), indices.data<int64_t>(),
-                    dim_size, inner_size, outer, inner);
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-            }
-        }
+        sort_along_dim_segmented<T>(input_cont.data<T>(), values.data<T>(),
+                                    indices.data<int64_t>(), outer_size, dim_size,
+                                    inner_size, descending, stream);
     };
 
-    // Half-type sort: upcast to Float32, sort, gather original values by indices
+    // Half-type sort: upcast to Float32, sort, narrow back to half.
     auto launch_half = [&]<typename HalfT>() {
         int64_t numel = input_cont.numel();
         int cvt_block = 256;
-        int cvt_grid = (numel + cvt_block - 1) / cvt_block;
+        int cvt_grid = compute_grid_size(numel, cvt_block);
 
-        // Allocate Float32 buffer
+        // Allocate Float32 buffers
         Tensor f32_input(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
         half_to_float_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
             reinterpret_cast<const HalfT*>(input_cont.data_ptr()),
@@ -490,27 +666,9 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
 
         Tensor f32_values(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
 
-        // Sort Float32 copy
-        backend::CachedMemoryGuard slice_guard(dim_size * sizeof(float));
-        float* d_slice = static_cast<float*>(slice_guard.get());
-        backend::CachedMemoryGuard idx_guard(dim_size * sizeof(int64_t));
-        int64_t* d_idx = static_cast<int64_t*>(idx_guard.get());
-
-        int block = 256;
-        int grid = std::min(int((dim_size + block - 1) / block), 1024);
-
-        for (int64_t outer = 0; outer < outer_size; ++outer) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                extract_slice_kernel<float><<<grid, block, 0, stream>>>(
-                    f32_input.data<float>(), d_slice, dim_size, inner_size, outer, inner);
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-                sort_1d_thrust<float>(d_slice, d_slice, d_idx, dim_size, descending, stream);
-                scatter_slice_kernel<float><<<grid, block, 0, stream>>>(
-                    d_slice, d_idx, f32_values.data<float>(), indices.data<int64_t>(),
-                    dim_size, inner_size, outer, inner);
-                TENZOR_CUDA_POST_LAUNCH_CHECK();
-            }
-        }
+        sort_along_dim_segmented<float>(f32_input.data<float>(), f32_values.data<float>(),
+                                        indices.data<int64_t>(), outer_size, dim_size,
+                                        inner_size, descending, stream);
 
         // Convert sorted Float32 values back to half
         float_to_half_kernel<HalfT><<<cvt_grid, cvt_block, 0, stream>>>(
@@ -3449,6 +3607,17 @@ auto cummax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
+    // A zero-length reduction axis makes the input buffer empty; the
+    // element-0 seed inside cummax_kernel_impl (input[outer*dim_size*
+    // inner_size+inner]) would then read/write out of bounds even though
+    // total_slices=outer_size*inner_size is nonzero. A cumulative op over a
+    // size-0 dim is a valid no-op (empty result), so skip the launch entirely
+    // BEFORE any element access — matches CPU's early-return
+    // (src/backends/cpu/kernels/advanced.cpp:818).
+    if (dim_size == 0) {
+        return {values, indices_out};
+    }
+
     int64_t total_slices = outer_size * inner_size;
     int block = 256;
     int grid = static_cast<int>((total_slices + block - 1) / block);
@@ -3543,6 +3712,17 @@ auto cummin_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
+    // A zero-length reduction axis makes the input buffer empty; the
+    // element-0 seed inside cummin_kernel_impl (input[outer*dim_size*
+    // inner_size+inner]) would then read/write out of bounds even though
+    // total_slices=outer_size*inner_size is nonzero. A cumulative op over a
+    // size-0 dim is a valid no-op (empty result), so skip the launch entirely
+    // BEFORE any element access — matches CPU's early-return
+    // (src/backends/cpu/kernels/advanced.cpp:846).
+    if (dim_size == 0) {
+        return {values, indices_out};
+    }
+
     int64_t total_slices = outer_size * inner_size;
     int block = 256;
     int grid = static_cast<int>((total_slices + block - 1) / block);
@@ -3601,6 +3781,32 @@ __global__ void fmax_kernel_impl(const T* __restrict__ a, const T* __restrict__ 
     }
 }
 
+// F-021: integer operands must compare exactly. The generic template above
+// round-trips through double, which silently loses precision for int64_t
+// magnitudes beyond 2^53 (well within int64_t's range) and can return the
+// wrong operand. Integers have no NaN, so plain comparison is both exact and
+// simpler — matches CPU's exact integer comparison (fmax_impl in
+// src/backends/cpu/kernels/advanced.cpp).
+template<>
+__global__ void fmax_kernel_impl<int32_t>(const int32_t* __restrict__ a, const int32_t* __restrict__ b,
+                                           int32_t* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] >= b[idx]) ? a[idx] : b[idx];
+    }
+}
+
+template<>
+__global__ void fmax_kernel_impl<int64_t>(const int64_t* __restrict__ a, const int64_t* __restrict__ b,
+                                           int64_t* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] >= b[idx]) ? a[idx] : b[idx];
+    }
+}
+
 template<>
 __global__ void fmax_kernel_impl<float>(const float* __restrict__ a, const float* __restrict__ b,
                                          float* __restrict__ out, int64_t n)
@@ -3640,6 +3846,16 @@ __global__ void fmax_kernel_bf16(const __nv_bfloat16* __restrict__ a,
 
 auto fmax_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 {
+    // F-005/F-037 defense in depth: fmax_kernel_impl indexes both operands
+    // with a single flat linear index over a_cont.numel() elements — no
+    // per-operand broadcast strides — so a shape mismatch (e.g. b smaller
+    // than a) would read past b's buffer. The public tenzor::fmax
+    // (src/ops/reduction.cpp) already broadcasts both operands to a common
+    // shape before dispatch, so this guards only a future caller that
+    // bypasses the op layer and dispatches directly.
+    if (!std::equal(a.shape().begin(), a.shape().end(), b.shape().begin(), b.shape().end())) {
+        throw std::runtime_error("fmax: tensors must have the same shape");
+    }
     Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
     Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
     int64_t n = a_cont.numel();
@@ -3699,6 +3915,29 @@ __global__ void fmin_kernel_impl(const T* __restrict__ a, const T* __restrict__ 
     }
 }
 
+// F-021: see the matching comment on fmax_kernel_impl's int32_t/int64_t
+// specializations above — exact integer comparison instead of a
+// precision-losing double round-trip.
+template<>
+__global__ void fmin_kernel_impl<int32_t>(const int32_t* __restrict__ a, const int32_t* __restrict__ b,
+                                           int32_t* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] <= b[idx]) ? a[idx] : b[idx];
+    }
+}
+
+template<>
+__global__ void fmin_kernel_impl<int64_t>(const int64_t* __restrict__ a, const int64_t* __restrict__ b,
+                                           int64_t* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] <= b[idx]) ? a[idx] : b[idx];
+    }
+}
+
 template<>
 __global__ void fmin_kernel_impl<float>(const float* __restrict__ a, const float* __restrict__ b,
                                          float* __restrict__ out, int64_t n)
@@ -3738,6 +3977,11 @@ __global__ void fmin_kernel_bf16(const __nv_bfloat16* __restrict__ a,
 
 auto fmin_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 {
+    // F-005/F-037 defense in depth: see the matching comment in fmax_kernel
+    // above — fmin_kernel_impl has no broadcast support of its own either.
+    if (!std::equal(a.shape().begin(), a.shape().end(), b.shape().begin(), b.shape().end())) {
+        throw std::runtime_error("fmin: tensors must have the same shape");
+    }
     Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
     Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
     int64_t n = a_cont.numel();
@@ -3836,6 +4080,30 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, cudaStream
 {
     Tensor elem_cont = elements.is_contiguous() ? elements : elements.contiguous();
     Tensor test_cont = test_elements.is_contiguous() ? test_elements : test_elements.contiguous();
+
+    // Widen dtypes with no native comparison path below to a common
+    // comparable width, matching CPU's isin_kernel exactly (advanced.cpp):
+    // all integer widths and Bool compare via Int64; Float16/BFloat16
+    // compare via Float64. Int32/Int64/Float32/Float64 already have
+    // dedicated native-precision kernels below and need no widening — the
+    // op-layer wrapper (src/ops/reduction.cpp::isin) promotes elements and
+    // test_elements to a common dtype before dispatch, so both are always
+    // widened identically here.
+    auto is_narrow_integral = [](DType d) {
+        return d == DType::Bool || d == DType::Int8 || d == DType::Int16 ||
+               d == DType::UInt8 || d == DType::UInt16 || d == DType::UInt32 ||
+               d == DType::UInt64;
+    };
+    auto is_narrow_float = [](DType d) {
+        return d == DType::Float16 || d == DType::BFloat16;
+    };
+    if (is_narrow_integral(elem_cont.dtype())) {
+        elem_cont = elem_cont.to(DType::Int64);
+        test_cont = test_cont.to(DType::Int64);
+    } else if (is_narrow_float(elem_cont.dtype())) {
+        elem_cont = elem_cont.to(DType::Float64);
+        test_cont = test_cont.to(DType::Float64);
+    }
 
     // Sort test_elements on GPU using thrust
     Tensor test_sorted(std::vector<int64_t>(test_cont.shape().begin(), test_cont.shape().end()),
@@ -3964,6 +4232,23 @@ __global__ void kthvalue_kernel_impl(
 auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
                      cudaStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // F-034: validate k against the reduced dim's size up front, before any
+    // dtype branching, recursion, or GPU work. The selection-sort kernel
+    // below indexes a per-slice workspace sized exactly dim_size; k outside
+    // [1, dim_size] reads/writes past that slice's segment. This mirrors CPU
+    // (src/backends/cpu/kernels/advanced.cpp:1051-1053) and is kept here (in
+    // addition to the op-layer wrapper in src/ops/reduction.cpp::kthvalue)
+    // as defense-in-depth so any direct caller of this kernel is also safe.
+    {
+        const auto& shape_chk = input.shape();
+        int64_t ndim_chk = input.ndim();
+        int64_t dim_chk = dim;
+        if (dim_chk < 0) dim_chk += ndim_chk;
+        const int64_t dim_size_chk = shape_chk[dim_chk];
+        if (k < 1 || k > dim_size_chk) {
+            throw std::runtime_error("kthvalue: k out of range");
+        }
+    }
     // Float16/BFloat16: widen to Float32, compute, narrow the VALUES back
     // (indices are dtype-independent). Matches the CPU kthvalue.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -4075,6 +4360,14 @@ __global__ void quantile_kernel_impl(
 auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
                      cudaStream_t stream) -> Tensor
 {
+    // Float16/BFloat16: widen to Float32 for the computation and narrow the
+    // result back, matching CPU's quantile_kernel (advanced.cpp) exactly.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor out_f32 = quantile_kernel(input.to(DType::Float32), q, dim, keepdim, stream);
+        return out_f32.to(orig);
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
@@ -4245,6 +4538,16 @@ __global__ void nanquantile_kernel_impl(
 auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
                         cudaStream_t stream) -> Tensor
 {
+    // Float16/BFloat16: widen to Float32 for the computation and narrow the
+    // result back, matching CPU's nanquantile_kernel (advanced.cpp) exactly.
+    // nanmedian_kernel is implemented as nanquantile_kernel(x, 0.5, ...), so
+    // it inherits this fix automatically.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor out_f32 = nanquantile_kernel(input.to(DType::Float32), q, dim, keepdim, stream);
+        return out_f32.to(orig);
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
@@ -4319,8 +4622,18 @@ auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim,
 // Float64 input to Float32, which truncated bin assignment near edges. Mirrors
 // histogram_kernel_impl<T> above. Counts/edges (min_val, max_val, bin_width) are
 // all computed in T so Float64 retains double precision throughout.
+//
+// F-035: counts accumulate into a scratch `int64_t* counts` buffer (via its
+// unsigned-long-long atomic alias — CUDA has no native int64 atomicAdd
+// overload) rather than directly into a T output. `atomicAdd(&output[bin],
+// T(1))` silently stops incrementing once a bin passes ~2^24 hits for T=float
+// (float32 can't exactly represent integers beyond 2^24) — CPU's histc_kernel
+// (src/backends/cpu/kernels/advanced.cpp) already documents and avoids this
+// exact issue with its own int64_t `counts` buffer. histc_narrow_kernel below
+// performs the final int64_t -> T narrow once all bins are tallied, mirroring
+// CPU's `out_data[b] = static_cast<T>(counts[b])` pass.
 template<typename T>
-__global__ void histc_kernel_impl(const T* __restrict__ input, T* __restrict__ output,
+__global__ void histc_kernel_impl(const T* __restrict__ input, int64_t* __restrict__ counts,
                                   int64_t n, int64_t bins, T min_val, T max_val)
 {
     T bin_width = (max_val - min_val) / static_cast<T>(bins);
@@ -4330,9 +4643,21 @@ __global__ void histc_kernel_impl(const T* __restrict__ input, T* __restrict__ o
         if (val >= min_val && val <= max_val) {
             int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
             if (bin >= bins) bin = bins - 1;
-            atomicAdd(&output[bin], static_cast<T>(1));
+            atomicAdd(reinterpret_cast<unsigned long long*>(&counts[bin]),
+                      static_cast<unsigned long long>(1));
         }
     }
+}
+
+// Narrows the int64_t bin-count accumulator to the output dtype T once
+// counting is complete (see F-035 comment on histc_kernel_impl above).
+template<typename T>
+__global__ void histc_narrow_kernel(const int64_t* __restrict__ counts,
+                                     T* __restrict__ output, int64_t bins)
+{
+    int64_t b = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (b >= bins) return;
+    output[b] = static_cast<T>(counts[b]);
 }
 
 // NaN-ignoring min/max reduction functors (torch.histc skips NaN when
@@ -4389,23 +4714,36 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
     if (min_val >= max_val) max_val = min_val + 1.0;
 
     Tensor output({bins}, dtype, device);
-    TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, bins * output.element_size(), stream));
+
+    // F-035: accumulate into a scratch int64_t counts buffer (zero-initialized)
+    // rather than atomically incrementing the T output directly — see the
+    // histc_kernel_impl comment above for why. Narrowed to `output`'s dtype T
+    // by histc_narrow_kernel once all elements have been counted.
+    backend::CachedMemoryGuard counts_guard(static_cast<size_t>(bins) * sizeof(int64_t));
+    int64_t* d_counts = static_cast<int64_t*>(counts_guard.get());
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(d_counts, 0, static_cast<size_t>(bins) * sizeof(int64_t), stream));
 
     int block = 256;
     int grid = std::min(static_cast<int>((n + block - 1) / block), 65535);
+    int narrow_block = 256;
+    int narrow_grid = static_cast<int>((bins + narrow_block - 1) / narrow_block);
 
     switch (dtype) {
         case DType::Float32:
             histc_kernel_impl<float><<<grid, block, 0, stream>>>(
-                input_cont.data<float>(), output.data<float>(), n, bins,
+                input_cont.data<float>(), d_counts, n, bins,
                 static_cast<float>(min_val), static_cast<float>(max_val));
+            histc_narrow_kernel<float><<<narrow_grid, narrow_block, 0, stream>>>(
+                d_counts, output.data<float>(), bins);
             break;
         case DType::Float64:
             // Native double-precision histogram: bin_width and bin membership are
             // computed in double, matching the CPU Float64 reference. No downcast.
             histc_kernel_impl<double><<<grid, block, 0, stream>>>(
-                input_cont.data<double>(), output.data<double>(), n, bins,
+                input_cont.data<double>(), d_counts, n, bins,
                 min_val, max_val);
+            histc_narrow_kernel<double><<<narrow_grid, narrow_block, 0, stream>>>(
+                d_counts, output.data<double>(), bins);
             break;
         default:
             throw std::runtime_error("histc CUDA: unsupported dtype (only float32/float64)");
@@ -4475,12 +4813,34 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
 {
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     int64_t n = input_cont.numel();
-    const auto dtype = input_cont.dtype();
+    const DType orig_dtype = input_cont.dtype();
+    auto dtype = orig_dtype;
     const auto device = input_cont.device();
 
     if (n == 0) {
         return {Tensor({0}, dtype, device), Tensor({0}, DType::Int64, device),
                 Tensor({0}, DType::Int64, device)};
+    }
+
+    // Widen dtypes the templated kernels below aren't instantiated for
+    // directly to a type that is: Int8/UInt8 -> Int32, Float16/BFloat16 ->
+    // Float32. Matches CPU's widen-before-compare strategy
+    // (src/backends/cpu/kernels/advanced.cpp:1628-1636). `input_cont` and
+    // `dtype` are captured by reference below, so mutating them here (before
+    // `launch` is invoked) is enough to make the widened path fall through
+    // the existing Int32 / Float32 kernel instantiations; the resulting
+    // unique values are narrowed back to `orig_dtype` after the switch.
+    // Inverse indices and counts are dtype-independent (Int64) and need no
+    // narrowing.
+    bool needs_narrow = false;
+    if (dtype == DType::Int8 || dtype == DType::UInt8) {
+        input_cont = input_cont.to(DType::Int32);
+        dtype = DType::Int32;
+        needs_narrow = true;
+    } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        input_cont = input_cont.to(DType::Float32);
+        dtype = DType::Float32;
+        needs_narrow = true;
     }
 
     // Step 1: compute mask (1 where value differs from predecessor)
@@ -4533,13 +4893,19 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
         return std::make_tuple(unique_out, inverse_out, counts);
     };
 
+    std::tuple<Tensor, Tensor, Tensor> result;
     switch (dtype) {
-        case DType::Float32: return launch.template operator()<float>();
-        case DType::Float64: return launch.template operator()<double>();
-        case DType::Int32:   return launch.template operator()<int32_t>();
-        case DType::Int64:   return launch.template operator()<int64_t>();
+        case DType::Float32: result = launch.template operator()<float>(); break;
+        case DType::Float64: result = launch.template operator()<double>(); break;
+        case DType::Int32:   result = launch.template operator()<int32_t>(); break;
+        case DType::Int64:   result = launch.template operator()<int64_t>(); break;
         default: throw std::runtime_error("unique_consecutive CUDA: unsupported dtype");
     }
+
+    if (needs_narrow) {
+        std::get<0>(result) = std::get<0>(result).to(orig_dtype);
+    }
+    return result;
 }
 
 // ============================================================================
@@ -4652,6 +5018,9 @@ auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
     else if (reduce == "max") mode = 2;
     else if (reduce == "min") mode = 3;
     else if (reduce == "prod") mode = 4;
+    else throw std::invalid_argument(
+        "segment_reduce: unsupported reduce mode '" + reduce +
+        "' (expected one of sum, mean, prod, max, min)");
 
     auto dtype = cont.dtype();
     auto device = cont.device();

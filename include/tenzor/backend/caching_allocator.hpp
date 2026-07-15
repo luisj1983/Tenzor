@@ -261,6 +261,26 @@ private:
      */
     bool release_block(Block* block);
 
+    /**
+     * @brief Evict this device's cached (free) blocks back to the driver,
+     *        assuming @p device 's per-device mutex is ALREADY held.
+     *
+     * This is the lock-free sibling of empty_cache(int) for a single device:
+     * it must NOT be implemented by calling empty_cache(device) directly,
+     * because empty_cache() takes map_mutex_ then device_alloc.mutex itself,
+     * and the only caller (allocate_new_block(), invoked from allocate() with
+     * device_alloc.mutex already held) would self-deadlock on that
+     * non-recursive std::mutex. Mirrors the CPU allocator's
+     * release_cached_memory()/retry step and the ROCm sibling's
+     * handle_allocation_failure() 3-attempt eviction loop.
+     *
+     * @param device Device ID whose cache should be trimmed
+     * @return true if any reserved memory was actually returned to the
+     *         device (i.e. a retried cudaMalloc has a real chance to
+     *         succeed), false if nothing could be freed.
+     */
+    bool release_cached_memory_locked(int device);
+
     // --- Stream-ordered reuse event helpers (called with device mutex held) ---
 
     /// Take an event from the pool, creating a new timing-disabled event if the

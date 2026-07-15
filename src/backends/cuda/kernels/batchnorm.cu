@@ -1093,6 +1093,25 @@ auto batchnorm2d_backward(const Tensor& grad_output,
         throw std::runtime_error("BatchNorm2d CUDA backward: Cannot compute gradients for empty tensor (N*H*W = 0)");
     }
 
+    // F069: Float16 widens to Float32 and recurses (see branch below), never
+    // touching `normalized`. Dispatch it here, before allocating grad_input/
+    // grad_gamma/grad_beta or computing `normalized`, so the widen-narrow path
+    // doesn't pay for a wasted forward pass, an unused allocation, and an
+    // extra memory pass that its result is immediately discarded.
+    if (input.dtype() == DType::Float16) {
+        // Widen to Float32, recurse (float accumulators / block_reduce_sum<float>),
+        // then narrow back. The native __half path reduced gradients in half
+        // precision (narrow accumulator), diverging from CPU and from the
+        // forward pass. Mirrors the ROCm widen-narrow pattern.
+        auto [gi, gg, gb] = batchnorm2d_backward(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            mean.to(DType::Float32), variance.to(DType::Float32),
+            gamma.to(DType::Float32), epsilon, stream);
+        return std::make_tuple(gi.to(DType::Float16),
+                               gg.to(DType::Float16),
+                               gb.to(DType::Float16));
+    }
+
     // Allocate output gradients
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor grad_input(shape_vec, input.dtype(), input.device());
@@ -1134,19 +1153,9 @@ auto batchnorm2d_backward(const Tensor& grad_output,
             mean.data<double>(), variance.data<double>(), gamma.data<double>(),
             epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float16) {
-        // Widen to Float32, recurse (float accumulators / block_reduce_sum<float>),
-        // then narrow back. The native __half path reduced gradients in half
-        // precision (narrow accumulator), diverging from CPU and from the
-        // forward pass. Mirrors the ROCm widen-narrow pattern.
-        auto [gi, gg, gb] = batchnorm2d_backward(
-            grad_output.to(DType::Float32), input.to(DType::Float32),
-            mean.to(DType::Float32), variance.to(DType::Float32),
-            gamma.to(DType::Float32), epsilon, stream);
-        return std::make_tuple(gi.to(DType::Float16),
-                               gg.to(DType::Float16),
-                               gb.to(DType::Float16));
     } else {
+        // Float16 is dispatched earlier (before `normalized` is computed);
+        // BFloat16 is dispatched at function entry. Anything else is unsupported.
         throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 

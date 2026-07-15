@@ -405,146 +405,24 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     // F042: dispatch to the backend for ALL devices (including CPU) so CPU and
     // GPU share the same Philox RNG stream. The CPU backend rand kernel is
     // Philox-based and bit-identical to the CUDA device Philox for a given seed.
-    {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Shape, shape_to_string(shape));
-        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
-        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
+    OpAttributes attrs;
+    attrs.set(AttrKey::Shape, shape_to_string(shape));
+    attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+    attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
-        return dispatch_to_device(OpId::Rand, device.type, {}, attrs)[0];
-    }
-
-    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
-    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
-    if (!tensor.impl() || !tensor.storage()) return tensor;
-
-    size_t numel = tensor.numel();
-    void* data = tensor.storage()->data();
-
-    // Use global random number generator (can be seeded via manual_seed)
-    auto& gen = get_rng();
-
-    // Fill with uniform random values based on dtype
-    switch (dtype) {
-        case DType::Float32: {
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            float* ptr = static_cast<float*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = dist(gen);
-            }
-            break;
-        }
-        case DType::Float64: {
-            std::uniform_real_distribution<double> dist(0.0, 1.0);
-            double* ptr = static_cast<double*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = dist(gen);
-            }
-            break;
-        }
-        case DType::Float16: {
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            Float16* ptr = static_cast<Float16*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = Float16(dist(gen));
-            }
-            break;
-        }
-        case DType::BFloat16: {
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            BFloat16* ptr = static_cast<BFloat16*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = BFloat16(dist(gen));
-            }
-            break;
-        }
-        default:
-            throw std::runtime_error("Unsupported dtype for rand() - only Float32, Float64, Float16, and BFloat16 are supported");
-    }
-    return tensor;
+    return dispatch_to_device(OpId::Rand, device.type, {}, attrs)[0];
 }
 
 auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     // F042: dispatch to the backend for ALL devices so CPU (Philox) and GPU
     // (device Philox) share the same RNG stream; normal samples match to ~ULP
     // (Box-Muller transcendentals differ between host libm and device intrinsics).
-    {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Shape, shape_to_string(shape));
-        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
-        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
+    OpAttributes attrs;
+    attrs.set(AttrKey::Shape, shape_to_string(shape));
+    attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+    attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
-        return dispatch_to_device(OpId::Randn, device.type, {}, attrs)[0];
-    }
-
-    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
-    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
-    if (!tensor.impl() || !tensor.storage()) return tensor;
-
-    size_t numel = tensor.numel();
-    void* data = tensor.storage()->data();
-
-    // Use global random number generator (can be seeded via manual_seed)
-    auto& gen = get_rng();
-
-    // Fill with normal random values N(0,1) based on dtype
-    switch (dtype) {
-        case DType::Float32: {
-            std::normal_distribution<float> dist(0.0f, 1.0f);
-            float* ptr = static_cast<float*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = dist(gen);
-            }
-            break;
-        }
-        case DType::Float64: {
-            std::normal_distribution<double> dist(0.0, 1.0);
-            double* ptr = static_cast<double*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = dist(gen);
-            }
-            break;
-        }
-        case DType::Float16: {
-            std::normal_distribution<float> dist(0.0f, 1.0f);
-            Float16* ptr = static_cast<Float16*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = Float16(dist(gen));
-            }
-            break;
-        }
-        case DType::BFloat16: {
-            std::normal_distribution<float> dist(0.0f, 1.0f);
-            BFloat16* ptr = static_cast<BFloat16*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = BFloat16(dist(gen));
-            }
-            break;
-        }
-        case DType::Complex64: {
-            // Standard complex normal: total variance 1 => variance 1/2 per real
-            // and imaginary component (std = sqrt(0.5)), matching torch.randn for
-            // complex dtypes. Filling each component with N(0,1) would give
-            // E[|z|^2] = 2 (a factor-sqrt(2) too large in magnitude).
-            std::normal_distribution<float> dist(0.0f, static_cast<float>(std::sqrt(0.5)));
-            auto* ptr = static_cast<std::complex<float>*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = {dist(gen), dist(gen)};
-            }
-            break;
-        }
-        case DType::Complex128: {
-            std::normal_distribution<double> dist(0.0, std::sqrt(0.5));
-            auto* ptr = static_cast<std::complex<double>*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = {dist(gen), dist(gen)};
-            }
-            break;
-        }
-        default:
-            throw std::runtime_error("Unsupported dtype for randn() - supported: Float32, Float64, Float16, BFloat16, Complex64, Complex128");
-    }
-    return tensor;
+    return dispatch_to_device(OpId::Randn, device.type, {}, attrs)[0];
 }
 
 auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
@@ -554,88 +432,14 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype,
 
     // F042: dispatch to the backend for ALL devices so CPU and GPU share the
     // same Philox stream (bit-identical for integers).
-    {
-        OpAttributes attrs;
-        attrs.set(AttrKey::Start, static_cast<int64_t>(low));
-        attrs.set(AttrKey::End, static_cast<int64_t>(high));
-        attrs.set(AttrKey::Shape, shape_to_string(shape));
-        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
-        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
+    OpAttributes attrs;
+    attrs.set(AttrKey::Start, static_cast<int64_t>(low));
+    attrs.set(AttrKey::End, static_cast<int64_t>(high));
+    attrs.set(AttrKey::Shape, shape_to_string(shape));
+    attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+    attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
 
-        return dispatch_to_device(OpId::Randint, device.type, {}, attrs)[0];
-    }
-
-    // CPU path: generate directly
-    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, Device::cpu());
-    if (!tensor.impl() || !tensor.storage()) return tensor;
-
-    size_t numel = tensor.numel();
-    void* data = tensor.storage()->data();
-
-    // Use global random number generator
-    auto& gen = get_rng();
-    // Reject ranges that do not fit the requested integer dtype; otherwise the
-    // per-dtype static_cast below would silently wrap (PyTorch raises here).
-    {
-        const int64_t hi_incl = high - 1;
-        bool fits = true;
-        switch (dtype) {
-            case DType::Int64: break;
-            case DType::Int32: fits = (low >= -2147483648LL && hi_incl <= 2147483647LL); break;
-            case DType::Int16: fits = (low >= -32768 && hi_incl <= 32767); break;
-            case DType::Int8:  fits = (low >= -128 && hi_incl <= 127); break;
-            case DType::UInt8: fits = (low >= 0 && hi_incl <= 255); break;
-            default: break;  // unsupported dtype reported by the switch below
-        }
-        if (!fits) {
-            throw std::out_of_range(
-                "randint: range [" + std::to_string(low) + ", " + std::to_string(high) +
-                ") does not fit in the requested integer dtype");
-        }
-    }
-    std::uniform_int_distribution<int64_t> dist(low, high - 1);
-
-    // Fill with random integers based on dtype
-    switch (dtype) {
-        case DType::Int64: {
-            int64_t* ptr = static_cast<int64_t*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = dist(gen);
-            }
-            break;
-        }
-        case DType::Int32: {
-            int32_t* ptr = static_cast<int32_t*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<int32_t>(dist(gen));
-            }
-            break;
-        }
-        case DType::Int16: {
-            int16_t* ptr = static_cast<int16_t*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<int16_t>(dist(gen));
-            }
-            break;
-        }
-        case DType::Int8: {
-            int8_t* ptr = static_cast<int8_t*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<int8_t>(dist(gen));
-            }
-            break;
-        }
-        case DType::UInt8: {
-            uint8_t* ptr = static_cast<uint8_t*>(data);
-            for (size_t i = 0; i < numel; ++i) {
-                ptr[i] = static_cast<uint8_t>(dist(gen));
-            }
-            break;
-        }
-        default:
-            throw std::runtime_error("Unsupported dtype for randint() - only integer types are supported");
-    }
-    return tensor;
+    return dispatch_to_device(OpId::Randint, device.type, {}, attrs)[0];
 }
 
 auto arange(double start, double end, double step, DType dtype, Device device) -> Tensor {
@@ -919,6 +723,38 @@ auto linspace(double start, double end, int64_t steps, DType dtype, Device devic
                 ptr[i] = saturate_to_int<int64_t>(start + i * step_size);
             }
             if (steps > 1) ptr[steps - 1] = saturate_to_int<int64_t>(end);
+            break;
+        }
+        case DType::UInt8: {
+            uint8_t* ptr = static_cast<uint8_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = saturate_to_int<uint8_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<uint8_t>(end);
+            break;
+        }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = saturate_to_int<uint16_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<uint16_t>(end);
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = saturate_to_int<uint32_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<uint32_t>(end);
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = saturate_to_int<uint64_t>(start + i * step_size);
+            }
+            if (steps > 1) ptr[steps - 1] = saturate_to_int<uint64_t>(end);
             break;
         }
         case DType::Complex64: {

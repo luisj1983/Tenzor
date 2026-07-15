@@ -33,21 +33,50 @@ namespace {
 /// register native kernels.
 /// Note: The CPU dispatch table wrappers call these functions, which check device==CPU
 /// and skip try_gpu_dispatch, so there is no circular dispatch.
-// Complex linalg (qr/svd/eig/det/inv/solve/cholesky) is implemented only on the
-// CPU LAPACK path in this codebase; the GPU backend kernels handle real floats
-// and throw for Complex64/Complex128. Rather than let that throw escape (which
-// crashed lstsq and made every complex linalg op fail on GPU devices), route
-// complex inputs through the CPU implementation and move the result back to the
-// caller's device. This is transparent to callers and keeps device semantics.
+// Complex linalg (qr/svd/eig/det/inv/solve/cholesky/...) is, for most GPU backends
+// (ROCm/Vulkan/OneAPI) and most ops, implemented only on the CPU LAPACK path; those
+// GPU kernels handle real floats and throw for Complex64/Complex128. Rather than let
+// that throw escape (which crashed lstsq and made every complex linalg op fail on GPU
+// devices), route complex inputs through the CPU implementation and move the result
+// back to the caller's device. This is transparent to callers and keeps device
+// semantics.
+//
+// CUDA is the exception for a handful of ops: det, inv, solve, eig, and
+// solve_triangular have genuine cuSOLVER/cuBLAS-backed Complex64/Complex128 kernels
+// (src/backends/cuda/kernels/linalg.cu — cusolverDnCgetrf/Zgetrf, Xgeev, cublasCtrsm/
+// Ztrsm). For those specific ops on a CUDA device, dispatch straight to the CUDA
+// kernel instead of round-tripping through the CPU — see
+// cuda_has_native_complex_kernel() below. All other ops (svd/qr/eigh/cholesky/lu/
+// lu_solve/ldl_factor/ldl_solve/geqrf/ormqr/householder) have no native complex
+// implementation on CUDA either, so they keep going through the CPU reroute.
 static bool is_complex_dtype(DType dt) {
     return dt == DType::Complex64 || dt == DType::Complex128;
+}
+
+// Returns true for the small set of linalg ops that have a genuine, working
+// Complex64/Complex128 CUDA implementation (verified against
+// src/backends/cuda/kernels/linalg.cu). Keep in sync with that file: if a future
+// change adds/removes native complex support for an op, update this list too.
+static bool cuda_has_native_complex_kernel(OpId op) {
+    switch (op) {
+        case OpId::LinalgDet:
+        case OpId::LinalgInv:
+        case OpId::LinalgSolve:
+        case OpId::LinalgEig:
+        case OpId::SolveTriangular:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool try_gpu_dispatch(OpId op, std::span<const Tensor> inputs,
                       const OpAttributes& attrs, Tensor& result) {
     const Device dev = inputs[0].device();
     if (dev.type == Device::Type::CPU) return false;
-    if (is_complex_dtype(inputs[0].dtype())) {
+    bool needs_cpu_reroute = is_complex_dtype(inputs[0].dtype()) &&
+        !(dev.type == Device::Type::CUDA && cuda_has_native_complex_kernel(op));
+    if (needs_cpu_reroute) {
         std::vector<Tensor> cpu_inputs;
         cpu_inputs.reserve(inputs.size());
         for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
@@ -64,7 +93,9 @@ bool try_gpu_dispatch_multi(OpId op, std::span<const Tensor> inputs,
                             const OpAttributes& attrs, std::vector<Tensor>& results) {
     const Device dev = inputs[0].device();
     if (dev.type == Device::Type::CPU) return false;
-    if (is_complex_dtype(inputs[0].dtype())) {
+    bool needs_cpu_reroute = is_complex_dtype(inputs[0].dtype()) &&
+        !(dev.type == Device::Type::CUDA && cuda_has_native_complex_kernel(op));
+    if (needs_cpu_reroute) {
         std::vector<Tensor> cpu_inputs;
         cpu_inputs.reserve(inputs.size());
         for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
@@ -2214,6 +2245,10 @@ auto lu(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
 #else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
+    if (is_complex_dtype(work.dtype())) {
+        throw std::invalid_argument(
+            "linalg::lu: complex (Complex64/Complex128) is not supported");
+    }
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
@@ -3059,6 +3094,10 @@ auto ldl_factor(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 #else
     auto original_dtype = A.dtype();
     auto work = prepare_matrix(A);
+    if (is_complex_dtype(work.dtype())) {
+        throw std::invalid_argument(
+            "linalg::ldl_factor: complex (Complex64/Complex128) is not supported");
+    }
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
@@ -3659,6 +3698,10 @@ auto geqrf(const Tensor& input) -> std::tuple<Tensor, Tensor> {
 #else
     auto original_dtype = input.dtype();
     auto work = prepare_matrix(input);
+    if (is_complex_dtype(work.dtype())) {
+        throw std::invalid_argument(
+            "linalg::geqrf: complex (Complex64/Complex128) is not supported");
+    }
     auto shape = input.shape();
     auto ndim = static_cast<int64_t>(shape.size());
     if (ndim < 2)

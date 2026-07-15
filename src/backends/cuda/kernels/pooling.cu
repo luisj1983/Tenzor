@@ -127,8 +127,41 @@ auto maxpool2d_forward_kernel(const Tensor& input,
     int64_t H = shape[2];
     int64_t W = shape[3];
 
+    // PyTorch semantics: padding must not exceed half the effective kernel
+    // size, otherwise a pooling window can lie entirely in the padded region
+    // (the effective kernel span is dilation*(kernel-1)+1). Enforcing this
+    // guarantees every output window contains at least one valid input
+    // element, so the forward kernel never emits -inf / a bogus index 0 that
+    // would corrupt the backward scatter. Mirrors CPU's maxpool2d validation
+    // (src/backends/cpu/kernels/pooling.cpp).
+    {
+        int64_t effective_kernel_h = dH * (kH - 1) + 1;
+        int64_t effective_kernel_w = dW * (kW - 1) + 1;
+        if (2 * pH > effective_kernel_h) {
+            throw std::runtime_error(
+                "maxpool2d: padding (" + std::to_string(pH) +
+                ") should be at most half of the effective kernel size (" +
+                std::to_string(effective_kernel_h) + ") on axis 0");
+        }
+        if (2 * pW > effective_kernel_w) {
+            throw std::runtime_error(
+                "maxpool2d: padding (" + std::to_string(pW) +
+                ") should be at most half of the effective kernel size (" +
+                std::to_string(effective_kernel_w) + ") on axis 1");
+        }
+    }
+
     int64_t H_out = (H + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
     int64_t W_out = (W + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
+
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (H_out <= 0 || W_out <= 0) {
+        throw std::invalid_argument(
+            "maxpool2d: computed output size (" + std::to_string(H_out) + "x" +
+            std::to_string(W_out) + ") is non-positive; the (dilated) kernel does "
+            "not fit the padded input");
+    }
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
     Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
@@ -732,7 +765,29 @@ auto maxpool1d_forward_kernel(const Tensor& input, std::array<int64_t, 1> kernel
     int64_t C = shape[1];
     int64_t L = shape[2];
 
+    // PyTorch semantics: padding must not exceed half the effective kernel size,
+    // else a window can lie entirely in the padded region, leaving max_val=-inf
+    // and max_idx=0 which corrupts the backward scatter into input element 0.
+    // Mirrors CPU's maxpool1d validation (src/backends/cpu/kernels/pooling.cpp).
+    {
+        int64_t effective_kernel = dilation * (kernel_size - 1) + 1;
+        if (2 * padding > effective_kernel) {
+            throw std::runtime_error(
+                "maxpool1d: padding (" + std::to_string(padding) +
+                ") should be at most half of the effective kernel size (" +
+                std::to_string(effective_kernel) + ")");
+        }
+    }
+
     int64_t L_out = (L + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (L_out <= 0) {
+        throw std::invalid_argument(
+            "maxpool1d: computed output size (" + std::to_string(L_out) +
+            ") is non-positive; the (dilated) kernel does not fit the padded input");
+    }
 
     Tensor output({N, C, L_out}, input.dtype(), input.device());
     Tensor indices({N, C, L_out}, DType::Int64, input.device());
@@ -1666,9 +1721,38 @@ auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel
     int64_t H = shape[3];
     int64_t W = shape[4];
 
+    // PyTorch semantics: padding must not exceed half the effective kernel size
+    // on each axis, else a window can lie entirely in padding, leaving
+    // max_val=-inf / max_idx=0 and corrupting the backward scatter. Mirrors
+    // CPU's maxpool3d validation (src/backends/cpu/kernels/pooling.cpp).
+    {
+        const int64_t k[3] = {kD, kH, kW};
+        const int64_t p[3] = {pD, pH, pW};
+        const int64_t d[3] = {dD, dH, dW};
+        for (int i = 0; i < 3; ++i) {
+            int64_t effective_kernel = d[i] * (k[i] - 1) + 1;
+            if (2 * p[i] > effective_kernel) {
+                throw std::runtime_error(
+                    "maxpool3d: padding (" + std::to_string(p[i]) +
+                    ") should be at most half of the effective kernel size (" +
+                    std::to_string(effective_kernel) + ") on axis " +
+                    std::to_string(i));
+            }
+        }
+    }
+
     int64_t D_out = (D + 2 * pD - dD * (kD - 1) - 1) / sD + 1;
     int64_t H_out = (H + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
     int64_t W_out = (W + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
+
+    // Guard against a kernel larger than the padded input, which yields a
+    // zero/negative output extent and a negative-dim allocation below.
+    if (D_out <= 0 || H_out <= 0 || W_out <= 0) {
+        throw std::invalid_argument(
+            "maxpool3d: computed output size (" + std::to_string(D_out) + "x" +
+            std::to_string(H_out) + "x" + std::to_string(W_out) + ") is "
+            "non-positive; the (dilated) kernel does not fit the padded input");
+    }
 
     Tensor output({N, C, D_out, H_out, W_out}, input.dtype(), input.device());
     Tensor indices({N, C, D_out, H_out, W_out}, DType::Int64, input.device());

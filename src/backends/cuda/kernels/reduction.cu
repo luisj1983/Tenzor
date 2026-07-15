@@ -88,6 +88,20 @@ template<> __device__ __host__ inline bool sentinel_max<bool>() { return true; }
 // Audit F3: rank cap lifted from 8 to 16 — matches the activations.cu copy
 // and the maximum supported in CPU/ROCm. The old 8-dim limit silently
 // truncated higher-rank tensors (e.g. block-sparse attention with rank 9+).
+//
+// F-038/F-041 follow-up: unlike TransformRankArray/GatherRankArray/etc. in
+// transform.cu/indexing.cu, DimMeta cannot be given a device-buffer overflow
+// path without touching every consuming kernel body. Every one of the ~30
+// kernels below that take `DimMeta meta` also declare their own local
+// `int64_t indices[DIM_META_MAX_RANK]` per-thread scratch array (populated
+// across the reduction loop, not in one streaming pass) to hold the decoded
+// per-dim coordinate while it iterates over the reduced dimension — that
+// array lives outside DimMeta and is sized to DIM_META_MAX_RANK independently
+// in each kernel. Supporting ndim > DIM_META_MAX_RANK would mean rewriting the
+// indexing math of every one of those kernels (e.g. dynamic shared memory, or
+// restructuring to a precomputed-base-offset formula that avoids storing the
+// full per-dim tuple), not just this metadata struct, so the rank cap here is
+// left as the existing clean throw rather than a partial/unsafe fix.
 constexpr int DIM_META_MAX_RANK = 16;
 struct DimMeta {
     int64_t shape[DIM_META_MAX_RANK];
@@ -258,6 +272,18 @@ __device__ __forceinline__ bool arg_min_takes_idx(T cand, int64_t cand_idx, T be
 // GPU-side scalar fill (replaces host_zero + cudaMemcpyAsync H2D pattern to avoid UB)
 template<typename T>
 __global__ void fill_scalar_kernel(T* dst, T value) { dst[0] = value; }
+
+// GPU-side full-buffer fill: writes `value` to every one of the n elements of
+// dst (unlike fill_scalar_kernel, which only writes index 0). Used to
+// explicitly and deterministically materialize e.g. NaN across an entire
+// empty-reduction output rather than relying on whatever a prior kernel
+// happened to leave in the buffer (see F-040/F-031: that assumption is not
+// reliably true for zero-size-axis reductions).
+template<typename T>
+__global__ void fill_all_kernel(T* dst, int64_t n, T value) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) dst[idx] = value;
+}
 
 // ============================================================================
 // Helper kernels for GPU-side scalar operations (avoids D2H transfers)
@@ -1294,7 +1320,20 @@ static void launch_dim_reduction_sum(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
+        return;
+    }
+    if (dim_size == 0) {
+        // Sum's identity element is 0. CPU's sum_along_dim leaves each
+        // per-slice accumulator at its initial value 0 when dim_size==0, so
+        // for a shape like {3,0,5} reduced along dim=1 (output_size=15,
+        // dim_size=0) the output_size real output elements must be written 0
+        // explicitly here rather than left as stale/uninitialized device
+        // memory (F-031).
+        constexpr int fill_block = 256;
+        const int fill_grid = static_cast<int>((output_size + fill_block - 1) / fill_block);
+        fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(d_output, output_size, T(0));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -1327,8 +1366,15 @@ static void launch_dim_reduction_max(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // max has no identity element: a zero-size reduction axis is
+        // undefined, matching CPU's max_kernel guard (reduction.cpp), which
+        // throws instead of leaving the output_size (real, non-empty) output
+        // elements as stale/uninitialized device memory (F-031).
+        throw std::runtime_error("max: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1359,8 +1405,15 @@ static void launch_dim_reduction_min(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // min has no identity element: a zero-size reduction axis is
+        // undefined, matching CPU's min_kernel guard (reduction.cpp), which
+        // throws instead of leaving the output_size (real, non-empty) output
+        // elements as stale/uninitialized device memory (F-031).
+        throw std::runtime_error("min: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1444,8 +1497,11 @@ static void launch_dim_reduction_max_half(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("max: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1475,8 +1531,11 @@ static void launch_dim_reduction_min_half(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("min: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1560,8 +1619,11 @@ static void launch_dim_reduction_max_bf16(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("max: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1591,8 +1653,11 @@ static void launch_dim_reduction_min_bf16(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("min: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1883,9 +1948,47 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
     }
 
     if (count == 0) {
-        // Return 0 for mean of empty tensor - this is practical for loss computation
-        // in object detection where no samples may be selected
-        return sum_result;  // sum_result is already 0 for empty tensor
+        // Mean of zero elements is mathematically 0/0 -- produce NaN explicitly
+        // and deterministically, matching CPU's mean (reduction.cpp). This must
+        // NOT rely on sum_result already holding 0: for a per-dim reduction over
+        // a zero-size axis (output_size > 0, dim_size == 0), sum_result can be
+        // uninitialized device memory (see F-031), so an accidental "0 * inf"
+        // trick is not safe here -- fill every output element with NaN directly.
+        const int64_t out_n = sum_result.numel();
+        if (out_n > 0) {
+            constexpr int fill_block = 256;
+            const int fill_grid = static_cast<int>((out_n + fill_block - 1) / fill_block);
+            if (dtype == DType::Float32) {
+                fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                    sum_result.data<float>(), out_n, static_cast<float>(NAN));
+            } else if (dtype == DType::Float64) {
+                fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                    sum_result.data<double>(), out_n, static_cast<double>(NAN));
+            } else if (dtype == DType::Float16) {
+                auto* data = reinterpret_cast<__half*>(sum_result.data_ptr());
+                fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                    data, out_n, __float2half(static_cast<float>(NAN)));
+            } else if (dtype == DType::BFloat16) {
+                auto* data = reinterpret_cast<__nv_bfloat16*>(sum_result.data_ptr());
+                fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                    data, out_n, __float2bfloat16(static_cast<float>(NAN)));
+            } else if (dtype == DType::Complex64) {
+                // Real and imaginary lanes are interleaved contiguous floats.
+                auto* data = reinterpret_cast<float*>(sum_result.data_ptr());
+                const int64_t n2 = 2 * out_n;
+                const int grid2 = static_cast<int>((n2 + fill_block - 1) / fill_block);
+                fill_all_kernel<<<grid2, fill_block, 0, stream>>>(
+                    data, n2, static_cast<float>(NAN));
+            } else {  // Complex128
+                auto* data = reinterpret_cast<double*>(sum_result.data_ptr());
+                const int64_t n2 = 2 * out_n;
+                const int grid2 = static_cast<int>((n2 + fill_block - 1) / fill_block);
+                fill_all_kernel<<<grid2, fill_block, 0, stream>>>(
+                    data, n2, static_cast<double>(NAN));
+            }
+            CUDA_CHECK(cudaGetLastError());
+        }
+        return sum_result;
     }
 
     // Divide by count (in-place) using proper CUDA kernel
@@ -1947,6 +2050,18 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
     // Normalize negative dim (but INT64_MIN means full reduction)
     if (dim < 0 && dim != INT64_MIN) {
         dim += input.ndim();
+    }
+    // Validate the (possibly-normalized) dim. A dim that is still negative
+    // after normalization (e.g. dim=-100 on a rank-3 tensor -> -97) or a
+    // positive dim >= ndim must throw here -- otherwise the `dim < 0` check
+    // in the switch below misreads it as the "full reduction" sentinel and
+    // silently reduces the whole tensor instead of rejecting the bad axis.
+    // Matches CPU's normalize_dim (reduction.cpp) and every other CUDA
+    // reduction op (sum/argmax/argmin/prod/var/norm/any/all/logsumexp), which
+    // all validate the normalized dim and throw for anything out of range.
+    if (dim != INT64_MIN && (dim < 0 || dim >= input.ndim())) {
+        throw std::runtime_error("Dimension " + std::to_string(dim) +
+            " out of range for tensor with " + std::to_string(input.ndim()) + " dimensions");
     }
 
     const auto dtype = input.dtype();
@@ -2078,6 +2193,18 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
     // Normalize negative dim (but INT64_MIN means full reduction)
     if (dim < 0 && dim != INT64_MIN) {
         dim += input.ndim();
+    }
+    // Validate the (possibly-normalized) dim. A dim that is still negative
+    // after normalization (e.g. dim=-100 on a rank-3 tensor -> -97) or a
+    // positive dim >= ndim must throw here -- otherwise the `dim < 0` check
+    // in the switch below misreads it as the "full reduction" sentinel and
+    // silently reduces the whole tensor instead of rejecting the bad axis.
+    // Matches CPU's normalize_dim (reduction.cpp) and every other CUDA
+    // reduction op (sum/argmax/argmin/prod/var/norm/any/all/logsumexp), which
+    // all validate the normalized dim and throw for anything out of range.
+    if (dim != INT64_MIN && (dim < 0 || dim >= input.ndim())) {
+        throw std::runtime_error("Dimension " + std::to_string(dim) +
+            " out of range for tensor with " + std::to_string(input.ndim()) + " dimensions");
     }
 
     const auto dtype = input.dtype();
@@ -3066,8 +3193,16 @@ static void launch_dim_argmax(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // argmax has no identity element: the index of the max over an empty
+        // range is undefined, matching CPU's argmax_kernel guard
+        // (reduction.cpp), which throws instead of leaving the output_size
+        // (real, non-empty) output elements as stale/uninitialized device
+        // memory (F-031).
+        throw std::runtime_error("argmax: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -3099,8 +3234,16 @@ static void launch_dim_argmin(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // argmin has no identity element: the index of the min over an empty
+        // range is undefined, matching CPU's argmin_kernel guard
+        // (reduction.cpp), which throws instead of leaving the output_size
+        // (real, non-empty) output elements as stale/uninitialized device
+        // memory (F-031).
+        throw std::runtime_error("argmin: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -3193,8 +3336,11 @@ static void launch_dim_argmax_half(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("argmax: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -3224,8 +3370,11 @@ static void launch_dim_argmin_half(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("argmin: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -3317,8 +3466,11 @@ static void launch_dim_argmax_bf16(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("argmax: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -3348,8 +3500,11 @@ static void launch_dim_argmin_bf16(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        throw std::runtime_error("argmin: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -3817,7 +3972,20 @@ static void launch_dim_reduction_prod(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
+        return;
+    }
+    if (dim_size == 0) {
+        // Product's identity element is 1. CPU's prod_along_dim initializes
+        // the whole output buffer to 1 before reducing, so a zero-size axis
+        // (e.g. shape {3,0,5} reduced along dim=1: output_size=15,
+        // dim_size=0) leaves every per-slice accumulator at that identity.
+        // Match it explicitly here instead of leaving output_size real
+        // output elements as stale/uninitialized device memory (F-031).
+        constexpr int fill_block = 256;
+        const int fill_grid = static_cast<int>((output_size + fill_block - 1) / fill_block);
+        fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(d_output, output_size, T(1));
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
 
@@ -3906,6 +4074,22 @@ __global__ void prod_reduce_complex_kernel(const Real* input, Real* output, int6
 template<typename Real>
 __global__ void fill_complex_one_kernel(Real* out) { out[0] = 1; out[1] = 0; }
 
+// Array version of fill_complex_one_kernel: writes the complex multiplicative
+// identity (1 + 0i) to each of the `n` interleaved (re, im) pairs in `out`.
+// Used by prod's per-dim complex launcher when dim_size==0 but
+// output_size!=0 -- CPU's prod_along_dim leaves every per-slice accumulator
+// at its initial value 1 in that case, so every output slice needs the same
+// identity written explicitly rather than being left as stale/uninitialized
+// device memory (F-031).
+template<typename Real>
+__global__ void fill_complex_one_array_kernel(Real* out, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[2 * idx] = Real(1);
+        out[2 * idx + 1] = Real(0);
+    }
+}
+
 template<typename Real>
 static void launch_full_reduction_prod_complex(const Real* d_input, Real* d_output,
                                                int64_t n, cudaStream_t stream) {
@@ -3943,7 +4127,15 @@ static void launch_dim_reduction_prod_complex(
     const int64_t dim_size = input_shape[dim];
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) if (i != dim) output_size *= input_shape[i];
-    if (output_size == 0 || dim_size == 0) return;
+    if (output_size == 0) return;
+    if (dim_size == 0) {
+        // Complex product identity is (1 + 0i) -- see fill_complex_one_array_kernel.
+        constexpr int fill_block = 256;
+        const int fill_grid = static_cast<int>((output_size + fill_block - 1) / fill_block);
+        fill_complex_one_array_kernel<<<fill_grid, fill_block, 0, stream>>>(d_output, output_size);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     prod_along_dim_complex_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
@@ -4223,9 +4415,12 @@ __global__ void welford_finalize_kernel(
 template<typename T>
 static void launch_variance_computation(const T* d_input, T* d_output, int64_t n, int64_t correction, cudaStream_t stream = nullptr) {
     if (n == 0) {
-        fill_scalar_kernel<<<1, 1, 0, stream>>>(d_output, T(0));
-        CUDA_CHECK(cudaGetLastError());
-        return;
+        // Full-reduction var/std of an empty tensor is undefined -- match CPU
+        // exactly (reduction.cpp var_kernel), which throws rather than
+        // silently returning a finite-looking 0.0. CPU's std_kernel delegates
+        // to var_kernel internally, so the same message covers both callers
+        // here too.
+        throw std::runtime_error("var: input tensor is empty");
     }
 
     if (n == 1) {
@@ -4351,7 +4546,7 @@ auto var_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, int64_t corr
         int64_t actual_dim = dim;
         if (actual_dim < 0) actual_dim += ndim;
         if (actual_dim < 0 || actual_dim >= ndim) {
-            throw std::runtime_error("var: dim out of range");
+            throw std::invalid_argument("var: dim out of range");
         }
 
         int64_t dim_size = input_shape[actual_dim];
@@ -4697,6 +4892,241 @@ __global__ void lp_norm_kernel(const T* input, T* output, int64_t n, float p) {
     }
 }
 
+// ---- Overflow-safe full-reduction Lp norm (F-036) ----
+// l2_norm_squared_kernel/lp_norm_kernel above compute val*val / pow(|x|,p)
+// directly, which overflows FLT_MAX for Float32 inputs with |x| beyond
+// ~1.8e19 (the squared/powered term hits +inf even though the true norm is
+// finite). CPU (reduction.cpp's scaled_lp lambda) avoids this via a
+// running-max normalization: norm = max*(sum((|x|/max)^p))^(1/p) -- values
+// are scaled down by the largest magnitude *before* squaring/powering, so no
+// intermediate term can exceed 1 in magnitude. The kernels below add a first
+// pass that finds the global max(|x|) (grid-stride + block/warp reduce,
+// mirroring max_reduce_kernel's structure), then "scaled" variants of the
+// squared/pow accumulation and the final combine kernels that divide by that
+// max before accumulating and multiply back by it afterward. Everything
+// stays on-stream/async: the max is read from device memory by later kernels
+// rather than being copied back to the host.
+
+// Phase 1: per-block max(|x|). Abs values are never negative, so seeding
+// out-of-range threads with 0 is a safe identity, and combining the
+// per-block partials with the existing (unscaled) max_reduce_kernel gives
+// exactly the global max(|x|).
+template<typename T>
+__global__ void abs_max_reduce_kernel(const T* input, T* output, int64_t n) {
+    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    T thread_max = T(0);
+    for (int64_t i = idx; i < n; i += grid_size) {
+        T a = abs(input[i]);
+        thread_max = cuda_max_val(a, thread_max);
+    }
+
+    shared[tid] = thread_max;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = cuda_max_val(shared[tid], shared[tid + stride]);
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+
+    if (tid < WARP_SIZE) {
+        T val = shared[tid];
+        val = warp_reduce_max(val);
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// Phase 2 (p==2): per-block sum((|x|/max)^2). `max_val_ptr` is produced by
+// abs_max_reduce_kernel + max_reduce_kernel above, already resident on device.
+template<typename T>
+__global__ void l2_norm_squared_scaled_kernel(const T* input, T* output, int64_t n,
+                                              const T* max_val_ptr) {
+    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    T max_val = *max_val_ptr;
+    T inv_max = (max_val > T(0)) ? (T(1) / max_val) : T(0);
+
+    T thread_sum = T(0);
+    for (int64_t i = idx; i < n; i += grid_size) {
+        T r = abs(input[i]) * inv_max;
+        thread_sum += r * r;
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+
+    if (tid < WARP_SIZE) {
+        T val = shared[tid];
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+            val += __shfl_down_sync(0xffffffff, val, offset);
+        }
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// Phase 2 (general p): per-block sum((|x|/max)^p).
+template<typename T>
+__global__ void lp_norm_scaled_kernel(const T* input, T* output, int64_t n, float p,
+                                      const T* max_val_ptr) {
+    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    T max_val = *max_val_ptr;
+    T inv_max = (max_val > T(0)) ? (T(1) / max_val) : T(0);
+
+    T thread_sum = T(0);
+    for (int64_t i = idx; i < n; i += grid_size) {
+        T r = abs(input[i]) * inv_max;
+        thread_sum += pow(r, static_cast<T>(p));
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+
+    if (tid < WARP_SIZE) {
+        T val = shared[tid];
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+            val += __shfl_down_sync(0xffffffff, val, offset);
+        }
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// Final combine for the scaled L2 path: reduces the per-block normalized
+// partial sums, takes sqrt, and scales back up by max_val -- norm =
+// max*sqrt(sum((|x|/max)^2)).
+template<typename T>
+__global__ void sum_reduce_sqrt_scaled_kernel(const T* input, T* output, int64_t n,
+                                              const T* max_val_ptr) {
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc shared[REDUCTION_BLOCK_SIZE];
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    Acc thread_sum = Acc(0);
+    for (int64_t i = idx; i < n; i += grid_size) {
+        thread_sum = thread_sum + Acc(input[i]);
+    }
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] + shared[tid + stride];
+        __syncthreads();
+    }
+    __syncthreads();
+    if (tid < WARP_SIZE) {
+        Acc val = shared[tid];
+        val = warp_reduce_sum(val);
+        if (tid == 0) output[blockIdx.x] = T(Acc(*max_val_ptr) * sqrt(val));
+    }
+}
+
+// Final combine for the scaled general-p path: norm =
+// max*(sum((|x|/max)^p))^(1/p).
+template<typename T>
+__global__ void sum_reduce_pow_scaled_kernel(const T* input, T* output, int64_t n,
+                                             T exponent, const T* max_val_ptr) {
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc shared[REDUCTION_BLOCK_SIZE];
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    Acc thread_sum = Acc(0);
+    for (int64_t i = idx; i < n; i += grid_size) {
+        thread_sum = thread_sum + Acc(input[i]);
+    }
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) shared[tid] = shared[tid] + shared[tid + stride];
+        __syncthreads();
+    }
+    __syncthreads();
+    if (tid < WARP_SIZE) {
+        Acc val = shared[tid];
+        val = warp_reduce_sum(val);
+        if (tid == 0) output[blockIdx.x] = T(Acc(*max_val_ptr) * pow(val, Acc(exponent)));
+    }
+}
+
+// Two-pass full-reduction Lp norm (p==2 or general p) with the
+// overflow-avoiding max-normalization described above: phase 1 finds the
+// global max(|x|), phase 2 accumulates (|x|/max)^p per block, and the final
+// kernel combines the per-block partials and scales back by max.
+template<typename T>
+static void launch_full_reduction_norm_scaled(const T* d_input, T* d_output,
+                                              int64_t n, float p,
+                                              cudaStream_t stream) {
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    backend::CachedMemoryGuard d_max_partial_guard(num_blocks * sizeof(T));
+    auto* d_max_partial = static_cast<T*>(d_max_partial_guard.get());
+    abs_max_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_max_partial, n);
+    CUDA_CHECK(cudaGetLastError());
+
+    backend::CachedMemoryGuard d_max_guard(sizeof(T));
+    auto* d_max = static_cast<T*>(d_max_guard.get());
+    max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_max_partial, d_max, num_blocks);
+    CUDA_CHECK(cudaGetLastError());
+
+    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
+    auto* d_temp = static_cast<T*>(d_temp_guard.get());
+    if (p == 2.0f) {
+        l2_norm_squared_scaled_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n, d_max);
+        CUDA_CHECK(cudaGetLastError());
+        sum_reduce_sqrt_scaled_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks, d_max);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        lp_norm_scaled_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n, p, d_max);
+        CUDA_CHECK(cudaGetLastError());
+        sum_reduce_pow_scaled_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+            d_temp, d_output, num_blocks, static_cast<T>(1.0 / p), d_max);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
 // Per-dimension norm reduction kernel (follows sum_along_dim_kernel pattern)
 template<typename T>
 __global__ void norm_along_dim_kernel(
@@ -4745,29 +5175,68 @@ __global__ void norm_along_dim_kernel(
         }
         output[out_idx] = T(acc);
     } else if (p == 2.0f) {
-        // L2 norm: sqrt(sum of x^2)
+        // L2 norm: max-normalize before squaring so extreme magnitudes cannot
+        // overflow Acc to +inf (mirrors CPU's norm_kernel_dim scaled_lp:
+        // norm = max*(sum((|x|/max)^2))^(1/2), reduction.cpp F-036). A single
+        // thread already owns this whole slice sequentially (no cross-thread
+        // reduction needed), so the two passes are just two loops.
+        Acc slice_max = Acc(0);
         for (int64_t i = 0; i < dim_size; i++) {
             indices[dim] = i;
             int64_t in_idx = 0;
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * meta.strides[d];
             }
-            Acc val = Acc(input[in_idx]);
-            acc = acc + val * val;
+            Acc av = Acc(input[in_idx]);
+            Acc a = av < Acc(0) ? -av : av;
+            if (a > slice_max) slice_max = a;
         }
-        output[out_idx] = T(sqrt(acc));
+        if (slice_max > Acc(0)) {
+            Acc inv_max = Acc(1) / slice_max;
+            for (int64_t i = 0; i < dim_size; i++) {
+                indices[dim] = i;
+                int64_t in_idx = 0;
+                for (int64_t d = 0; d < ndim; d++) {
+                    in_idx += indices[d] * meta.strides[d];
+                }
+                Acc r = Acc(input[in_idx]) * inv_max;
+                acc = acc + r * r;
+            }
+            output[out_idx] = T(slice_max * sqrt(acc));
+        } else {
+            output[out_idx] = T(0);
+        }
     } else {
-        // General Lp norm: (sum of |x|^p)^(1/p)
+        // General Lp norm: same max-normalization as above, for arbitrary p
+        // (norm = max*(sum((|x|/max)^p))^(1/p)).
+        Acc slice_max = Acc(0);
         for (int64_t i = 0; i < dim_size; i++) {
             indices[dim] = i;
             int64_t in_idx = 0;
             for (int64_t d = 0; d < ndim; d++) {
                 in_idx += indices[d] * meta.strides[d];
             }
-            Acc val = Acc(input[in_idx]);
-            acc = acc + pow(val < Acc(0) ? -val : val, Acc(p));
+            Acc av = Acc(input[in_idx]);
+            Acc a = av < Acc(0) ? -av : av;
+            if (a > slice_max) slice_max = a;
         }
-        output[out_idx] = T(pow(acc, Acc(1.0f / p)));
+        if (slice_max > Acc(0)) {
+            Acc inv_max = Acc(1) / slice_max;
+            for (int64_t i = 0; i < dim_size; i++) {
+                indices[dim] = i;
+                int64_t in_idx = 0;
+                for (int64_t d = 0; d < ndim; d++) {
+                    in_idx += indices[d] * meta.strides[d];
+                }
+                Acc av = Acc(input[in_idx]);
+                Acc a = av < Acc(0) ? -av : av;
+                Acc r = a * inv_max;
+                acc = acc + pow(r, Acc(p));
+            }
+            output[out_idx] = T(slice_max * pow(acc, Acc(1.0f / p)));
+        } else {
+            output[out_idx] = T(0);
+        }
     }
     }
 }
@@ -4886,41 +5355,11 @@ auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, cu
                     sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
                     CUDA_CHECK(cudaGetLastError());
                 }
-            } else if (p == 2.0f) {
-                // L2 norm — fused sqrt into final reduction
-                if (num_blocks == 1) {
-                    // Single block: reduce and sqrt in one kernel
-                    backend::CachedMemoryGuard d_temp_guard(sizeof(float));
-                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
-                    l2_norm_squared_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1);
-                    CUDA_CHECK(cudaGetLastError());
-                } else {
-                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
-                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
-                    l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
-                    CUDA_CHECK(cudaGetLastError());
-                }
             } else {
-                // General Lp norm — fused pow into final reduction
-                if (num_blocks == 1) {
-                    backend::CachedMemoryGuard d_temp_guard(sizeof(float));
-                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
-                    lp_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1, 1.0f / p);
-                    CUDA_CHECK(cudaGetLastError());
-                } else {
-                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
-                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
-                    lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks, 1.0f / p);
-                    CUDA_CHECK(cudaGetLastError());
-                }
+                // L2 (p==2) and general Lp norm: two-pass max-normalized
+                // reduction so squaring/powering extreme magnitudes cannot
+                // overflow Float32 (F-036) -- see launch_full_reduction_norm_scaled.
+                launch_full_reduction_norm_scaled(input_data, output_data, n, p, stream);
             }
 
 #ifndef NDEBUG
@@ -4945,40 +5384,14 @@ auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, cu
                     sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
                     CUDA_CHECK(cudaGetLastError());
                 }
-            } else if (p == 2.0f) {
-                // L2 norm — fused sqrt into final reduction
-                if (num_blocks == 1) {
-                    backend::CachedMemoryGuard d_temp_guard(sizeof(double));
-                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
-                    l2_norm_squared_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1);
-                    CUDA_CHECK(cudaGetLastError());
-                } else {
-                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
-                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
-                    l2_norm_squared_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_sqrt_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
-                    CUDA_CHECK(cudaGetLastError());
-                }
             } else {
-                // General Lp norm — fused pow into final reduction
-                if (num_blocks == 1) {
-                    backend::CachedMemoryGuard d_temp_guard(sizeof(double));
-                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
-                    lp_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, 1, static_cast<double>(1.0 / p));
-                    CUDA_CHECK(cudaGetLastError());
-                } else {
-                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
-                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
-                    lp_norm_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n, p);
-                    CUDA_CHECK(cudaGetLastError());
-                    sum_reduce_pow_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks, static_cast<double>(1.0 / p));
-                    CUDA_CHECK(cudaGetLastError());
-                }
+                // L2 (p==2) and general Lp norm: two-pass max-normalized
+                // reduction so squaring/powering extreme magnitudes cannot
+                // overflow (F-036) -- see launch_full_reduction_norm_scaled.
+                // Float64's own range is wide enough that overflow needs even
+                // more extreme magnitudes than Float32, but the same scaling
+                // keeps both dtypes on an identical code path as CPU does.
+                launch_full_reduction_norm_scaled(input_data, output_data, n, p, stream);
             }
 
 #ifndef NDEBUG
@@ -5293,7 +5706,7 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStrea
     // Normalize and validate dim, mirroring the CPU argsort contract.
     if (dim < 0) dim += ndim;
     if (ndim == 0 || dim < 0 || dim >= ndim) {
-        throw std::out_of_range("argsort: dimension out of range");
+        throw std::invalid_argument("argsort: dimension out of range");
     }
 
     // CUB radix sort consumes a contiguous buffer; the gather/scatter offsets
@@ -5866,7 +6279,19 @@ static void launch_dim_reduction_any(
         if (i != dim) output_size *= input_shape[i];
     }
 
-    if (output_size == 0 || dim_size == 0) return;
+    if (output_size == 0) return;
+    if (dim_size == 0) {
+        // any()'s identity is false: CPU's any_kernel leaves `found` at its
+        // initial value false when dim_size==0, so every one of the
+        // output_size (real, non-empty) output elements must get that same
+        // identity explicitly instead of being left as stale/uninitialized
+        // device memory (F-031).
+        constexpr int fill_block = 256;
+        const int fill_grid = static_cast<int>((output_size + fill_block - 1) / fill_block);
+        fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(d_output, output_size, uint8_t(0));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
@@ -5894,7 +6319,19 @@ static void launch_dim_reduction_all(
         if (i != dim) output_size *= input_shape[i];
     }
 
-    if (output_size == 0 || dim_size == 0) return;
+    if (output_size == 0) return;
+    if (dim_size == 0) {
+        // all()'s identity is true: CPU's all_kernel leaves `result` at its
+        // initial value true when dim_size==0, so every one of the
+        // output_size (real, non-empty) output elements must get that same
+        // identity explicitly instead of being left as stale/uninitialized
+        // device memory (F-031).
+        constexpr int fill_block = 256;
+        const int fill_grid = static_cast<int>((output_size + fill_block - 1) / fill_block);
+        fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(d_output, output_size, uint8_t(1));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
@@ -5924,7 +6361,7 @@ auto any_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
     if (dim != INT64_MIN) {
         if (dim < 0) normalized_dim = ndim + dim;
         if (normalized_dim < 0 || normalized_dim >= ndim) {
-            throw std::runtime_error("Dimension " + std::to_string(dim) +
+            throw std::invalid_argument("Dimension " + std::to_string(dim) +
                 " out of range for tensor with " + std::to_string(ndim) + " dimensions");
         }
     }

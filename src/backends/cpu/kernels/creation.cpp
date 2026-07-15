@@ -237,8 +237,40 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
         // Audit J14: widen to Float32, generate normals, then narrow.
         Tensor tmp = randn_kernel(shape, DType::Float32, device);
         return tmp.to(dtype);
+
+    } else if (dtype == DType::Complex64) {
+        // Standard complex normal: total variance 1 => variance 1/2 per real
+        // and imaginary component (std = sqrt(0.5)), matching torch.randn for
+        // complex dtypes. Filling each component with N(0,1) would give
+        // E[|z|^2] = 2 (a factor-sqrt(2) too large in magnitude). Real and
+        // imaginary parts draw from disjoint Philox counter slots (2*i, 2*i+1)
+        // so they're independent and the stream stays reproducible/thread-safe.
+        std::complex<float>* data = result.data<std::complex<float>>();
+        uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+        constexpr float kStd = 0.7071067811865476f;  // sqrt(0.5)
+
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            float re = kStd * philox::philox_normal_f32(seed, 2 * i);
+            float im = kStd * philox::philox_normal_f32(seed, 2 * i + 1);
+            data[i] = {re, im};
+        }
+
+    } else if (dtype == DType::Complex128) {
+        std::complex<double>* data = result.data<std::complex<double>>();
+        uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+        constexpr double kStd = 0.70710678118654752440;  // sqrt(0.5)
+
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            double re = kStd * philox::philox_normal_f64(seed, 2 * i);
+            double im = kStd * philox::philox_normal_f64(seed, 2 * i + 1);
+            data[i] = {re, im};
+        }
+
     } else {
-        throw std::runtime_error("randn operation supports Float32/Float64/Float16/BFloat16");
+        throw std::runtime_error(
+            "randn operation supports Float32/Float64/Float16/BFloat16/Complex64/Complex128");
     }
 
     return result;
@@ -605,6 +637,18 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, const
             break;
         case DType::Int64:
             fill(result.data<int64_t>(), [](double v) { return static_cast<int64_t>(v); });
+            break;
+        case DType::UInt8:
+            fill(result.data<uint8_t>(), [](double v) { return static_cast<uint8_t>(v); });
+            break;
+        case DType::UInt16:
+            fill(result.data<uint16_t>(), [](double v) { return static_cast<uint16_t>(v); });
+            break;
+        case DType::UInt32:
+            fill(result.data<uint32_t>(), [](double v) { return static_cast<uint32_t>(v); });
+            break;
+        case DType::UInt64:
+            fill(result.data<uint64_t>(), [](double v) { return static_cast<uint64_t>(v); });
             break;
         case DType::Complex64:
             fill(result.data<std::complex<float>>(),

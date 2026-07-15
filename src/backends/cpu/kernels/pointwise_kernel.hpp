@@ -23,6 +23,7 @@
 
 #include "simd_traits.hpp"
 
+namespace tenzor::cpu {
 
 // ============================================================================
 // binary_pointwise_kernel — the main entry point

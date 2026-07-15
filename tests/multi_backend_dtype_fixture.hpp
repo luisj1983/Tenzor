@@ -30,11 +30,16 @@
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/core/dtype.hpp>
 
-// audit-2026-05-03 — disable TF32 BEFORE any matmul thread-local flag
+// audit-2026-05-03 — disable TF32 BEFORE any matmul process-global flag
 // initialises. Static initialiser at file scope runs before main(), which
 // is before any test runs, which is before the first cuBLAS call. This
 // closes the LSTMCell-on-Cuda-Float32 gradcheck failures (the cuBLAS TF32
-// default silently drops ~13 mantissa bits, breaking the 5e-3 tolerance).
+// path silently drops ~13 mantissa bits, breaking the 5e-3 tolerance).
+// F-108 update: tenzor::cuda::matmul::allow_tf32() now defaults to disabled
+// out of the box (TENZOR_ENABLE_TF32=1 opts back in), so this setenv is a
+// no-op in the common case; kept for backward compatibility with the old
+// opt-out variable and as explicit, discoverable documentation of the
+// requirement at the point every multi-backend dtype test includes.
 namespace tenzor::testing::detail {
 inline const int _disable_tf32_init = []() {
     ::setenv("TENZOR_DISABLE_TF32", "1", /*overwrite=*/0);

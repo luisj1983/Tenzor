@@ -812,7 +812,7 @@ static auto normalize_dim(int64_t dim, int64_t ndim) -> int64_t {
     }
     // Validate dimension is within bounds
     if (dim < 0 || dim >= ndim) {
-        throw std::runtime_error("Dimension " + std::to_string(dim) +
+        throw std::invalid_argument("Dimension " + std::to_string(dim) +
             " out of range for tensor with " + std::to_string(ndim) + " dimensions");
     }
     return dim;
@@ -1419,6 +1419,28 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         count = input.numel();
     } else {
         count = input.shape()[dim];
+    }
+
+    // Mean of zero elements is mathematically 0/0 -- produce NaN explicitly
+    // and deterministically as a documented choice, rather than relying on
+    // scale = 1/count overflowing to +inf and an (assumed-zero) sum_result
+    // collapsing 0 * inf to NaN by accident. Matches CUDA's mean_kernel.
+    if (count == 0) {
+        const int64_t n = sum_result.numel();
+        if (dtype == DType::Float16) {
+            auto* data = sum_result.data<Float16>();
+            for (int64_t i = 0; i < n; i++) data[i] = Float16(std::numeric_limits<float>::quiet_NaN());
+        } else if (dtype == DType::BFloat16) {
+            auto* data = sum_result.data<BFloat16>();
+            for (int64_t i = 0; i < n; i++) data[i] = BFloat16(std::numeric_limits<float>::quiet_NaN());
+        } else if (dtype == DType::Float32) {
+            auto* data = sum_result.data<float>();
+            for (int64_t i = 0; i < n; i++) data[i] = std::numeric_limits<float>::quiet_NaN();
+        } else {  // Float64
+            auto* data = sum_result.data<double>();
+            for (int64_t i = 0; i < n; i++) data[i] = std::numeric_limits<double>::quiet_NaN();
+        }
+        return sum_result;
     }
 
     // Divide sum by count

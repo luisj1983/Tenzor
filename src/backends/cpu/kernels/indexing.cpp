@@ -210,24 +210,40 @@ void nonzero_impl(const T* data, int64_t numel, std::vector<int64_t>& nz_indices
 
 } // namespace detail
 
+// F-055: widen an Int32 index tensor to Int64 so these backend kernels accept
+// either dtype directly, matching CUDA's index_select/gather/scatter/
+// scatter_add kernels (indexing.cu), which already accept Int32 OR Int64. The
+// op-layer's validate_and_cast_index (src/ops/indexing.cpp) already performs
+// this cast before the normal dispatch path, but a caller reaching this kernel
+// directly (JIT graph replay, autograd reconstruction, fusion passes) must
+// see the same dtype support as CUDA rather than a CPU-only throw.
+static auto widen_index_to_int64(const Tensor& index, const char* op) -> Tensor {
+    if (index.dtype() == DType::Int64) {
+        return index;
+    }
+    if (index.dtype() == DType::Int32) {
+        return index.to(DType::Int64);
+    }
+    throw std::invalid_argument(
+        std::string(op) + ": index tensor must have dtype Int32 or Int64");
+}
+
 /**
  * @brief Select elements along a dimension using an index tensor
  * @param input Input tensor
  * @param dim Dimension to select along
- * @param index Index tensor (must be Int64)
+ * @param index_arg Index tensor (Int32 or Int64)
  * @return Tensor with selected elements
  */
-auto index_select_kernel(const Tensor& input_arg, int64_t dim, const Tensor& index) -> Tensor {
+auto index_select_kernel(const Tensor& input_arg, int64_t dim, const Tensor& index_arg) -> Tensor {
     // index_select_impl computes inner offsets as flat (contiguous) positions,
     // so a non-contiguous input (transposed/permuted view) would be read with
     // the wrong memory layout. Materialise contiguous first — gather/scatter do
     // the same. contiguous() is a shallow no-op when already contiguous.
     const Tensor input = input_arg.contiguous();
 
-    // Validate index tensor
-    if (index.dtype() != DType::Int64) {
-        throw std::invalid_argument("index_select: index tensor must have dtype Int64");
-    }
+    // Accept Int32 indices too (widened to Int64) for parity with CUDA.
+    const Tensor index = widen_index_to_int64(index_arg, "index_select");
 
     // Normalize dimension
     const int64_t ndim = input.ndim();
@@ -326,11 +342,9 @@ static auto calculate_strides(const std::vector<int64_t>& shape) -> std::vector<
 }
 
 // Gather operation - select values at specified indices along a dimension
-auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
-    // Validate index tensor dtype
-    if (index.dtype() != DType::Int64) {
-        throw std::invalid_argument("gather: index tensor must have dtype Int64");
-    }
+auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index_arg) -> Tensor {
+    // Accept Int32 indices too (widened to Int64) for parity with CUDA.
+    const Tensor index = widen_index_to_int64(index_arg, "gather");
 
     // Ensure input and index are contiguous - strides are computed from shape
     // so non-contiguous tensors (from transpose/slice) would produce wrong results
@@ -399,11 +413,9 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Ten
 }
 
 // Scatter operation - distribute values at specified indices along a dimension
-auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
-    // Validate index tensor dtype
-    if (index.dtype() != DType::Int64) {
-        throw std::invalid_argument("scatter: index tensor must have dtype Int64");
-    }
+auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index_arg, const Tensor& src) -> Tensor {
+    // Accept Int32 indices too (widened to Int64) for parity with CUDA.
+    const Tensor index = widen_index_to_int64(index_arg, "scatter");
 
     // Ensure tensors are contiguous - strides are computed from shape
     auto input_c = input.contiguous();
@@ -479,10 +491,9 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
 }
 
 // Scatter-add: accumulate source elements into output at indexed positions
-auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
-    if (index.dtype() != DType::Int64) {
-        throw std::invalid_argument("scatter_add: index tensor must have dtype Int64");
-    }
+auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index_arg, const Tensor& src) -> Tensor {
+    // Accept Int32 indices too (widened to Int64) for parity with CUDA.
+    const Tensor index = widen_index_to_int64(index_arg, "scatter_add");
 
     auto input_c = input.contiguous();
     auto index_c = index.contiguous();
@@ -958,6 +969,22 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, double value
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
         }
+    } else if (input.dtype() == DType::Int8) {
+        const int8_t* input_ptr = input.data<int8_t>();
+        int8_t* output_ptr = output.data<int8_t>();
+        const int8_t fill_value = static_cast<int8_t>(value);
+
+        for (int64_t i = 0; i < numel; ++i) {
+            output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
+        }
+    } else if (input.dtype() == DType::UInt8) {
+        const uint8_t* input_ptr = input.data<uint8_t>();
+        uint8_t* output_ptr = output.data<uint8_t>();
+        const uint8_t fill_value = static_cast<uint8_t>(value);
+
+        for (int64_t i = 0; i < numel; ++i) {
+            output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
+        }
     } else if (input.dtype() == DType::Float16) {
         const Float16* input_ptr = input.data<Float16>();
         Float16* output_ptr = output.data<Float16>();
@@ -1006,27 +1033,36 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, double value
 }
 
 // Where operation - select elements from x or y based on condition
-auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor {
-    auto cond_shape = condition.shape();
-    auto x_shape = x.shape();
-    auto y_shape = y.shape();
-
-    // Validate shapes match
-    if (!std::equal(cond_shape.begin(), cond_shape.end(), x_shape.begin(), x_shape.end()) ||
-        !std::equal(cond_shape.begin(), cond_shape.end(), y_shape.begin(), y_shape.end())) {
-        throw std::invalid_argument("where: condition, x, and y must have same shape");
-    }
-
+auto where_kernel(const Tensor& condition_orig, const Tensor& x_orig, const Tensor& y_orig) -> Tensor {
     // Validate x and y have same dtype
-    if (x.dtype() != y.dtype()) {
+    if (x_orig.dtype() != y_orig.dtype()) {
         throw std::invalid_argument("where: x and y must have same dtype");
     }
 
-    const int64_t numel = condition.numel();
+    // Broadcast condition, x, and y to a common shape. CUDA's where_kernel
+    // already broadcasts internally via broadcast_shapes/broadcast_to; this
+    // CPU kernel previously required identical shapes and threw otherwise,
+    // which stayed invisible only because tenzor::where() at the op layer
+    // pre-broadcasts all three operands before dispatch. Any future direct
+    // dispatch<OpId::Where> caller (JIT graph replay, autograd reconstruction,
+    // fusion passes) needs both backends' raw kernels to agree on the same
+    // broadcast contract, so make this kernel broadcast-aware too.
+    std::vector<int64_t> output_shape = tenzor::broadcast_shapes(
+        tenzor::broadcast_shapes(condition_orig.shape(), x_orig.shape()), y_orig.shape());
 
-    // Create output with same shape and dtype as x
-    std::vector<int64_t> shape_vec(x_shape.begin(), x_shape.end());
-    Tensor output(shape_vec, x.dtype(), x.device());
+    int64_t numel = 1;
+    for (auto s : output_shape) numel *= s;
+
+    // Create output with the broadcast shape and dtype as x
+    Tensor output(output_shape, x_orig.dtype(), x_orig.device());
+
+    if (numel == 0) return output;
+
+    // Broadcast + contiguify every operand so the flat 1:1 indexing below is
+    // valid (a broadcast view has zero/mismatched strides on expanded axes).
+    Tensor condition = tenzor::broadcast_to(condition_orig, output_shape).contiguous();
+    Tensor x = tenzor::broadcast_to(x_orig, output_shape).contiguous();
+    Tensor y = tenzor::broadcast_to(y_orig, output_shape).contiguous();
 
     // Support Bool dtype and any floating condition dtype (for CUDA
     // compatibility and Float64/Float16/BFloat16 conditions). Any non-zero
@@ -1253,11 +1289,21 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes) -> Tensor {
     return output;
 }
 
-auto take_kernel(const Tensor& input, const Tensor& indices) -> Tensor {
-    // Take elements from flattened input using indices
-    if (indices.dtype() != DType::Int64) {
-        throw std::runtime_error("take: indices must have dtype Int64");
+auto take_kernel(const Tensor& input, const Tensor& indices_orig) -> Tensor {
+    // Take elements from flattened input using indices.
+    // The op-layer's validate_flat_index() (src/ops/indexing.cpp) explicitly
+    // allows Int32 OR Int64 index tensors -- the same contract already
+    // honored by CUDA's take_kernel and by the dim-wise index_select/gather
+    // kernels. Widen Int32 to Int64 up front (mirrors validate_and_cast_index()
+    // used by gather/scatter/index_select) so the rest of this function can
+    // keep operating on a single int64_t* without duplicating the loop below
+    // per index dtype.
+    if (indices_orig.dtype() != DType::Int32 && indices_orig.dtype() != DType::Int64) {
+        throw std::runtime_error("take: indices must have dtype Int32 or Int64");
     }
+    Tensor indices = (indices_orig.dtype() == DType::Int32)
+        ? indices_orig.to(DType::Int64)
+        : indices_orig;
 
     const int64_t num_indices = indices.numel();
     const int64_t input_numel = input.numel();
@@ -1294,11 +1340,19 @@ auto take_kernel(const Tensor& input, const Tensor& indices) -> Tensor {
     return output;
 }
 
-auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
+auto put_kernel(Tensor& input, const Tensor& indices_orig, const Tensor& source,
                 bool accumulate) -> Tensor {
-    if (indices.dtype() != DType::Int64) {
-        throw std::runtime_error("put: indices must have dtype Int64");
+    // Same Int32/Int64 index-dtype contract as take_kernel above -- the
+    // op-layer's validate_flat_index() explicitly allows both, and CUDA's
+    // put_kernel already accepts Int32. Widen Int32 to Int64 up front rather
+    // than throwing, so both backends genuinely support the dtype range the
+    // op layer promises instead of contradicting it in this direction.
+    if (indices_orig.dtype() != DType::Int32 && indices_orig.dtype() != DType::Int64) {
+        throw std::runtime_error("put: indices must have dtype Int32 or Int64");
     }
+    Tensor indices = (indices_orig.dtype() == DType::Int32)
+        ? indices_orig.to(DType::Int64)
+        : indices_orig;
 
     const int64_t num_indices = indices.numel();
     const int64_t input_numel = input.numel();
@@ -1352,15 +1406,69 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
             if (idx < 0) idx += input_numel;
             dst_d[idx] += src_d[i];
         }
+    } else if (accumulate && result.dtype() == DType::Int8) {
+        int8_t* dst_i8 = result.data<int8_t>();
+        const int8_t* src_i8 = source_c.data<int8_t>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            dst_i8[idx] += src_i8[i];
+        }
+    } else if (accumulate && result.dtype() == DType::UInt8) {
+        uint8_t* dst_u8 = result.data<uint8_t>();
+        const uint8_t* src_u8 = source_c.data<uint8_t>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            dst_u8[idx] += src_u8[i];
+        }
+    } else if (accumulate && result.dtype() == DType::Int32) {
+        int32_t* dst_i32 = result.data<int32_t>();
+        const int32_t* src_i32 = source_c.data<int32_t>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            dst_i32[idx] += src_i32[i];
+        }
+    } else if (accumulate && result.dtype() == DType::Int64) {
+        int64_t* dst_i64 = result.data<int64_t>();
+        const int64_t* src_i64 = source_c.data<int64_t>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            dst_i64[idx] += src_i64[i];
+        }
+    } else if (accumulate && (result.dtype() == DType::Float16 || result.dtype() == DType::BFloat16)) {
+        // F-056: Float16/BFloat16 accumulate in Float32 to avoid repeated-
+        // rounding precision loss when multiple indices collide on the same
+        // output element, then convert back — mirrors scatter_add_kernel's
+        // Float16/BFloat16 handling (this file, above) and matches CUDA's
+        // native-atomicAdd-with-CAS-fallback coverage for these dtypes.
+        // put_kernel is single-threaded (no OpenMP over the index list), so a
+        // plain serial accumulate is race-free without atomics.
+        DType orig_dtype = result.dtype();
+        Tensor result_f32 = result.to(DType::Float32);
+        Tensor source_f32 = source_c.to(DType::Float32);
+        float* dst_f32 = result_f32.data<float>();
+        const float* src_f32 = source_f32.data<float>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += input_numel;
+            dst_f32[idx] += src_f32[i];
+        }
+        result = result_f32.to(orig_dtype);
     } else if (accumulate) {
-        // F089: the accumulate=true fast paths above cover only Float32/Float64.
-        // Falling through to the plain memcpy here would SILENTLY OVERWRITE
-        // instead of accumulating for every other dtype (Int32/64, Float16,
-        // BFloat16, complex). Fail loudly rather than produce a wrong result.
+        // F089/F-056: accumulate=true is implemented for Float32/64, Int8/
+        // UInt8, Int32/64, and Float16/BFloat16 — matching CUDA's CAS-based
+        // put accumulate coverage in indexing.cu. Falling through to the plain
+        // memcpy below would SILENTLY OVERWRITE instead of accumulating for
+        // the remaining dtypes (Bool, Int16/UInt16/UInt32/UInt64, complex).
+        // Fail loudly rather than produce a wrong result.
         throw std::runtime_error(
-            "put(accumulate=true): accumulation is only implemented for "
-            "Float32/Float64 on CPU; got an unsupported dtype. Cast to a "
-            "supported dtype, or use accumulate=false to overwrite.");
+            "put(accumulate=true): accumulation is not implemented for this "
+            "dtype on CPU. Supported: Float32/64, Int8/UInt8, Int32/64, "
+            "Float16/BFloat16. Cast to a supported dtype, or use "
+            "accumulate=false to overwrite.");
     } else {
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
@@ -1486,6 +1594,14 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minleng
     }
 
     int64_t output_size = std::max(max_val + 1, minlength);
+
+    // Bound the output size derived from untrusted input data to avoid an
+    // unbounded allocation (OOM/DoS) driven by a single very large value.
+    // Matches CUDA's cap (src/backends/cuda/kernels/advanced.cu:3508).
+    constexpr int64_t kMaxBincountSize = static_cast<int64_t>(1) << 31;  // ~2.1B bins
+    if (output_size > kMaxBincountSize) {
+        throw std::runtime_error("bincount: output size exceeds supported limit");
+    }
 
     bool has_weights = (weights != nullptr);
     DType out_dtype = has_weights ? DType::Float64 : DType::Int64;

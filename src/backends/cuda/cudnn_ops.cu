@@ -588,14 +588,15 @@ auto cudnn_conv2d_forward(
     filter_desc.set(cudnn_dtype, out_channels, in_channels / groups, kernel_h, kernel_w);
     conv_desc.set(pad_h, pad_w, stride_h, stride_w, dil_h, dil_w, cudnn_dtype);
 
-    // Enable TF32 tensor cores for FP32 convolution, matching PyTorch's
-    // torch.backends.cudnn.allow_tf32 default (True). The descriptor wrapper
-    // only sets TENSOR_OP_MATH for FP16/BF16, leaving FP32 at DEFAULT_MATH —
-    // which runs FP32 conv WITHOUT tensor cores and is ~10-30% slower than
-    // PyTorch (worst on Winograd-friendly k3s1 shapes). Gated on allow_tf32()
-    // so TENZOR_DISABLE_TF32 still gets precise FP32 (consistent with the
-    // Winograd exclusion in the algo search below, which keys off the same
-    // flag). FindEx below then times the TF32 algorithms.
+    // Enable TF32 tensor cores for FP32 convolution when explicitly opted in
+    // via allow_tf32() (TENZOR_ENABLE_TF32=1 / set_allow_tf32(true)). PyTorch
+    // defaults torch.backends.cudnn.allow_tf32 to True; tenzor deliberately
+    // defaults allow_tf32() to False (F-108) for CPU<->CUDA numerical parity,
+    // so out of the box this leaves FP32 conv at DEFAULT_MATH (no tensor
+    // cores, ~10-30% slower than PyTorch's default, worst on Winograd-friendly
+    // k3s1 shapes) in exchange for exact FP32 matching CPU. Gated on the same
+    // flag as the Winograd exclusion in the algo search below. FindEx below
+    // then times the TF32 algorithms when the flag is on.
     if (cudnn_dtype == CUDNN_DATA_FLOAT && ::tenzor::cuda::matmul::allow_tf32()) {
         CUDNN_CHECK(cudnnSetConvolutionMathType(
             conv_desc.get(), CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));

@@ -10,6 +10,10 @@
 // suites, regardless of which order Google Test instantiates them in. A
 // direct call risks reinitialising backends in the middle of another
 // suite's run, and bypasses the TF32-disable defaults this helper applies.
+// (As of F-108, tenzor::cuda::matmul::allow_tf32() already defaults to
+// disabled process-wide, so the setenv below is now belt-and-suspenders
+// rather than load-bearing — kept for backward compatibility with the old
+// opt-out env var and as defense-in-depth documentation of the requirement.)
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -27,9 +31,13 @@ namespace testing {
 // EnsureInitialized: process-wide one-shot library bring-up for test fixtures.
 // ----------------------------------------------------------------------------
 // Thread-safe via std::call_once. Sets TENZOR_DISABLE_TF32=1 (only if the
-// caller has not already set it) so cuBLAS does not silently downgrade FP32
-// matmul to TF32 on Ampere+, which would blow through the parity tolerances
-// the test suite uses. Idempotent: subsequent calls are no-ops.
+// caller has not already set it) so cuBLAS does not downgrade FP32 matmul to
+// TF32 on Ampere+, which would blow through the parity tolerances the test
+// suite uses. Note (F-108): TF32 is disabled by default now regardless of
+// this env var — it's TENZOR_ENABLE_TF32=1 that opts back in — so this call
+// is a no-op in the common case; it's kept so any old script/CI config that
+// still sets TENZOR_DISABLE_TF32 continues to behave identically. Idempotent:
+// subsequent calls are no-ops.
 //
 // Call this from BackendTest::SetUp, any TestEnvironment::SetUp, or any
 // custom fixture's SetUp / SetUpTestSuite. Never call `tenzor::initialize()`
@@ -42,10 +50,11 @@ namespace testing {
 inline void EnsureInitialized() {
     static std::once_flag flag;
     std::call_once(flag, []() {
-        // Force IEEE 754 FP32 on CUDA matmul — cuBLAS defaults to TF32 on
-        // Ampere+, which silently drops ~13 mantissa bits and blows through
-        // the 1e-4/1e-5 tolerances most parity tests use. Respect the
-        // caller's explicit value if they set it themselves.
+        // Force IEEE 754 FP32 on CUDA matmul. Since F-108, tenzor's own
+        // default already disables TF32 (TENZOR_ENABLE_TF32=1 opts back in),
+        // so this is now redundant in the common case; kept for backward
+        // compatibility with the old opt-out variable. Respect the caller's
+        // explicit value if they set it themselves.
         setenv("TENZOR_DISABLE_TF32", "1", /*overwrite=*/0);
         tenzor::initialize();
     });
@@ -201,7 +210,8 @@ protected:
     void SetUp() override {
         // Bring up the Tenzor runtime exactly once per process. Test files
         // MUST NOT call tenzor::initialize() directly — the helper applies
-        // the TENZOR_DISABLE_TF32 default required by FP32 parity tests.
+        // the TF32-disabled default required by FP32 parity tests (F-108:
+        // this is now tenzor's own out-of-the-box default too).
         ::tenzor::testing::EnsureInitialized();
 
         // Deterministic RNG seed per test. Parity tests that use randn() would

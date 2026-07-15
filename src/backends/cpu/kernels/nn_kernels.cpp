@@ -799,6 +799,9 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
         return {input, Tensor()};
     }
 
+    // data<T>() ignores strides — operate on a contiguous copy (see clamp_kernel).
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+
     auto output = Tensor::empty_uninitialized(
         std::vector<int64_t>(input.shape().begin(), input.shape().end()),
         input.dtype(), input.device());
@@ -857,13 +860,13 @@ auto dropout_kernel(const Tensor& input, float p, bool training)
     };
 
     if (input.dtype() == DType::Float32) {
-        apply_dropout_float(input.data<float>(), output.data<float>());
+        apply_dropout_float(input_c.data<float>(), output.data<float>());
     } else if (input.dtype() == DType::Float64) {
-        apply_dropout_float(input.data<double>(), output.data<double>());
+        apply_dropout_float(input_c.data<double>(), output.data<double>());
     } else if (input.dtype() == DType::Float16) {
-        apply_dropout_half(input.data<Float16>(), output.data<Float16>());
+        apply_dropout_half(input_c.data<Float16>(), output.data<Float16>());
     } else if (input.dtype() == DType::BFloat16) {
-        apply_dropout_half(input.data<BFloat16>(), output.data<BFloat16>());
+        apply_dropout_half(input_c.data<BFloat16>(), output.data<BFloat16>());
     } else {
         throw std::runtime_error("dropout: unsupported dtype");
     }
@@ -876,15 +879,19 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
         return grad_output;
     }
 
+    // data<T>() ignores strides — operate on contiguous copies (see clamp_kernel).
+    Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    Tensor mask_c = mask.is_contiguous() ? mask : mask.contiguous();
+
     auto grad_input = Tensor::empty_uninitialized(
         std::vector<int64_t>(grad_output.shape().begin(), grad_output.shape().end()),
         grad_output.dtype(), grad_output.device());
 
-    int64_t n = grad_output.numel();
-    const float* mask_data = mask.data<float>();
+    int64_t n = grad_output_c.numel();
+    const float* mask_data = mask_c.data<float>();
 
     if (grad_output.dtype() == DType::Float32) {
-        const float* grad_data = grad_output.data<float>();
+        const float* grad_data = grad_output_c.data<float>();
         float* grad_in_data = grad_input.data<float>();
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
@@ -896,21 +903,21 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
         // backward is a bit-exact derivative of the double-precision forward.
         // The mask carries the keep/drop indicator (0 == dropped).
         const double scale_d = 1.0 / (1.0 - static_cast<double>(p));
-        const double* grad_data = grad_output.data<double>();
+        const double* grad_data = grad_output_c.data<double>();
         double* grad_in_data = grad_input.data<double>();
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = (mask_data[i] != 0.0f) ? grad_data[i] * scale_d : 0.0;
         }
     } else if (grad_output.dtype() == DType::Float16) {
-        const Float16* grad_data = grad_output.data<Float16>();
+        const Float16* grad_data = grad_output_c.data<Float16>();
         Float16* grad_in_data = grad_input.data<Float16>();
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = Float16(static_cast<float>(grad_data[i]) * mask_data[i]);
         }
     } else if (grad_output.dtype() == DType::BFloat16) {
-        const BFloat16* grad_data = grad_output.data<BFloat16>();
+        const BFloat16* grad_data = grad_output_c.data<BFloat16>();
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
         for (int64_t i = 0; i < n; ++i) {
@@ -928,6 +935,11 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t paddi
     // indices: [*] (any shape of int64 indices)
     // output: [*, embedding_dim]
 
+    // data<T>() ignores strides — operate on a contiguous copy of the weight
+    // table (see clamp_kernel); a tied/sliced embedding table can be
+    // non-contiguous.
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+
     auto w_shape = weight.shape();
     auto idx_shape = indices.shape();
 
@@ -940,8 +952,10 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t paddi
 
     int64_t num_indices = indices.numel();
     // Accept Int32 or Int64 index tensors (the CUDA kernel supports both);
-    // normalize to Int64 so the lookup path is uniform.
-    Tensor indices_i64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+    // normalize to Int64 so the lookup path is uniform, then contiguify — a
+    // transposed/sliced index view must not be read via flat offsets.
+    Tensor indices_i64_raw = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+    Tensor indices_i64 = indices_i64_raw.is_contiguous() ? indices_i64_raw : indices_i64_raw.contiguous();
     const int64_t* idx_data = indices_i64.data<int64_t>();
 
     int64_t num_embeddings = w_shape[0];
@@ -977,13 +991,13 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t paddi
     };
 
     if (weight.dtype() == DType::Float32) {
-        do_embedding(weight.data<float>(), output.data<float>());
+        do_embedding(weight_c.data<float>(), output.data<float>());
     } else if (weight.dtype() == DType::Float64) {
-        do_embedding(weight.data<double>(), output.data<double>());
+        do_embedding(weight_c.data<double>(), output.data<double>());
     } else if (weight.dtype() == DType::Float16) {
-        do_embedding(weight.data<Float16>(), output.data<Float16>());
+        do_embedding(weight_c.data<Float16>(), output.data<Float16>());
     } else if (weight.dtype() == DType::BFloat16) {
-        do_embedding(weight.data<BFloat16>(), output.data<BFloat16>());
+        do_embedding(weight_c.data<BFloat16>(), output.data<BFloat16>());
     } else {
         throw std::runtime_error("embedding: unsupported dtype");
     }
@@ -993,14 +1007,20 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t paddi
 
 auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                 int64_t num_embeddings) -> Tensor {
+    // data<T>() ignores strides — operate on contiguous copies (see
+    // clamp_kernel); a transposed/sliced grad_output or index view must not
+    // be read via flat offsets.
+    Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    Tensor indices_c = indices.is_contiguous() ? indices : indices.contiguous();
+
     auto grad_shape = grad_output.shape();
     int64_t embedding_dim = grad_shape[grad_shape.size() - 1];
 
     auto grad_weight = zeros({num_embeddings, embedding_dim},
                              grad_output.dtype(), grad_output.device());
 
-    int64_t num_indices = indices.numel();
-    const int64_t* idx_data = indices.data<int64_t>();
+    int64_t num_indices = indices_c.numel();
+    const int64_t* idx_data = indices_c.data<int64_t>();
 
     // Validate all indices before accumulation (bounds check)
     for (int64_t i = 0; i < num_indices; ++i) {
@@ -1015,7 +1035,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     // Note: gradient accumulation is single-threaded to avoid races on duplicate indices.
     // If parallelism is needed, use per-thread buffers or atomic operations.
     if (grad_output.dtype() == DType::Float32) {
-        const float* grad_data = grad_output.data<float>();
+        const float* grad_data = grad_output_c.data<float>();
         float* grad_w_data = grad_weight.data<float>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
@@ -1025,7 +1045,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             }
         }
     } else if (grad_output.dtype() == DType::Float64) {
-        const double* grad_data = grad_output.data<double>();
+        const double* grad_data = grad_output_c.data<double>();
         double* grad_w_data = grad_weight.data<double>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
@@ -1035,7 +1055,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             }
         }
     } else if (grad_output.dtype() == DType::Float16) {
-        const Float16* grad_data = grad_output.data<Float16>();
+        const Float16* grad_data = grad_output_c.data<Float16>();
         Float16* grad_w_data = grad_weight.data<Float16>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
@@ -1047,7 +1067,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             }
         }
     } else if (grad_output.dtype() == DType::BFloat16) {
-        const BFloat16* grad_data = grad_output.data<BFloat16>();
+        const BFloat16* grad_data = grad_output_c.data<BFloat16>();
         BFloat16* grad_w_data = grad_weight.data<BFloat16>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
@@ -1071,8 +1091,13 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 // attrs: Mode ("sum"/"mean"/"max"), EmbeddingDim, IncludeLastOffset
 auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
                                    const OpAttributes& attrs) -> std::vector<Tensor> {
-    const auto& embeddings = inputs[0];
-    const auto& offsets = inputs[1];
+    // data<T>() ignores strides — operate on contiguous copies (see
+    // clamp_kernel); a transposed/sliced embeddings buffer or offsets view
+    // must not be read via flat offsets.
+    Tensor embeddings_c = inputs[0].is_contiguous() ? inputs[0] : inputs[0].contiguous();
+    Tensor offsets_c = inputs[1].is_contiguous() ? inputs[1] : inputs[1].contiguous();
+    const Tensor& embeddings = embeddings_c;
+    const Tensor& offsets = offsets_c;
 
     int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
     std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
@@ -1228,10 +1253,17 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
             std::string(dtype_name(indices.dtype())));
     }
 
+    // data<T>() ignores strides — operate on contiguous copies (see
+    // clamp_kernel); a transposed/sliced grad_output, indices, or offsets
+    // view must not be read via flat offsets.
+    Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    Tensor indices_c = indices.is_contiguous() ? indices : indices.contiguous();
+    Tensor offsets_c = offsets.is_contiguous() ? offsets : offsets.contiguous();
+
     int64_t total_elements = indices.numel();
     int64_t num_bags = offsets.numel();
-    const int64_t* offsets_ptr = offsets.data<int64_t>();
-    const int64_t* indices_ptr = indices.data<int64_t>();
+    const int64_t* offsets_ptr = offsets_c.data<int64_t>();
+    const int64_t* indices_ptr = indices_c.data<int64_t>();
 
     if (include_last_offset && num_bags > 0) {
         num_bags -= 1;
@@ -1268,7 +1300,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
             grad_output.dtype() == DType::BFloat16) {
             auto go_f32 = grad_output.to(DType::Float32);
             auto result = embedding_bag_backward_kernel(
-                go_f32, indices, offsets, max_indices, attrs);
+                go_f32, indices_c, offsets_c, max_indices, attrs);
             return result.to(grad_output.dtype());
         }
         if (!max_indices.is_valid() || max_indices.numel() == 0) {
@@ -1280,7 +1312,8 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
             throw std::runtime_error(
                 "embedding_bag_backward: max_indices must be Int64");
         }
-        const int64_t* argmax_ptr = max_indices.data<int64_t>();
+        Tensor max_indices_c = max_indices.is_contiguous() ? max_indices : max_indices.contiguous();
+        const int64_t* argmax_ptr = max_indices_c.data<int64_t>();
         auto grad_weight = zeros({num_embeddings, embedding_dim},
                                  grad_output.dtype(), grad_output.device());
 
@@ -1304,9 +1337,9 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
             }
         };
         if (grad_output.dtype() == DType::Float32) {
-            scatter_max(grad_weight.data<float>(), grad_output.data<float>());
+            scatter_max(grad_weight.data<float>(), grad_output_c.data<float>());
         } else if (grad_output.dtype() == DType::Float64) {
-            scatter_max(grad_weight.data<double>(), grad_output.data<double>());
+            scatter_max(grad_weight.data<double>(), grad_output_c.data<double>());
         } else {
             throw std::runtime_error(
                 "embedding_bag_backward: unsupported grad_output dtype " +
@@ -1351,9 +1384,9 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
         };
 
         if (grad_output.dtype() == DType::Float32) {
-            scatter_add(grad_weight.data<float>(), grad_output.data<float>());
+            scatter_add(grad_weight.data<float>(), grad_output_c.data<float>());
         } else {
-            scatter_add(grad_weight.data<double>(), grad_output.data<double>());
+            scatter_add(grad_weight.data<double>(), grad_output_c.data<double>());
         }
 
         return grad_weight;
@@ -1361,7 +1394,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
                grad_output.dtype() == DType::BFloat16) {
         // Float16/BFloat16: upcast to Float32 (indices stays Int64)
         auto go_f32 = grad_output.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, max_indices, attrs);
+        auto result = embedding_bag_backward_kernel(go_f32, indices_c, offsets_c, max_indices, attrs);
         return result.to(grad_output.dtype());
     } else {
         throw std::runtime_error(

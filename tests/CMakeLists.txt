@@ -448,7 +448,6 @@ add_executable(tenzor_backend_param_tests
     unit/test_linear.cpp
     unit/test_losses.cpp
     unit/test_optimizers.cpp
-    unit/test_simd.cpp
 )
 target_link_libraries(tenzor_backend_param_tests PRIVATE
     tenzor_core
@@ -1011,9 +1010,9 @@ endif()
 # Benchmark executables
 # ============================================================================
 
-# Benchmark suite
-add_executable(benchmark_suite benchmarks/benchmark_suite.cpp)
-target_link_libraries(benchmark_suite PRIVATE tenzor_core tenzor_backend_cpu)
+# benchmark_suite (benchmarks/benchmark_suite.cpp) removed: it exclusively
+# exercised the dead cpu::simd::/cpu::scalar:: wrapper API deleted under
+# F-029 (math_simd.cpp/activations_simd.cpp no longer define it).
 
 # Cross-backend benchmark suite
 add_executable(benchmark_backends benchmarks/benchmark_backends.cpp)

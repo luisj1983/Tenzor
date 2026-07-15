@@ -316,9 +316,13 @@ __global__ void grid_sample_nearest_kernel(
 // Affine grid kernel
 // ============================================================================
 
+// E.1/M8 follow-up: templated on T so a Float64 theta can compute natively in
+// double instead of always narrowing to float32 first (mirrors
+// affine_grid_backward_kernel<T> below, which already does this).
+template <typename T>
 __global__ void affine_grid_kernel(
-    const float* __restrict__ theta,
-    float* __restrict__ grid,
+    const T* __restrict__ theta,
+    T* __restrict__ grid,
     int64_t N, int64_t H, int64_t W, bool align_corners
 ) {
     int64_t total = N * H * W;
@@ -330,18 +334,18 @@ __global__ void affine_grid_kernel(
     int64_t h = (idx / W) % H;
     int64_t n = idx / (H * W);
 
-    float x_norm, y_norm;
+    T x_norm, y_norm;
     if (align_corners) {
-        x_norm = (W > 1) ? (2.0f * static_cast<float>(w) / static_cast<float>(W - 1) - 1.0f) : 0.0f;
-        y_norm = (H > 1) ? (2.0f * static_cast<float>(h) / static_cast<float>(H - 1) - 1.0f) : 0.0f;
+        x_norm = (W > 1) ? (T(2) * static_cast<T>(w) / static_cast<T>(W - 1) - T(1)) : T(0);
+        y_norm = (H > 1) ? (T(2) * static_cast<T>(h) / static_cast<T>(H - 1) - T(1)) : T(0);
     } else {
-        x_norm = (2.0f * static_cast<float>(w) + 1.0f) / static_cast<float>(W) - 1.0f;
-        y_norm = (2.0f * static_cast<float>(h) + 1.0f) / static_cast<float>(H) - 1.0f;
+        x_norm = (T(2) * static_cast<T>(w) + T(1)) / static_cast<T>(W) - T(1);
+        y_norm = (T(2) * static_cast<T>(h) + T(1)) / static_cast<T>(H) - T(1);
     }
 
-    const float* t = theta + n * 6;
-    float x_out = t[0] * x_norm + t[1] * y_norm + t[2];
-    float y_out = t[3] * x_norm + t[4] * y_norm + t[5];
+    const T* t = theta + n * 6;
+    T x_out = t[0] * x_norm + t[1] * y_norm + t[2];
+    T y_out = t[3] * x_norm + t[4] * y_norm + t[5];
 
     int64_t out_idx = ((n * H + h) * W + w) * 2;
     grid[out_idx] = x_out;
@@ -443,23 +447,34 @@ auto affine_grid_cuda(const Tensor& theta, const std::vector<int64_t>& size,
     int64_t H = size[2];
     int64_t W = size[3];
 
-    Tensor theta_f32 = theta.to(DType::Float32).contiguous();
-    Tensor grid({N, H, W, 2}, DType::Float32, theta.device());
+    // F-065: native FP64 compute path when theta is Float64, mirroring
+    // affine_grid_backward_cuda's compute-dtype selection below — previously
+    // this always narrowed to Float32 before launch, silently truncating
+    // Float64 theta precision even though the backward pass already computed
+    // natively in double.
+    DType compute = (theta.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    Tensor theta_c = theta.to(compute).contiguous();
+    Tensor grid({N, H, W, 2}, compute, theta.device());
 
     int64_t total = N * H * W;
     int block_size = 256;
     int grid_size = compute_grid_size(total, block_size);
 
-    affine_grid_kernel<<<grid_size, block_size>>>(
-        theta_f32.data<float>(), grid.data<float>(),
-        N, H, W, align_corners);
+    if (compute == DType::Float64) {
+        affine_grid_kernel<double><<<grid_size, block_size>>>(
+            theta_c.data<double>(), grid.data<double>(),
+            N, H, W, align_corners);
+    } else {
+        affine_grid_kernel<float><<<grid_size, block_size>>>(
+            theta_c.data<float>(), grid.data<float>(),
+            N, H, W, align_corners);
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-    // M8: restore theta's original dtype (the kernel above is Float32-only,
-    // like grid_sample_cuda one function above — which DOES do this
-    // restore). Returning a hardcoded Float32 grid silently dropped a
-    // Float64 theta's precision, defeating Float64 gradcheck/parity for the
-    // whole affine_grid -> grid_sample pipeline.
+    // M8: restore theta's original dtype (e.g. Float16/BFloat16 promoted to
+    // Float32 for compute). For Float64 theta this is now a no-op cast since
+    // compute == Float64 already.
     return grid.to(theta.dtype());
 }
 

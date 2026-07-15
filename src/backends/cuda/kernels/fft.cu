@@ -531,6 +531,23 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
+    // F-080 fix: RFFT (R2C) requires real input. The op-layer places no
+    // dtype guard upstream (src/ops/fft.cpp rfft() passes complex input
+    // straight through), so a Complex64/Complex128 tensor can reach here.
+    // Without this check, `is_float32` below (dtype()==Float32) is false
+    // for both complex dtypes, so the kernel would silently fall into the
+    // "Float64" branch and reinterpret_cast the interleaved complex buffer
+    // as cufftDoubleReal*, running CUFFT_D2Z over raw real+imag bytes —
+    // numerically meaningless output for Complex64, and an out-of-bounds/
+    // misaligned read for Complex128 (whose element stride doesn't match
+    // what D2Z expects) for any batch beyond the first. Mirror the CPU
+    // rfft_kernel (cpu/kernels/fft.cpp:756-759): extract the real
+    // component first.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        DType real_dtype_of_complex =
+            (input.dtype() == DType::Complex64) ? DType::Float32 : DType::Float64;
+        return cuda_rfft_kernel(input.to(real_dtype_of_complex), dim, n, norm, stream);
+    }
     // cuFFT R2C only accepts float/double; widen Float16/BFloat16 to Float32
     // (output is Complex64), mirroring the CPU build_complex64_from_half path.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -542,19 +559,23 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("RFFT: dimension out of range");
     }
+
+    // F-082 fix: cuFFT's simple plan interface requires the FFT dimension to
+    // be innermost. Rather than relying solely on the op-layer's
+    // transpose-before-dispatch trick (src/ops/fft.cpp rfft(), which is an
+    // unenforced, comment-only contract), honor arbitrary axes directly here
+    // too: transpose the target axis to last, recurse, transpose back.
+    // Matches CPU's arbitrary-axis support (compute_dim_layout).
+    if (dim != ndim - 1) {
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = cuda_rfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
+    }
+
     bool is_float32 = (input.dtype() == DType::Float32);
 
     int64_t N_in = shape[dim];
     int64_t N_out_complex = n / 2 + 1;
-
-    // For R2C, cuFFT requires the FFT dimension to be the innermost (last) dimension
-    // when using the simple plan interface. We handle only the last-dim case directly;
-    // for other dims the dispatch layer decomposes into 1D FFTs.
-    if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "cuFFT rfft: only last-dimension FFT is supported on CUDA. "
-            "The dispatch layer should decompose non-last-dim rfft.");
-    }
 
     // Prepare real input buffer (padded or truncated to length n)
     std::vector<int64_t> real_shape = shape;
@@ -644,13 +665,20 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IRFFT: dimension out of range");
     }
-    bool is_float32 = (input.dtype() == DType::Complex64);
 
+    // F-082 fix: cuFFT's simple plan interface requires the FFT dimension to
+    // be innermost. Rather than relying solely on the op-layer's
+    // transpose-before-dispatch trick (src/ops/fft.cpp irfft(), which is an
+    // unenforced, comment-only contract), honor arbitrary axes directly here
+    // too: transpose the target axis to last, recurse, transpose back.
+    // Matches CPU's arbitrary-axis support (compute_dim_layout).
     if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "cuFFT irfft: only last-dimension IRFFT is supported on CUDA. "
-            "The dispatch layer should decompose non-last-dim irfft.");
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = cuda_irfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
     }
+
+    bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];  // n/2 + 1 complex elements
     int64_t expected_complex = n / 2 + 1;
@@ -728,6 +756,18 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
 auto cuda_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                       const std::vector<int64_t>& n_vec,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
+    // F-081 fix: this cuFFT fast path assumes `input` is already Complex64/
+    // Complex128 (is_float32 below reads dtype()==Complex64 directly, and
+    // out_dtype = input.dtype() propagates whatever dtype it received
+    // straight into the output Tensor, which is then reinterpret_cast to
+    // cufftComplex*/cufftDoubleComplex* for the C2C exec calls). A real
+    // dtype must be promoted to the matching complex dtype first, exactly
+    // like CPU's fft2_kernel (cpu/kernels/fft.cpp:858-873) and this file's
+    // own 1D cuda_fft_kernel above.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_fft2_kernel(input.to(c), dims, n_vec, norm, stream);
+    }
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -824,6 +864,12 @@ auto cuda_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 auto cuda_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                        const std::vector<int64_t>& n_vec,
                        const std::string& norm, cudaStream_t stream) -> Tensor {
+    // F-081 fix: promote real dtypes to the matching complex dtype first —
+    // see cuda_fft2_kernel above for the full rationale.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_ifft2_kernel(input.to(c), dims, n_vec, norm, stream);
+    }
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
@@ -913,6 +959,12 @@ auto cuda_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                       const std::vector<int64_t>& n_vec,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
+    // F-081 fix: promote real dtypes to the matching complex dtype first —
+    // see cuda_fft2_kernel above for the full rationale.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_fftn_kernel(input.to(c), dims, n_vec, norm, stream);
+    }
     int64_t ndim = static_cast<int64_t>(input.shape().size());
     int64_t rank = static_cast<int64_t>(dims.size());
 
@@ -1030,6 +1082,12 @@ auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 auto cuda_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                        const std::vector<int64_t>& n_vec,
                        const std::string& norm, cudaStream_t stream) -> Tensor {
+    // F-081 fix: promote real dtypes to the matching complex dtype first —
+    // see cuda_fft2_kernel above for the full rationale.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        DType c = (input.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return cuda_ifftn_kernel(input.to(c), dims, n_vec, norm, stream);
+    }
     int64_t ndim = static_cast<int64_t>(input.shape().size());
     int64_t rank = static_cast<int64_t>(dims.size());
 
@@ -2077,6 +2135,19 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
+    // F-080 fix: RFFT (R2C) requires real input. The op-layer places no
+    // dtype guard upstream (src/ops/fft.cpp rfft() passes complex input
+    // straight through), so a Complex64/Complex128 tensor can reach here.
+    // Without this check, `is_float32` below (dtype()==Float32) is false
+    // for both complex dtypes and the kernel would misinterpret the
+    // interleaved complex buffer as a Float64 real buffer. Mirror the CPU
+    // rfft_kernel (cpu/kernels/fft.cpp:756-759): extract the real
+    // component first.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        DType real_dtype_of_complex =
+            (input.dtype() == DType::Complex64) ? DType::Float32 : DType::Float64;
+        return cuda_rfft_kernel(input.to(real_dtype_of_complex), dim, n, norm, stream);
+    }
     // cuFFT R2C only accepts float/double; widen Float16/BFloat16 to Float32
     // (output is Complex64), mirroring the CPU build_complex64_from_half path.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -2088,16 +2159,21 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("RFFT: dimension out of range");
     }
+
+    // F-082 fix: honor arbitrary axes directly (transpose target axis to
+    // last, recurse, transpose back) instead of relying solely on the
+    // op-layer's transpose-before-dispatch contract. Matches CPU's
+    // arbitrary-axis support (compute_dim_layout).
+    if (dim != ndim - 1) {
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = cuda_rfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
+    }
+
     bool is_float32 = (input.dtype() == DType::Float32);
 
     int64_t N_in = shape[dim];
     int64_t N_out_complex = n / 2 + 1;
-
-    if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "cuda native rfft: only last-dimension FFT is supported. "
-            "The dispatch layer should decompose non-last-dim rfft.");
-    }
 
     // Prepare real input buffer (padded or truncated to length n)
     std::vector<int64_t> real_shape = shape;
@@ -2270,13 +2346,18 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IRFFT: dimension out of range");
     }
-    bool is_float32 = (input.dtype() == DType::Complex64);
 
+    // F-082 fix: honor arbitrary axes directly (transpose target axis to
+    // last, recurse, transpose back) instead of relying solely on the
+    // op-layer's transpose-before-dispatch contract. Matches CPU's
+    // arbitrary-axis support (compute_dim_layout).
     if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "cuda native irfft: only last-dimension IRFFT is supported. "
-            "The dispatch layer should decompose non-last-dim irfft.");
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = cuda_irfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
     }
+
+    bool is_float32 = (input.dtype() == DType::Complex64);
 
     int64_t N_in = shape[dim];  // n/2 + 1 complex elements
     int64_t expected_complex = n / 2 + 1;

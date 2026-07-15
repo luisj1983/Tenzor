@@ -12,6 +12,9 @@
 #include "fused_lstm.hpp"  // SIMD-optimized fused kernels
 #include "rnn_onednn.hpp"  // oneDNN-accelerated LSTM/GRU (re-enabled with fixes)
 #include <cmath>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace tenzor {
 namespace cpu {
@@ -905,11 +908,49 @@ auto lstm_forward_kernel(
     }
 
     // Get dimensions
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "lstm_forward_kernel: input must be 3-D (seq_len, batch, input_size), got rank " +
+            std::to_string(input.shape().size()));
+    }
+    if (h0.shape().size() != 2) {
+        throw std::invalid_argument(
+            "lstm_forward_kernel: h0 must be 2-D (batch, hidden), got rank " +
+            std::to_string(h0.shape().size()));
+    }
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
     int64_t batch = input_shape[1];
     int64_t input_size = input_shape[2];
     int64_t hidden = h0.shape()[1];
+
+    // F-071: validate degenerate/mismatched dimensions before any GEMM/kernel
+    // launch. Previously a zero/negative seq_len/batch/input_size/hidden, or a
+    // h0/c0 batch-dimension disagreement with input, surfaced as a confusing
+    // low-level BLAS/oneDNN failure (or silent garbage) instead of a clear
+    // error naming the bad argument.
+    if (seq_len <= 0) {
+        throw std::invalid_argument("lstm_forward_kernel: seq_len must be positive, got " + std::to_string(seq_len));
+    }
+    if (batch <= 0) {
+        throw std::invalid_argument("lstm_forward_kernel: batch must be positive, got " + std::to_string(batch));
+    }
+    if (input_size <= 0) {
+        throw std::invalid_argument("lstm_forward_kernel: input_size must be positive, got " + std::to_string(input_size));
+    }
+    if (hidden <= 0) {
+        throw std::invalid_argument("lstm_forward_kernel: hidden must be positive, got " + std::to_string(hidden));
+    }
+    if (h0.shape()[0] != batch) {
+        throw std::invalid_argument(
+            "lstm_forward_kernel: h0 batch dimension (" + std::to_string(h0.shape()[0]) +
+            ") does not match input batch (" + std::to_string(batch) + ")");
+    }
+    if (c0.shape().size() != 2 || c0.shape()[0] != batch || c0.shape()[1] != hidden) {
+        throw std::invalid_argument(
+            "lstm_forward_kernel: c0 must have shape (batch=" + std::to_string(batch) +
+            ", hidden=" + std::to_string(hidden) + ")");
+    }
 
     // Make tensors contiguous - these are likely already contiguous, so no-op
     Tensor input_contig = input.contiguous();
@@ -1253,11 +1294,44 @@ auto gru_forward_kernel(
     }
 
     // Get dimensions
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "gru_forward_kernel: input must be 3-D (seq_len, batch, input_size), got rank " +
+            std::to_string(input.shape().size()));
+    }
+    if (h0.shape().size() != 2) {
+        throw std::invalid_argument(
+            "gru_forward_kernel: h0 must be 2-D (batch, hidden), got rank " +
+            std::to_string(h0.shape().size()));
+    }
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
     int64_t batch = input_shape[1];
     int64_t input_size = input_shape[2];
     int64_t hidden = h0.shape()[1];
+
+    // F-071: validate degenerate/mismatched dimensions before any GEMM/kernel
+    // launch. Previously a zero/negative seq_len/batch/input_size/hidden, or a
+    // h0 batch-dimension disagreement with input, surfaced as a confusing
+    // low-level BLAS/oneDNN failure (or silent garbage) instead of a clear
+    // error naming the bad argument.
+    if (seq_len <= 0) {
+        throw std::invalid_argument("gru_forward_kernel: seq_len must be positive, got " + std::to_string(seq_len));
+    }
+    if (batch <= 0) {
+        throw std::invalid_argument("gru_forward_kernel: batch must be positive, got " + std::to_string(batch));
+    }
+    if (input_size <= 0) {
+        throw std::invalid_argument("gru_forward_kernel: input_size must be positive, got " + std::to_string(input_size));
+    }
+    if (hidden <= 0) {
+        throw std::invalid_argument("gru_forward_kernel: hidden must be positive, got " + std::to_string(hidden));
+    }
+    if (h0.shape()[0] != batch) {
+        throw std::invalid_argument(
+            "gru_forward_kernel: h0 batch dimension (" + std::to_string(h0.shape()[0]) +
+            ") does not match input batch (" + std::to_string(batch) + ")");
+    }
 
     // Make tensors contiguous
     Tensor input_contig = input.contiguous();
@@ -1334,6 +1408,49 @@ auto gru_forward_kernel(
     return {output, h_n};
 }
 
+// F-070: LSTMMultiLayerForward/GRUMultiLayerForward carry exactly ONE bias
+// tensor per layer at the wire (dispatch-input) level. CPU used to treat that
+// tensor as bias_ih only (dropping any bias_hh silently); CUDA's cuDNN/native
+// multi-layer paths used to assume it was always an 8*hidden (LSTM) /
+// 6*hidden (GRU) concatenation of [bias_ih ; bias_hh] and blindly split it in
+// half -- which corrupted a genuine bias_ih-only tensor (the size every other
+// backend, and every existing caller/test, actually sends) by slicing a
+// single gate's bias vector across a gate boundary into two meaningless
+// halves. This helper makes BOTH backends agree on one convention, keyed off
+// the tensor's actual size, without changing the wire format (still one
+// tensor per layer) or breaking the existing bias_ih-only callers:
+//   - empty                -> (empty, empty)           no bias at all
+//   - numel == gate_size    -> (bias, empty)            bias_ih only; bias_hh
+//                              is implicitly zero (the long-standing, still
+//                              backward-compatible convention)
+//   - numel == 2*gate_size  -> split at the midpoint into (bias_ih, bias_hh)
+// gate_size is 4*hidden for LSTM, 3*hidden for GRU. Any other size is a
+// malformed bias tensor -- throw rather than silently mis-slicing it.
+inline auto split_multilayer_bias(const Tensor& bias, int64_t gate_size, const char* op_name)
+    -> std::pair<Tensor, Tensor> {
+    DType dt = bias.dtype();
+    Device dev = bias.device();
+    if (bias.numel() == 0) {
+        Tensor empty_t = empty({0}, dt, dev);
+        return {empty_t, empty_t};
+    }
+    if (bias.numel() == gate_size) {
+        Tensor empty_t = empty({0}, dt, dev);
+        return {bias.contiguous(), empty_t};
+    }
+    if (bias.numel() == 2 * gate_size) {
+        Tensor c = bias.contiguous();
+        Tensor bias_ih = c.slice(0, 0, gate_size).contiguous();
+        Tensor bias_hh = c.slice(0, gate_size, 2 * gate_size).contiguous();
+        return {bias_ih, bias_hh};
+    }
+    throw std::invalid_argument(
+        std::string(op_name) + ": layer bias has " + std::to_string(bias.numel()) +
+        " elements; expected " + std::to_string(gate_size) +
+        " (bias_ih only) or " + std::to_string(2 * gate_size) +
+        " (concatenated bias_ih+bias_hh)");
+}
+
 /**
  * @brief Fused multi-layer LSTM forward pass
  *
@@ -1343,7 +1460,9 @@ auto gru_forward_kernel(
  * @param input Input sequence (seq_len, batch, input_size)
  * @param W_ih_list Input-to-hidden weights for each layer
  * @param W_hh_list Hidden-to-hidden weights for each layer
- * @param bias_list Bias for each layer (empty if no bias)
+ * @param bias_list Per-layer bias tensor; see split_multilayer_bias for the
+ *        size convention that disambiguates bias_ih-only vs. concatenated
+ *        bias_ih+bias_hh (empty if no bias)
  * @param h0 Initial hidden states (num_layers, batch, hidden)
  * @param c0 Initial cell states (num_layers, batch, hidden)
  * @return vector of [output, h_n, c_n]
@@ -1389,14 +1508,21 @@ auto lstm_multilayer_forward_kernel(
     Tensor h0_contig = h0.contiguous();
     Tensor c0_contig = c0.contiguous();
 
-    std::vector<Tensor> W_ih_contig, W_hh_contig, bias_contig;
+    std::vector<Tensor> W_ih_contig, W_hh_contig;
+    // Per-layer bias split from the single wire-format tensor into
+    // (bias_ih, bias_hh) via split_multilayer_bias -- both index-aligned to
+    // the layer number, with genuinely-empty tensors (not nullopt) for
+    // bias-less layers.
+    std::vector<Tensor> bias_ih_list(static_cast<size_t>(num_layers)),
+                         bias_hh_list(static_cast<size_t>(num_layers));
 
     for (int64_t l = 0; l < num_layers; ++l) {
         W_ih_contig.push_back(W_ih_list[l].contiguous());
         W_hh_contig.push_back(W_hh_list[l].contiguous());
-        if (!bias_list.empty() && bias_list[l].numel() > 0) {
-            bias_contig.push_back(bias_list[l].contiguous());
-        }
+        Tensor layer_bias = (!bias_list.empty()) ? bias_list[l] : empty({0}, dt, input.device());
+        auto [bih, bhh] = split_multilayer_bias(layer_bias, 4 * hidden, "lstm_multilayer_forward_kernel");
+        bias_ih_list[static_cast<size_t>(l)] = bih;
+        bias_hh_list[static_cast<size_t>(l)] = bhh;
     }
 
     Tensor output = empty({seq_len, batch, hidden}, dt, input.device());
@@ -1409,21 +1535,36 @@ auto lstm_multilayer_forward_kernel(
             W_ih_ptrs.push_back(W_ih_contig[l].data<float>());
             W_hh_ptrs.push_back(W_hh_contig[l].data<float>());
         }
-        // Build a length-num_layers bias pointer vector that is index-aligned to
-        // the layer number: nullptr entries for bias-less layers (do NOT compact,
-        // otherwise lstm_multilayer_forward_onednn's bias_list[l] selects the
-        // wrong layer's bias for mixed-bias configs). bias_contig holds only the
-        // non-empty bias tensors in layer order, so walk it with a running index.
-        std::vector<const float*> bias_ptrs_f;
-        if (!bias_list.empty()) {
-            bias_ptrs_f.assign(num_layers, nullptr);
-            size_t bi = 0;
-            for (int64_t l = 0; l < num_layers; ++l) {
-                if (bias_list[l].numel() > 0) {
-                    bias_ptrs_f[l] = bias_contig[bi].data<float>();
-                    ++bi;
+        // oneDNN's fused LSTM primitive wants ONE combined per-gate bias
+        // (bias_ih + bias_hh summed): valid for LSTM because both always
+        // enter the very same gate pre-activation additively (unlike GRU's
+        // reset-gated new-gate term, which cannot be pre-summed). Build that
+        // combined buffer per layer from the split (bias_ih, bias_hh) pair
+        // above. Index-aligned with nullptr entries for bias-less layers (do
+        // NOT compact, otherwise lstm_multilayer_forward_onednn's
+        // bias_list[l] selects the wrong layer's bias for mixed-bias
+        // configs).
+        std::vector<std::vector<float>> combined_bias_bufs(static_cast<size_t>(num_layers));
+        std::vector<const float*> bias_ptrs_f(static_cast<size_t>(num_layers), nullptr);
+        for (int64_t l = 0; l < num_layers; ++l) {
+            bool has_ih = bias_ih_list[static_cast<size_t>(l)].numel() > 0;
+            bool has_hh = bias_hh_list[static_cast<size_t>(l)].numel() > 0;
+            if (!has_ih && !has_hh) continue;
+            auto& buf = combined_bias_bufs[static_cast<size_t>(l)];
+            buf.resize(static_cast<size_t>(4 * hidden));
+            const float* ih_ptr = has_ih ? bias_ih_list[static_cast<size_t>(l)].data<float>() : nullptr;
+            const float* hh_ptr = has_hh ? bias_hh_list[static_cast<size_t>(l)].data<float>() : nullptr;
+            if (has_ih && has_hh) {
+                #pragma omp simd
+                for (int64_t i = 0; i < 4 * hidden; ++i) {
+                    buf[static_cast<size_t>(i)] = ih_ptr[i] + hh_ptr[i];
                 }
+            } else if (has_ih) {
+                std::memcpy(buf.data(), ih_ptr, static_cast<size_t>(4 * hidden) * sizeof(float));
+            } else {
+                std::memcpy(buf.data(), hh_ptr, static_cast<size_t>(4 * hidden) * sizeof(float));
             }
+            bias_ptrs_f[static_cast<size_t>(l)] = buf.data();
         }
 
 #ifdef TENZOR_USE_ONEDNN
@@ -1447,6 +1588,9 @@ auto lstm_multilayer_forward_kernel(
 
     // Fallback for Float32 / native path for Float64: process each layer
     // sequentially using the single-layer kernel (which is dtype-aware).
+    // lstm_forward_kernel already accepts bias_ih/bias_hh separately and does
+    // its own (correct) combining for its own oneDNN call, so hand it the
+    // split tensors directly instead of always synthesizing an empty bias_hh.
     Tensor layer_input = input_contig;
     std::vector<Tensor> h_states, c_states;
 
@@ -1454,13 +1598,10 @@ auto lstm_multilayer_forward_kernel(
         Tensor h0_layer = h0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
         Tensor c0_layer = c0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
 
-        Tensor bias_ih_tensor = (!bias_list.empty() && bias_list[l].numel() > 0)
-                                ? bias_list[l]
-                                : empty({0}, dt, input.device());
-        Tensor bias_hh_empty = empty({0}, dt, input.device());
-
         auto layer_output = lstm_forward_kernel(
-            layer_input, W_ih_list[l], W_hh_list[l], bias_ih_tensor, bias_hh_empty, h0_layer, c0_layer
+            layer_input, W_ih_list[l], W_hh_list[l],
+            bias_ih_list[static_cast<size_t>(l)], bias_hh_list[static_cast<size_t>(l)],
+            h0_layer, c0_layer
         );
 
         h_states.push_back(layer_output[1]);
@@ -1496,7 +1637,11 @@ auto lstm_multilayer_forward_kernel(
  * @param input Input sequence (seq_len, batch, input_size)
  * @param W_ih_list Input-to-hidden weights for each layer
  * @param W_hh_list Hidden-to-hidden weights for each layer
- * @param bias_list Bias for each layer (empty if no bias)
+ * @param bias_list Per-layer bias tensor; see split_multilayer_bias for the
+ *        size convention that disambiguates bias_ih-only vs. concatenated
+ *        bias_ih+bias_hh (empty if no bias). bias_hh's new-gate component
+ *        (b_hn) is kept inside the reset-gate multiply, never summed with
+ *        bias_ih's -- GRU cannot use LSTM's combined-sum shortcut.
  * @param h0 Initial hidden states (num_layers, batch, hidden)
  * @return vector of [output, h_n]
  */
@@ -1536,37 +1681,46 @@ auto gru_multilayer_forward_kernel(
     Tensor input_contig = input.contiguous();
     Tensor h0_contig = h0.contiguous();
 
-    std::vector<Tensor> W_ih_contig, W_hh_contig, bias_contig;
+    std::vector<Tensor> W_ih_contig, W_hh_contig;
+    // Per-layer bias split from the single wire-format tensor into
+    // (bias_ih, bias_hh) via split_multilayer_bias. Unlike LSTM, the two
+    // cannot be pre-summed: GRU's recurrent new-gate bias (b_hn) must stay
+    // inside the reset-gate multiply, so both halves are kept separate all
+    // the way down to gru_forward_onednn / gru_forward_kernel.
+    std::vector<Tensor> bias_ih_list(static_cast<size_t>(num_layers)),
+                         bias_hh_list(static_cast<size_t>(num_layers));
 
     for (int64_t l = 0; l < num_layers; ++l) {
         W_ih_contig.push_back(W_ih_list[l].contiguous());
         W_hh_contig.push_back(W_hh_list[l].contiguous());
-        if (!bias_list.empty() && bias_list[l].numel() > 0) {
-            bias_contig.push_back(bias_list[l].contiguous());
-        }
+        Tensor layer_bias = (!bias_list.empty()) ? bias_list[l] : empty({0}, dt, input.device());
+        auto [bih, bhh] = split_multilayer_bias(layer_bias, 3 * hidden, "gru_multilayer_forward_kernel");
+        bias_ih_list[static_cast<size_t>(l)] = bih;
+        bias_hh_list[static_cast<size_t>(l)] = bhh;
     }
 
     Tensor output = empty({seq_len, batch, hidden}, dt, input.device());
     Tensor h_n = empty({num_layers, batch, hidden}, dt, input.device());
 
     if (dt == DType::Float32) {
-        std::vector<const float*> W_ih_ptrs, W_hh_ptrs, bias_ptrs;
+        std::vector<const float*> W_ih_ptrs, W_hh_ptrs;
         for (int64_t l = 0; l < num_layers; ++l) {
             W_ih_ptrs.push_back(W_ih_contig[l].data<float>());
             W_hh_ptrs.push_back(W_hh_contig[l].data<float>());
         }
-        // Build a length-num_layers, index-aligned bias pointer vector with
-        // nullptr entries for bias-less layers (do NOT compact, otherwise
-        // gru_multilayer_forward_onednn's bias_list[src_layer] indexing selects
-        // the wrong layer's bias and reads OOB for mixed-bias configs).
-        if (!bias_list.empty()) {
-            bias_ptrs.assign(num_layers, nullptr);
-            size_t bi = 0;
-            for (int64_t l = 0; l < num_layers; ++l) {
-                if (bias_list[l].numel() > 0) {
-                    bias_ptrs[l] = bias_contig[bi].data<float>();
-                    ++bi;
-                }
+        // Build length-num_layers, index-aligned bias_ih/bias_hh pointer
+        // vectors with nullptr entries for bias-less layers (do NOT compact,
+        // otherwise gru_multilayer_forward_onednn's bias_*_list[src_layer]
+        // indexing selects the wrong layer's bias and reads OOB for
+        // mixed-bias configs).
+        std::vector<const float*> bias_ih_ptrs(static_cast<size_t>(num_layers), nullptr);
+        std::vector<const float*> bias_hh_ptrs(static_cast<size_t>(num_layers), nullptr);
+        for (int64_t l = 0; l < num_layers; ++l) {
+            if (bias_ih_list[static_cast<size_t>(l)].numel() > 0) {
+                bias_ih_ptrs[static_cast<size_t>(l)] = bias_ih_list[static_cast<size_t>(l)].data<float>();
+            }
+            if (bias_hh_list[static_cast<size_t>(l)].numel() > 0) {
+                bias_hh_ptrs[static_cast<size_t>(l)] = bias_hh_list[static_cast<size_t>(l)].data<float>();
             }
         }
 
@@ -1575,7 +1729,8 @@ auto gru_multilayer_forward_kernel(
             input_contig.data<float>(),
             W_ih_ptrs,
             W_hh_ptrs,
-            bias_ptrs,
+            bias_ih_ptrs,
+            bias_hh_ptrs,
             h0_contig.data<float>(),
             output.data<float>(),
             h_n.data<float>(),
@@ -1587,21 +1742,20 @@ auto gru_multilayer_forward_kernel(
 #endif
     }
 
-    // Fallback for Float32 / native for Float64: per-layer via single-layer kernel.
+    // Fallback for Float32 / native for Float64: per-layer via single-layer
+    // kernel. gru_forward_kernel already accepts bias_ih/bias_hh separately
+    // and keeps b_hn inside the reset-gate multiply, so hand it the split
+    // tensors directly instead of always synthesizing an empty bias_hh.
     Tensor layer_input = input_contig;
     std::vector<Tensor> h_states;
 
     for (int64_t l = 0; l < num_layers; ++l) {
         Tensor h0_layer = h0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
 
-        Tensor bias_ih_tensor = (!bias_list.empty() && bias_list[l].numel() > 0)
-                                ? bias_list[l]
-                                : empty({0}, dt, input.device());
-        Tensor bias_hh_empty = empty({0}, dt, input.device());
-
         auto layer_output = gru_forward_kernel(
             layer_input, W_ih_list[l], W_hh_list[l],
-            bias_ih_tensor, bias_hh_empty, h0_layer
+            bias_ih_list[static_cast<size_t>(l)], bias_hh_list[static_cast<size_t>(l)],
+            h0_layer
         );
 
         h_states.push_back(layer_output[1]);

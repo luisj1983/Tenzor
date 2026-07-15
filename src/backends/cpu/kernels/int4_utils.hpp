@@ -1,11 +1,17 @@
 /**
  * @file int4_utils.hpp
- * @brief INT4 packing and unpacking utilities for quantized inference.
+ * @brief INT4 unpacking utility for quantized inference.
  *
- * Provides routines for packing int8 values in [-8, 7] range into a packed
- * INT4 representation (two values per byte) and unpacking them back with
- * correct sign extension.  The packing convention is little-nibble-first:
- * low nibble holds the first element, high nibble holds the second.
+ * Provides `unpack_int4`, which decodes a packed INT4 byte (two 4-bit values,
+ * low-nibble-first: low nibble holds the first element, high nibble holds the
+ * second) back into two sign-extended int8 values in [-8, 7].
+ *
+ * The corresponding pack_int4 routines are NOT in this file — they live as
+ * member functions on the quantizers that produce packed weights:
+ * `AWQQuantizer::pack_int4` (src/nn/quantization/awq.cpp) and
+ * `GPTQQuantizer::pack_int4` (src/nn/quantization/gptq.cpp). Both use the
+ * same low-nibble-first convention and round-trip through this file's
+ * `unpack_int4`, so the two halves of the format should be read together.
  */
 #pragma once
 

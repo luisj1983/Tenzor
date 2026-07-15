@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <limits>
 #include <iostream>
+#include <type_traits>
 
 #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
@@ -1490,8 +1491,14 @@ static void attention_online_f32(
             float l_i = 0.0f;
             std::memset(oi, 0, head_dim * sizeof(float));
 
-            // Upper bound for j when causal: only attend to positions <= i.
-            const int64_t j_limit = causal ? std::min(i + 1, seq_k) : seq_k;
+            // F021/F067: bottom-right causal alignment (matches CUDA's
+            // flash_attention_v2_kernel and CPU's own flash_attention.cpp,
+            // per docs/internals/attention-contract.md). A query at row i
+            // attends to keys j <= i + (seq_k - seq_q); for self-attention
+            // (seq_q == seq_k) the offset is 0 and this reduces to j <= i,
+            // while for KV-cache decode (seq_q < seq_k) it lets the single
+            // query see all preceding cached keys instead of only key 0.
+            const int64_t j_limit = causal ? std::min(i + 1 + (seq_k - seq_q), seq_k) : seq_k;
 
             for (int64_t j0 = 0; j0 < j_limit; j0 += ATTN_TILE_K) {
                 const int64_t j1 = std::min(j0 + ATTN_TILE_K, j_limit);
@@ -1590,7 +1597,9 @@ static void attention_online_f64(
             double l_i = 0.0;
             std::memset(oi, 0, head_dim * sizeof(double));
 
-            const int64_t j_limit = causal ? std::min(i + 1, seq_k) : seq_k;
+            // F021/F067: bottom-right causal alignment — see attention_online_f32
+            // above and docs/internals/attention-contract.md.
+            const int64_t j_limit = causal ? std::min(i + 1 + (seq_k - seq_q), seq_k) : seq_k;
 
             for (int64_t j0 = 0; j0 < j_limit; j0 += ATTN_TILE_K) {
                 const int64_t j1 = std::min(j0 + ATTN_TILE_K, j_limit);
@@ -2352,8 +2361,64 @@ auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
             ad[i] = static_cast<double>(rho) * ad[i] + (1.0 - static_cast<double>(rho)) * delta * delta;
             p[i] -= static_cast<double>(lr) * delta;
         }
+    } else if (param.dtype() == DType::Float16) {
+        // F-086: native Float16 fast path — compute per-element in float,
+        // narrow back to Float16 on store. Matches CUDA's
+        // fused_adadelta_step_half_kernel<__half> (no caller pre-widening
+        // required) and this file's existing per-element widen/narrow
+        // convention for F16/BF16 (e.g. fused_batch_norm_relu, fused_layer_norm).
+        Float16* p = param.data<Float16>();
+        const Float16* g = grad.data<Float16>();
+        Float16* sq = square_avg.data<Float16>();
+        Float16* ad = acc_delta.data<Float16>();
+
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
+        for (int64_t i = 0; i < n; ++i) {
+            float grad_val = static_cast<float>(g[i]);
+            float p_val = static_cast<float>(p[i]);
+            if (weight_decay != 0.0f) {
+                grad_val += static_cast<float>(weight_decay) * p_val;
+            }
+
+            float sq_val = static_cast<float>(rho) * static_cast<float>(sq[i]) +
+                           (1.0f - static_cast<float>(rho)) * grad_val * grad_val;
+            sq[i] = Float16(sq_val);
+
+            float ad_val = static_cast<float>(ad[i]);
+            float delta = std::sqrt(ad_val + static_cast<float>(eps)) /
+                          std::sqrt(sq_val + static_cast<float>(eps)) * grad_val;
+            ad[i] = Float16(static_cast<float>(rho) * ad_val +
+                             (1.0f - static_cast<float>(rho)) * delta * delta);
+            p[i] = Float16(p_val - static_cast<float>(lr) * delta);
+        }
+    } else if (param.dtype() == DType::BFloat16) {
+        // F-086: native BFloat16 fast path, mirrors the Float16 branch above
+        // and CUDA's fused_adadelta_step_half_kernel<__nv_bfloat16>.
+        BFloat16* p = param.data<BFloat16>();
+        const BFloat16* g = grad.data<BFloat16>();
+        BFloat16* sq = square_avg.data<BFloat16>();
+        BFloat16* ad = acc_delta.data<BFloat16>();
+
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
+        for (int64_t i = 0; i < n; ++i) {
+            float grad_val = static_cast<float>(g[i]);
+            float p_val = static_cast<float>(p[i]);
+            if (weight_decay != 0.0f) {
+                grad_val += static_cast<float>(weight_decay) * p_val;
+            }
+
+            float sq_val = static_cast<float>(rho) * static_cast<float>(sq[i]) +
+                           (1.0f - static_cast<float>(rho)) * grad_val * grad_val;
+            sq[i] = BFloat16(sq_val);
+
+            float ad_val = static_cast<float>(ad[i]);
+            float delta = std::sqrt(ad_val + static_cast<float>(eps)) /
+                          std::sqrt(sq_val + static_cast<float>(eps)) * grad_val;
+            ad[i] = BFloat16(static_cast<float>(rho) * ad_val +
+                              (1.0f - static_cast<float>(rho)) * delta * delta);
+            p[i] = BFloat16(p_val - static_cast<float>(lr) * delta);
+        }
     } else {
-        // audit-8 GG.2: F16/BF16 must be widened by caller; silent no-op was a P0.
         throw std::runtime_error(
             "fused_adadelta_step_kernel (CPU): unsupported dtype " +
             std::string(dtype_name(param.dtype())) +
@@ -2410,36 +2475,29 @@ auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
 // FusedConv2dBnReLU
 // =========================================================================
 
-auto fused_conv2d_bn_relu_kernel(
+// Shared body for the Float32 and Float64 native paths (F059/F061): T=float
+// reuses the existing SIMD-accelerated compute, T=double routes through the
+// scalar-but-genuinely-double-precision branches added to
+// fused_conv_bn_relu.hpp so a Float64 caller never gets narrowed through
+// float anywhere in the pipeline — matching CUDA's
+// launch_fused_conv2d_bn_relu<double>/launch_fused_conv2d_bn_relu_training<double>.
+// `groups` (F061) is forwarded end to end, mirroring FusedConv2dReLU/Conv2d.
+template <typename T>
+static Tensor fused_conv2d_bn_relu_kernel_impl(
     const Tensor& input, const Tensor& weight, const Tensor& conv_bias,
     const Tensor& bn_gamma, const Tensor& bn_beta,
     const Tensor& bn_running_mean, const Tensor& bn_running_var,
     int64_t stride_h, int64_t stride_w,
     int64_t padding_h, int64_t padding_w,
     int64_t dilation_h, int64_t dilation_w,
-    float bn_momentum, float bn_eps, bool training) -> Tensor {
+    float bn_momentum, float bn_eps, bool training, int64_t groups) {
 
-    // Widen-narrow for non-Float32 inputs (audit M3 / feedback_float16_widen_narrow).
-    // The underlying SIMD GEMM + conv code is float-typed; we cast to Float32 at
-    // the boundary and back to the input dtype on return so all four dtypes
-    // (Float32 / Float64 / Float16 / BFloat16) get parity coverage.
-    DType orig_dtype = input.dtype();
-    if (orig_dtype != DType::Float32) {
-        Tensor input_f32 = input.dtype() == DType::Float32 ? input : input.to(DType::Float32);
-        Tensor weight_f32 = weight.dtype() == DType::Float32 ? weight : weight.to(DType::Float32);
-        Tensor conv_bias_f32 = (conv_bias.numel() == 0 || conv_bias.dtype() == DType::Float32)
-                                   ? conv_bias
-                                   : conv_bias.to(DType::Float32);
-        Tensor bn_gamma_f32 = bn_gamma.dtype() == DType::Float32 ? bn_gamma : bn_gamma.to(DType::Float32);
-        Tensor bn_beta_f32  = bn_beta.dtype()  == DType::Float32 ? bn_beta  : bn_beta.to(DType::Float32);
-        Tensor bn_rm_f32    = bn_running_mean.dtype() == DType::Float32 ? bn_running_mean : bn_running_mean.to(DType::Float32);
-        Tensor bn_rv_f32    = bn_running_var.dtype()  == DType::Float32 ? bn_running_var  : bn_running_var.to(DType::Float32);
-        Tensor out_f32 = fused_conv2d_bn_relu_kernel(
-            input_f32, weight_f32, conv_bias_f32,
-            bn_gamma_f32, bn_beta_f32, bn_rm_f32, bn_rv_f32,
-            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
-            bn_momentum, bn_eps, training);
-        return out_f32.to(orig_dtype);
+    constexpr DType kDType = std::is_same_v<T, double> ? DType::Float64 : DType::Float32;
+
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "fused_conv2d_bn_relu: groups must be positive (got " +
+            std::to_string(groups) + ")");
     }
 
     // F036: the raw-pointer conv routines below walk input/weight as densely
@@ -2457,27 +2515,31 @@ auto fused_conv2d_bn_relu_kernel(
     int64_t height = in_shape[2];
     int64_t width = in_shape[3];
     int64_t out_channels = w_shape[0];
+    // weight's second dim is C_in/groups, not the input tensor's full
+    // in_channels — using in_channels here would be wrong for groups>1
+    // (F061; previously unreachable since groups was always 1 pre-fix).
+    int64_t in_channels_per_group = w_shape[1];
     int64_t kernel_h = w_shape[2];
     int64_t kernel_w = w_shape[3];
     int64_t out_h = (height + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
     int64_t out_w = (width  + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
-    Tensor output({batch, out_channels, out_h, out_w}, DType::Float32, input.device());
+    Tensor output({batch, out_channels, out_h, out_w}, kDType, input.device());
 
     if (training) {
         // Training path: compute batch stats inline
         Tensor rm = bn_running_mean;  // Will be updated in-place
         Tensor rv = bn_running_var;
-        fused::conv_bn_relu_training(
-            input_c.data<float>(), weight_c.data<float>(),
-            conv_bias.numel() > 0 ? conv_bias.data<float>() : nullptr,
-            bn_gamma.data<float>(), bn_beta.data<float>(),
-            rm.data<float>(), rv.data<float>(),
-            output.data<float>(),
+        fused::conv_bn_relu_training<T>(
+            input_c.data<T>(), weight_c.data<T>(),
+            conv_bias.numel() > 0 ? conv_bias.data<T>() : nullptr,
+            bn_gamma.data<T>(), bn_beta.data<T>(),
+            rm.data<T>(), rv.data<T>(),
+            output.data<T>(),
             batch, in_channels, height, width,
             out_channels, kernel_h, kernel_w,
             stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
-            out_h, out_w, bn_momentum, bn_eps);
+            out_h, out_w, groups, static_cast<T>(bn_momentum), static_cast<T>(bn_eps));
     } else {
         // Inference path: fold BN into conv weights.
         //
@@ -2486,40 +2548,94 @@ auto fused_conv2d_bn_relu_kernel(
         // input — folding into that view would silently corrupt the caller's
         // weight tensor across subsequent calls (audit item A.1).  Materialise
         // a private buffer per call.
-        Tensor weight_folded({out_channels, in_channels, kernel_h, kernel_w},
-                             DType::Float32, input.device());
+        Tensor weight_folded({out_channels, in_channels_per_group, kernel_h, kernel_w},
+                             kDType, input.device());
         {
             Tensor weight_src = weight_c;
-            std::memcpy(weight_folded.data<float>(), weight_src.data<float>(),
-                        static_cast<size_t>(out_channels) * in_channels *
-                            kernel_h * kernel_w * sizeof(float));
+            std::memcpy(weight_folded.data<T>(), weight_src.data<T>(),
+                        static_cast<size_t>(out_channels) * in_channels_per_group *
+                            kernel_h * kernel_w * sizeof(T));
         }
-        Tensor bias_folded({out_channels}, DType::Float32, input.device());
+        Tensor bias_folded({out_channels}, kDType, input.device());
         if (conv_bias.numel() > 0) {
             Tensor bias_src = conv_bias.contiguous();
-            std::memcpy(bias_folded.data<float>(), bias_src.data<float>(),
-                        static_cast<size_t>(out_channels) * sizeof(float));
+            std::memcpy(bias_folded.data<T>(), bias_src.data<T>(),
+                        static_cast<size_t>(out_channels) * sizeof(T));
         } else {
-            std::memset(bias_folded.data<float>(), 0,
-                        static_cast<size_t>(out_channels) * sizeof(float));
+            std::memset(bias_folded.data<T>(), 0,
+                        static_cast<size_t>(out_channels) * sizeof(T));
         }
 
-        fused::fold_bn_params(
-            weight_folded.data<float>(), bias_folded.data<float>(),
-            bn_gamma.data<float>(), bn_beta.data<float>(),
-            bn_running_mean.data<float>(), bn_running_var.data<float>(),
-            out_channels, in_channels, kernel_h, kernel_w, bn_eps);
+        fused::fold_bn_params<T>(
+            weight_folded.data<T>(), bias_folded.data<T>(),
+            bn_gamma.data<T>(), bn_beta.data<T>(),
+            bn_running_mean.data<T>(), bn_running_var.data<T>(),
+            out_channels, in_channels_per_group, kernel_h, kernel_w, static_cast<T>(bn_eps));
 
-        fused::conv_bn_relu_folded(
-            input_c.data<float>(), weight_folded.data<float>(), bias_folded.data<float>(),
-            output.data<float>(),
+        fused::conv_bn_relu_folded<T>(
+            input_c.data<T>(), weight_folded.data<T>(), bias_folded.data<T>(),
+            output.data<T>(),
             batch, in_channels, height, width,
             out_channels, kernel_h, kernel_w,
             stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
-            out_h, out_w);
+            out_h, out_w, groups);
     }
 
     return output;
+}
+
+auto fused_conv2d_bn_relu_kernel(
+    const Tensor& input, const Tensor& weight, const Tensor& conv_bias,
+    const Tensor& bn_gamma, const Tensor& bn_beta,
+    const Tensor& bn_running_mean, const Tensor& bn_running_var,
+    int64_t stride_h, int64_t stride_w,
+    int64_t padding_h, int64_t padding_w,
+    int64_t dilation_h, int64_t dilation_w,
+    float bn_momentum, float bn_eps, bool training,
+    int64_t groups) -> Tensor {
+
+    // Widen-narrow only for Float16/BFloat16 (audit M3 /
+    // feedback_float16_widen_narrow). Float64 gets its own genuine
+    // double-precision path below instead of being routed through this
+    // widen/narrow — narrowing F64->F32 for the real math and upcasting the
+    // (already-lossy) result back to double recovers nothing (F059). CUDA's
+    // fused_conv2d_bn_relu_cuda only widens Float16/BFloat16 the same way.
+    DType orig_dtype = input.dtype();
+    if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor weight_f32 = weight.to(DType::Float32);
+        Tensor conv_bias_f32 = (conv_bias.numel() == 0 || conv_bias.dtype() == DType::Float32)
+                                   ? conv_bias
+                                   : conv_bias.to(DType::Float32);
+        Tensor bn_gamma_f32 = bn_gamma.dtype() == DType::Float32 ? bn_gamma : bn_gamma.to(DType::Float32);
+        Tensor bn_beta_f32  = bn_beta.dtype()  == DType::Float32 ? bn_beta  : bn_beta.to(DType::Float32);
+        Tensor bn_rm_f32    = bn_running_mean.dtype() == DType::Float32 ? bn_running_mean : bn_running_mean.to(DType::Float32);
+        Tensor bn_rv_f32    = bn_running_var.dtype()  == DType::Float32 ? bn_running_var  : bn_running_var.to(DType::Float32);
+        Tensor out_f32 = fused_conv2d_bn_relu_kernel(
+            input_f32, weight_f32, conv_bias_f32,
+            bn_gamma_f32, bn_beta_f32, bn_rm_f32, bn_rv_f32,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
+            bn_momentum, bn_eps, training, groups);
+        return out_f32.to(orig_dtype);
+    }
+
+    if (orig_dtype == DType::Float64) {
+        return fused_conv2d_bn_relu_kernel_impl<double>(
+            input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
+            bn_momentum, bn_eps, training, groups);
+    }
+
+    if (orig_dtype != DType::Float32) {
+        throw std::runtime_error(
+            "fused_conv2d_bn_relu_kernel (CPU): unsupported dtype " +
+            std::string(dtype_name(orig_dtype)));
+    }
+
+    return fused_conv2d_bn_relu_kernel_impl<float>(
+        input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var,
+        stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
+        bn_momentum, bn_eps, training, groups);
 }
 
 // =========================================================================

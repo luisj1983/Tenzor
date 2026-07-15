@@ -665,7 +665,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
 // Tanh Activation
 // ============================================================================
 
-// Forward: (exp(x) - exp(-x)) / (exp(x) + exp(-x)) - OpenMP + SIMD optimized
+// Forward: (exp(x) - exp(-x)) / (exp(x) + exp(-x)) - OpenMP optimized
 auto tanh_kernel(const Tensor& input_raw) -> Tensor {
     // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
     auto input = input_raw.contiguous();
@@ -677,46 +677,19 @@ auto tanh_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
 #ifdef TENZOR_USE_ONEDNN
-        // Try oneDNN for large tensors (faster than SIMD for tanh)
+        // Try oneDNN for large tensors (exact, and faster than a scalar loop).
         if (onednn_eltwise_forward(in_data, out_data, n, dnnl::algorithm::eltwise_tanh)) {
             return output;
         }
 #endif
-        // Fall back to SIMD implementation
-        // For small arrays, use single-threaded SIMD
-        if (static_cast<int64_t>(n) < ACTIVATION_OMP_THRESHOLD) {
-#ifdef TENZOR_HAS_AVX512
-            fast_math::tanh_batch_avx512(in_data, out_data, n);
-#elif defined(TENZOR_HAS_AVX2)
-            fast_math::tanh_batch_avx2(in_data, out_data, n);
-#else
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = std::tanh(in_data[i]);
-            }
-#endif
-        } else {
-            // For large arrays, use OpenMP with thread-local SIMD
-            #pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                int nthreads = omp_get_num_threads();
-
-                size_t chunk_size = (n + nthreads - 1) / nthreads;
-                size_t start = tid * chunk_size;
-                size_t end = std::min(start + chunk_size, n);
-
-                if (start < end) {
-#ifdef TENZOR_HAS_AVX512
-                    fast_math::tanh_batch_avx512(in_data + start, out_data + start, end - start);
-#elif defined(TENZOR_HAS_AVX2)
-                    fast_math::tanh_batch_avx2(in_data + start, out_data + start, end - start);
-#else
-                    for (size_t i = start; i < end; ++i) {
-                        out_data[i] = std::tanh(in_data[i]);
-                    }
-#endif
-                }
-            }
+        // Exact path: fast_math::tanh_batch_avx2/avx512 is a ~2 ULP polynomial
+        // approximation, the same class of approximation already rejected for
+        // Log/Exp/Sin/Cos (see log_kernel) because it silently diverges from
+        // libm/CUDA. CUDA's tanh_kernel always calls the correctly-rounded
+        // device tanhf, so CPU must use std::tanh to match.
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::tanh(in_data[i]);
         }
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
@@ -732,56 +705,12 @@ auto tanh_kernel(const Tensor& input_raw) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
-        if (static_cast<int64_t>(n) < ACTIVATION_OMP_THRESHOLD) {
-#ifdef __F16C__
-            size_t i = 0;
-            for (; i + 8 <= n; i += 8) {
-                __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
-                __m256 fp32 = _mm256_cvtph_ps(packed);
-                __m256 result = fast_math::tanh_avx2(fp32);
-                __m128i out_packed = _mm256_cvtps_ph(result, _MM_FROUND_TO_NEAREST_INT);
-                _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
-            }
-            for (; i < n; ++i) {
-                float val = static_cast<float>(in_data[i]);
-                out_data[i] = Float16(std::tanh(val));
-            }
-#else
-            for (size_t i = 0; i < n; ++i) {
-                float val = static_cast<float>(in_data[i]);
-                out_data[i] = Float16(std::tanh(val));
-            }
-#endif
-        } else {
-            #pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                int nthreads = omp_get_num_threads();
-
-                size_t chunk_size = (n + nthreads - 1) / nthreads;
-                size_t start = tid * chunk_size;
-                size_t end = std::min(start + chunk_size, n);
-
-#ifdef __F16C__
-                size_t i = start;
-                for (; i + 8 <= end; i += 8) {
-                    __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
-                    __m256 fp32 = _mm256_cvtph_ps(packed);
-                    __m256 result = fast_math::tanh_avx2(fp32);
-                    __m128i out_packed = _mm256_cvtps_ph(result, _MM_FROUND_TO_NEAREST_INT);
-                    _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
-                }
-                for (; i < end; ++i) {
-                    float val = static_cast<float>(in_data[i]);
-                    out_data[i] = Float16(std::tanh(val));
-                }
-#else
-                for (size_t i = start; i < end; ++i) {
-                    float val = static_cast<float>(in_data[i]);
-                    out_data[i] = Float16(std::tanh(val));
-                }
-#endif
-            }
+        // Exact path (see the Float32 branch above): widen to Float32,
+        // compute via std::tanh, narrow back — no fast_math polynomial.
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::tanh(val));
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();

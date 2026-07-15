@@ -6,6 +6,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/utils/profiling.hpp"
 
 #include <iomanip>
@@ -514,6 +515,16 @@ auto kthvalue(const Tensor& input, int64_t k, int64_t dim, bool keepdim) -> std:
     if (dim < 0 || dim >= ndim) {
         throw std::out_of_range("kthvalue: dim out of range");
     }
+    // F-034: validate k against the reduced dim's size BEFORE dispatch, on
+    // every backend — not just CPU (advanced.cpp:1051-1053). The CUDA
+    // selection-sort kernel indexes a per-slice workspace sized exactly
+    // dim_size; k outside [1, dim_size] reads/writes past that slice's
+    // segment. Throwing here (host-side, pre-launch) is strictly better than
+    // a device-side check and covers every backend uniformly.
+    const int64_t dim_size = input.shape()[static_cast<size_t>(dim)];
+    if (k < 1 || k > dim_size) {
+        throw std::runtime_error("kthvalue: k out of range");
+    }
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
@@ -523,13 +534,30 @@ auto kthvalue(const Tensor& input, int64_t k, int64_t dim, bool keepdim) -> std:
     return {results[0], results[1]};
 }
 
+// F-005/F-020/F-021/F-037: fmax/fmin kernels (CPU and CUDA) index both
+// operands with a single flat linear index over a.numel() elements — unlike
+// minimum/maximum, which broadcast internally via per-operand strides, these
+// kernels have no broadcast support at all. Mirror the explicit
+// promote+broadcast_to+contiguous pattern used for hypot/copysign/nextafter/
+// gcd/lcm (see detail::binary_op_promoted_broadcast in src/ops/math.cpp) so
+// that by the time the kernel sees the tensors they are guaranteed to share
+// an identical (broadcast) shape and dtype. This both adds broadcasting
+// support (F-020) and eliminates the CUDA/CPU out-of-bounds read on
+// mismatched operand sizes at its root (F-005/F-037), since a.numel() ==
+// b.numel() is now guaranteed for any shapes that are broadcast-compatible.
 auto fmax(const Tensor& a, const Tensor& b) -> Tensor {
-    std::array<Tensor, 2> inputs = {a.contiguous(), b.contiguous()};
+    auto [ap, bp] = promote_inputs(a, b);
+    auto bshape = broadcast_shapes(ap.shape(), bp.shape());
+    std::array<Tensor, 2> inputs = {broadcast_to(ap, bshape).contiguous(),
+                                     broadcast_to(bp, bshape).contiguous()};
     return dispatch<OpId::Fmax>(inputs)[0];
 }
 
 auto fmin(const Tensor& a, const Tensor& b) -> Tensor {
-    std::array<Tensor, 2> inputs = {a.contiguous(), b.contiguous()};
+    auto [ap, bp] = promote_inputs(a, b);
+    auto bshape = broadcast_shapes(ap.shape(), bp.shape());
+    std::array<Tensor, 2> inputs = {broadcast_to(ap, bshape).contiguous(),
+                                     broadcast_to(bp, bshape).contiguous()};
     return dispatch<OpId::Fmin>(inputs)[0];
 }
 

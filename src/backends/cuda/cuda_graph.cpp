@@ -1,6 +1,7 @@
 #include "tenzor/backend/cuda_graph.hpp"
 #include "cuda_graph.hpp"
 #include "cuda_stream.hpp"
+#include "cuda_error.hpp"
 #include "tenzor/core/device.hpp"
 #include <cuda_runtime.h>
 #include <stdexcept>
@@ -14,7 +15,12 @@ namespace tenzor {
 class CUDAGraphImpl : public CUDAGraph {
 public:
     explicit CUDAGraphImpl(int32_t device_id) : device_id_(device_id) {
-        cudaSetDevice(device_id_);
+        // A silently-failed cudaSetDevice here would create the capture stream
+        // on the wrong device; the cuBLAS/cuSPARSE/cuSOLVER handle pools all
+        // resolve their per-thread handle via cudaGetDevice(), so ops during
+        // capture/replay would then silently pick up the wrong device's
+        // handle instead of raising a clear error like CUDABackend::set_device().
+        CUDA_CHECK(cudaSetDevice(device_id_));
         auto err = cudaStreamCreate(&stream_);
         if (err != cudaSuccess) {
             throw std::runtime_error(
@@ -45,12 +51,12 @@ public:
     }
 
     void prepare_capture_stream() override {
-        cudaSetDevice(device_id_);
+        CUDA_CHECK(cudaSetDevice(device_id_));
         cuda::cuda_current_stream() = stream_;
     }
 
     void begin_capture() override {
-        cudaSetDevice(device_id_);
+        CUDA_CHECK(cudaSetDevice(device_id_));
         // Route all subsequent dispatch launches onto the capture stream so the
         // forward pass is recorded (the backend otherwise launches on the
         // un-capturable default stream).
@@ -74,7 +80,7 @@ public:
     }
 
     void replay() override {
-        cudaSetDevice(device_id_);
+        CUDA_CHECK(cudaSetDevice(device_id_));
         capture_.replay(stream_);
     }
 

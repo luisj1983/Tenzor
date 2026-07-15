@@ -280,3 +280,5 @@ template<> struct SimdTrait<DivOp, Float16> {
     }
 };
 
+} // namespace tenzor::cpu
+

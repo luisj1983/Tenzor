@@ -504,22 +504,29 @@ TEST_P(NumericalStabilityParity, DetectOverflow) {
 // ============================================================================
 // FP16 Saturation Tests
 // ============================================================================
-// Verify all backends clamp FP16 ±Inf to ±65504 (max finite Float16 value).
-// FP32 compute producing values outside [-65504, 65504] should be saturated
-// rather than producing Inf, which would cascade to NaN.
-
-// FP16 overflow handling is not uniform across backends:
-//   * CPU and Vulkan follow IEEE 754 strictly — overflow → +Inf.
+// FP16 matmul overflow (F-107): CPU and CUDA now share ONE overflow
+// behavior. Both follow strict IEEE 754 float32->float16 narrowing: an
+// accumulator whose magnitude exceeds 65504 (the largest finite Float16
+// value) becomes signed Infinity. CUDA used to clamp this to +/-65504
+// instead (see src/backends/cuda/kernels/matmul.cu's now-removed
+// float_to_half_saturated/saturate_fp16) purely to avoid producing Inf, not
+// to work around any actual cuBLAS correctness bug — that was a categorical
+// CPU<->CUDA divergence (Inf vs. a large finite number), so the clamp was
+// removed and CUDA now narrows FP16 matmul output the same way CPU's
+// Float16::Float16(float) constructor does (src/core/dtype.cpp). The
+// FP16Saturation_MatMul test below asserts this agreement explicitly for
+// CPU vs. CUDA.
+//
+// FP16 overflow handling is NOT uniform across every backend, though:
+//   * CPU and Vulkan follow IEEE 754 strictly — overflow -> +Inf.
+//   * CUDA follows IEEE 754 strictly too, as of F-107 (matmul path).
 //   * ROCm saturates to FP16 max (65504).
-//   * CUDA and OneAPI saturate on element-wise add but produce +Inf on
-//     matmul (or vice-versa depending on the kernel path).
-// Forcing one behavior or the other would require touching every backend's
-// FP16 conversion, and the library has historically left this implementation-
-// defined. The actionable stability property — and the one this suite can
-// enforce across backends — is "overflow must not produce NaN, and must
-// produce the same answer for repeated calls on the same backend". Use that
-// instead of a cross-backend parity check (test_operation_parity), which
-// silently fails because +Inf and 65504 are both reasonable but disagree.
+//   * OneAPI saturates on element-wise add but produces +Inf on matmul (or
+//     vice-versa depending on the kernel path).
+// Reconciling ROCm/OneAPI is out of scope for the CPU/CUDA parity fix above,
+// so those backends are still only held to the weaker property this suite
+// can enforce for all of them: "overflow must not produce NaN, and must
+// produce the same answer for repeated calls on the same backend."
 namespace {
 inline void expect_no_nan_overflow_deterministic(
     const std::function<Tensor(Device)>& run, const std::string& name) {
@@ -565,13 +572,37 @@ inline void expect_no_nan_overflow_deterministic(
 
 TEST(NumericalStability, FP16Saturation_MatMul) {
     // FP16 matmul whose accumulator overflows the FP16 range (16 × 300×300 =
-    // 1.44M ≫ 65504). The library doesn't promise saturation vs Inf across
-    // backends; instead require: no NaN, deterministic within a backend.
+    // 1.44M ≫ 65504, the largest finite Float16 magnitude).
     auto a = full({4, 16}, 300.0f, DType::Float32, Device::cpu()).to(DType::Float16);
     auto b = full({16, 4}, 300.0f, DType::Float32, Device::cpu()).to(DType::Float16);
-    expect_no_nan_overflow_deterministic(
-        [&](Device d) { return matmul(a.to(d), b.to(d)); },
-        "FP16 Saturation MatMul");
+    auto run = [&](Device d) { return matmul(a.to(d), b.to(d)); };
+
+    // Baseline sanity check for every available backend (including ones this
+    // audit doesn't touch, e.g. ROCm/OneAPI): no NaN, deterministic per-backend.
+    expect_no_nan_overflow_deterministic(run, "FP16 Saturation MatMul");
+
+    // F-107: CPU and CUDA must now AGREE, not just individually avoid NaN.
+    // Both are required to produce signed Infinity for this overflowing
+    // matmul -- CUDA no longer saturates to a finite +/-65504.
+    if (has_cuda()) {
+        Tensor cpu_result = run(Device::cpu()).to(DType::Float32).to(Device::cpu()).contiguous();
+        Tensor cuda_result = run(Device::cuda(0)).to(DType::Float32).to(Device::cpu()).contiguous();
+        Device::cuda(0).synchronize();
+        ASSERT_EQ(cpu_result.numel(), cuda_result.numel());
+        const float* cp = cpu_result.data<float>();
+        const float* gp = cuda_result.data<float>();
+        for (int64_t i = 0; i < cpu_result.numel(); ++i) {
+            ASSERT_TRUE(std::isinf(cp[i]))
+                << "CPU FP16 matmul overflow expected +/-Inf at index " << i
+                << " (got " << cp[i] << ")";
+            ASSERT_TRUE(std::isinf(gp[i]))
+                << "CUDA FP16 matmul overflow expected +/-Inf at index " << i
+                << " (got " << gp[i] << ") -- CUDA must no longer saturate FP16 "
+                << "matmul overflow to +/-65504 (F-107)";
+            ASSERT_EQ(cp[i] > 0, gp[i] > 0)
+                << "CPU/CUDA Inf sign mismatch at index " << i;
+        }
+    }
 }
 
 TEST(NumericalStability, FP16Saturation_Add) {

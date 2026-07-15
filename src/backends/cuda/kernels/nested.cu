@@ -841,6 +841,17 @@ auto nested_from_padded_cuda(const Tensor& padded, const Tensor& offsets,
     if (!padded.is_contiguous()) {
         throw std::runtime_error("nested_from_padded_cuda: padded must be contiguous (packed [B, max_len, inner] layout)");
     }
+    // F065/F-084: a nested tensor is a batch of variable-length sequences x
+    // feature, so its packed `values` buffer is inherently >= 2-D (batch x
+    // max_len x feature). Tensor::shape() is an unchecked std::span, so reject
+    // rank<2 input clearly before indexing shape[0]/shape[1], matching CPU's
+    // require_ndim_ge2 guard in nested_from_padded_kernel.
+    if (padded.ndim() < 2) {
+        throw std::invalid_argument(
+            std::string("nested_from_padded_cuda") + ": expected values with ndim >= 2 "
+            "(batch-of-sequences x feature), got ndim " +
+            std::to_string(padded.ndim()));
+    }
     auto pad_shape = padded.shape();
     int64_t B = pad_shape[0];
     int64_t max_len = pad_shape[1];

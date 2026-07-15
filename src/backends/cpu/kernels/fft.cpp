@@ -1001,21 +1001,24 @@ auto ifftn_kernel(const Tensor& input,
 // Non-MKL CPU FFT fallback (Wave Inf-A, expanded under audits M4 / F.6).
 //
 // Hierarchy of paths inside `dft_1d_strided`:
-//   1. Power-of-2 N, contiguous (inner == 1): iterative Cooley-Tukey
-//      radix-2 in-place. O(N log N).
-//   2. Arbitrary N (including non-power-of-2), N_in == N_out:
-//      Bluestein's chirp-Z transform built on the radix-2 FFT.
-//      O(N log N).  The chirp factors and FFT(B) are cached in a
-//      BluesteinContext so multi-row dispatches share the work.
-//   3. Resampling (N_in != N_out): direct O(N²) DFT.  This is a
-//      different operation (zero-pad / truncate then transform) and
-//      isn't faster with any FFT algorithm — the O(N²) cost is
-//      inherent to the definition.
+//   1. Power-of-2 N_out, contiguous (inner == 1): iterative Cooley-Tukey
+//      radix-2 in-place. O(N_out log N_out).
+//   2. Arbitrary N_out (including non-power-of-2): Bluestein's chirp-Z
+//      transform built on the radix-2 FFT. O(N_out log N_out). The chirp
+//      factors and FFT(B) are cached in a BluesteinContext so multi-row
+//      dispatches share the work.
+//   Resampling (N_in != N_out) is not a separate O(N^2) code path: the
+//   row is zero-padded (N_out > N_in) or truncated (N_out < N_in) into an
+//   N_out-length buffer first, then transformed by whichever of the above
+//   two paths applies — the same technique already used by CPU's MKL path
+//   (mkl_rfft_1d/mkl_fft_1d_complex) and CUDA's non-cuFFT fallback
+//   (cuda_fft_kernel in fft.cu), so resampling costs O(N_out log N_out)
+//   here too, never O(N^2).
 //
 // Audit F.6 conclusion: vendoring PocketFFT was considered as an
 // alternative, but the in-tree Cooley-Tukey + Bluestein covers every
-// non-resampling case at O(N log N) using only the existing infra
-// (no new 3000-LoC header dependency).  The kernel API is unchanged
+// case (including resampling) at O(N log N) using only the existing
+// infra (no new 3000-LoC header dependency). The kernel API is unchanged
 // so callers see no difference between this and the MKL fast path.
 // ============================================================================
 namespace {
@@ -1159,16 +1162,28 @@ void dft_1d_strided(const std::complex<T>* in,
                     int64_t N_in, int64_t N_out,
                     int64_t outer, int64_t inner,
                     bool is_forward, double scale) {
-    // Fast path: power-of-2 length, no resampling (N_in == N_out), strided
-    // axis is inner==1 (otherwise the bit-reversal would interfere with
-    // the strided layout). Use Cooley-Tukey radix-2 — O(N log N) per row.
-    if (N_in == N_out && is_power_of_2<T>(N_out) && inner == 1) {
+    // F-083 fix: resampling (N_in != N_out) is handled by zero-padding
+    // (N_out > N_in) or truncating (N_out < N_in) each row into an
+    // N_out-length buffer *before* transforming — the same technique
+    // already used by CPU's own MKL path and CUDA's non-cuFFT fallback
+    // (cuda_fft_kernel in fft.cu) — rather than falling back to a direct
+    // O(N^2) DFT. `copy_len` elements are copied verbatim from the input
+    // row; any remaining elements up to N_out are zero-filled.
+    const int64_t copy_len = (N_in < N_out) ? N_in : N_out;
+
+    // Fast path: power-of-2 output length, strided axis is inner==1
+    // (otherwise the bit-reversal would interfere with the strided
+    // layout). Use Cooley-Tukey radix-2 — O(N_out log N_out) per row,
+    // regardless of whether this is a resampling transform.
+    if (is_power_of_2<T>(N_out) && inner == 1) {
         #pragma omp parallel for schedule(static) if (outer > 4)
         for (int64_t o = 0; o < outer; ++o) {
-            // Copy this row into the output buffer, then transform in place.
+            // Copy (zero-pad/truncate) this row into the output buffer,
+            // then transform in place.
             const std::complex<T>* x = in + o * N_in;
             std::complex<T>* y = out + o * N_out;
-            for (int64_t k = 0; k < N_out; ++k) y[k] = x[k];
+            for (int64_t k = 0; k < copy_len; ++k) y[k] = x[k];
+            for (int64_t k = copy_len; k < N_out; ++k) y[k] = std::complex<T>(0, 0);
             cooley_tukey_radix2<T>(y, N_out, is_forward);
             if (scale != 1.0) {
                 T s = static_cast<T>(scale);
@@ -1178,12 +1193,14 @@ void dft_1d_strided(const std::complex<T>* in,
         return;
     }
     // Wave Inf-A (deferred → landed): Bluestein chirp z-transform for
-    // non-power-of-2 lengths. O(N log N) for any length.
+    // non-power-of-2 lengths. O(N_out log N_out) for any length,
+    // including resampling and strided (inner > 1) axes — the chirp
+    // permutation needs a flat contiguous row, so strided dims are
+    // gathered (with zero-pad/truncate) to a contiguous scratch buffer
+    // then scattered back.
     // M4 fix: precompute chirp + B_fft once and reuse across rows; gives
     // 30-50% speedup at outer >> 1 versus per-row recomputation.
-    // Constraints: N_in == N_out (no resampling) — strided dims (inner > 1)
-    // gather to a contiguous scratch then scatter back.
-    if (N_in == N_out && N_out > 1) {
+    {
         auto ctx = make_bluestein_context<T>(N_out, is_forward);
         if (inner == 1) {
             #pragma omp parallel
@@ -1193,7 +1210,8 @@ void dft_1d_strided(const std::complex<T>* in,
                 for (int64_t o = 0; o < outer; ++o) {
                     const std::complex<T>* x = in + o * N_in;
                     std::complex<T>* y = out + o * N_out;
-                    for (int64_t k = 0; k < N_out; ++k) y[k] = x[k];
+                    for (int64_t k = 0; k < copy_len; ++k) y[k] = x[k];
+                    for (int64_t k = copy_len; k < N_out; ++k) y[k] = std::complex<T>(0, 0);
                     bluestein_fft_with_ctx<T>(y, A_scratch.data(), ctx);
                     if (scale != 1.0) {
                         T s = static_cast<T>(scale);
@@ -1202,9 +1220,10 @@ void dft_1d_strided(const std::complex<T>* in,
                 }
             }
         } else {
-            // M4 strided fix: gather a row into contiguous scratch, run
-            // Bluestein, scatter back. Same complexity as contiguous case
-            // plus one O(N) gather/scatter per row.
+            // M4 strided fix: gather a row into contiguous scratch
+            // (zero-padded/truncated to N_out), run Bluestein, scatter
+            // back. Same complexity as the contiguous case plus one O(N)
+            // gather/scatter per row.
             #pragma omp parallel
             {
                 std::vector<std::complex<T>> row_scratch(static_cast<size_t>(N_out));
@@ -1214,8 +1233,11 @@ void dft_1d_strided(const std::complex<T>* in,
                     for (int64_t j = 0; j < inner; ++j) {
                         const std::complex<T>* x = in + (o * N_in) * inner + j;
                         std::complex<T>* y = out + (o * N_out) * inner + j;
-                        for (int64_t k = 0; k < N_in; ++k) {
+                        for (int64_t k = 0; k < copy_len; ++k) {
                             row_scratch[static_cast<size_t>(k)] = x[k * inner];
+                        }
+                        for (int64_t k = copy_len; k < N_out; ++k) {
+                            row_scratch[static_cast<size_t>(k)] = std::complex<T>(0, 0);
                         }
                         bluestein_fft_with_ctx<T>(row_scratch.data(),
                                                   A_scratch.data(), ctx);
@@ -1230,39 +1252,6 @@ void dft_1d_strided(const std::complex<T>* in,
                         }
                     }
                 }
-            }
-        }
-        return;
-    }
-    // Fallback: O(N²) direct DFT. Handles resampling (N_in != N_out) and
-    // strided (inner > 1) axes — the Bluestein path can't handle those
-    // because the chirp permutation assumes a flat contiguous row.
-    // Accumulate the O(N) sum in double precision regardless of T (e.g. Complex64
-    // with T=float): summing N terms in std::complex<float> grows round-off error
-    // O(N), so mirror the double-accumulation policy used elsewhere in this file
-    // and narrow only on store.
-    const double two_pi_sign = is_forward ? -2.0 * M_PI : 2.0 * M_PI;
-    #pragma omp parallel for collapse(2) schedule(static) if (outer * inner > 64)
-    for (int64_t o = 0; o < outer; ++o) {
-        for (int64_t j = 0; j < inner; ++j) {
-            const std::complex<T>* x = in + (o * N_in) * inner + j;
-            std::complex<T>* y = out + (o * N_out) * inner + j;
-            const int64_t L = (N_in < N_out) ? N_in : N_out;
-            for (int64_t k = 0; k < N_out; ++k) {
-                std::complex<double> acc(0, 0);
-                const double phase_base =
-                    two_pi_sign * static_cast<double>(k) / static_cast<double>(N_out);
-                for (int64_t n = 0; n < L; ++n) {
-                    double phase = phase_base * static_cast<double>(n);
-                    std::complex<double> w(std::cos(phase), std::sin(phase));
-                    const std::complex<T>& xn = x[n * inner];
-                    std::complex<double> xnd(static_cast<double>(xn.real()),
-                                             static_cast<double>(xn.imag()));
-                    acc += xnd * w;
-                }
-                std::complex<double> res = acc * scale;
-                y[k * inner] = std::complex<T>(static_cast<T>(res.real()),
-                                               static_cast<T>(res.imag()));
             }
         }
     }

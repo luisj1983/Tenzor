@@ -29,6 +29,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tenzor {
@@ -50,10 +51,12 @@ cudnnDataType_t to_cudnn_dtype_rnn(DType dtype) {
 }
 
 // TF32 for Float32 RNN matmuls, gated by the unified backend toggle
-// (tenzor::cuda::matmul::allow_tf32() / TENZOR_DISABLE_TF32) that conv2d and
-// matmul already honor. Default is ON, matching PyTorch
-// (torch.backends.cudnn.allow_tf32=True): TF32 tensor-core math (~1.3x faster)
-// with FP32 fallback. Float64 always uses full precision.
+// (tenzor::cuda::matmul::allow_tf32() / TENZOR_ENABLE_TF32) that conv2d and
+// matmul already honor. Default is OFF (F-108): tenzor deliberately diverges
+// from PyTorch's torch.backends.cudnn.allow_tf32=True default for CPU<->CUDA
+// numerical parity. Opt in via TENZOR_ENABLE_TF32=1 / set_allow_tf32(true)
+// for TF32 tensor-core math (~1.3x faster) with FP32 fallback. Float64
+// always uses full precision regardless.
 cudnnMathType_t rnn_math_type(DType dtype) {
     if (dtype == DType::Float32 && ::tenzor::cuda::matmul::allow_tf32()) {
         return CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION;
@@ -1035,11 +1038,50 @@ std::vector<Tensor> gru_forward_cudnn_inference(
     return { out.output, out.hy.reshape({batch, hidden}) };
 }
 
+// F-070: see rnn_sequence.cu's split_multilayer_bias for the full rationale
+// (duplicated here since these are separate translation units). In short:
+// LSTMMultiLayerForward/GRUMultiLayerForward carry exactly ONE bias tensor
+// per layer at the wire level; its size -- not a hardcoded assumption --
+// disambiguates whether it is a plain bias_ih (gate_size elements, bias_hh
+// implicitly zero) or a concatenated [bias_ih ; bias_hh] (2*gate_size
+// elements) to split at the midpoint. Throws on any other size instead of
+// silently mis-slicing.
+static std::pair<Tensor, Tensor> split_multilayer_bias(
+    const Tensor& bias, int64_t gate_size, const char* op_name) {
+    if (bias.numel() == 0) {
+        return {Tensor{}, Tensor{}};
+    }
+    if (bias.numel() == gate_size) {
+        return {bias.contiguous(), Tensor{}};
+    }
+    if (bias.numel() == 2 * gate_size) {
+        Tensor c = bias.contiguous();
+        return {c.slice(0, 0, gate_size).contiguous(),
+                c.slice(0, gate_size, 2 * gate_size).contiguous()};
+    }
+    throw std::invalid_argument(
+        std::string(op_name) + ": layer bias has " + std::to_string(bias.numel()) +
+        " elements; expected " + std::to_string(gate_size) +
+        " (bias_ih only) or " + std::to_string(2 * gate_size) +
+        " (concatenated bias_ih+bias_hh)");
+}
+
 // Multi-layer (stacked, unidirectional) LSTM inference in a single fused cuDNN
 // call, replacing the previous per-layer loop of separate cuDNN calls. Each
-// bias_list[l] is the combined 8*hidden bias (4*hidden bias_ih ++ 4*hidden
-// bias_hh) — split exactly as the per-layer path does. h0/c0 are
-// (num_layers, batch, hidden), which already matches cuDNN's hx/cx layout.
+// bias_list[l] is this layer's single wire-format bias tensor; its size
+// disambiguates whether it is a plain 4*hidden bias_ih (the long-standing
+// convention every other backend's fused multi-layer entry point uses, with
+// bias_hh implicitly zero) or an 8*hidden concatenation of
+// [bias_ih ; bias_hh] to split at the midpoint -- see split_multilayer_bias.
+// NOTE: this used to unconditionally assume the 8*hidden form and divide by
+// two regardless of the tensor's actual size, which silently sliced a real
+// 4*hidden bias_ih vector across a gate boundary into two meaningless
+// halves. The per-layer path (lstm_forward_cudnn_inference above) never
+// does any splitting at all -- its bias_ih/bias_hh arrive as two separate
+// tensors from the caller -- so the previous version of this comment,
+// claiming this "splits exactly as the per-layer path does", was incorrect.
+// h0/c0 are (num_layers, batch, hidden), which already matches cuDNN's
+// hx/cx layout.
 std::vector<Tensor> lstm_multi_layer_forward_cudnn_inference(
     const Tensor& input,
     const std::vector<Tensor>& W_ih_list,
@@ -1056,14 +1098,10 @@ std::vector<Tensor> lstm_multi_layer_forward_cudnn_inference(
     biases_ih.reserve(num_layers);
     biases_hh.reserve(num_layers);
     for (int64_t l = 0; l < num_layers; ++l) {
-        if (bias_list[l].numel() > 0) {
-            const int64_t half = bias_list[l].numel() / 2;
-            biases_ih.push_back(bias_list[l].slice(0, 0, half).contiguous());
-            biases_hh.push_back(bias_list[l].slice(0, half, 2 * half).contiguous());
-        } else {
-            biases_ih.push_back(Tensor{});
-            biases_hh.push_back(Tensor{});
-        }
+        auto [bias_ih, bias_hh] = split_multilayer_bias(
+            bias_list[l], 4 * hidden, "lstm_multi_layer_forward_cudnn_inference");
+        biases_ih.push_back(bias_ih);
+        biases_hh.push_back(bias_hh);
     }
 
     auto out = cudnn_lstm_forward(

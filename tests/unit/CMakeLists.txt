@@ -285,14 +285,8 @@ target_link_libraries(test_swin_transformer_multidtype PRIVATE tenzor_core GTest
 add_executable(test_efficientnet_multidtype test_efficientnet_multidtype.cpp)
 target_link_libraries(test_efficientnet_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
-# SIMD operations tests
-add_executable(test_simd_ops test_simd_ops.cpp)
-target_link_libraries(test_simd_ops PRIVATE tenzor_core tenzor_backend_cpu GTest::gtest_main)
-
-# test_simd_ops crashes during --gtest_list_tests (static destruction), use add_test
-# CPU-only SIMD kernel test; prefix with cpu_ so `ctest -R cpu` finds it.
-add_test(NAME cpu_test_simd_ops COMMAND test_simd_ops)
-set_tests_properties(cpu_test_simd_ops PROPERTIES TIMEOUT 120 LABELS "cpu")
+# test_simd_ops (test_simd_ops.cpp) removed: it exclusively tested the dead
+# cpu::simd::/cpu::scalar:: wrapper API deleted under F-029.
 
 # New comparison ops tests (OneAPI/Vulkan backends)
 add_executable(test_comparison_ops test_comparison_ops.cpp)
@@ -506,14 +500,8 @@ target_link_libraries(test_async_ops PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_data_loading test_data_loading.cpp)
 target_link_libraries(test_data_loading PRIVATE tenzor_core GTest::gtest_main)
 
-# SIMD tests (multi-backend)
-add_executable(test_simd test_simd.cpp)
-target_link_libraries(test_simd PRIVATE tenzor_core tenzor_backend_cpu GTest::gtest_main)
-
-# test_simd crashes during --gtest_list_tests (static destruction), use add_test
-# CPU-only SIMD harness; prefix with cpu_ so `ctest -R cpu` finds it.
-add_test(NAME cpu_test_simd COMMAND test_simd)
-set_tests_properties(cpu_test_simd PROPERTIES TIMEOUT 120 LABELS "cpu")
+# test_simd (test_simd.cpp) removed: it exclusively tested the dead
+# cpu::simd::/cpu::scalar:: wrapper API deleted under F-029.
 
 # Inplace operations multi-dtype tests
 add_executable(test_inplace_operations_multidtype test_inplace_operations_multidtype.cpp)

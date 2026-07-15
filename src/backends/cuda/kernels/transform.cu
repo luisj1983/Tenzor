@@ -51,32 +51,76 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
         CUDA_CHECK(cudaGetLastError()); \
     } while(0)
 
-// Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays).
+// Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride
+// arrays in the common case).
 //
-// Audit F.12: rank cap lifted from 8 to 16 with a runtime throw on overflow.
-// The previous code silently truncated any tensor with rank > 8 — the make
-// function looped `i < 8` and the kernel iterated only those slots, dropping
-// higher dimensions. 16 matches the cap used by reduction.cu / activations.cu
-// (DIM_META_MAX_RANK) and the maximum supported in CPU/ROCm.
+// F-038/F-041 follow-up: TRANSFORM_DIM_META_MAX_RANK=16 remains the size of the
+// inline fast-path arrays (unchanged perf/layout for the common case), but
+// TransformRankArray now falls back to a device buffer for ndim > 16 instead of
+// throwing -- see make_transform_meta below. contiguous_kernel_impl and
+// slice_kernel_impl (below) only ever read shape/stride entries via operator[]
+// in a single decode-and-relinearize pass with no per-thread scratch array
+// sized to the rank, so this is a safe, drop-in fix for arbitrary rank on
+// those two kernels. cat_kernel_impl is a separate case with its own local
+// per-thread `coords[]` array and is left as a clean throw -- see the comment
+// at cat_kernel.
 constexpr int TRANSFORM_DIM_META_MAX_RANK = 16;
-struct TransformMeta {
-    int64_t shape[TRANSFORM_DIM_META_MAX_RANK];
-    int64_t strides[TRANSFORM_DIM_META_MAX_RANK];
+
+// Per-dim value accessor. `data` backs ndim <= TRANSFORM_DIM_META_MAX_RANK
+// (byte-identical to the original raw array). `overflow`, when non-null,
+// points at a device buffer holding `ndim` values, used for
+// ndim > TRANSFORM_DIM_META_MAX_RANK. Kernels only ever read via operator[],
+// so this is a drop-in replacement for `int64_t[TRANSFORM_DIM_META_MAX_RANK]`
+// requiring no kernel-body changes.
+struct TransformRankArray {
+    int64_t data[TRANSFORM_DIM_META_MAX_RANK];
+    const int64_t* overflow = nullptr;
+
+    __host__ __device__ __forceinline__ int64_t operator[](int64_t d) const {
+        return overflow != nullptr ? overflow[d] : data[d];
+    }
 };
 
+struct TransformMeta {
+    TransformRankArray shape;
+    TransformRankArray strides;
+};
+
+// Builds a TransformMeta for shape/strides of any rank. For
+// ndim <= TRANSFORM_DIM_META_MAX_RANK, populates the inline fast-path arrays
+// (identical to the pre-fix behavior/perf). For higher rank, packs shape+strides
+// into one device buffer (allocated into `overflow_buf`, which the caller must
+// keep alive until every kernel launch consuming the returned meta has been
+// enqueued on `stream`) and points the meta's overflow pointers at it, so
+// contiguous_kernel works for arbitrary rank instead of throwing.
 static TransformMeta make_transform_meta(const std::vector<int64_t>& shape,
-                                          const std::vector<int64_t>& strides) {
-    if (shape.size() > TRANSFORM_DIM_META_MAX_RANK) {
-        throw std::runtime_error(
-            "CUDA TransformMeta: tensor rank " + std::to_string(shape.size()) +
-            " exceeds maximum " + std::to_string(TRANSFORM_DIM_META_MAX_RANK) +
-            " (raise TRANSFORM_DIM_META_MAX_RANK if needed).");
-    }
+                                          const std::vector<int64_t>& strides,
+                                          CudaAsyncBuffer& overflow_buf,
+                                          cudaStream_t stream) {
     TransformMeta meta{};
-    for (size_t i = 0; i < shape.size(); ++i) {
-        meta.shape[i] = shape[i];
-        meta.strides[i] = strides[i];
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+
+    if (ndim <= TRANSFORM_DIM_META_MAX_RANK) {
+        for (int64_t i = 0; i < ndim; ++i) {
+            meta.shape.data[i] = shape[i];
+            meta.strides.data[i] = strides[i];
+        }
+        return meta;
     }
+
+    // Arbitrary-rank fallback: pack shape+strides into one device buffer
+    // (mirrors the packed device metadata buffer used by cat_kernel below).
+    std::vector<int64_t> host_buf(static_cast<size_t>(ndim) * 2);
+    std::copy(shape.begin(), shape.end(), host_buf.begin());
+    std::copy(strides.begin(), strides.end(), host_buf.begin() + ndim);
+
+    overflow_buf = CudaAsyncBuffer(host_buf.size() * sizeof(int64_t), stream);
+    auto* d_buf = overflow_buf.as<int64_t>();
+    CUDA_CHECK(cudaMemcpyAsync(d_buf, host_buf.data(), host_buf.size() * sizeof(int64_t),
+                               cudaMemcpyHostToDevice, stream));
+
+    meta.shape.overflow = d_buf;
+    meta.strides.overflow = d_buf + ndim;
     return meta;
 }
 
@@ -117,9 +161,13 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         return result;  // Empty tensor
     }
 
-    // Pass strides and shape by value as kernel argument
+    // Pass strides and shape by value as kernel argument. ndim >
+    // TRANSFORM_DIM_META_MAX_RANK packs shape/strides into a device buffer
+    // (meta_overflow_buf, freed once this function returns) instead of
+    // throwing -- see make_transform_meta above (F-038/F-041).
     std::vector<int64_t> strides_vec(input.strides().begin(), input.strides().end());
-    TransformMeta meta = make_transform_meta(shape, strides_vec);
+    CudaAsyncBuffer meta_overflow_buf;
+    TransformMeta meta = make_transform_meta(shape, strides_vec, meta_overflow_buf, stream);
 
     // Launch kernel
     int num_blocks = get_num_blocks(total_elements);
@@ -452,6 +500,14 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
     if (dim < 0 || dim >= ndim) {
         throw std::invalid_argument("Dimension out of range for concatenation");
     }
+    // F-038/F-041: unlike contiguous_kernel/slice_kernel above, cat_kernel_impl's
+    // decode loop stores a full per-thread `coords[TRANSFORM_DIM_META_MAX_RANK]`
+    // scratch array (populated in one pass, then re-read in a second pass to
+    // find the source tensor and re-linearise), not a single streaming
+    // decode-and-relinearise pass. Supporting ndim > TRANSFORM_DIM_META_MAX_RANK
+    // here would require restructuring that kernel's indexing math (e.g.
+    // dynamic shared memory sized per-launch), not just the metadata -- left
+    // as a clean throw rather than a partial/unsafe fix.
     if (ndim > TRANSFORM_DIM_META_MAX_RANK) {
         throw std::runtime_error(
             "CUDA cat_kernel: tensor rank " + std::to_string(ndim) +
@@ -571,76 +627,28 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
     // Launch kernel
     const int num_blocks = get_num_blocks(total_elements);
 
-    if (tensors[0].dtype() == DType::Float32) {
-        cat_kernel_impl<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<float**>(d_input_ptrs), output.data<float>(),
+    // F-057: cat is pure data movement (index-based element copy), so dispatch
+    // by element size like slice_kernel/tile_kernel (this file) rather than a
+    // fixed per-dtype switch. This makes cat dtype-agnostic — covering Int16/
+    // UInt16/UInt32/UInt64 (previously missing) — matching CPU's byte-generic
+    // cat_kernel (src/backends/cpu/kernels/transform.cpp) and this file's own
+    // slice/tile sibling kernels instead of throwing for the unlisted dtypes.
+    auto launch_cat = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        cat_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<T**>(d_input_ptrs), reinterpret_cast<T*>(output.data_ptr()),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Float64) {
-        cat_kernel_impl<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<double**>(d_input_ptrs), output.data<double>(),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Int32) {
-        cat_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<int32_t**>(d_input_ptrs), output.data<int32_t>(),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Int64) {
-        cat_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<int64_t**>(d_input_ptrs), output.data<int64_t>(),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Float16) {
-        cat_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<__half**>(d_input_ptrs), reinterpret_cast<__half*>(output.data_ptr()),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::BFloat16) {
-        cat_kernel_impl<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<__nv_bfloat16**>(d_input_ptrs), reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Int8) {
-        cat_kernel_impl<int8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<int8_t**>(d_input_ptrs), output.data<int8_t>(),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::UInt8) {
-        cat_kernel_impl<uint8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<uint8_t**>(d_input_ptrs), output.data<uint8_t>(),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Bool) {
-        cat_kernel_impl<bool><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<bool**>(d_input_ptrs), reinterpret_cast<bool*>(output.data_ptr()),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Complex64) {
-        // Concatenation is pure data movement; treat each complex element as a
-        // float2 (real,imag) so it copies correctly (matches contiguous_kernel).
-        cat_kernel_impl<float2><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<float2**>(d_input_ptrs), reinterpret_cast<float2*>(output.data_ptr()),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (tensors[0].dtype() == DType::Complex128) {
-        cat_kernel_impl<double2><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<double2**>(d_input_ptrs), reinterpret_cast<double2*>(output.data_ptr()),
-            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
-            num_tensors, ndim, dim, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("Concatenation: unsupported dtype");
+        CUDA_CHECK(cudaGetLastError());
+    };
+    switch (dtype_size(tensors[0].dtype())) {
+        case 1:  launch_cat(static_cast<uint8_t*>(nullptr));  break;   // Int8, UInt8, Bool
+        case 2:  launch_cat(static_cast<uint16_t*>(nullptr)); break;   // Float16, BFloat16, Int16, UInt16
+        case 4:  launch_cat(static_cast<uint32_t*>(nullptr)); break;   // Float32, Int32, UInt32
+        case 8:  launch_cat(static_cast<uint64_t*>(nullptr)); break;   // Float64, Int64, UInt64, Complex64
+        case 16: launch_cat(static_cast<double2*>(nullptr));  break;   // Complex128
+        default:
+            throw std::runtime_error("cat: unsupported element size");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -868,18 +876,20 @@ auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim, cud
 // Slice
 // ============================================================================
 
-// Metadata struct passed by value to slice kernel (avoids 5x cudaMalloc for shape/stride arrays).
+// Metadata struct passed by value to slice kernel (avoids 5x cudaMalloc for
+// shape/stride arrays in the common case).
 //
-// Audit F.12: rank cap lifted from 8 to TRANSFORM_DIM_META_MAX_RANK (16).
-// Previously the slice setup loop guarded `d < 8` and silently truncated
-// higher-rank tensors. The host dispatcher (slice_kernel) now throws when
-// ndim exceeds the cap.
+// F-038/F-041 follow-up: see the TransformRankArray comment above -- the
+// slice setup loop below now packs all 5 arrays into a device buffer for
+// ndim > TRANSFORM_DIM_META_MAX_RANK instead of throwing. slice_kernel_impl
+// decodes and re-linearises in a single pass with no per-thread scratch
+// array sized to the rank, so this is a safe fix for arbitrary rank.
 struct SliceMeta {
-    int64_t input_strides[TRANSFORM_DIM_META_MAX_RANK];
-    int64_t output_shape[TRANSFORM_DIM_META_MAX_RANK];
-    int64_t output_strides[TRANSFORM_DIM_META_MAX_RANK];
-    int64_t starts[TRANSFORM_DIM_META_MAX_RANK];
-    int64_t steps[TRANSFORM_DIM_META_MAX_RANK];
+    TransformRankArray input_strides;
+    TransformRankArray output_shape;
+    TransformRankArray output_strides;
+    TransformRankArray starts;
+    TransformRankArray steps;
 };
 
 template<typename T>
@@ -973,21 +983,38 @@ auto slice_kernel(
         }
     }
 
-    // Build metadata struct passed by value (avoids 5x cudaMalloc).
-    // Audit F.12: enforce the rank cap explicitly instead of silently truncating.
-    if (ndim > TRANSFORM_DIM_META_MAX_RANK) {
-        throw std::runtime_error(
-            "CUDA slice_kernel: tensor rank " + std::to_string(ndim) +
-            " exceeds maximum " + std::to_string(TRANSFORM_DIM_META_MAX_RANK) +
-            " (raise TRANSFORM_DIM_META_MAX_RANK if needed).");
-    }
+    // Build metadata struct passed by value (avoids 5x cudaMalloc for the
+    // common case). ndim > TRANSFORM_DIM_META_MAX_RANK packs all 5 arrays
+    // into one device buffer (slice_overflow_buf, freed once this function
+    // returns) instead of throwing -- see TransformRankArray /
+    // make_transform_meta above for the same pattern (F-038/F-041).
     SliceMeta meta{};
-    for (int64_t d = 0; d < ndim; ++d) {
-        meta.input_strides[d] = input_strides[d];
-        meta.output_shape[d] = output_shape[d];
-        meta.output_strides[d] = output_strides[d];
-        meta.starts[d] = padded_starts[d];
-        meta.steps[d] = padded_steps[d];
+    CudaAsyncBuffer slice_overflow_buf;
+    if (ndim <= TRANSFORM_DIM_META_MAX_RANK) {
+        for (int64_t d = 0; d < ndim; ++d) {
+            meta.input_strides.data[d] = input_strides[d];
+            meta.output_shape.data[d] = output_shape[d];
+            meta.output_strides.data[d] = output_strides[d];
+            meta.starts.data[d] = padded_starts[d];
+            meta.steps.data[d] = padded_steps[d];
+        }
+    } else {
+        std::vector<int64_t> host_buf(static_cast<size_t>(ndim) * 5);
+        std::copy(input_strides.begin(), input_strides.end(), host_buf.begin());
+        std::copy(output_shape.begin(), output_shape.end(), host_buf.begin() + ndim);
+        std::copy(output_strides.begin(), output_strides.end(), host_buf.begin() + 2 * ndim);
+        std::copy(padded_starts.begin(), padded_starts.end(), host_buf.begin() + 3 * ndim);
+        std::copy(padded_steps.begin(), padded_steps.end(), host_buf.begin() + 4 * ndim);
+
+        slice_overflow_buf = CudaAsyncBuffer(host_buf.size() * sizeof(int64_t), stream);
+        auto* d_buf = slice_overflow_buf.as<int64_t>();
+        CUDA_CHECK(cudaMemcpyAsync(d_buf, host_buf.data(), host_buf.size() * sizeof(int64_t),
+                                   cudaMemcpyHostToDevice, stream));
+        meta.input_strides.overflow = d_buf;
+        meta.output_shape.overflow = d_buf + ndim;
+        meta.output_strides.overflow = d_buf + 2 * ndim;
+        meta.starts.overflow = d_buf + 3 * ndim;
+        meta.steps.overflow = d_buf + 4 * ndim;
     }
 
     int block_size = 256;
@@ -1981,45 +2008,27 @@ auto flip_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tenso
         inner_size *= shape[d];
     }
 
-    switch (input.dtype()) {
-        case DType::Float32: {
-            auto [grid, block] = optimal_launch_config(flip_kernel_impl<float>, total);
-            flip_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<float>(), output.data<float>(), total, dim_size, inner_size);
-            break;
-        }
-        case DType::Float64: {
-            auto [grid, block] = optimal_launch_config(flip_kernel_impl<double>, total);
-            flip_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<double>(), output.data<double>(), total, dim_size, inner_size);
-            break;
-        }
-        case DType::Float16: {
-            auto [grid, block] = optimal_launch_config(flip_kernel_impl<Float16>, total);
-            flip_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<Float16>(), output.data<Float16>(), total, dim_size, inner_size);
-            break;
-        }
-        case DType::BFloat16: {
-            auto [grid, block] = optimal_launch_config(flip_kernel_impl<BFloat16>, total);
-            flip_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<BFloat16>(), output.data<BFloat16>(), total, dim_size, inner_size);
-            break;
-        }
-        case DType::Int32: {
-            auto [grid, block] = optimal_launch_config(flip_kernel_impl<int32_t>, total);
-            flip_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<int32_t>(), output.data<int32_t>(), total, dim_size, inner_size);
-            break;
-        }
-        case DType::Int64: {
-            auto [grid, block] = optimal_launch_config(flip_kernel_impl<int64_t>, total);
-            flip_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<int64_t>(), output.data<int64_t>(), total, dim_size, inner_size);
-            break;
-        }
+    // F-058: flip is pure data movement (index-based element copy), so
+    // dispatch by element size like slice_kernel/tile_kernel (this file)
+    // rather than a fixed 6-type switch. This makes it dtype-agnostic (Bool,
+    // Int8/16, UInt8/16/32/64, Complex64/128) matching CPU's byte-generic
+    // flip (src/backends/cpu/kernels/transform.cpp) instead of throwing for
+    // the unlisted dtypes.
+    auto launch_flip = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        auto [grid, block] = optimal_launch_config(flip_kernel_impl<T>, total);
+        flip_kernel_impl<T><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const T*>(cont.data_ptr()), reinterpret_cast<T*>(output.data_ptr()),
+            total, dim_size, inner_size);
+    };
+    switch (dtype_size(input.dtype())) {
+        case 1:  launch_flip(static_cast<uint8_t*>(nullptr));  break;   // Int8, UInt8, Bool
+        case 2:  launch_flip(static_cast<uint16_t*>(nullptr)); break;   // Float16, BFloat16, Int16, UInt16
+        case 4:  launch_flip(static_cast<uint32_t*>(nullptr)); break;   // Float32, Int32, UInt32
+        case 8:  launch_flip(static_cast<uint64_t*>(nullptr)); break;   // Float64, Int64, UInt64, Complex64
+        case 16: launch_flip(static_cast<double2*>(nullptr));  break;   // Complex128
         default:
-            throw std::runtime_error("flip_kernel: unsupported dtype");
+            throw std::runtime_error("flip_kernel: unsupported element size");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2235,51 +2244,27 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t s
         inner_size *= shape[d];
     }
 
-    switch (input.dtype()) {
-        case DType::Float32: {
-            auto [grid, block] = optimal_launch_config(roll_kernel_impl<float>, total);
-            roll_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<float>(), output.data<float>(),
-                total, dim_size, shift, inner_size);
-            break;
-        }
-        case DType::Float64: {
-            auto [grid, block] = optimal_launch_config(roll_kernel_impl<double>, total);
-            roll_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<double>(), output.data<double>(),
-                total, dim_size, shift, inner_size);
-            break;
-        }
-        case DType::Int32: {
-            auto [grid, block] = optimal_launch_config(roll_kernel_impl<int32_t>, total);
-            roll_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<int32_t>(), output.data<int32_t>(),
-                total, dim_size, shift, inner_size);
-            break;
-        }
-        case DType::Int64: {
-            auto [grid, block] = optimal_launch_config(roll_kernel_impl<int64_t>, total);
-            roll_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<int64_t>(), output.data<int64_t>(),
-                total, dim_size, shift, inner_size);
-            break;
-        }
-        case DType::Float16: {
-            auto [grid, block] = optimal_launch_config(roll_kernel_impl<Float16>, total);
-            roll_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<Float16>(), output.data<Float16>(),
-                total, dim_size, shift, inner_size);
-            break;
-        }
-        case DType::BFloat16: {
-            auto [grid, block] = optimal_launch_config(roll_kernel_impl<BFloat16>, total);
-            roll_kernel_impl<<<grid, block, 0, stream>>>(
-                cont.data<BFloat16>(), output.data<BFloat16>(),
-                total, dim_size, shift, inner_size);
-            break;
-        }
+    // F-058: roll is pure data movement (index-based element copy), so
+    // dispatch by element size like slice_kernel/tile_kernel (this file)
+    // rather than a fixed 6-type switch. This makes it dtype-agnostic (Bool,
+    // Int8/16, UInt8/16/32/64, Complex64/128) matching CPU's byte-generic
+    // roll (src/backends/cpu/kernels/transform.cpp) instead of throwing for
+    // the unlisted dtypes.
+    auto launch_roll = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        auto [grid, block] = optimal_launch_config(roll_kernel_impl<T>, total);
+        roll_kernel_impl<T><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const T*>(cont.data_ptr()), reinterpret_cast<T*>(output.data_ptr()),
+            total, dim_size, shift, inner_size);
+    };
+    switch (dtype_size(input.dtype())) {
+        case 1:  launch_roll(static_cast<uint8_t*>(nullptr));  break;   // Int8, UInt8, Bool
+        case 2:  launch_roll(static_cast<uint16_t*>(nullptr)); break;   // Float16, BFloat16, Int16, UInt16
+        case 4:  launch_roll(static_cast<uint32_t*>(nullptr)); break;   // Float32, Int32, UInt32
+        case 8:  launch_roll(static_cast<uint64_t*>(nullptr)); break;   // Float64, Int64, UInt64, Complex64
+        case 16: launch_roll(static_cast<double2*>(nullptr));  break;   // Complex128
         default:
-            throw std::runtime_error("roll_kernel: unsupported dtype");
+            throw std::runtime_error("roll_kernel: unsupported element size");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2373,24 +2358,28 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
 
-    #define LAUNCH_SCALAR_RI(T) { \
-        auto [grid, block] = optimal_launch_config(repeat_interleave_scalar_kernel_impl<T>, total); \
-        repeat_interleave_scalar_kernel_impl<<<grid, block, 0, stream>>>( \
-            cont.data<T>(), output.data<T>(), \
-            total, in_dim_size, out_dim_size, repeats, inner_size); \
-    }
-
-    switch (input.dtype()) {
-        case DType::Float32: LAUNCH_SCALAR_RI(float); break;
-        case DType::Float64: LAUNCH_SCALAR_RI(double); break;
-        case DType::Int32:   LAUNCH_SCALAR_RI(int32_t); break;
-        case DType::Int64:   LAUNCH_SCALAR_RI(int64_t); break;
-        case DType::Float16: LAUNCH_SCALAR_RI(Float16); break;
-        case DType::BFloat16: LAUNCH_SCALAR_RI(BFloat16); break;
+    // F-058: repeat_interleave is pure data movement (index-based element
+    // copy), so dispatch by element size like slice_kernel/tile_kernel (this
+    // file) rather than a fixed 6-type switch. This makes it dtype-agnostic
+    // (Bool, Int8/16, UInt8/16/32/64, Complex64/128) matching CPU's
+    // byte-generic repeat_interleave (src/backends/cpu/kernels/transform.cpp)
+    // instead of throwing for the unlisted dtypes.
+    auto launch_scalar_ri = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        auto [grid, block] = optimal_launch_config(repeat_interleave_scalar_kernel_impl<T>, total);
+        repeat_interleave_scalar_kernel_impl<T><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const T*>(cont.data_ptr()), reinterpret_cast<T*>(output.data_ptr()),
+            total, in_dim_size, out_dim_size, repeats, inner_size);
+    };
+    switch (dtype_size(input.dtype())) {
+        case 1:  launch_scalar_ri(static_cast<uint8_t*>(nullptr));  break;   // Int8, UInt8, Bool
+        case 2:  launch_scalar_ri(static_cast<uint16_t*>(nullptr)); break;   // Float16, BFloat16, Int16, UInt16
+        case 4:  launch_scalar_ri(static_cast<uint32_t*>(nullptr)); break;   // Float32, Int32, UInt32
+        case 8:  launch_scalar_ri(static_cast<uint64_t*>(nullptr)); break;   // Float64, Int64, UInt64, Complex64
+        case 16: launch_scalar_ri(static_cast<double2*>(nullptr));  break;   // Complex128
         default:
-            throw std::runtime_error("repeat_interleave_scalar_kernel: unsupported dtype");
+            throw std::runtime_error("repeat_interleave_scalar_kernel: unsupported element size");
     }
-    #undef LAUNCH_SCALAR_RI
 
     CUDA_CHECK(cudaGetLastError());
     return output;
@@ -2536,25 +2525,29 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
 
-    #define LAUNCH_TENSOR_RI(T) { \
-        auto [grid, block] = optimal_launch_config(repeat_interleave_tensor_kernel_impl<T>, total); \
-        repeat_interleave_tensor_kernel_impl<<<grid, block, 0, stream>>>( \
-            cont.data<T>(), output.data<T>(), d_prefix, \
-            total, in_dim_size, out_dim_size, inner_size); \
-    }
-
-    switch (input.dtype()) {
-        case DType::Float32: LAUNCH_TENSOR_RI(float); break;
-        case DType::Float64: LAUNCH_TENSOR_RI(double); break;
-        case DType::Int32:   LAUNCH_TENSOR_RI(int32_t); break;
-        case DType::Int64:   LAUNCH_TENSOR_RI(int64_t); break;
-        case DType::Float16: LAUNCH_TENSOR_RI(Float16); break;
-        case DType::BFloat16: LAUNCH_TENSOR_RI(BFloat16); break;
+    // F-058: repeat_interleave is pure data movement (index-based element
+    // copy), so dispatch by element size like slice_kernel/tile_kernel (this
+    // file) rather than a fixed 6-type switch. This makes it dtype-agnostic
+    // (Bool, Int8/16, UInt8/16/32/64, Complex64/128) matching CPU's
+    // byte-generic repeat_interleave (src/backends/cpu/kernels/transform.cpp)
+    // instead of throwing for the unlisted dtypes.
+    auto launch_tensor_ri = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        auto [grid, block] = optimal_launch_config(repeat_interleave_tensor_kernel_impl<T>, total);
+        repeat_interleave_tensor_kernel_impl<T><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const T*>(cont.data_ptr()), reinterpret_cast<T*>(output.data_ptr()), d_prefix,
+            total, in_dim_size, out_dim_size, inner_size);
+    };
+    switch (dtype_size(input.dtype())) {
+        case 1:  launch_tensor_ri(static_cast<uint8_t*>(nullptr));  break;   // Int8, UInt8, Bool
+        case 2:  launch_tensor_ri(static_cast<uint16_t*>(nullptr)); break;   // Float16, BFloat16, Int16, UInt16
+        case 4:  launch_tensor_ri(static_cast<uint32_t*>(nullptr)); break;   // Float32, Int32, UInt32
+        case 8:  launch_tensor_ri(static_cast<uint64_t*>(nullptr)); break;   // Float64, Int64, UInt64, Complex64
+        case 16: launch_tensor_ri(static_cast<double2*>(nullptr));  break;   // Complex128
         default:
             CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
-            throw std::runtime_error("repeat_interleave_tensor_kernel: unsupported dtype");
+            throw std::runtime_error("repeat_interleave_tensor_kernel: unsupported element size");
     }
-    #undef LAUNCH_TENSOR_RI
 
     CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
     CUDA_CHECK(cudaGetLastError());

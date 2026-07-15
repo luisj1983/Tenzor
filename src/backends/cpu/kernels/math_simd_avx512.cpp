@@ -7,7 +7,6 @@
  */
 
 #include "tenzor/backends/cpu/simd.hpp"
-#include "simd_fast_math.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #if defined(__AVX512F__)
@@ -100,29 +99,6 @@ auto sqrt(const float* a, float* out, size_t size) -> void {
     avx2::sqrt(a + i, out + i, size - i);
 }
 
-auto exp(const float* a, float* out, size_t size) -> void {
-    fast_math::exp_batch_avx512(a, out, size);
-}
-
-auto log(const float* a, float* out, size_t size) -> void {
-    fast_math::log_batch_avx512(a, out, size);
-}
-
-auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void {
-    const size_t vec_size = 16;
-    size_t i = 0;
-
-    for (; i + vec_size <= size; i += vec_size) {
-        __m512 va = _mm512_loadu_ps(a + i);
-        __m512 vb = _mm512_loadu_ps(b + i);
-        __m512 vc = _mm512_loadu_ps(c + i);
-        __m512 vout = _mm512_fmadd_ps(va, vb, vc);
-        _mm512_storeu_ps(out + i, vout);
-    }
-
-    avx2::fma(a + i, b + i, c + i, out + i, size - i);
-}
-
 #else
 
 // Fallback to AVX2 if AVX-512 not available at compile time
@@ -131,9 +107,6 @@ auto sub(const float* a, const float* b, float* out, size_t size) -> void { avx2
 auto mul(const float* a, const float* b, float* out, size_t size) -> void { avx2::mul(a, b, out, size); }
 auto div(const float* a, const float* b, float* out, size_t size) -> void { avx2::div(a, b, out, size); }
 auto sqrt(const float* a, float* out, size_t size) -> void { avx2::sqrt(a, out, size); }
-auto exp(const float* a, float* out, size_t size) -> void { avx2::exp(a, out, size); }
-auto log(const float* a, float* out, size_t size) -> void { avx2::log(a, out, size); }
-auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void { avx2::fma(a, b, c, out, size); }
 
 #endif
 

@@ -484,6 +484,23 @@ auto FusionPattern::match_conv_bn_relu(const FusionGraph& graph, size_t start) c
         match.matched_nodes = {start, outputs[0], bn_outputs[0]};
         match.confidence = 1.0f;
         match.pattern_name = "conv_bn_relu";
+
+        // F060/F061: forward the source conv's groups/dilation (when known)
+        // into the fused op's attributes so execute_fused_op reproduces the
+        // unfused numerics. FusedConv2dBnReLU's kernel now supports both
+        // end to end on CPU and CUDA (F061) — previously it had neither, so
+        // fusing a grouped/dilated conv would have silently defaulted both
+        // to 1 regardless of the real config. When the source conv node
+        // carries no explicit value we leave the key unset; execute_fused_op
+        // defaults to 1 (PyTorch's Conv2d default / a no-op), same as the
+        // existing stride/padding/eps handling below.
+        if (auto it = conv_node.attributes.find("groups"); it != conv_node.attributes.end()) {
+            match.attributes["groups"] = it->second;
+        }
+        if (auto it = conv_node.attributes.find("dilation"); it != conv_node.attributes.end()) {
+            match.attributes["dilation"] = it->second;
+        }
+
         return match;
 
     } catch (const std::out_of_range&) {
@@ -1158,10 +1175,18 @@ auto execute_fused_op(
             );
         }
 
-        // Parse stride/padding/eps attributes.  Inference fusion ⇒ training=false,
-        // running stats are used directly; momentum is irrelevant but must be passed.
+        // Parse stride/padding/dilation/groups/eps attributes.  Inference
+        // fusion ⇒ training=false, running stats are used directly;
+        // momentum is irrelevant but must be passed.
+        // F060/F061: dilation/groups previously were never parsed here at
+        // all, so they silently defaulted to 1 regardless of the source
+        // conv's real config; the underlying FusedConv2dBnReLU kernel now
+        // has genuine support for both on CPU and CUDA (F061), so they are
+        // forwarded exactly like stride/padding below.
         int64_t stride = 1;
         int64_t padding = 0;
+        int64_t dilation = 1;
+        int64_t groups = 1;
         double eps = 1e-5;
 
         if (auto it = attributes.find("stride"); it != attributes.end()) {
@@ -1170,6 +1195,12 @@ auto execute_fused_op(
         if (auto it = attributes.find("padding"); it != attributes.end()) {
             padding = parse_attr_i64("padding", it->second);
         }
+        if (auto it = attributes.find("dilation"); it != attributes.end()) {
+            dilation = parse_attr_i64("dilation", it->second);
+        }
+        if (auto it = attributes.find("groups"); it != attributes.end()) {
+            groups = parse_attr_i64("groups", it->second);
+        }
         if (auto it = attributes.find("eps"); it != attributes.end()) {
             eps = parse_attr_double("eps", it->second);
         }
@@ -1177,6 +1208,8 @@ auto execute_fused_op(
         OpAttributes attrs;
         attrs.set(AttrKey::Stride, stride);
         attrs.set(AttrKey::Padding, padding);
+        attrs.set(AttrKey::Dilation, dilation);
+        attrs.set(AttrKey::Groups, groups);
         attrs.set(AttrKey::Momentum, 0.1);
         attrs.set(AttrKey::Eps, eps);
         attrs.set(AttrKey::Training, false);

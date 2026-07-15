@@ -11,9 +11,10 @@
  * module on a CUDA-less build fails with:
  *   ImportError: undefined symbol: _ZN6tenzor4cuda6matmul24set_warn_fp16_saturationEb
  *
- * The stubs preserve the thread-local toggle semantics so callers that
- * read back what they set still observe their value, even though no
- * CUDA kernel will ever consult it.
+ * The stubs preserve the process-global toggle semantics (including the
+ * TF32-disabled-by-default resolution, F-108) so callers that read back
+ * what they set still observe their value, even though no CUDA kernel will
+ * ever consult it.
  */
 
 #include "tenzor/backend/cuda_config.hpp"
@@ -32,19 +33,23 @@ namespace tenzor::cuda::matmul {
 // internal allow_tf32() calls to THESE definitions (symbol interposition). So
 // these "stubs" must be behaviorally identical to the real implementation in
 // src/backends/cuda/kernels/matmul.cu — in particular they MUST honor the
-// documented TENZOR_DISABLE_TF32 env var, otherwise cuBLAS silently keeps TF32
-// on and CPU<->CUDA Float32 parity is broken. Tri-state: -1 = resolve from env
-// on first read (lazily, so a setenv before the first gemm is honored).
+// documented TENZOR_ENABLE_TF32 env var (F-108: TF32 is now disabled by
+// default; TENZOR_ENABLE_TF32=1 opts back in), otherwise cuBLAS silently
+// keeps TF32 on/off inconsistently with the real backend and CPU<->CUDA
+// Float32 parity is broken. Tri-state: -1 = resolve from env on first read
+// (lazily, so a setenv before the first gemm is honored).
 namespace {
 std::atomic<int> g_allow_tf32{-1};
 std::atomic<bool> g_warn_fp16_saturation{false};
 
 auto tf32_default_from_env() -> bool {
-    const char* v = std::getenv("TENZOR_DISABLE_TF32");
-    if (v && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0)) {
-        return false;  // TF32 disabled
+    const char* enable = std::getenv("TENZOR_ENABLE_TF32");
+    if (enable && (std::strcmp(enable, "1") == 0 || std::strcmp(enable, "true") == 0)) {
+        return true;  // TF32 explicitly enabled
     }
-    return true;  // TF32 allowed (default)
+    // TF32 disabled by default (F-108); TENZOR_DISABLE_TF32 (old opt-out
+    // variable) is a harmless no-op now since disabled is already the default.
+    return false;
 }
 }  // namespace
 

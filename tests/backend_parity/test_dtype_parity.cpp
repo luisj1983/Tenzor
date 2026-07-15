@@ -18,11 +18,13 @@ using namespace tenzor::testing;
 
 
 class DTypeParity : public BackendTest {};
-// The CUDA backend defaults to TF32 tensor cores for Float32 matmul
-// (~3e-4 relative precision) which is well below the parity tolerances
-// used here. Setting TENZOR_DISABLE_TF32=1 before initialize() forces
-// full IEEE 754 FP32 on cuBLAS so CPU↔CUDA matmul parity is measurable.
-// The actual setenv() call lives in main().
+// The CUDA backend can opt into TF32 tensor cores for Float32 matmul
+// (~3e-4 relative precision) via TENZOR_ENABLE_TF32=1, which is well below
+// the parity tolerances used here -- but TF32 is disabled by default
+// (F-108), so out of the box cuBLAS already runs full IEEE 754 FP32 and
+// CPU<->CUDA matmul parity is measurable. Setting TENZOR_DISABLE_TF32=1
+// before initialize() (see main()) is now a no-op kept for backward
+// compatibility; it re-affirms rather than changes the default.
 
 // ============================================================================
 // Float32 Operations

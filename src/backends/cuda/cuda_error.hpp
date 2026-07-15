@@ -42,8 +42,9 @@
         if (status != CUBLAS_STATUS_SUCCESS) {                                 \
             throw std::runtime_error(                                          \
                 std::string("cuBLAS error at ") + __FILE__ + ":" +            \
-                std::to_string(__LINE__) + " - status code " +                \
-                std::to_string(static_cast<int>(status)));                     \
+                std::to_string(__LINE__) + " - " +                            \
+                cublasGetStatusString(status) + " (status code " +            \
+                std::to_string(static_cast<int>(status)) + ")");              \
         }                                                                      \
     } while (0)
 #endif

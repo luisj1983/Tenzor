@@ -653,8 +653,12 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
 
         int64_t n_unique = static_cast<int64_t>(unique_vals.size());
 
-        // Build output tensors
-        Tensor unique_out({n_unique}, input.dtype(), input.device());
+        // Build output tensors. Use T's own dtype (not input.dtype()) here:
+        // the Float16/BFloat16 caller below invokes this with T=float on a
+        // widened copy, so input.dtype() would still be Float16/BFloat16 and
+        // constructing the output tensor with that dtype while writing
+        // through a float* would throw a dtype mismatch in Tensor::data<T>().
+        Tensor unique_out({n_unique}, type_to_dtype_v<T>, input.device());
         T* unique_data = unique_out.template data<T>();
         std::memcpy(unique_data, unique_vals.data(), n_unique * sizeof(T));
 
@@ -694,6 +698,10 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
         return do_unique(cont.data<int8_t>());
     } else if (input.dtype() == DType::UInt8) {
         return do_unique(cont.data<uint8_t>());
+    } else if (input.dtype() == DType::Int16) {
+        return do_unique(cont.data<int16_t>());
+    } else if (input.dtype() == DType::UInt16) {
+        return do_unique(cont.data<uint16_t>());
     } else if (input.dtype() == DType::Bool) {
         // vector<bool> is special in C++, use uint8_t internally
         const bool* bdata = cont.data<bool>();
@@ -1131,8 +1139,15 @@ auto fmin_impl(const T* a, const T* b, T* out, int64_t n) -> void {
 }
 
 auto fmax_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    if (a.numel() != b.numel()) {
-        throw std::runtime_error("fmax: tensors must have the same number of elements");
+    // Defense in depth: this kernel indexes both operands with a single flat
+    // linear index (no per-operand broadcast strides), so it requires an
+    // exact shape match. The public tenzor::fmax (src/ops/reduction.cpp)
+    // already promotes dtype and broadcasts both operands to a common shape
+    // before dispatch, so this should never fire on that path — it guards a
+    // future caller that bypasses the op layer and dispatches directly with
+    // mismatched (or merely same-numel, differently-shaped) operands.
+    if (!std::equal(a.shape().begin(), a.shape().end(), b.shape().begin(), b.shape().end())) {
+        throw std::runtime_error("fmax: tensors must have the same shape");
     }
     Tensor ca = a.is_contiguous() ? a : a.contiguous();
     Tensor cb = b.is_contiguous() ? b : b.contiguous();
@@ -1162,8 +1177,11 @@ auto fmax_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto fmin_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    if (a.numel() != b.numel()) {
-        throw std::runtime_error("fmin: tensors must have the same number of elements");
+    // Defense in depth: see the matching comment in fmax_kernel above — this
+    // kernel has no broadcast support of its own, so it requires an exact
+    // shape match even though the op layer already guarantees one.
+    if (!std::equal(a.shape().begin(), a.shape().end(), b.shape().begin(), b.shape().end())) {
+        throw std::runtime_error("fmin: tensors must have the same shape");
     }
     Tensor ca = a.is_contiguous() ? a : a.contiguous();
     Tensor cb = b.is_contiguous() ? b : b.contiguous();

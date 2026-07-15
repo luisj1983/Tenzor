@@ -7,8 +7,6 @@
  */
 
 #include "tenzor/backends/cpu/simd.hpp"
-#include "tenzor/backend/runtime_simd.hpp"
-#include "simd_fast_math.hpp"
 #include <cmath>
 
 // Include SIMD intrinsics based on compiler
@@ -59,24 +57,6 @@ auto div(const float* a, const float* b, float* out, size_t size) -> void {
 auto sqrt(const float* a, float* out, size_t size) -> void {
     for (size_t i = 0; i < size; ++i) {
         out[i] = std::sqrt(a[i]);
-    }
-}
-
-auto exp(const float* a, float* out, size_t size) -> void {
-    for (size_t i = 0; i < size; ++i) {
-        out[i] = std::exp(a[i]);
-    }
-}
-
-auto log(const float* a, float* out, size_t size) -> void {
-    for (size_t i = 0; i < size; ++i) {
-        out[i] = std::log(a[i]);
-    }
-}
-
-auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void {
-    for (size_t i = 0; i < size; ++i) {
-        out[i] = a[i] * b[i] + c[i];
     }
 }
 
@@ -161,31 +141,6 @@ auto sqrt(const float* a, float* out, size_t size) -> void {
     scalar::sqrt(a + i, out + i, size - i);
 }
 
-auto exp(const float* a, float* out, size_t size) -> void {
-    // Use optimized vectorized exp with polynomial approximation
-    fast_math::exp_batch_avx2(a, out, size);
-}
-
-auto log(const float* a, float* out, size_t size) -> void {
-    // Use optimized vectorized log with polynomial approximation
-    fast_math::log_batch_avx2(a, out, size);
-}
-
-auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void {
-    const size_t vec_size = 8;
-    size_t i = 0;
-
-    for (; i + vec_size <= size; i += vec_size) {
-        __m256 va = _mm256_loadu_ps(a + i);
-        __m256 vb = _mm256_loadu_ps(b + i);
-        __m256 vc = _mm256_loadu_ps(c + i);
-        __m256 vout = _mm256_fmadd_ps(va, vb, vc);
-        _mm256_storeu_ps(out + i, vout);
-    }
-
-    scalar::fma(a + i, b + i, c + i, out + i, size - i);
-}
-
 #else
 
 // Fallback to scalar if AVX2 not available
@@ -194,111 +149,10 @@ auto sub(const float* a, const float* b, float* out, size_t size) -> void { scal
 auto mul(const float* a, const float* b, float* out, size_t size) -> void { scalar::mul(a, b, out, size); }
 auto div(const float* a, const float* b, float* out, size_t size) -> void { scalar::div(a, b, out, size); }
 auto sqrt(const float* a, float* out, size_t size) -> void { scalar::sqrt(a, out, size); }
-auto exp(const float* a, float* out, size_t size) -> void { scalar::exp(a, out, size); }
-auto log(const float* a, float* out, size_t size) -> void { scalar::log(a, out, size); }
-auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void { scalar::fma(a, b, c, out, size); }
 
 #endif
 
 } // namespace avx2
-
-// ============================================================================
-// Runtime dispatch based on CPU features
-// AVX-512 implementations are in math_simd_avx512.cpp (separate TU for
-// portable builds that compile with -mavx512f per-file).
-// ============================================================================
-
-namespace simd {
-
-auto add(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::add(a, b, out, size);
-    } else if (cpu.avx2) {
-        avx2::add(a, b, out, size);
-    } else {
-        scalar::add(a, b, out, size);
-    }
-}
-
-auto sub(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::sub(a, b, out, size);
-    } else if (cpu.avx2) {
-        avx2::sub(a, b, out, size);
-    } else {
-        scalar::sub(a, b, out, size);
-    }
-}
-
-auto mul(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::mul(a, b, out, size);
-    } else if (cpu.avx2) {
-        avx2::mul(a, b, out, size);
-    } else {
-        scalar::mul(a, b, out, size);
-    }
-}
-
-auto div(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::div(a, b, out, size);
-    } else if (cpu.avx2) {
-        avx2::div(a, b, out, size);
-    } else {
-        scalar::div(a, b, out, size);
-    }
-}
-
-auto sqrt(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::sqrt(a, out, size);
-    } else if (cpu.avx2) {
-        avx2::sqrt(a, out, size);
-    } else {
-        scalar::sqrt(a, out, size);
-    }
-}
-
-auto exp(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::exp(a, out, size);
-    } else if (cpu.avx2) {
-        avx2::exp(a, out, size);
-    } else {
-        scalar::exp(a, out, size);
-    }
-}
-
-auto log(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::log(a, out, size);
-    } else if (cpu.avx2) {
-        avx2::log(a, out, size);
-    } else {
-        scalar::log(a, out, size);
-    }
-}
-
-auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void {
-    const auto& cpu = ::tenzor::backend::get_simd_features();
-    if (cpu.avx512f) {
-        avx512::fma(a, b, c, out, size);
-    } else if (cpu.avx2) {
-        avx2::fma(a, b, c, out, size);
-    } else {
-        scalar::fma(a, b, c, out, size);
-    }
-}
-
-} // namespace simd
 
 } // namespace cpu
 } // namespace tenzor
