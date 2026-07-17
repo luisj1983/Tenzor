@@ -231,7 +231,6 @@ set(TENZOR_CORE_SOURCES
     nn/compression/distillation.cpp
     distributed/distributed.cpp
     distributed/pipeline_parallel.cpp
-    distributed/nccl_backend.cpp
     distributed/gloo_backend.cpp
     distributed/mpi_backend.cpp
     distributed/rpc/function_registry.cpp
@@ -568,21 +567,14 @@ if(TENZOR_BUILD_CUDA)
         message(WARNING "NVRTC not found: runtime kernel codegen will use CPU fallback")
     endif()
 
-    # Link NCCL if available (uses cmake/FindNCCL.cmake)
-    option(TENZOR_REQUIRE_NCCL "Require NCCL library (fail if not found)" OFF)
-    find_package(NCCL)
-    if(NCCL_FOUND)
-        target_link_libraries(tenzor_core PRIVATE NCCL::NCCL)
-        target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_NCCL)
-    else()
-        if(TENZOR_REQUIRE_NCCL)
-            message(FATAL_ERROR "NCCL library required but not found. "
-                    "Set NCCL_ROOT or install NCCL.")
-        else()
-            message(WARNING "NCCL not found — distributed GPU training disabled. "
-                    "Set -DTENZOR_REQUIRE_NCCL=ON to make this an error.")
-        endif()
-    endif()
+    # NOTE: NCCL is intentionally NOT linked into the host tenzor_core library.
+    # The NCCL collective implementation lives in tenzor_backend_cuda (and RCCL
+    # in tenzor_backend_rocm); the distributed factory resolves the active GPU
+    # backend DSO via the BackendLoader registry and asks it for a
+    # CommunicationBackend. Linking libnccl into tenzor_core would pull
+    # <nccl.h> into host TUs and clash with <cuda_runtime.h> on a combined
+    # CUDA+ROCm build (RCCL's nccl.h drags in hip/hip_runtime.h). See
+    # src/backends/cuda/CMakeLists.txt for the NCCL find_package/link.
 endif()
 
 # MPI backend (Phase 1.5 — OpenMPI / MPICH / Intel MPI).
@@ -611,8 +603,13 @@ if(TENZOR_BUILD_MPI)
     endif()
 endif()
 
-# Add ROCm/HIP definition and includes if ROCm backend is enabled
-if(TENZOR_BUILD_ROCM)
+# Add ROCm/HIP definition and includes if ROCm backend is enabled.
+# Gated on _ROCM_AVAILABLE (not just TENZOR_BUILD_ROCM) because this block
+# sets LANGUAGE HIP on a source file — the HIP language is only enabled at
+# project() time when the ROCm toolchain was detected. Running it without a
+# detected toolchain trips "The language HIP was requested for compilation
+# but was not enabled".
+if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     # Ensure HIP_PLATFORM is set before find_package(hip)
     if(NOT DEFINED HIP_PLATFORM AND NOT DEFINED ENV{HIP_PLATFORM})
         set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
@@ -637,8 +634,8 @@ if(TENZOR_BUILD_ROCM)
         # symbols live in libhiprtc / libamdhip64 (host API only — the TU includes
         # <hip/hip_runtime_api.h>, NOT the device header, so no vector-type clash
         # with CUDA). Link them so a combined CUDA+ROCm build can target ROCm GPUs.
-        find_library(TENZOR_HIPRTC_LIB hiprtc HINTS ${_ROCM_ROOT}/lib REQUIRED)
-        find_library(TENZOR_AMDHIP_LIB amdhip64 HINTS ${_ROCM_ROOT}/lib REQUIRED)
+        find_library(TENZOR_HIPRTC_LIB hiprtc HINTS ${_ROCM_ROOT}/lib "${_ROCM_ROOT}/core/lib" REQUIRED)
+        find_library(TENZOR_AMDHIP_LIB amdhip64 HINTS ${_ROCM_ROOT}/lib "${_ROCM_ROOT}/core/lib" REQUIRED)
         target_link_libraries(tenzor_core PRIVATE
             ${TENZOR_HIPRTC_LIB}
             ${TENZOR_AMDHIP_LIB}

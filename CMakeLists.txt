@@ -12,15 +12,22 @@ set(_ROCM_AVAILABLE FALSE)
 if(DEFINED ENV{ROCM_PATH})
     set(_ROCM_ROOT "$ENV{ROCM_PATH}")
 else()
-    find_program(_HIPCC_EXE hipcc PATHS /opt/rocm/bin NO_DEFAULT_PATH)
+    # ROCm 6.x+/7.x split the toolchain into a "core/" subdirectory, so hipcc
+    # may be at /opt/rocm/core/bin/hipcc rather than the legacy /opt/rocm/bin.
+    find_program(_HIPCC_EXE hipcc PATHS /opt/rocm/bin /opt/rocm/core/bin NO_DEFAULT_PATH)
     if(_HIPCC_EXE)
-        get_filename_component(_ROCM_ROOT "${_HIPCC_EXE}" DIRECTORY)
-        get_filename_component(_ROCM_ROOT "${_ROCM_ROOT}" DIRECTORY)
+        get_filename_component(_ROCM_ROOT "${_HIPCC_EXE}" DIRECTORY)   # .../core/bin or .../bin
+        get_filename_component(_ROCM_ROOT "${_ROCM_ROOT}" DIRECTORY)   # .../core   or /opt/rocm
+        # Normalise the new "core/" split layout back to the ROCm top-level so
+        # ${_ROCM_ROOT}/core/lib and ${_ROCM_ROOT}/include resolve correctly.
+        if(_ROCM_ROOT MATCHES "/core$")
+            get_filename_component(_ROCM_ROOT "${_ROCM_ROOT}" DIRECTORY)
+        endif()
     else()
         set(_ROCM_ROOT "/opt/rocm")
     endif()
 endif()
-if(EXISTS "${_ROCM_ROOT}/bin/hipcc")
+if(EXISTS "${_ROCM_ROOT}/bin/hipcc" OR EXISTS "${_ROCM_ROOT}/core/bin/hipcc")
     set(_ROCM_AVAILABLE TRUE)
 endif()
 
@@ -35,9 +42,13 @@ option(TENZOR_BUILD_ROCM "Build ROCm backend" ON)
 # Set up HIP architectures if building ROCm backend
 if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     if(NOT CMAKE_HIP_ARCHITECTURES)
-        # Try to auto-detect GPU architecture
+        # Try to auto-detect GPU architecture. The enumerator moved with the
+        # ROCm 6.x+/7.x "core/" split (now /opt/rocm/core/bin), so resolve the
+        # actual path rather than assuming ${_ROCM_ROOT}/bin.
+        find_program(ROCM_AGENT_ENUMERATOR rocm_agent_enumerator
+            PATHS ${_ROCM_ROOT}/bin ${_ROCM_ROOT}/core/bin NO_DEFAULT_PATH)
         execute_process(
-            COMMAND ${_ROCM_ROOT}/bin/rocm_agent_enumerator
+            COMMAND ${ROCM_AGENT_ENUMERATOR}
             OUTPUT_VARIABLE ROCM_AGENTS
             OUTPUT_STRIP_TRAILING_WHITESPACE
             RESULT_VARIABLE ROCM_ENUM_RESULT

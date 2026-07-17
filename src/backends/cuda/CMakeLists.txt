@@ -49,6 +49,14 @@ set(CUDA_BACKEND_SOURCES
     cudnn_rnn.cu
     cudnn_sdpa.cpp
     cuda_graph.cpp
+    # NCCL collective implementation lives in this DSO (not in tenzor_core) so
+    # libnccl's <nccl.h> resolves unambiguously against <cuda_runtime.h> — the
+    # ROCm include path that shadowed /usr/include/nccl.h on the host is NOT on
+    # this target. The cuda backend links libnccl PRIVATE (cudaStream_t);
+    # tenzor_backend_rocm.so owns the RCCL twin (hipStream_t). The stub branch
+    # (TENZOR_HAS_NCCL undefined) compiles cleanly when NCCL is absent.
+    ../../distributed/nccl_backend.cpp
+    ../../distributed/nccl_process_group.cpp
 )
 
 # Create CUDA backend shared library
@@ -126,6 +134,33 @@ if(TARGET CUDA::cufft)
     target_link_libraries(tenzor_backend_cuda PRIVATE CUDA::cufft)
     target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUFFT)
     message(STATUS "CUDA Backend: cuFFT support enabled")
+endif()
+
+# NCCL collective library — owned by this backend DSO, NOT by tenzor_core.
+# libnccl's <nccl.h> resolves unambiguously here (the ROCm include path that
+# shadowed /usr/include/nccl.h on the host is not on this target). TENZOR_HAS_NCCL
+# and TENZOR_USE_CUDA are scoped to the two NCCL impl TUs so the .cu kernels'
+# compile environment is unchanged (and transfer_engine.hpp's layout-gated
+# structs see the same defines as tenzor_core, which already defines
+# TENZOR_USE_CUDA). The stub branch compiles cleanly when NCCL is absent.
+option(TENZOR_REQUIRE_NCCL "Require NCCL library (fail if not found)" OFF)
+find_package(NCCL)
+if(NCCL_FOUND)
+    target_link_libraries(tenzor_backend_cuda PRIVATE NCCL::NCCL)
+    set_source_files_properties(
+        ../../distributed/nccl_backend.cpp
+        ../../distributed/nccl_process_group.cpp
+        PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_NCCL;TENZOR_USE_CUDA"
+    )
+    message(STATUS "CUDA Backend: NCCL support enabled")
+else()
+    if(TENZOR_REQUIRE_NCCL)
+        message(FATAL_ERROR "NCCL library required (-DTENZOR_REQUIRE_NCCL=ON) but not found. "
+                "Set NCCL_ROOT or install NCCL.")
+    else()
+        message(STATUS "CUDA Backend: NCCL not found — collective backend compiled as no-op stub. "
+                "Set -DTENZOR_REQUIRE_NCCL=ON to make this an error.")
+    endif()
 endif()
 
 # Link cuDNN if available

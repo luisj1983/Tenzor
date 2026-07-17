@@ -961,7 +961,18 @@ auto NCCLBackend::finalize() -> void {
 }
 
 auto NCCLBackend::supports_device(Device::Type device_type) const -> bool {
-    return device_type == Device::Type::CUDA || device_type == Device::Type::ROCm;
+    // NCCL and RCCL are source-compatible (same nccl* ABI), so this one source
+    // file is compiled into both GPU backend DSOs. Each DSO claims only its own
+    // runtime's tensors: the CUDA backend (TENZOR_USE_CUDA) handles CUDA
+    // devices, the ROCm backend (TENZOR_USE_ROCM, via RCCL) handles ROCm
+    // devices. Claiming both from a single DSO breaks the factory's
+    // device-runtime routing (a CUDA DSO must not accept ROCm tensors and
+    // vice-versa).
+#if defined(TENZOR_USE_ROCM)
+    return device_type == Device::Type::ROCm;
+#else
+    return device_type == Device::Type::CUDA;
+#endif
 }
 
 auto NCCLBackend::get_communicator(int device_id) -> ncclComm_t {

@@ -9,6 +9,7 @@
 #pragma message("WARNING: Building without cuDNN. Conv2d, pooling, softmax, batchnorm, and layernorm will use custom CUDA kernels with reduced performance.")
 #endif
 #include <cuda_runtime.h>
+#include "tenzor/distributed/nccl_backend.hpp"  // NCCLBackend (impl lives in this DSO)
 #include "cuda_stream_pool.hpp"
 #include "cuda_stream.hpp"  // cuda::cuda_current_stream()
 #include "cuda_error.hpp"
@@ -275,6 +276,17 @@ public:
         // destroyed pool, reading its freed device_pools_ vector (a garbage
         // stream count / SIGSEGV at process exit).
         cuda::CUDAStreamPool::instance();
+    }
+
+    // The NCCL collective implementation is linked into this backend DSO
+    // (tenzor_backend_cuda links libnccl PRIVATE). The distributed factory
+    // resolves the active GPU backend through the BackendLoader registry and
+    // asks it for a CommunicationBackend through this hook; we hand back a
+    // heap NCCLBackend that the factory wraps in a unique_ptr. Returns
+    // nullptr when this DSO was built without NCCL (the stub NCCLBackend has
+    // no real collective support), surfaced as a clear error by the caller.
+    auto create_comm_backend() -> void* override {
+        return new tenzor::distributed::NCCLBackend();
     }
 
     auto name() const -> std::string_view override {

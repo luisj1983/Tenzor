@@ -51,10 +51,15 @@ target_link_libraries(test_mpi_backend_smoke PRIVATE tenzor_core GTest::gtest_ma
 tenzor_discover_tests(test_mpi_backend_smoke LABELS "distributed" DISCOVERY_TIMEOUT 60)
 
 # Audit 2026-05-02 H.3: NCCL backend single-process smoke (skips at runtime
-# when CUDA or NCCL isn't available).
-add_executable(test_nccl_backend_smoke test_nccl_backend_smoke.cpp)
-target_link_libraries(test_nccl_backend_smoke PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_nccl_backend_smoke LABELS "distributed" DISCOVERY_TIMEOUT 60)
+# when CUDA or NCCL isn't available). The NCCLBackend implementation lives in
+# the tenzor_backend_cuda DSO (not tenzor_core), so this test must link that
+# DSO to resolve NCCLBackend's symbols; gated on the cuda backend target so
+# CPU-only builds skip the test entirely.
+if(TARGET tenzor_backend_cuda)
+    add_executable(test_nccl_backend_smoke test_nccl_backend_smoke.cpp)
+    target_link_libraries(test_nccl_backend_smoke PRIVATE tenzor_core tenzor_backend_cuda GTest::gtest_main)
+    tenzor_discover_tests(test_nccl_backend_smoke LABELS "distributed" DISCOVERY_TIMEOUT 60)
+endif()
 
 # Inf-F: native GlooProcessGroup::all_to_all_single + MPIProcessGroup
 # split/all_to_all_single contract tests (single-process degenerates).

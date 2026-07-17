@@ -103,6 +103,10 @@ struct DeviceInfo {
     int pci_device_id{-1};         ///< PCI device ID (-1 if not applicable)
 };
 
+namespace distributed {
+class CommunicationBackend;  // opaque return type of create_comm_backend()
+}  // namespace distributed
+
 /**
  * @brief Abstract base class for device backend implementations.
  *
@@ -373,6 +377,31 @@ public:
     // removed. Production dispatch is OpId-based via DispatchTable; use
     // `dispatch_to_device(OpId::..., device.type, inputs, attrs)` instead.
     // (Removed in the pre-release audit cleanup — see audit Phase C.)
+
+    /**
+     * @brief Create the collective (distributed) communication backend owned
+     *        by this device backend DSO, if one is built in.
+     *
+     * The NCCL implementation lives in tenzor_backend_cuda (linked to libnccl,
+     * cudaStream_t) and the RCCL implementation in tenzor_backend_rocm (linked
+     * to librccl, hipStream_t). Keeping the collective library inside the GPU
+     * backend DSO — rather than the host tenzor_core library — is what lets a
+     * combined CUDA+ROCm build exist at all: both libnccl and librccl export
+     * the full nccl* ABI and cannot coexist in one shared object, but each
+     * lives in its own RTLD_LOCAL backend DSO. It also keeps tenzor_core free
+     * of <nccl.h>/<rccl/rccl.h> includes, which otherwise clash with the CUDA
+     * runtime headers when the ROCm include path shadows /usr/include/nccl.h.
+     *
+     * The distributed factory resolves the active GPU backend via the
+     * BackendLoader registry and asks it for a CommunicationBackend through
+     * this hook. The return is a raw void* (ownership transferred) so this
+     * header does not need to depend on distributed.hpp; the caller
+     * (src/distributed/distributed.cpp) casts to CommunicationBackend* and
+     * wraps it in a std::unique_ptr. Returns nullptr when this backend
+     * provides no collective implementation (CPU backend, or a CUDA build
+     * without NCCL linked).
+     */
+    virtual auto create_comm_backend() -> void* { return nullptr; }
 };
 
 /**

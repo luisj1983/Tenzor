@@ -4,9 +4,7 @@
  */
 
 #include "tenzor/distributed/distributed.hpp"
-#if defined(TENZOR_HAS_NCCL)
-#include "tenzor/distributed/nccl_backend.hpp"
-#endif
+#include "tenzor/backend/loader.hpp"  // backend_registry() — resolve GPU backend DSO for NCCL/RCCL
 #include "tenzor/distributed/gloo_backend.hpp"
 #ifdef TENZOR_HAS_MPI
 #include "tenzor/distributed/mpi_backend.hpp"
@@ -254,11 +252,44 @@ auto ProcessGroup::create_process_group(
 
     switch (backend) {
         case Backend::NCCL:
-#if defined(TENZOR_HAS_NCCL)
-            comm_backend = std::make_unique<NCCLBackend>();
-#else
-            throw std::runtime_error("NCCL backend requires CUDA/ROCm with NCCL installed");
-#endif
+            // NCCL/RCCL implementations live inside the GPU backend DSOs
+            // (tenzor_backend_cuda links libnccl; tenzor_backend_rocm links
+            // librccl) — they cannot live in the host tenzor_core library
+            // because libnccl and librccl both export the full nccl* ABI and
+            // would clash in one shared object. Resolve the active GPU
+            // backend through the BackendLoader registry and ask it for its
+            // collective impl via the create_comm_backend() hook. Each
+            // backend DSO is dlopen'd RTLD_LOCAL, so its nccl* symbols stay
+            // out of the global table and the two flavors coexist.
+            {
+                tenzor::Backend* gpu_backend =
+                    tenzor::backend_registry().get_backend(tenzor::Device::Type::CUDA);
+                if (gpu_backend == nullptr) {
+                    // No CUDA backend loaded — try the ROCm backend (its
+                    // create_comm_backend() returns the RCCL impl).
+                    gpu_backend =
+                        tenzor::backend_registry().get_backend(tenzor::Device::Type::ROCm);
+                }
+                if (gpu_backend == nullptr) {
+                    throw std::runtime_error(
+                        "NCCL backend requires a GPU backend (CUDA with NCCL, "
+                        "or ROCm with RCCL) loaded. None is registered with "
+                        "the backend loader."
+                    );
+                }
+                void* raw = gpu_backend->create_comm_backend();
+                if (raw == nullptr) {
+                    throw std::runtime_error(
+                        std::string("The loaded GPU backend ('") +
+                        std::string(gpu_backend->name()) +
+                        "') did not provide a collective communication "
+                        "backend. For CUDA this means Tenzor was built "
+                        "without NCCL; for ROCm, without RCCL. Rebuild with "
+                        "the corresponding collective library installed."
+                    );
+                }
+                comm_backend.reset(static_cast<CommunicationBackend*>(raw));
+            }
             break;
         case Backend::GLOO:
             comm_backend = std::make_unique<GlooBackend>();
