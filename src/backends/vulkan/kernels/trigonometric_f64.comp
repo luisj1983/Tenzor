@@ -102,14 +102,17 @@ double tan_d(double x) {
     return s / c;
 }
 
-// Double-precision asin using identity asin(x) = atan(x / sqrt(1 - x^2))
+// Double-precision asin using identity asin(x) = atan(x / sqrt(1 - x^2)).
+// Domain guard: |x|>1 must produce a deterministic NaN (matching
+// std::asin), not a finite value. The previous clamp(x, -1, 1) silently
+// masked out-of-domain inputs into +-pi/2 instead of NaN.
 double atan_d(double x);  // forward decl
 double asin_d(double x) {
     if (x != x) return x;
-    double clamped = clamp(x, -1.0, 1.0);
-    double one_minus_xx = 1.0 - clamped * clamped;
-    if (one_minus_xx <= 0.0) return (clamped > 0.0) ? (PI * 0.5) : (-PI * 0.5);
-    return atan_d(clamped / sqrt(one_minus_xx));
+    if (x > 1.0 || x < -1.0) return 0.0 / 0.0;  // NaN
+    double one_minus_xx = 1.0 - x * x;
+    if (one_minus_xx <= 0.0) return (x > 0.0) ? (PI * 0.5) : (-PI * 0.5);  // exact +-1
+    return atan_d(x / sqrt(one_minus_xx));
 }
 
 // Double-precision acos = pi/2 - asin

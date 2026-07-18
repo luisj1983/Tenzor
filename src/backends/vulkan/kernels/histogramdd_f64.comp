@@ -1,0 +1,70 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Histogramdd (Float64): multi-dimensional histogram via per-sample atomic
+// add, native double precision. Mirrors histogramdd.comp exactly (including
+// its NaN-handling behavior, for parity with the existing tested Float32
+// path) -- only the input samples and per-dimension (min, step) params are
+// float64_t. Bin counts remain a plain `int` buffer: atomicAdd on a 32-bit
+// signed integer is exact regardless of the input's floating dtype, matching
+// CPU/CUDA/ROCm, whose count accumulators are always integer.
+//
+// Buffers:
+//   binding 0: float64_t input_data[] - flattened (N * D) double samples
+//   binding 1: int       counts[]     - flattened output histogram bins (total_bins int32)
+//   binding 2: float64_t dim_params[] - per-dimension (min, step) pairs
+//   binding 3: int       strides[]    - per-dimension output strides
+//
+// Push constants:
+//   n          - number of samples
+//   D          - number of dimensions
+//   total_bins - total number of output bins (product of all bins[d])
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputBuf   { float64_t input_data[]; };
+layout(binding = 1) buffer CountsBuf  { int        counts[];     };
+layout(binding = 2) buffer ParamsBuf  { float64_t dim_params[]; };
+layout(binding = 3) buffer StridesBuf { int        strides[];    };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint D;
+    uint total_bins;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    int flat_index = 0;
+    bool in_range = true;
+
+    for (uint d = 0; d < params.D; ++d) {
+        float64_t val     = input_data[idx * params.D + d];
+        float64_t dim_min = dim_params[d * 2];
+        float64_t step    = dim_params[d * 2 + 1];
+
+        int num_bins_d;
+        if (d == 0) {
+            num_bins_d = int(params.total_bins) / strides[0];
+        } else {
+            num_bins_d = strides[d - 1] / strides[d];
+        }
+
+        float64_t range_max = dim_min + step * float64_t(num_bins_d);
+        if (val < dim_min || val > range_max) {
+            in_range = false;
+            break;
+        }
+
+        int b = int((val - dim_min) / step);
+        if (b >= num_bins_d) b = num_bins_d - 1;
+        if (b < 0) b = 0;
+        flat_index += b * strides[d];
+    }
+
+    if (in_range) {
+        atomicAdd(counts[flat_index], 1);
+    }
+}

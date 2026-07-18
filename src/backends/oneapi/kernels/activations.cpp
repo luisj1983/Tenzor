@@ -3025,7 +3025,11 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
         const float* w_ptr = has_weight ? get_data_ptr<const float>(weight) : nullptr;
         const float* b_ptr = has_bias ? get_data_ptr<const float>(bias) : nullptr;
 
-        // Each work-item handles one (n, c) pair
+        // Each work-item handles one (n, c) pair. Accumulate mean/var in
+        // double — matches CPU's instance_norm_impl_with_stats (Acc=double
+        // for all storage types) and CUDA/ROCm; a float accumulator here
+        // silently loses precision for large spatial_size and corrupts
+        // gradcheck relative to the other backends.
         queue.parallel_for<InstanceNormKernelFloat32>(
             sycl::range<2>(N, C), [=](sycl::id<2> id) {
             int64_t n = id[0];
@@ -3033,28 +3037,28 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
             int64_t base = (n * C + c) * spatial_size;
 
             // Compute mean
-            float sum = 0.0f;
+            double sum = 0.0;
             for (int64_t s = 0; s < spatial_size; ++s) {
-                sum += in_ptr[base + s];
+                sum += static_cast<double>(in_ptr[base + s]);
             }
-            float m = sum / static_cast<float>(spatial_size);
+            double m = sum / static_cast<double>(spatial_size);
 
             // Compute variance
-            float var = 0.0f;
+            double var = 0.0;
             for (int64_t s = 0; s < spatial_size; ++s) {
-                float diff = in_ptr[base + s] - m;
+                double diff = static_cast<double>(in_ptr[base + s]) - m;
                 var += diff * diff;
             }
-            var /= static_cast<float>(spatial_size);
-            float istd = 1.0f / sycl::sqrt(var + eps);
+            var /= static_cast<double>(spatial_size);
+            double istd = 1.0 / sycl::sqrt(var + static_cast<double>(eps));
 
-            mean_ptr[n * C + c] = m;
-            inv_std_ptr[n * C + c] = istd;
+            mean_ptr[n * C + c] = static_cast<float>(m);
+            inv_std_ptr[n * C + c] = static_cast<float>(istd);
 
-            float w = w_ptr ? w_ptr[c] : 1.0f;
-            float b = b_ptr ? b_ptr[c] : 0.0f;
+            double w = w_ptr ? static_cast<double>(w_ptr[c]) : 1.0;
+            double b = b_ptr ? static_cast<double>(b_ptr[c]) : 0.0;
             for (int64_t s = 0; s < spatial_size; ++s) {
-                out_ptr[base + s] = (in_ptr[base + s] - m) * istd * w + b;
+                out_ptr[base + s] = static_cast<float>((static_cast<double>(in_ptr[base + s]) - m) * istd * w + b);
             }
         });
     }

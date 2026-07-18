@@ -86,7 +86,13 @@ auto nested_softmax_hip(const Tensor& values_in, const Tensor& offsets_in,
     Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
     Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    // D must be the product of ALL trailing dims (shape[1:]), not just
+    // shape[1]: for rank>=3 values (e.g. [total_len,H,W]), using shape[1]
+    // alone (H) only touches H of the H*W elements per row and misindexes
+    // every row after the first. Matches CPU (product of all trailing dims)
+    // and CUDA (numel()/total_len).
+    int64_t D = 1;
+    for (size_t i = 1; i < shape.size(); ++i) D *= shape[i];
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
@@ -157,7 +163,9 @@ auto nested_log_softmax_hip(const Tensor& values_in, const Tensor& offsets_in,
     Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
     Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    // See nested_softmax_hip: D must be the product of ALL trailing dims.
+    int64_t D = 1;
+    for (size_t i = 1; i < shape.size(); ++i) D *= shape[i];
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
@@ -216,10 +224,22 @@ auto nested_sum_hip(const Tensor& values_in, const Tensor& offsets_in,
     Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
     Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    // See nested_softmax_hip: D must be the product of ALL trailing dims.
+    int64_t D = 1;
+    for (size_t i = 1; i < shape.size(); ++i) D *= shape[i];
     int64_t B = offsets.numel() - 1;
 
-    auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
+    // Output shape must be rank-preserving [B, ...trailing dims], matching
+    // CPU, not flattened [B, D]: NestedSumBackward broadcasts the gradient
+    // back to [total_len, ...trailing dims] using this tensor's own shape.
+    // D itself (the flat per-row stride the kernel below uses) is unaffected.
+    std::vector<int64_t> out_shape;
+    out_shape.push_back(B);
+    for (size_t i = 1; i < shape.size(); ++i) out_shape.push_back(shape[i]);
+    auto output = tenzor::zeros(out_shape, values.dtype(), values.device());
+    // An empty batch (B <= 0) would launch a 0-block grid, which HIP rejects;
+    // the zero-filled output is already correct (mirrors CUDA's nested_sum_cuda).
+    if (B <= 0) return output;
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
     if (values.dtype() == DType::Float32) {
@@ -279,10 +299,22 @@ auto nested_mean_hip(const Tensor& values_in, const Tensor& offsets_in,
     Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
     Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    // See nested_softmax_hip: D must be the product of ALL trailing dims.
+    int64_t D = 1;
+    for (size_t i = 1; i < shape.size(); ++i) D *= shape[i];
     int64_t B = offsets.numel() - 1;
 
-    auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
+    // Output shape must be rank-preserving [B, ...trailing dims], matching
+    // CPU, not flattened [B, D]: NestedMeanBackward broadcasts the gradient
+    // back to [total_len, ...trailing dims] using this tensor's own shape.
+    // D itself (the flat per-row stride the kernel below uses) is unaffected.
+    std::vector<int64_t> out_shape;
+    out_shape.push_back(B);
+    for (size_t i = 1; i < shape.size(); ++i) out_shape.push_back(shape[i]);
+    auto output = tenzor::zeros(out_shape, values.dtype(), values.device());
+    // An empty batch (B <= 0) would launch a 0-block grid, which HIP rejects;
+    // the zero-filled output is already correct (mirrors CUDA's nested_mean_cuda).
+    if (B <= 0) return output;
     int threads = static_cast<int>(std::min(D, int64_t(256)));
 
     if (values.dtype() == DType::Float32) {
@@ -392,6 +424,13 @@ auto nested_attention_hip(const Tensor& Q_in, const Tensor& K_in, const Tensor& 
     int64_t B = q_offsets.numel() - 1;
 
     auto output = tenzor::zeros({total_q_len, head_dim}, Q.dtype(), Q.device());
+    // Empty nested batch: a 0-block grid (B==0) or 0-thread block
+    // (total_q_len==0) is an invalid HIP launch config; the output is already
+    // an allocated zero tensor, so return it without launching (mirrors
+    // CUDA's nested_attention_cuda).
+    if (B <= 0 || total_q_len <= 0) {
+        return output;
+    }
     int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
 
     if (Q.dtype() == DType::Float32) {
@@ -530,6 +569,14 @@ auto nested_attention_backward_hip(const Tensor& grad_out, const Tensor& Q,
     auto grad_K = tenzor::zeros({total_kv_len, head_dim}, K.dtype(), K.device());
     auto grad_V = tenzor::zeros({total_kv_len, head_dim}, V.dtype(), V.device());
 
+    // Empty nested batch: avoid a 0-block grid (B==0) or 0-thread block
+    // (total_q_len==0) launch, which is an invalid HIP launch config. The
+    // gradients are already allocated as zeros, so return them as-is
+    // (mirrors CUDA's nested_attention_backward_cuda).
+    if (B <= 0 || total_q_len <= 0) {
+        return {grad_Q, grad_K, grad_V};
+    }
+
     int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
 
     if (Q.dtype() == DType::Float32) {
@@ -590,7 +637,10 @@ auto nested_to_padded_hip(const Tensor& values_in, const Tensor& offsets_in,
     Tensor values  = values_in.is_contiguous()  ? values_in  : values_in.contiguous();
     Tensor offsets = offsets_in.is_contiguous() ? offsets_in : offsets_in.contiguous();
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    // See nested_softmax_hip: D must be the product of ALL trailing dims,
+    // matching CPU/CUDA (output is flattened to {B, max_len, D}).
+    int64_t D = 1;
+    for (size_t i = 1; i < shape.size(); ++i) D *= shape[i];
     int64_t B = offsets.numel() - 1;
 
     auto padded = tenzor::full({B, max_len, D}, padding_value, values.dtype(), values.device());
@@ -687,13 +737,16 @@ __global__ void nested_layer_norm_kernel(
     const T* __restrict__ weight,
     const T* __restrict__ bias,
     const int64_t* __restrict__ offsets,
-    int64_t D, int64_t B, T eps)
+    int64_t D, int64_t inner_stride, int64_t B, T eps)
 {
     int64_t b = blockIdx.x;
     if (b >= B) return;
 
-    int64_t start = offsets[b];
-    int64_t end = offsets[b + 1];
+    // offsets are in units of dim-0 positions; scale to row-space (each dim-0
+    // position spans `inner_stride` rows of width D, matching CPU's
+    // total_rows = numel()/D convention for rank>=3 values).
+    int64_t start = offsets[b] * inner_stride;
+    int64_t end = offsets[b + 1] * inner_stride;
     if (start >= end) return;
 
     // Block is launched with at most 256 threads (min(D, 256)). Each thread
@@ -746,7 +799,17 @@ auto nested_layer_norm_hip(const Tensor& values_in, const Tensor& offsets_in,
     Tensor values = mc(values_in), offsets = mc(offsets_in);
     Tensor weight = mc(weight_in), bias = mc(bias_in);
     auto shape = values.shape();
-    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    // Normalize over the LAST dim only (weight/bias sized [D]), matching CPU
+    // exactly -- not shape[1] (a third, independently-wrong convention: for
+    // rank-2 values shape[1]==D coincidentally, but for rank>=3 it's the
+    // MIDDLE dim, not the feature axis; see NestedLayerNorm3DMatchesRegularLayerNorm).
+    int64_t D = shape.empty() ? 1 : shape.back();
+    // Product of all MIDDLE dims (between dim 0 and the last dim): for rank-2
+    // values this is 1 (no behavior change); for rank>=3 (e.g. [total_len,H,D])
+    // this is H, so each dim-0 position contributes H rows in the flattened
+    // [total_len*H, D] row space that offsets must be scaled into.
+    int64_t inner_stride = 1;
+    for (size_t i = 1; i + 1 < shape.size(); ++i) inner_stride *= shape[i];
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
@@ -757,13 +820,13 @@ auto nested_layer_norm_hip(const Tensor& values_in, const Tensor& offsets_in,
             dim3(static_cast<unsigned>(B)), dim3(threads), 0, stream,
             values.data<float>(), output.data<float>(),
             weight.data<float>(), bias.data<float>(),
-            offsets.data<int64_t>(), D, B, eps);
+            offsets.data<int64_t>(), D, inner_stride, B, eps);
     } else if (values.dtype() == DType::Float64) {
         hipLaunchKernelGGL(nested_layer_norm_kernel<double>,
             dim3(static_cast<unsigned>(B)), dim3(threads), 0, stream,
             values.data<double>(), output.data<double>(),
             weight.data<double>(), bias.data<double>(),
-            offsets.data<int64_t>(), D, B, static_cast<double>(eps));
+            offsets.data<int64_t>(), D, inner_stride, B, static_cast<double>(eps));
     } else {
         throw std::runtime_error("nested_layer_norm_hip: unsupported dtype");
     }

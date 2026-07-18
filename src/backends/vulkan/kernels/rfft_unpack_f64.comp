@@ -15,7 +15,42 @@ layout(push_constant) uniform PushConstants {
     uint out_batch_stride; // Stride between output batches (in double elements)
 };
 
-const double PI_D = 3.14159265358979323846LF;
+const double PI_D     = 3.14159265358979323846LF;
+const double TWO_PI_D = 6.28318530717958647693LF;
+
+// Double-precision sin/cos. GLSL's built-in cos/sin operate at float32
+// precision; computing the twiddle there would discard ~9 significant digits
+// in an otherwise all-double RFFT pipeline (matches irfft_pack_f64.comp's
+// sincos_d — the prior `double(cos(float(angle)))` shortcut here dropped the
+// twiddle to float precision). Range-reduce into [-pi, pi] and evaluate with
+// a double-precision Taylor series (arguments are tiny, |x| <= pi).
+void sincos_d(double x, out double s, out double c) {
+    double q = floor(x / TWO_PI_D + 0.5LF);
+    x = x - q * TWO_PI_D;
+
+    double x2 = x * x;
+
+    double term = x;
+    s = term;
+    term = -term * x2 / (2.0LF * 3.0LF);   s += term;   // x^3/3!
+    term = -term * x2 / (4.0LF * 5.0LF);   s += term;   // x^5/5!
+    term = -term * x2 / (6.0LF * 7.0LF);   s += term;   // x^7/7!
+    term = -term * x2 / (8.0LF * 9.0LF);   s += term;   // x^9/9!
+    term = -term * x2 / (10.0LF * 11.0LF); s += term;   // x^11/11!
+    term = -term * x2 / (12.0LF * 13.0LF); s += term;   // x^13/13!
+    term = -term * x2 / (14.0LF * 15.0LF); s += term;   // x^15/15!
+
+    double ct = 1.0LF;
+    c = ct;
+    ct = -ct * x2 / (1.0LF * 2.0LF);   c += ct;   // x^2/2!
+    ct = -ct * x2 / (3.0LF * 4.0LF);   c += ct;   // x^4/4!
+    ct = -ct * x2 / (5.0LF * 6.0LF);   c += ct;   // x^6/6!
+    ct = -ct * x2 / (7.0LF * 8.0LF);   c += ct;   // x^8/8!
+    ct = -ct * x2 / (9.0LF * 10.0LF);  c += ct;   // x^10/10!
+    ct = -ct * x2 / (11.0LF * 12.0LF); c += ct;   // x^12/12!
+    ct = -ct * x2 / (13.0LF * 14.0LF); c += ct;   // x^14/14!
+    ct = -ct * x2 / (15.0LF * 16.0LF); c += ct;   // x^16/16!
+}
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
@@ -59,9 +94,9 @@ void main() {
     double b_im = zk_im - zc_im;
 
     double angle = -2.0LF * PI_D * double(k) / double(n);
-    float angle_f = float(angle);
-    double w_re = double(cos(angle_f));
-    double w_im = double(sin(angle_f));
+    double w_re;
+    double w_im;
+    sincos_d(angle, w_im, w_re);
 
     double iw_b_re = w_re * b_im + w_im * b_re;
     double iw_b_im = -w_re * b_re + w_im * b_im;

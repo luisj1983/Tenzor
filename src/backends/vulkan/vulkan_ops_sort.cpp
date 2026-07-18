@@ -332,9 +332,16 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
     auto* pipeline = getPipeline(sort_shader, device_id);
     uint32_t workgroups = div_wg_checked(padded_n / 2, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
 
+    // Padding slots (i>=n) get distinct indices n, n+1, n+2, ... rather than
+    // all sharing index n: the shader's tie-break comparator (idx_i > idx_j)
+    // needs a genuine total order to behave deterministically, and giving
+    // every padding slot the same index made padding-vs-padding comparisons
+    // tie on both value AND index -- harmless today (padding is always
+    // discarded), but a real instability if any consumer ever inspects the
+    // padded region's index column.
     std::vector<int32_t> init_indices(padded_n);
     for (uint32_t i = 0; i < padded_n; ++i) {
-        init_indices[i] = (i < n) ? static_cast<int32_t>(i) : static_cast<int32_t>(n);
+        init_indices[i] = static_cast<int32_t>(i);
     }
 
     // Ensure input is contiguous on the GPU for D2D slice copies.
@@ -535,15 +542,16 @@ auto VulkanBackend::dispatchMedian(const Tensor& input, int64_t dim, bool keepdi
 
     const int64_t dim_size = input_shape[dim];
 
-    // Edge case: empty tensor
-    if (input.numel() == 0 || dim_size == 0) {
-        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
-        out_shape[dim] = 0;
-        if (!keepdim) {
-            out_shape.erase(out_shape.begin() + dim);
-        }
-        return {Tensor(out_shape, input.dtype(), input.device()),
-                Tensor(out_shape, DType::Int64, input.device())};
+    // A zero-length reduction axis has no values to take a median of. Match
+    // CPU's guard exactly (std::invalid_argument, same message, same
+    // dim_size==0-specific condition -- CPU has no separate numel()==0
+    // special case; when numel()==0 because some OTHER dimension is empty,
+    // it just falls through to the normal path, whose loop bounds are
+    // naturally zero) instead of silently returning a zero-sized "result"
+    // tensor, which looks like a valid (if empty) answer rather than the
+    // error CPU raises.
+    if (dim_size == 0) {
+        throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
     }
 
     // Sort along dim (ascending). Float16/BFloat16 are sorted as Float32: the
@@ -580,7 +588,11 @@ auto VulkanBackend::dispatchMedian(const Tensor& input, int64_t dim, bool keepdi
         for (int i = 0; i < ndim; ++i) {
             if (i != dim) out_shape.push_back(med_shape[i]);
         }
-        if (out_shape.empty()) out_shape.push_back(1);  // scalar
+        // An empty out_shape here is correct and intentional: reducing the
+        // only dimension of a 1-D input with keepdim=false collapses to a
+        // true 0-dim scalar, matching CPU/CUDA/ROCm/OneAPI's convention (a
+        // previous version force-pushed a size-1 dim here, producing a
+        // rank-1 [x] tensor instead of a rank-0 scalar).
         median_values = dispatchReshape(median_values, out_shape);
         median_indices = dispatchReshape(median_indices, out_shape);
     }
@@ -604,17 +616,15 @@ auto VulkanBackend::dispatchMode(const Tensor& input, int64_t dim, bool keepdim)
 
     const int64_t dim_size = input_shape[dim];
 
-    // Edge case: empty tensor
-    if (input.numel() == 0 || dim_size == 0) {
-        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
-        if (keepdim) {
-            out_shape[dim] = 1;
-        } else {
-            out_shape.erase(out_shape.begin() + dim);
-        }
-        if (out_shape.empty()) out_shape.push_back(1);
-        return {Tensor(out_shape, input.dtype(), input.device()),
-                Tensor(out_shape, DType::Int64, input.device())};
+    // A zero-length reduction axis has no values to take a mode of. Match
+    // CPU's guard exactly (std::invalid_argument, same message, same
+    // dim_size==0-specific condition -- CPU has no separate numel()==0
+    // special case; when numel()==0 because some OTHER dimension is empty,
+    // it just falls through to the normal path, whose loop bounds are
+    // naturally zero) instead of silently returning a zero-sized "result"
+    // tensor.
+    if (dim_size == 0) {
+        throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
     }
 
     // Size-1 dim: mode is the element itself
@@ -632,7 +642,8 @@ auto VulkanBackend::dispatchMode(const Tensor& input, int64_t dim, bool keepdim)
             for (int i = 0; i < ndim; ++i) {
                 if (i != dim) out_shape.push_back(input_shape[i]);
             }
-            if (out_shape.empty()) out_shape.push_back(1);
+            // Empty out_shape (1-D input, keepdim=false) is a true 0-dim
+            // scalar -- see dispatchMedian's identical fix for rationale.
             Tensor vals = dispatchReshape(input, out_shape);
             Tensor indices_out(out_shape, DType::Int64, input.device());
             memset(indices_out.data_ptr(), 0,
@@ -758,7 +769,8 @@ auto VulkanBackend::dispatchMode(const Tensor& input, int64_t dim, bool keepdim)
         for (int i = 0; i < ndim; ++i) {
             if (i != dim) out_shape.push_back(input_shape[i]);
         }
-        if (out_shape.empty()) out_shape.push_back(1);
+        // Empty out_shape (1-D input, keepdim=false) is a true 0-dim
+        // scalar -- see dispatchMedian's identical fix for rationale.
     }
 
     mode_values = dispatchReshape(mode_values, out_shape);

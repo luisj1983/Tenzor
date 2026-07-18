@@ -1098,7 +1098,8 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim,
         for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
             if (i != dim) squeezed.push_back(out_shape[i]);
         }
-        if (squeezed.empty()) squeezed.push_back(1);
+        // Empty squeezed (1-D input, keepdim=false) is a true 0-dim scalar --
+        // do not force a size-1 dim.
         values = values.reshape(squeezed);
         indices = indices.reshape(squeezed);
     }
@@ -1338,7 +1339,8 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim,
         for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
             if (i != dim) squeezed.push_back(out_shape[i]);
         }
-        if (squeezed.empty()) squeezed.push_back(1);
+        // Empty squeezed (1-D input, keepdim=false) is a true 0-dim scalar --
+        // do not force a size-1 dim.
         output = output.reshape(squeezed);
     }
 
@@ -1384,7 +1386,8 @@ auto nanquantile_kernel(const Tensor& input, double q, int64_t dim,
         for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
             if (i != dim) squeezed.push_back(out_shape[i]);
         }
-        if (squeezed.empty()) squeezed.push_back(1);
+        // Empty squeezed (1-D input, keepdim=false) is a true 0-dim scalar --
+        // do not force a size-1 dim.
         output = output.reshape(squeezed);
     }
 
@@ -1421,8 +1424,11 @@ auto nanmedian_impl(const T* data, int64_t dim_size,
             std::sort(slice.begin(), slice.end(),
                       [](const auto& a, const auto& b) { return nan_less(a, b); });
             int64_t n = static_cast<int64_t>(slice.size());
-            // PyTorch nanmedian returns the lower median (no interpolation)
-            out_values[outer * inner_size + inner] = slice[n / 2];
+            // PyTorch nanmedian returns the lower median (no interpolation),
+            // i.e. index (n-1)/2, matching this file's own median_kernel.
+            // n/2 is the upper-middle index for even n and was returning the
+            // wrong element (e.g. nanmedian([1,2,3,4]) gave 3 instead of 2).
+            out_values[outer * inner_size + inner] = slice[(n - 1) / 2];
         }
     }
 }
@@ -1460,7 +1466,8 @@ auto nanmedian_kernel(const Tensor& input, int64_t dim) -> Tensor {
     for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
         if (i != dim) squeezed.push_back(out_shape[i]);
     }
-    if (squeezed.empty()) squeezed.push_back(1);
+    // Empty squeezed (1-D input, keepdim=false) is a true 0-dim scalar --
+    // do not force a size-1 dim.
     output = output.reshape(squeezed);
 
     return output;

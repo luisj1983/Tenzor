@@ -16,6 +16,12 @@ layout(push_constant) uniform PushConstants {
 shared float s_min[WORKGROUP_SIZE];
 shared float s_max[WORKGROUP_SIZE];
 
+// NaN-propagating max/min (IEEE/PyTorch semantics). GLSL max()/min() return the
+// non-NaN operand, so a plain reduction would silently drop NaNs. `x != x` is
+// true iff x is NaN (see reduction.comp).
+float nanmax(float a, float b) { return (a != a) ? a : ((b != b) ? b : max(a, b)); }
+float nanmin(float a, float b) { return (a != a) ? a : ((b != b) ? b : min(a, b)); }
+
 void main() {
     uint tid = gl_LocalInvocationID.x;
 
@@ -24,8 +30,8 @@ void main() {
 
     for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
         float val = input_data[i];
-        local_min = min(local_min, val);
-        local_max = max(local_max, val);
+        local_min = nanmin(local_min, val);
+        local_max = nanmax(local_max, val);
     }
 
     s_min[tid] = local_min;
@@ -35,8 +41,8 @@ void main() {
     // Tree reduction
     for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            s_min[tid] = min(s_min[tid], s_min[tid + s]);
-            s_max[tid] = max(s_max[tid], s_max[tid + s]);
+            s_min[tid] = nanmin(s_min[tid], s_min[tid + s]);
+            s_max[tid] = nanmax(s_max[tid], s_max[tid + s]);
         }
         barrier();
     }

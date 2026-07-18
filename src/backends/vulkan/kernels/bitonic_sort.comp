@@ -38,7 +38,11 @@ void main() {
     // Determine sort direction for this block
     // In bitonic sort, the direction alternates every (1 << (stage+1)) elements
     uint sort_block = i / block_size;
-    bool ascending_block = ((sort_block % 2) == 0);
+    // F140: block_ascending is the network's own merge-structure direction,
+    // independent of the requested global sort order -- it must NOT be XORed
+    // with params.descending (see below, tie-break rationale).
+    bool block_ascending = ((sort_block % 2) == 0);
+    bool ascending_block = block_ascending;
     if (params.descending != 0) ascending_block = !ascending_block;
 
     float val_i = values[i];
@@ -56,11 +60,39 @@ void main() {
     float ka = isnan(val_i) ? uintBitsToFloat(0x7F800000u) : val_i;
     float kb = isnan(val_j) ? uintBitsToFloat(0x7F800000u) : val_j;
 
+    // F139/F140: Two independent decisions live here, and conflating them is
+    // what caused the original bug (and a second, subtler bug in the first
+    // attempted fix).
+    //
+    // (1) VALUE direction (ascending_block, XORed with params.descending):
+    //     correctly reverses which of ka/kb should sort first at this block,
+    //     the standard "flip every comparator" trick for turning an ascending
+    //     network into a descending one.
+    //
+    // (2) TIE-BREAK direction (must NOT be XORed with params.descending):
+    //     bitonic sort's correctness proof (0-1 principle) requires every
+    //     comparator to implement one of exactly two FIXED relations across
+    //     the whole network: R at "R-slots" and its precise reverse R' at
+    //     "R'-slots" (a R' b iff b R a), where which slot a comparator
+    //     occupies is determined purely by the network's own merge structure
+    //     (block_ascending = sort_block parity), never by the caller's
+    //     requested sort order. Using idx_i > idx_j at every slot regardless
+    //     of block_ascending (the original bug) makes ascending sorts
+    //     unstable, because R'-slots then implement neither R nor its true
+    //     reverse. But naively reversing the tie-break together with the
+    //     value direction (i.e. keying tie-break off ascending_block instead
+    //     of block_ascending) is ALSO wrong: it makes descending sorts tie-
+    //     break by descending index, whereas CPU/CUDA/ROCm/OneAPI stability
+    //     always breaks ties by ascending original index regardless of sort
+    //     direction. block_ascending (pre-descending-flip) is the only
+    //     quantity that is both a valid 0-1-principle R/R' selector AND
+    //     direction-independent, so it alone must drive the tie-break.
     bool should_swap;
+    bool tie_break = block_ascending ? (idx_i > idx_j) : (idx_i < idx_j);
     if (ascending_block) {
-        should_swap = (ka > kb) || (ka == kb && idx_i > idx_j);
+        should_swap = (ka > kb) || (ka == kb && tie_break);
     } else {
-        should_swap = (ka < kb) || (ka == kb && idx_i > idx_j);
+        should_swap = (ka < kb) || (ka == kb && tie_break);
     }
 
     if (should_swap) {

@@ -197,10 +197,123 @@ auto irfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
     return dispatch<OpId::IRFFT>(inputs, attrs)[0];
 }
 
+namespace {
+
+// Encode an int64 list as a comma-separated string for AttrKey list storage
+// (NewOpAttributes::get_int_list() parses either a bare Int64 tag or a
+// String tag holding a comma-separated list). Mirrors
+// src/ops/transform.cpp's file-local shape_to_string().
+std::string dims_to_string(const std::vector<int64_t>& dims) {
+    std::string out;
+    for (size_t i = 0; i < dims.size(); ++i) {
+        if (i) out += ',';
+        out += std::to_string(dims[i]);
+    }
+    return out;
+}
+
+// Zero-pad (at the end) or truncate `input` along `dim` so shape[dim] ==
+// target. No-op if already equal. Mirrors the pad/crop convention already
+// used by dct()/dct1_via_rfft() above and matches the N_in-vs-N_out
+// semantics of the per-axis fft()/ifft() kernels.
+Tensor fftn_resize_axis(const Tensor& input, int64_t dim, int64_t target) {
+    int64_t cur = input.shape()[dim];
+    if (cur == target) return input;
+    if (cur > target) {
+        return tenzor::slice(input, dim, 0, target);
+    }
+    auto pad_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    pad_shape[dim] = target - cur;
+    auto pad = tenzor::zeros(pad_shape, input.dtype(), input.device());
+    return tenzor::cat({input, pad}, dim);
+}
+
+// True if `dims` (after dim-normalization) contains a repeated axis. The
+// batched OpId::FFTN/FFT2 kernels build one plan entry per listed axis and
+// don't support (nor does PyTorch) transforming the same axis twice in a
+// single call, whereas the legacy sequential loop just applies two
+// independent 1D transforms back-to-back on that axis. Rather than risk
+// silently changing behavior for this degenerate case, the fast path
+// declines it and lets the sequential loop keep its existing semantics.
+bool has_duplicate_dims(const std::vector<int64_t>& dims_in, int64_t ndim) {
+    for (size_t i = 0; i < dims_in.size(); ++i) {
+        int64_t di = normalize_dim(dims_in[i], ndim);
+        for (size_t j = i + 1; j < dims_in.size(); ++j) {
+            if (normalize_dim(dims_in[j], ndim) == di) return true;
+        }
+    }
+    return false;
+}
+
+// Native batched N-D FFT fast path shared by fft2()/ifft2()/fftn()/ifftn().
+//
+// cuFFT/rocFFT/MKL DFTI/oneMKL each support a single batched multi-dimensional
+// plan covering all the listed axes at once -- but only up to rank 3, a hard
+// limit of the underlying libraries (see cuda_fftn_kernel/rocm_fftn_kernel,
+// which themselves fall back to a sequential 1D loop beyond that, or when the
+// requested axes aren't contiguous trailing dims). Callers are expected to
+// only invoke this for rank <= 3; rank > 3 stays on the tested sequential
+// per-axis loop.
+//
+// Every backend's registered OpId::FFTN/FFT2/IFFTN/IFFT2 kernel derives its
+// per-axis transform length directly from the (already-resized) input
+// tensor's shape at each `dims[i]` -- there is no separate attribute
+// carrying a per-axis "target length" list distinct from the tensor's actual
+// shape -- so honoring a caller-supplied `s` that differs from the current
+// shape means resizing the tensor ourselves before dispatch, exactly like
+// PyTorch zero-pads/crops ahead of an fftn() call with an explicit `s`.
+Tensor fftn_dispatch_fastpath(const Tensor& input,
+                              const std::optional<std::vector<int64_t>>& s,
+                              const std::vector<int64_t>& dims_in,
+                              const std::string& norm,
+                              bool inverse, bool use_fft2,
+                              const char* op_name) {
+    validate_fft_input(input, op_name);
+    int64_t ndim = input.ndim();
+    std::vector<int64_t> dims(dims_in.size());
+    for (size_t i = 0; i < dims_in.size(); ++i) {
+        dims[i] = normalize_dim(dims_in[i], ndim);
+    }
+
+    // Real inputs widen to complex (mirrors fft()/ifft() above).
+    DType in_dt = input.dtype();
+    Tensor inp =
+        (in_dt == DType::Float16 || in_dt == DType::BFloat16)
+            ? input.to(DType::Float32).to(to_complex_dtype(in_dt))
+        : (in_dt == DType::Float32 || in_dt == DType::Float64)
+            ? input.to(to_complex_dtype(in_dt))
+            : input;
+
+    for (size_t i = 0; i < dims.size(); ++i) {
+        int64_t target = s ? (*s)[i] : inp.shape()[dims[i]];
+        if (target <= 0) {
+            throw std::runtime_error(
+                std::string(op_name) + ": n must be positive, got " + std::to_string(target));
+        }
+        inp = fftn_resize_axis(inp, dims[i], target);
+    }
+
+    std::array<Tensor, 1> inputs = {inp.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dims, dims_to_string(dims));
+    attrs.set(AttrKey::Norm, norm);
+
+    OpId op = use_fft2 ? (inverse ? OpId::IFFT2 : OpId::FFT2)
+                        : (inverse ? OpId::IFFTN : OpId::FFTN);
+    return dispatch(op, inputs, attrs)[0];
+}
+
+} // anonymous namespace
+
 auto fft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
           std::vector<int64_t> dim, const std::string& norm) -> Tensor {
     validate_s_length(s, dim.size(), "fft2");
-    // Apply 1D FFT along each dimension sequentially
+    if (!dim.empty() && dim.size() <= 3 && !has_duplicate_dims(dim, input.ndim())) {
+        return fftn_dispatch_fastpath(input, s, dim, norm,
+                                      /*inverse=*/false, /*use_fft2=*/true, "fft2");
+    }
+    // Fallback: apply 1D FFT along each dimension sequentially (rank > 3, or
+    // a degenerate/repeated-axis `dim` argument the fast path declines).
     Tensor result = input;
     for (size_t i = 0; i < dim.size(); ++i) {
         std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
@@ -212,6 +325,10 @@ auto fft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
 auto ifft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
            std::vector<int64_t> dim, const std::string& norm) -> Tensor {
     validate_s_length(s, dim.size(), "ifft2");
+    if (!dim.empty() && dim.size() <= 3 && !has_duplicate_dims(dim, input.ndim())) {
+        return fftn_dispatch_fastpath(input, s, dim, norm,
+                                      /*inverse=*/true, /*use_fft2=*/true, "ifft2");
+    }
     Tensor result = input;
     for (size_t i = 0; i < dim.size(); ++i) {
         std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
@@ -302,6 +419,15 @@ auto fftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
     }
     validate_s_length(s, dims.size(), "fftn");
 
+    // Native batched N-D fast path for rank <= 3 (the underlying FFT
+    // libraries' hard limit -- see fftn_dispatch_fastpath's doc comment).
+    // Rank > 3, or a degenerate/repeated-axis `dim`, keeps the sequential
+    // per-axis loop below.
+    if (!dims.empty() && dims.size() <= 3 && !has_duplicate_dims(dims, input.ndim())) {
+        return fftn_dispatch_fastpath(input, s, dims, norm,
+                                      /*inverse=*/false, /*use_fft2=*/false, "fftn");
+    }
+
     Tensor result = input;
     for (size_t i = 0; i < dims.size(); ++i) {
         std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
@@ -320,6 +446,11 @@ auto ifftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
         for (int64_t i = 0; i < input.ndim(); ++i) dims[i] = i;
     }
     validate_s_length(s, dims.size(), "ifftn");
+
+    if (!dims.empty() && dims.size() <= 3 && !has_duplicate_dims(dims, input.ndim())) {
+        return fftn_dispatch_fastpath(input, s, dims, norm,
+                                      /*inverse=*/true, /*use_fft2=*/false, "ifftn");
+    }
 
     Tensor result = input;
     for (size_t i = 0; i < dims.size(); ++i) {
@@ -667,7 +798,7 @@ Tensor dct2_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
 
     // Twiddle for all N coefficients
     auto k_full = tenzor::arange(0.0, static_cast<double>(N), 1.0, dtype, device);
-    auto angle_full = tenzor::mul(k_full, static_cast<float>(-pi / (2.0 * N)));
+    auto angle_full = tenzor::mul(k_full, -pi / (2.0 * N));
     auto tw_cos_full = tenzor::cos(angle_full);
     auto tw_sin_full = tenzor::sin(angle_full);
 
@@ -694,20 +825,25 @@ Tensor dct2_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
         // result already = 2*Re(Y*tw). Standard DCT-II is sum of x[n]*cos(pi*(2n+1)*k/(2N)).
         // With our reorder+FFT approach, the 2* gives us the right scale for "backward".
         // For "ortho": scale everything by sqrt(1/(2*N)), then k=0 by extra 1/sqrt(2).
-        float scale_all = std::sqrt(1.0f / (2.0f * N));
+        // Computed in double regardless of the tensor's dtype: mul()/full() take
+        // a double scalar, and truncating these normalization constants to
+        // float before that conversion caps Float64 DCT-II output at ~1e-7
+        // relative precision instead of full double precision (DCT
+        // twiddle/normalization-factor precision bug).
+        double scale_all = std::sqrt(1.0 / (2.0 * static_cast<double>(N)));
         result = tenzor::mul(result, scale_all);
 
         // Scale k=0 by 1/sqrt(2)
         // Create a scale tensor: [1/sqrt(2), 1, 1, ..., 1]
         auto ortho_scale = tenzor::ones({N}, dtype, device);
-        auto first_val = tenzor::full({1}, static_cast<float>(1.0 / std::sqrt(2.0)), dtype, device);
+        auto first_val = tenzor::full({1}, 1.0 / std::sqrt(2.0), dtype, device);
         auto rest = tenzor::ones({N - 1}, dtype, device);
         ortho_scale = tenzor::cat({first_val, rest}, 0);
         ortho_scale = ortho_scale.reshape(tw_full_shape);
         result = tenzor::mul(result, ortho_scale);
     } else if (norm == "forward") {
         // Forward normalization: divide by N
-        result = tenzor::mul(result, static_cast<float>(1.0 / N));
+        result = tenzor::mul(result, 1.0 / static_cast<double>(N));
     }
     // "backward" normalization: no additional scaling
 
@@ -760,23 +896,23 @@ Tensor dct3_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
     // DCT-II ortho applied: all *= sqrt(1/(2N)), k=0 *= extra 1/sqrt(2)
     // Undo: k=0 *= sqrt(2), then all /= sqrt(1/(2N)) = all *= sqrt(2N)
     if (norm == "ortho") {
-        auto k0_scale = tenzor::full({1}, static_cast<float>(std::sqrt(2.0)), dtype, device);
+        auto k0_scale = tenzor::full({1}, std::sqrt(2.0), dtype, device);
         auto rest_ones = tenzor::ones({N - 1}, dtype, device);
         auto undo_k0 = tenzor::cat({k0_scale, rest_ones}, 0).reshape(bcast_shape);
         X = tenzor::mul(X, undo_k0);
-        X = tenzor::mul(X, static_cast<float>(std::sqrt(2.0 * N)));
+        X = tenzor::mul(X, std::sqrt(2.0 * static_cast<double>(N)));
     }
 
     // Step 1: Half the DC term to account for the inverse formula weight
     // W[0] = X[0]/2, W[k>0] = X[k]
-    auto dc_scale = tenzor::full({1}, 0.5f, dtype, device);
+    auto dc_scale = tenzor::full({1}, 0.5, dtype, device);
     auto rest_ones = tenzor::ones({N - 1}, dtype, device);
     auto w_scale = tenzor::cat({dc_scale, rest_ones}, 0).reshape(bcast_shape);
     auto W = tenzor::mul(X, w_scale);
 
     // Step 2: Twiddle factors: exp(+j*pi*k/(2N))
     auto k_full = tenzor::arange(0.0, static_cast<double>(N), 1.0, dtype, device);
-    auto angle = tenzor::mul(k_full, static_cast<float>(pi / (2.0 * N)));
+    auto angle = tenzor::mul(k_full, pi / (2.0 * N));
     auto tw_cos = tenzor::cos(angle).reshape(bcast_shape);
     auto tw_sin = tenzor::sin(angle).reshape(bcast_shape);
 
@@ -824,7 +960,7 @@ Tensor dct3_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
         // The result is the original x. No additional scaling.
     } else {
         // "forward" norm
-        result = tenzor::mul(result, static_cast<float>(N));
+        result = tenzor::mul(result, static_cast<double>(N));
     }
 
     return result;
@@ -860,21 +996,23 @@ Tensor dct1_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
 
     // Normalization
     if (norm == "ortho") {
-        // Ortho: 1/sqrt(2*(N-1)), with endpoints scaled by 1/sqrt(2)
-        float scale = std::sqrt(1.0f / (2.0f * (N - 1)));
+        // Ortho: 1/sqrt(2*(N-1)), with endpoints scaled by 1/sqrt(2). Kept in
+        // double precision throughout (mul()/full() take a double scalar) so
+        // Float64 DCT-I isn't capped at float precision.
+        double scale = std::sqrt(1.0 / (2.0 * static_cast<double>(N - 1)));
         result = tenzor::mul(result, scale);
 
         std::vector<int64_t> s(ndim, 1);
         s[d] = N;
         auto edge_scale = tenzor::ones({N}, dtype, device);
-        auto inv_sqrt2 = static_cast<float>(1.0 / std::sqrt(2.0));
+        double inv_sqrt2 = 1.0 / std::sqrt(2.0);
         auto first = tenzor::full({1}, inv_sqrt2, dtype, device);
         auto last = tenzor::full({1}, inv_sqrt2, dtype, device);
         auto mid = tenzor::ones({N - 2}, dtype, device);
         edge_scale = tenzor::cat({first, mid, last}, 0).reshape(s);
         result = tenzor::mul(result, edge_scale);
     } else if (norm == "forward") {
-        result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+        result = tenzor::mul(result, 1.0 / (2.0 * static_cast<double>(N - 1)));
     }
 
     return result;
@@ -917,12 +1055,12 @@ Tensor dct4_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
         auto U = fft::fft(u, M, d, "backward");
         auto odd_idx = tenzor::arange(1.0, 2.0, 2.0, DType::Int64, device);
         auto U_odd = tenzor::index_select(U, d, odd_idx);
-        auto tw_angle_val = static_cast<float>(pi / (4.0 * N));
-        auto result = tenzor::mul(tenzor::real(U_odd), 2.0f * std::cos(tw_angle_val));
+        auto tw_angle_val = pi / (4.0 * N);
+        auto result = tenzor::mul(tenzor::real(U_odd), 2.0 * std::cos(tw_angle_val));
         if (norm == "ortho") {
-            result = tenzor::mul(result, static_cast<float>(std::sqrt(1.0 / (2.0 * N))));
+            result = tenzor::mul(result, std::sqrt(1.0 / (2.0 * N)));
         } else if (norm == "forward") {
-            result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+            result = tenzor::mul(result, 1.0 / (2.0 * N));
         }
         return result;
     }
@@ -954,7 +1092,7 @@ Tensor dct4_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
     // angle_k = pi*(2k+1)/(4N)
     auto tw_angle = tenzor::mul(
         tenzor::add(tenzor::mul(k_vals, 2.0f), tenzor::full({1}, 1.0f, dtype, device)),
-        static_cast<float>(pi / (4.0 * N)));
+        pi / (4.0 * N));
     auto tw_cos = tenzor::cos(tw_angle);
     auto tw_sin = tenzor::sin(tw_angle);
 
@@ -969,9 +1107,9 @@ Tensor dct4_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::str
 
     // Normalization
     if (norm == "ortho") {
-        result = tenzor::mul(result, static_cast<float>(std::sqrt(1.0 / (2.0 * N))));
+        result = tenzor::mul(result, std::sqrt(1.0 / (2.0 * N)));
     } else if (norm == "forward") {
-        result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+        result = tenzor::mul(result, 1.0 / (2.0 * N));
     }
     // backward: no scaling (raw DCT-IV with factor-2 convention)
 
@@ -1054,9 +1192,12 @@ auto idct(const Tensor& input, int type, std::optional<int64_t> n, int64_t dim,
     switch (type) {
         case 1: {
             // DCT-I is self-inverse up to scaling: T(T(x)) = 2*(N-1)*x
+            // All scale constants below are kept in double precision (mul()/
+            // full() take a double scalar) -- truncating them to float first
+            // caps Float64 IDCT-I output at ~1e-7 relative precision.
             if (norm == "backward") {
                 auto result = dct1_via_rfft(x, N, dim, "backward");
-                return tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+                return tenzor::mul(result, 1.0 / (2.0 * static_cast<double>(N - 1)));
             } else if (norm == "ortho") {
                 // Undo the ortho scaling on the input coefficients:
                 //   ortho forward applied: all *= sqrt(1/(2*(N-1))), endpoints *= 1/sqrt(2)
@@ -1064,23 +1205,23 @@ auto idct(const Tensor& input, int type, std::optional<int64_t> n, int64_t dim,
                 int64_t dd = normalize_dim(dim, x.ndim());
                 std::vector<int64_t> s(x.ndim(), 1);
                 s[dd] = N;
-                auto inv_sqrt2 = static_cast<float>(std::sqrt(2.0));
+                double inv_sqrt2 = std::sqrt(2.0);
                 auto first = tenzor::full({1}, inv_sqrt2, x.dtype(), x.device());
                 auto last = tenzor::full({1}, inv_sqrt2, x.dtype(), x.device());
                 auto mid = tenzor::ones({N - 2}, x.dtype(), x.device());
                 auto undo_edge = tenzor::cat({first, mid, last}, 0).reshape(s);
 
                 auto unscaled = tenzor::mul(x, undo_edge);
-                unscaled = tenzor::mul(unscaled, static_cast<float>(std::sqrt(2.0 * (N - 1))));
+                unscaled = tenzor::mul(unscaled, std::sqrt(2.0 * static_cast<double>(N - 1)));
 
                 // Apply backward DCT-I, then scale by 1/(2*(N-1))
                 auto result = dct1_via_rfft(unscaled, N, dim, "backward");
-                result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+                result = tenzor::mul(result, 1.0 / (2.0 * static_cast<double>(N - 1)));
                 return result;
             } else {
                 // forward norm
                 auto result = dct1_via_rfft(x, N, dim, "backward");
-                return tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+                return tenzor::mul(result, 1.0 / (2.0 * static_cast<double>(N - 1)));
             }
         }
         case 2:
@@ -1093,7 +1234,7 @@ auto idct(const Tensor& input, int type, std::optional<int64_t> n, int64_t dim,
             } else {
                 // forward
                 auto result = dct3_via_rfft(x, N, dim, "backward");
-                return tenzor::mul(result, static_cast<float>(1.0 / N));
+                return tenzor::mul(result, 1.0 / static_cast<double>(N));
             }
         case 3:
             // IDCT-III = DCT-II (with appropriate normalization)
@@ -1101,16 +1242,16 @@ auto idct(const Tensor& input, int type, std::optional<int64_t> n, int64_t dim,
                 return dct2_via_rfft(x, N, dim, "ortho");
             } else if (norm == "backward") {
                 auto result = dct2_via_rfft(x, N, dim, "backward");
-                return tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+                return tenzor::mul(result, 1.0 / (2.0 * static_cast<double>(N)));
             } else {
                 auto result = dct2_via_rfft(x, N, dim, "backward");
-                return tenzor::mul(result, static_cast<float>(1.0 / N));
+                return tenzor::mul(result, 1.0 / static_cast<double>(N));
             }
         case 4: {
             // DCT-IV is its own inverse (up to scaling by N/2)
             auto result = dct4_via_rfft(x, N, dim, norm);
             if (norm == "backward") {
-                result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+                result = tenzor::mul(result, 1.0 / (2.0 * static_cast<double>(N)));
             }
             return result;
         }

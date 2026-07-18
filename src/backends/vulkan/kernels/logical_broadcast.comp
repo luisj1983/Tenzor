@@ -1,0 +1,77 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Broadcasting-aware logical binary operations (and, or, xor).
+// Inputs treated as Bool (nonzero = true), output is uint8_t Bool.
+//
+// The non-broadcast "logical" shader (logical.comp) binds a's and b's buffers
+// at the SAME linear index with no broadcast-shape handling at all, so a
+// smaller-but-broadcastable b (e.g. a scalar) read out of bounds past the end
+// of its buffer -- a real heap-buffer-overflow read. This shader mirrors
+// bitwise_broadcast.comp / math_broadcast.comp: strides_a/strides_b are
+// derived host-side from each operand's true shape (0 stride on any
+// broadcast dimension), so every out_idx maps to a valid, in-bounds index
+// into both operand buffers regardless of their (broadcastable) sizes.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { uint8_t a[]; };
+layout(binding = 1) buffer InputB { uint8_t b[]; };
+layout(binding = 2) buffer Output { uint8_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_size;
+    // Same opcode scheme as logical.comp (dispatchLogicalOp passes the same
+    // `opcode` value to either shader): 0=and, 1=or, 2=not, 3=xor. `not` is
+    // unary (a and b are always the same tensor) so it always takes
+    // logical.comp's same-shape fast path and never reaches this shader --
+    // case 2 is unused here but kept numerically aligned with logical.comp
+    // so a future caller can't silently get the wrong op by assuming a
+    // shared enum between the two shaders.
+    uint op;
+    uint ndim_a;
+    uint ndim_b;
+    uint ndim_out;
+    uint strides_a[8];
+    uint strides_b[8];
+    uint shape_out[8];
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.output_size) {
+        return;
+    }
+
+    uint idx_a = 0;
+    uint idx_b = 0;
+    uint tmp = out_idx;
+
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+        idx_a += coord * params.strides_a[dim_idx];
+        idx_b += coord * params.strides_b[dim_idx];
+    }
+
+    bool val_a = (a[idx_a] != uint8_t(0));
+    bool val_b = (b[idx_b] != uint8_t(0));
+
+    uint8_t result_val;
+    switch (params.op) {
+        case 0u: // logical_and
+            result_val = (val_a && val_b) ? uint8_t(1) : uint8_t(0);
+            break;
+        case 1u: // logical_or
+            result_val = (val_a || val_b) ? uint8_t(1) : uint8_t(0);
+            break;
+        case 3u: // logical_xor
+            result_val = (val_a != val_b) ? uint8_t(1) : uint8_t(0);
+            break;
+        default:
+            result_val = uint8_t(0);
+            break;
+    }
+
+    result[out_idx] = result_val;
+}

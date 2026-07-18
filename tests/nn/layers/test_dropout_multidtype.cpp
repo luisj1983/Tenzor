@@ -12,6 +12,9 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "../../multi_backend_dtype_fixture.hpp"
 #include "../../grad_flow_helpers.hpp"
 #include <cmath>
@@ -197,6 +200,45 @@ TEST_P(DropoutMultiDTypeTest, BackwardPassGradientValues) {
 
     for (int64_t i = 0; i < grad_f32.numel(); ++i) {
         EXPECT_NEAR(grad_data[i], 2.0f, atol());
+    }
+}
+
+// Regression test: dropout_backward at p=1.0 drops every element, so grad
+// should be a clean zero. scale=1/(1-p) is +inf at p=1.0; if backward
+// multiplies mask(0)*scale(inf) instead of short-circuiting, IEEE-754 gives
+// NaN, not 0 -- unlike forward's clean zero output for the same p.
+//
+// p=1.0 is rejected by the nn::Dropout Module's constructor (Dropout
+// probability must be in [0,1)), but OpId::Dropout/DropoutBackward
+// themselves have no such validation -- reachable directly via dispatch,
+// e.g. from a training loop that computes p dynamically (annealing
+// schedules etc.) and happens to hit 1.0 exactly.
+TEST_P(DropoutMultiDTypeTest, ProbabilityOneBackwardIsZeroNotNaN) {
+    auto input_tensor = createOnes({5, 5});
+
+    NewOpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::P, 1.0);
+    fwd_attrs.set(AttrKey::Training, true);
+    const Tensor fwd_inputs[1] = {input_tensor};
+    auto fwd_results = tenzor::dispatch(OpId::Dropout,
+                                        std::span<const Tensor>{fwd_inputs, 1}, fwd_attrs);
+    ASSERT_GE(fwd_results.size(), 2u);
+    const Tensor& mask = fwd_results[1];
+
+    auto grad_output = tenzor::full({5, 5}, 2.0f, dtype(), device());
+    NewOpAttributes bwd_attrs;
+    bwd_attrs.set(AttrKey::P, 1.0);
+    const Tensor bwd_inputs[2] = {grad_output, mask};
+    auto bwd_results = tenzor::dispatch(OpId::DropoutBackward,
+                                        std::span<const Tensor>{bwd_inputs, 2}, bwd_attrs);
+    ASSERT_GE(bwd_results.size(), 1u);
+
+    auto grad_f32 = bwd_results[0].to(Device::cpu()).to(DType::Float32);
+    auto* grad_data = grad_f32.data<float>();
+
+    for (int64_t i = 0; i < grad_f32.numel(); ++i) {
+        ASSERT_FALSE(std::isnan(grad_data[i])) << "grad_input[" << i << "] is NaN at p=1.0";
+        EXPECT_NEAR(grad_data[i], 0.0f, atol());
     }
 }
 

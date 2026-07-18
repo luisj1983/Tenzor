@@ -1543,7 +1543,11 @@ __global__ void csr_sparse_add_kernel(
         int64_t row_start = crow_ptr[row];
         int64_t row_end = crow_ptr[row + 1];
         for (int64_t j = row_start; j < row_end; ++j) {
-            out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+            // Guard against malformed/untrusted CSR col indices: an out-of-range
+            // column would be an out-of-bounds device write into out_ptr.
+            int64_t c = col_ptr[j];
+            if (c < 0 || c >= ncols) continue;
+            out_ptr[row * ncols + c] += val_ptr[j];
         }
     }
 }
@@ -1864,7 +1868,11 @@ __global__ void csr_sparse_add_kernel(
         int64_t row_start = crow_ptr[row];
         int64_t row_end = crow_ptr[row + 1];
         for (int64_t j = row_start; j < row_end; ++j) {
-            out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+            // Guard against malformed/untrusted CSR col indices: an out-of-range
+            // column would be an out-of-bounds device write into out_ptr.
+            int64_t c = col_ptr[j];
+            if (c < 0 || c >= ncols) continue;
+            out_ptr[row * ncols + c] += val_ptr[j];
         }
     }
 }

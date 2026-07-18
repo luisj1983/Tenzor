@@ -121,7 +121,24 @@ auto VulkanBackend::dispatchArange(double start, double end, double step, DType 
         return Tensor({0}, dtype, device);
     }
 
-    int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
+    // Length matches PyTorch's torch.arange: ceil((end - start) / step), but a
+    // naive ceil over a floating-point ratio rounds an exact-integer quotient
+    // (e.g. (1.0 - 0.0) / 0.1 = 9.999999999999998 or 10.000000000000002) up by
+    // one, yielding a spurious final element whose value can also drift past
+    // `end`. Snap a ratio that is integral within a relative epsilon to that
+    // integer before applying ceil, so exact ranges produce the exact element
+    // count — matches CPU's arange_kernel (src/backends/cpu/kernels/creation.cpp)
+    // bit-for-bit.
+    const double ratio = (end - start) / step;
+    double rounded = std::round(ratio);
+    double count_d;
+    if (std::abs(ratio - rounded) < std::numeric_limits<double>::epsilon() *
+                                    std::max(1.0, std::abs(ratio)) * 4.0) {
+        count_d = rounded;  // exact integer ratio: half-open interval => `rounded` elements
+    } else {
+        count_d = std::ceil(ratio);
+    }
+    int64_t numel = static_cast<int64_t>(count_d);
     if (numel <= 0) {
         return Tensor({0}, dtype, device);
     }

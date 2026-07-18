@@ -68,8 +68,11 @@ void main() {
     if (j >= params.padded_n) return;
 
     // Determine sort direction for this block
+    // F140: block_ascending is the network's own merge-structure direction,
+    // independent of the requested global sort order (see bitonic_sort.comp).
     uint sort_block = i / block_size;
-    bool ascending_block = ((sort_block % 2) == 0);
+    bool block_ascending = ((sort_block % 2) == 0);
+    bool ascending_block = block_ascending;
     if (params.descending != 0) ascending_block = !ascending_block;
 
     // Read float16 values as float32 for comparison
@@ -83,11 +86,17 @@ void main() {
     float ka = isnan(val_i) ? uintBitsToFloat(0x7F800000u) : val_i;
     float kb = isnan(val_j) ? uintBitsToFloat(0x7F800000u) : val_j;
 
+    // F139/F140: value direction (ascending_block) is XORed with
+    // params.descending; tie-break direction (block_ascending) is NOT --
+    // ties must always break by ascending original index regardless of sort
+    // direction, while still following the 0-1-principle R/R' network
+    // structure. See bitonic_sort.comp for the full rationale.
     bool should_swap;
+    bool tie_break = block_ascending ? (idx_i > idx_j) : (idx_i < idx_j);
     if (ascending_block) {
-        should_swap = (ka > kb) || (ka == kb && idx_i > idx_j);
+        should_swap = (ka > kb) || (ka == kb && tie_break);
     } else {
-        should_swap = (ka < kb) || (ka == kb && idx_i > idx_j);
+        should_swap = (ka < kb) || (ka == kb && tie_break);
     }
 
     if (should_swap) {

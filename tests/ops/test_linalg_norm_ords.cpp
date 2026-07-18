@@ -24,6 +24,7 @@
 #include <tenzor/ops/reduction.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
 
 #include <cmath>
 #include <limits>
@@ -400,6 +401,113 @@ TEST_P(LinalgVectorNormOrd0, BackwardThrows) {
     tenzor::Variable xv(x, /*requires_grad=*/true);
     auto y = tenzor::vector_norm(xv, /*ord=*/0.0, /*dim=*/{}, /*keepdim=*/false);
     EXPECT_THROW(y.backward(), std::runtime_error);
+}
+
+// ============================================================================
+// OpId dispatch-kernel regression (CPU-only): exercises the CPU
+// cpu_kernel_registry.cpp entries for LinalgMatrixNorm / LinalgVectorNorm /
+// LinalgVecdot directly via tenzor::dispatch(), which is how these OpIds are
+// actually invoked (currently only from the JVP adapters in jvp_rules.cpp).
+// The dispatch kernels used to reimplement this math a second time,
+// divergently, instead of delegating to the already-tested linalg::* free
+// functions above -- these tests target that dispatch-layer attribute
+// plumbing specifically, not the free-function math (covered above).
+// ============================================================================
+class LinalgOpIdDispatchCpu : public ::testing::Test {
+protected:
+    void SetUp() override { tenzor::testing::EnsureInitialized(); }
+};
+
+TEST_F(LinalgOpIdDispatchCpu, MatrixNormOrd1IsMaxAbsColumnSumNotNuclear) {
+    // Same 4x3 matrix as above: column abs-sums are 9, 7, 6 -> ord=1 should
+    // give max()=9. The old dispatch kernel treated ord==1 as the nuclear
+    // norm (sum of singular values, a different number entirely).
+    auto A = mk_matrix_f32(Device::cpu());
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Order, 1.0);
+    auto result = tenzor::dispatch(OpId::LinalgMatrixNorm, std::vector<Tensor>{A}, attrs);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_NEAR(scalar_f32(result[0]), 9.0f, 1e-5f);
+}
+
+TEST_F(LinalgOpIdDispatchCpu, MatrixNormOrd1PreservesBatchDim) {
+    // Stack two copies of the 4x3 matrix into a [2,4,3] batch. The old
+    // nuclear/spectral branch reduced with INT64_MIN (reduce-all), collapsing
+    // the batch dim to a scalar instead of returning shape [2].
+    std::vector<float> batched(kMatF32.size() * 2);
+    std::copy(kMatF32.begin(), kMatF32.end(), batched.begin());
+    std::copy(kMatF32.begin(), kMatF32.end(), batched.begin() + kMatF32.size());
+    auto A = from_data(batched.data(), {2, kM, kN}, Device::cpu()).contiguous();
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Order, 1.0);
+    auto result = tenzor::dispatch(OpId::LinalgMatrixNorm, std::vector<Tensor>{A}, attrs);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].numel(), 2) << "batch dim was collapsed instead of preserved";
+    auto out_cpu = result[0].to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* out_data = out_cpu.data<float>();
+    EXPECT_NEAR(out_data[0], 9.0f, 1e-5f);
+    EXPECT_NEAR(out_data[1], 9.0f, 1e-5f);
+}
+
+TEST_F(LinalgOpIdDispatchCpu, VectorNormDimsAttrSupportsMultiAxisReduction) {
+    // [2,3,4] tensor of ones; L2-norm reduced over dims {0,1} (6 elements per
+    // trailing-axis slot) should give sqrt(6) per output element, shape [4].
+    // The old dispatch kernel delegated to cpu::norm_kernel, which only
+    // accepts a single dim and could not express this at all.
+    auto A = ones({2, 3, 4}, DType::Float32, Device::cpu());
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::P, 2.0);
+    attrs.set(AttrKey::Dims, "0,1");
+    attrs.set(AttrKey::Keepdim, false);
+    auto result = tenzor::dispatch(OpId::LinalgVectorNorm, std::vector<Tensor>{A}, attrs);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].numel(), 4);
+    auto out_cpu = result[0].to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* out_data = out_cpu.data<float>();
+    for (int64_t i = 0; i < 4; ++i) {
+        EXPECT_NEAR(out_data[i], std::sqrt(6.0f), 1e-5f);
+    }
+}
+
+TEST_F(LinalgOpIdDispatchCpu, VectorNormSingleDimAttrStillWorks) {
+    // Regression: the only current real caller (the JVP adapter) sets a
+    // single AttrKey::Dim, not AttrKey::Dims. Must keep working unchanged.
+    auto A = ones({3, 4}, DType::Float32, Device::cpu());
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::P, 2.0);
+    attrs.set(AttrKey::Dim, static_cast<int64_t>(1));
+    attrs.set(AttrKey::Keepdim, false);
+    auto result = tenzor::dispatch(OpId::LinalgVectorNorm, std::vector<Tensor>{A}, attrs);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].numel(), 3);
+    auto out_cpu = result[0].to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* out_data = out_cpu.data<float>();
+    for (int64_t i = 0; i < 3; ++i) {
+        EXPECT_NEAR(out_data[i], 2.0f, 1e-5f);  // sqrt(4 ones^2) = 2
+    }
+}
+
+TEST_F(LinalgOpIdDispatchCpu, VecdotConjugatesComplexFirstArgument) {
+    // vecdot(a, b) = sum(conj(a) * b). Pick a = [i, 0], b = [i, 0]:
+    // conj(a)*b = [conj(i)*i, 0] = [(-i)*i, 0] = [1, 0] -> sum = 1+0i.
+    // The old dispatch kernel omitted the conjugation entirely and would
+    // have computed sum(a*b) = i*i = -1+0i instead.
+    auto a = zeros({2}, DType::Complex64, Device::cpu());
+    auto b = zeros({2}, DType::Complex64, Device::cpu());
+    a.data<std::complex<float>>()[0] = {0.0f, 1.0f};
+    a.data<std::complex<float>>()[1] = {0.0f, 0.0f};
+    b.data<std::complex<float>>()[0] = {0.0f, 1.0f};
+    b.data<std::complex<float>>()[1] = {0.0f, 0.0f};
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, static_cast<int64_t>(0));
+    auto result = tenzor::dispatch(OpId::LinalgVecdot, std::vector<Tensor>{a, b}, attrs);
+    ASSERT_EQ(result.size(), 1u);
+    auto out_cpu = result[0].to(Device::cpu()).contiguous();
+    auto value = out_cpu.data<std::complex<float>>()[0];
+    EXPECT_NEAR(value.real(), 1.0f, 1e-5f);
+    EXPECT_NEAR(value.imag(), 0.0f, 1e-5f);
 }
 
 // ============================================================================

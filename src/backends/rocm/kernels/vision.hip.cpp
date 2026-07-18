@@ -1173,7 +1173,12 @@ __global__ void box_iou_kernel(
     T area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
     T union_area = area1 + area2 - inter_area;
 
-    T iou = inter_area / (union_area + static_cast<T>(1e-7));
+    // Matches CPU exactly: for degenerate/inverted input boxes (e.g. x2<x1
+    // giving negative area, or two coincident zero-area boxes) union_area can
+    // be <= 0; the unguarded `inter_area / (union_area + eps)` can then return
+    // a negative or blown-up IoU instead of the defined 0.
+    const T eps = static_cast<T>(1e-7);
+    T iou = (union_area > static_cast<T>(0)) ? inter_area / union_area : static_cast<T>(0);
 
     // GIoU(1) / DIoU(2) / CIoU(3) all need the smallest enclosing box.
     if (iou_type >= 1) {
@@ -1187,7 +1192,7 @@ __global__ void box_iou_kernel(
         if (iou_type == 1) {
             // GIoU = IoU - (enclose_area - union_area) / enclose_area
             T enc_area = enc_w * enc_h;
-            iou = iou - (enc_area - union_area) / (enc_area + static_cast<T>(1e-7));
+            iou = iou - (enc_area - union_area) / max(enc_area, eps);
         } else {
             // Center-distance penalty (shared by DIoU and CIoU).
             T cx1 = (x1_1 + x2_1) * static_cast<T>(0.5);

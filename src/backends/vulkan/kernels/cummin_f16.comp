@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Cumulative Minimum along a dimension — Float16 variant.
+// See cummax_f16.comp for the packed uint32 layout rationale (2 float16
+// elements per word, matching cumsum_f16.comp's convention).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input   { uint input_data[]; };
+layout(binding = 1) buffer Values  { uint values_data[]; };
+layout(binding = 2) buffer Indices { int  indices_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;
+    uint reduce_size;
+    uint inner_size;
+} params;
+
+float16_t readF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+void writeF16(uint flat_idx, float16_t val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint new_bits = packHalf2x16(vec2(float(val), 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = values_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(values_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    float running = float(readF16(base));
+    int   ri = 0;
+    writeF16(base, float16_t(running));
+    indices_data[base] = 0;
+
+    for (uint i = 1; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        float val = float(readF16(idx));
+        if (val < running) {
+            running = val;
+            ri = int(i);
+        }
+        writeF16(idx, float16_t(running));
+        indices_data[idx] = ri;
+    }
+}

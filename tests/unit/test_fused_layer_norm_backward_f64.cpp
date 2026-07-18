@@ -279,4 +279,47 @@ TEST_P(FusedLayerNormBackwardF64, Float32PathUnchanged) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Float16 path: ROCm's fused_layer_norm_backward_hip previously had NO
+// Float16 handling at all (only BFloat16 was widened) and unconditionally
+// threw "Only Float32 and Float64 supported" for Float16 input, unlike every
+// other activation/fused kernel in the backend (GELU, Sigmoid, Softmax,
+// FusedAddReLU, FusedGelu, FusedRMSNorm all support Float16 via widen-narrow).
+// ---------------------------------------------------------------------------
+TEST_P(FusedLayerNormBackwardF64, Float16PathWidenNarrow) {
+    const int64_t N = 4, C = 8;
+
+    Tensor input    = tenzor::randn({N, C}, DType::Float16, device);
+    Tensor grad_out = tenzor::ones ({N, C}, DType::Float16, device);
+    Tensor weight   = tenzor::ones ({C},    DType::Float16, device);
+    Tensor mean     = tenzor::zeros({N},    DType::Float16, device);
+    Tensor inv_std  = tenzor::ones ({N},    DType::Float16, device);
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NormalizedShape, std::to_string(C));
+    const Tensor inputs_arr[5] = {grad_out, input, weight, mean, inv_std};
+    std::vector<Tensor> results;
+    ASSERT_NO_THROW({
+        results = tenzor::dispatch(OpId::FusedLayerNormBackward,
+                                   std::span<const Tensor>{inputs_arr, 5}, attrs);
+    }) << "FusedLayerNormBackward should widen-narrow Float16 like every other "
+       << "fused kernel, not throw, on " << device.to_string();
+    ASSERT_GE(results.size(), 3u);
+
+    const Tensor& gi = results[0];
+    const Tensor& gw = results[1];
+    const Tensor& gb = results[2];
+
+    EXPECT_EQ(gi.dtype(), DType::Float16) << "grad_input dtype mismatch";
+    EXPECT_EQ(gw.dtype(), DType::Float16) << "grad_weight dtype mismatch";
+    EXPECT_EQ(gb.dtype(), DType::Float16) << "grad_bias dtype mismatch";
+
+    Tensor gb_c = gb.contiguous().cpu().to(DType::Float32);
+    const float* p = gb_c.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < gb_c.numel(); ++i) max_abs = std::max(max_abs, std::abs(p[i]));
+    EXPECT_GT(max_abs, 1e-3f)
+        << "grad_bias is effectively zero — grad_out=ones*N should sum to N per channel";
+}
+
 INSTANTIATE_BACKEND_TESTS(FusedLayerNormBackwardF64);

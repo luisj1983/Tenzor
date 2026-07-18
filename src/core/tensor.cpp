@@ -23,6 +23,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_set>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -895,6 +896,36 @@ auto Tensor::to(Device device, DType dtype) const -> Tensor {
     return same_dtype ? on_device : on_device.to(dtype);
 }
 
+namespace {
+// Float(16/BF16/32/64)->Int cast saturating conversion, matching the native
+// ISA behavior CUDA/ROCm/Vulkan's cvt instructions already give for free
+// (NaN.to(Int32) -> 0, +Inf/overflow -> INT_MAX, -Inf/-overflow -> INT_MIN)
+// instead of a bare static_cast, which is UB in C++ for out-of-range/NaN
+// input and manifests as garbage (INT_MIN regardless of sign) on x86.
+// Only participates when SrcT is floating-point and DstT is integral;
+// every other SrcT/DstT combination is a plain static_cast passthrough.
+template <typename DstT, typename SrcT>
+inline auto saturating_cast(SrcT val) -> DstT {
+    if constexpr (std::is_floating_point_v<SrcT> && std::is_integral_v<DstT> &&
+                  !std::is_same_v<DstT, bool>) {
+        if (std::isnan(val)) return DstT{0};
+        // Compare in SrcT: DstT's min/max may not be exactly representable in
+        // SrcT (e.g. int64_t::max() in float), but the comparison still
+        // correctly detects "at or beyond the representable range" since the
+        // nearest SrcT value to an integral bound is never smaller than it.
+        if (val >= static_cast<SrcT>(std::numeric_limits<DstT>::max())) {
+            return std::numeric_limits<DstT>::max();
+        }
+        if (val <= static_cast<SrcT>(std::numeric_limits<DstT>::min())) {
+            return std::numeric_limits<DstT>::min();
+        }
+        return static_cast<DstT>(val);
+    } else {
+        return static_cast<DstT>(val);
+    }
+}
+}  // namespace
+
 auto Tensor::to(DType dtype) const -> Tensor {
     if (!impl_) {
         return *this;
@@ -1013,7 +1044,7 @@ auto Tensor::cast_cpu_raw(DType dtype) const -> Tensor {
                 } else if constexpr (std::is_same_v<DstT, std::complex<double>>) {
                     dst_ptr[i] = std::complex<double>(static_cast<double>(intermediate), 0.0);
                 } else {
-                    dst_ptr[i] = static_cast<DstT>(intermediate);
+                    dst_ptr[i] = saturating_cast<DstT>(intermediate);
                 }
             } else if constexpr (std::is_same_v<SrcT, FP8_E4M3> || std::is_same_v<SrcT, FP8_E5M2> ||
                                  std::is_same_v<SrcT, FP8_E4M3FNUZ> || std::is_same_v<SrcT, FP8_E5M2FNUZ>) {
@@ -1029,7 +1060,7 @@ auto Tensor::cast_cpu_raw(DType dtype) const -> Tensor {
                 } else if constexpr (std::is_same_v<DstT, std::complex<double>>) {
                     dst_ptr[i] = std::complex<double>(static_cast<double>(intermediate), 0.0);
                 } else {
-                    dst_ptr[i] = static_cast<DstT>(intermediate);
+                    dst_ptr[i] = saturating_cast<DstT>(intermediate);
                 }
             } else if constexpr (std::is_same_v<DstT, FP8_E4M3> || std::is_same_v<DstT, FP8_E5M2> ||
                                  std::is_same_v<DstT, FP8_E4M3FNUZ> || std::is_same_v<DstT, FP8_E5M2FNUZ>) {
@@ -1061,15 +1092,18 @@ auto Tensor::cast_cpu_raw(DType dtype) const -> Tensor {
                 } else if constexpr (std::is_same_v<DstT, std::complex<double>>) {
                     dst_ptr[i] = std::complex<double>(src_ptr[i]);
                 } else {
-                    dst_ptr[i] = static_cast<DstT>(src_ptr[i].real());
+                    dst_ptr[i] = saturating_cast<DstT>(src_ptr[i].real());
                 }
             } else if constexpr (std::is_same_v<DstT, std::complex<float>> || std::is_same_v<DstT, std::complex<double>>) {
                 // Convert to complex (set imaginary to 0)
                 using RealType = typename DstT::value_type;
                 dst_ptr[i] = DstT(static_cast<RealType>(src_ptr[i]), RealType{0});
             } else {
-                // Standard numeric conversion
-                dst_ptr[i] = static_cast<DstT>(src_ptr[i]);
+                // Standard numeric conversion. saturating_cast only changes
+                // behavior for Float->Int (NaN->0, out-of-range->INT_MAX/MIN,
+                // matching CUDA/ROCm/Vulkan's native ISA saturating convert);
+                // every other SrcT/DstT pair is an unchanged bare static_cast.
+                dst_ptr[i] = saturating_cast<DstT>(src_ptr[i]);
             }
         }
     };

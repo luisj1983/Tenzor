@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Phase 8.4 (Float64): pack per-column min/max + bin counts into the (D × 2)
+// dim_params buffer used by histogramdd_f64. Mirrors
+// histogramdd_pack_params.comp in native double precision.
+//
+// dim_params[2d + 0] = adjusted min
+// dim_params[2d + 1] = step = (adjusted_max - adjusted_min) / bins[d]
+// adj_min/adj_max widen the range by 0.5 if vmin == vmax (matches host code).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer ColMinBuf  { float64_t col_min[]; };
+layout(binding = 1) buffer ColMaxBuf  { float64_t col_max[]; };
+layout(binding = 2) buffer BinsBuf    { int        bins[]; };
+layout(binding = 3) buffer ParamsBuf  { float64_t dim_params[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint D;
+} params;
+
+void main() {
+    uint d = gl_GlobalInvocationID.x;
+    if (d >= params.D) return;
+
+    float64_t vmin = col_min[d];
+    float64_t vmax = col_max[d];
+    if (vmin == vmax) {
+        vmin -= 0.5LF;
+        vmax += 0.5LF;
+    }
+    float64_t step = (vmax - vmin) / float64_t(bins[d]);
+
+    dim_params[d * 2u + 0u] = vmin;
+    dim_params[d * 2u + 1u] = step;
+}

@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Nanmedian (Float64) — NaN-ignoring LOWER median (no interpolation) along a
+// dimension. Mirrors nanquantile_f64.comp's NaN-filter + insertion-sort
+// structure, but selects the exact element at index (count-1)/2 instead of
+// linearly interpolating between the two middle values -- matching CPU's
+// nanmedian_impl (src/backends/cpu/kernels/advanced.cpp) and CUDA's
+// nanmedian_kernel_impl (src/backends/cuda/kernels/advanced.cu). Float64
+// variant preserves precision and tie ordering relative to the CPU Float64
+// reference (vs. promoting to F32).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { float64_t input_data[]; };
+layout(binding = 1) writeonly buffer Output { float64_t output_data[]; };
+layout(binding = 2)          buffer Scratch { float64_t scratch_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_slices;
+    uint dim_size;
+    uint inner_size;
+} params;
+
+void main() {
+    uint slice_idx = gl_GlobalInvocationID.x;
+    if (slice_idx >= params.total_slices) return;
+
+    uint outer_idx = slice_idx / params.inner_size;
+    uint inner_idx = slice_idx % params.inner_size;
+    uint base = outer_idx * params.dim_size * params.inner_size + inner_idx;
+
+    // Copy non-NaN values into scratch
+    uint scratch_base = slice_idx * params.dim_size;
+    uint count = 0;
+    for (uint i = 0; i < params.dim_size; i++) {
+        float64_t val = input_data[base + i * params.inner_size];
+        // NaN detect: a value never compares equal to itself.
+        if (val == val) {
+            scratch_data[scratch_base + count] = val;
+            count++;
+        }
+    }
+
+    if (count == 0) {
+        // Produce NaN (0.0 / 0.0) in double precision.
+        float64_t zero = 0.0LF;
+        output_data[slice_idx] = zero / zero;
+        return;
+    }
+
+    // Insertion sort on compacted values
+    for (uint i = 1; i < count; i++) {
+        float64_t key = scratch_data[scratch_base + i];
+        int j = int(i) - 1;
+        while (j >= 0 && scratch_data[scratch_base + uint(j)] > key) {
+            scratch_data[scratch_base + uint(j) + 1] = scratch_data[scratch_base + uint(j)];
+            j--;
+        }
+        scratch_data[scratch_base + uint(j) + 1] = key;
+    }
+
+    // Lower median, no interpolation: index (count-1)/2 of the NaN-filtered,
+    // sorted values (matches CPU nanmedian_impl / CUDA nanmedian_kernel_impl).
+    output_data[slice_idx] = scratch_data[scratch_base + (count - 1) / 2];
+}

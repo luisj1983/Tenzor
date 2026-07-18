@@ -2,6 +2,9 @@
 #include "../backend_test_fixture.hpp"
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <complex>
 
@@ -210,6 +213,39 @@ TEST_P(FFTTest, Length1FFT) {
     auto* Xp = X_cpu.data<std::complex<float>>();
     EXPECT_NEAR(Xp[0].real(), 1.0f, 1e-4f);
     EXPECT_NEAR(Xp[0].imag(), 0.0f, 1e-4f);
+}
+
+// ============================================================================
+// CUDA: n<=0 defense-in-depth (kernel-level, bypassing the op layer)
+// ============================================================================
+// The op-layer (tenzor::fft::fft/ifft/rfft/irfft) already rejects n<=0 in the
+// normal call path, but cuda_fft_kernel/cuda_ifft_kernel/cuda_rfft_kernel/
+// cuda_irfft_kernel did not independently re-validate it -- a direct
+// OpId::FFT/... dispatch with a crafted AttrKey::N (bypassing the op layer
+// entirely, e.g. from a hand-built JIT graph) would reach the kernel with
+// n<=0 and get a silent degenerate result (0-block no-op launches, or
+// cufft_checked_int accepting n==0) instead of a clear error.
+TEST(FFTCudaDirectDispatch, ZeroOrNegativeNThrowsAtKernelLevel) {
+    using namespace tenzor;
+    initialize();
+    bool has_cuda = false;
+    try { auto t = zeros({1}, DType::Float32, Device::cuda(0)); (void)t; has_cuda = true; }
+    catch (...) {}
+    if (!has_cuda) GTEST_SKIP();
+
+    auto x = ones({8}, DType::Complex64, Device::cuda(0));
+    std::vector<Tensor> ins = {x};
+
+    for (int64_t bad_n : {0, -1, -5}) {
+        for (OpId op : {OpId::FFT, OpId::IFFT, OpId::RFFT, OpId::IRFFT}) {
+            NewOpAttributes attrs;
+            attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            attrs.set(AttrKey::N, bad_n);
+            EXPECT_THROW(dispatch(op, ins, attrs), std::runtime_error)
+                << "OpId " << static_cast<int>(op) << " with n=" << bad_n
+                << " did not throw at the kernel level";
+        }
+    }
 }
 
 // ============================================================================

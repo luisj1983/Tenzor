@@ -2050,6 +2050,24 @@ auto conv_transpose2d_forward_kernel(
 ) -> Tensor {
     // Q.8: per-axis dilation_h/w added. PyTorch ConvTranspose2d supports
     // dilation > 1; previous ROCm kernel silently forced 1.
+
+    // The transposed-conv gather kernel below reads input/weight/bias with
+    // dense NCHW / (C_in, C_out/groups, kH,kW) strides, so a non-contiguous
+    // view (e.g. a permuted input) would be read at the wrong offsets.
+    // Materialize contiguous copies once (mirrors conv2d_forward_kernel's
+    // guard above) by recursing with packed tensors.
+    if (!input.is_contiguous() || !weight.is_contiguous() || (bias && !bias->is_contiguous())) {
+        Tensor input_c = input.contiguous();
+        Tensor weight_c = weight.contiguous();
+        Tensor bias_c;
+        const Tensor* bias_ptr = bias;
+        if (bias && !bias->is_contiguous()) { bias_c = bias->contiguous(); bias_ptr = &bias_c; }
+        return conv_transpose2d_forward_kernel(input_c, weight_c, bias_ptr,
+            stride_h, stride_w, padding_h, padding_w,
+            output_padding_h, output_padding_w,
+            dilation_h, dilation_w, groups, stream);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -2204,6 +2222,22 @@ auto depthwise_conv2d_kernel(
     int64_t dilation_w,
     hipStream_t stream
 ) -> Tensor {
+    // The depthwise gather kernel below reads input/weight/bias with dense
+    // NCHW strides, so a non-contiguous view (e.g. a permuted/sliced input)
+    // would be read at the wrong offsets. Materialize contiguous copies once
+    // by recursing with packed tensors — mirrors conv2d_forward_kernel's
+    // guard and ROCm's own depthwise_conv1d_kernel/depthwise_conv3d_kernel
+    // (which call .contiguous() in their `run` lambda).
+    if (!input.is_contiguous() || !weight.is_contiguous() || (bias && !bias->is_contiguous())) {
+        Tensor input_c = input.contiguous();
+        Tensor weight_c = weight.contiguous();
+        Tensor bias_c;
+        const Tensor* bias_ptr = bias;
+        if (bias && !bias->is_contiguous()) { bias_c = bias->contiguous(); bias_ptr = &bias_c; }
+        return depthwise_conv2d_kernel(input_c, weight_c, bias_ptr,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, stream);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -2685,12 +2719,21 @@ auto deformable_conv2d_forward_kernel(
     dim3 grid, block;
     compute_launch_config_1d(total, grid, block);
 
+    // data<T>() ignores strides -- contiguify all raw-pointer operands so a
+    // non-contiguous (channels-last/permuted/sliced) view is read correctly.
+    // Matches the CPU kernel's guard (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor input_c  = input.is_contiguous()  ? input  : input.contiguous();
+    const Tensor offset_c = offset.is_contiguous() ? offset : offset.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor bias_c   = bias.is_contiguous()   ? bias   : bias.contiguous();
+    const Tensor mask_c   = mask.is_contiguous()   ? mask   : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(dcn_forward_kernel<float>,
             grid, block, 0, stream,
-            input.data<float>(), offset.data<float>(), weight.data<float>(),
-            bias.numel() > 0 ? bias.data<float>() : nullptr,
-            use_mask ? mask.data<float>() : nullptr,
+            input_c.data<float>(), offset_c.data<float>(), weight_c.data<float>(),
+            bias.numel() > 0 ? bias_c.data<float>() : nullptr,
+            use_mask ? mask_c.data<float>() : nullptr,
             output.data<float>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
@@ -2698,9 +2741,9 @@ auto deformable_conv2d_forward_kernel(
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(dcn_forward_kernel<double>,
             grid, block, 0, stream,
-            input.data<double>(), offset.data<double>(), weight.data<double>(),
-            bias.numel() > 0 ? bias.data<double>() : nullptr,
-            use_mask ? mask.data<double>() : nullptr,
+            input_c.data<double>(), offset_c.data<double>(), weight_c.data<double>(),
+            bias.numel() > 0 ? bias_c.data<double>() : nullptr,
+            use_mask ? mask_c.data<double>() : nullptr,
             output.data<double>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
@@ -2779,12 +2822,20 @@ auto deformable_conv2d_backward_input_kernel(
     dim3 grid, block;
     compute_launch_config_1d(total, grid, block);
 
+    // data<T>() ignores strides -- contiguify all raw-pointer read operands.
+    // Matches the CPU kernel's guard (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c       = input.is_contiguous()       ? input       : input.contiguous();
+    const Tensor offset_c      = offset.is_contiguous()      ? offset      : offset.contiguous();
+    const Tensor weight_c      = weight.is_contiguous()      ? weight      : weight.contiguous();
+    const Tensor mask_c        = mask.is_contiguous()        ? mask        : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(dcn_backward_input_kernel<float>,
             grid, block, 0, stream,
-            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
-            weight.data<float>(),
-            use_mask ? mask.data<float>() : nullptr,
+            grad_output_c.data<float>(), input_c.data<float>(), offset_c.data<float>(),
+            weight_c.data<float>(),
+            use_mask ? mask_c.data<float>() : nullptr,
             grad_input.data<float>(), grad_offset.data<float>(),
             use_mask ? grad_mask.data<float>() : nullptr,
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
@@ -2793,9 +2844,9 @@ auto deformable_conv2d_backward_input_kernel(
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(dcn_backward_input_kernel<double>,
             grid, block, 0, stream,
-            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
-            weight.data<double>(),
-            use_mask ? mask.data<double>() : nullptr,
+            grad_output_c.data<double>(), input_c.data<double>(), offset_c.data<double>(),
+            weight_c.data<double>(),
+            use_mask ? mask_c.data<double>() : nullptr,
             grad_input.data<double>(), grad_offset.data<double>(),
             use_mask ? grad_mask.data<double>() : nullptr,
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
@@ -2851,11 +2902,18 @@ auto deformable_conv2d_backward_weight_kernel(
     dim3 grid, block;
     compute_launch_config_1d(total, grid, block);
 
+    // data<T>() ignores strides -- contiguify all raw-pointer read operands.
+    // Matches the CPU kernel's guard (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c       = input.is_contiguous()       ? input       : input.contiguous();
+    const Tensor offset_c      = offset.is_contiguous()      ? offset      : offset.contiguous();
+    const Tensor mask_c        = mask.is_contiguous()        ? mask        : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(dcn_backward_weight_kernel<float>,
             grid, block, 0, stream,
-            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
-            use_mask ? mask.data<float>() : nullptr,
+            grad_output_c.data<float>(), input_c.data<float>(), offset_c.data<float>(),
+            use_mask ? mask_c.data<float>() : nullptr,
             grad_weight.data<float>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
@@ -2863,8 +2921,8 @@ auto deformable_conv2d_backward_weight_kernel(
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(dcn_backward_weight_kernel<double>,
             grid, block, 0, stream,
-            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
-            use_mask ? mask.data<double>() : nullptr,
+            grad_output_c.data<double>(), input_c.data<double>(), offset_c.data<double>(),
+            use_mask ? mask_c.data<double>() : nullptr,
             grad_weight.data<double>(),
             N, C_in, H, W, C_out, kH, kW, H_out, W_out,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,

@@ -48,6 +48,8 @@ class NormReducePhase1Float64;
 class NormReducePhase2Float64;
 class NormDimKernelFloat32;
 class NormDimKernelFloat64;
+class NormFullInfFloat32;
+class NormFullInfFloat64;
 
 
 /**
@@ -1110,6 +1112,29 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
             Tensor output(out_shape, input.dtype(), input.device());
             float* out_ptr = get_data_ptr<float>(output);
 
+            // p == +/-inf: L-infinity / L-(-infinity) norm = max(|x|) / min(|x|)
+            // respectively -- NOT expressible via the general
+            // pow(sum(|x|^p), 1/p) formula below: any |x| > 1 blows the sum to
+            // +inf, after which pow(inf, 1/inf) evaluates to 1 (IEEE x^0==1)
+            // instead of max(|x|). Handled as a dedicated pass before the
+            // sum-based two-phase reduction, since it needs a max/min
+            // reduction rather than a sum. Matches CPU's norm_kernel
+            // full-reduction std::isinf(p) special-casing
+            // (src/backends/cpu/kernels/reduction.cpp) and ROCm's
+            // is_pos_inf_bits/is_neg_inf_bits convention (p<0 -> min, p>0 -> max).
+            if (std::isinf(p)) {
+                bool is_neg_inf = std::signbit(p);
+                queue.single_task<NormFullInfFloat32>([=]() {
+                    float m = is_neg_inf ? std::numeric_limits<float>::infinity() : 0.0f;
+                    for (int64_t i = 0; i < n; ++i) {
+                        float a = sycl::fabs(in_ptr[i]);
+                        if (is_neg_inf ? (a < m) : (a > m)) m = a;
+                    }
+                    out_ptr[0] = m;
+                }).wait();
+                return output;
+            }
+
             constexpr int64_t WG_SIZE = 256;
             int64_t num_wgs = (n + WG_SIZE - 1) / WG_SIZE;
             auto partial_buf = sycl::malloc_device<float>(num_wgs, queue);
@@ -1123,7 +1148,14 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
                     float val = 0.0f;
                     if (gid < n) {
                         float x = in_ptr[gid];
-                        if (p_val == 1.0f) {
+                        // p == 0: L0 "norm" = count of nonzero elements.
+                        // pow(x,0)==1 for every element (including zero, per
+                        // IEEE-754), so the general branch below would wrongly
+                        // sum to n instead of the nonzero count. Matches CPU's
+                        // norm_kernel p==0 special-casing.
+                        if (p_val == 0.0f) {
+                            val = (x != 0.0f) ? 1.0f : 0.0f;
+                        } else if (p_val == 1.0f) {
                             val = sycl::fabs(x);
                         } else if (p_val == 2.0f) {
                             val = x * x;
@@ -1155,7 +1187,7 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
                     if (lid == 0) {
                         if (p_val == 2.0f) {
                             out_ptr[0] = sycl::sqrt(sum);
-                        } else if (p_val == 1.0f) {
+                        } else if (p_val == 0.0f || p_val == 1.0f) {
                             out_ptr[0] = sum;
                         } else {
                             out_ptr[0] = sycl::pow(sum, 1.0f / p_val);
@@ -1171,6 +1203,20 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
             Tensor output(out_shape, input.dtype(), input.device());
             double* out_ptr = get_data_ptr<double>(output);
 
+            // p == +/-inf: see the Float32 branch above for rationale.
+            if (std::isinf(p)) {
+                bool is_neg_inf = std::signbit(p);
+                queue.single_task<NormFullInfFloat64>([=]() {
+                    double m = is_neg_inf ? std::numeric_limits<double>::infinity() : 0.0;
+                    for (int64_t i = 0; i < n; ++i) {
+                        double a = sycl::fabs(in_ptr[i]);
+                        if (is_neg_inf ? (a < m) : (a > m)) m = a;
+                    }
+                    out_ptr[0] = m;
+                }).wait();
+                return output;
+            }
+
             constexpr int64_t WG_SIZE = 256;
             int64_t num_wgs = (n + WG_SIZE - 1) / WG_SIZE;
             auto partial_buf = sycl::malloc_device<double>(num_wgs, queue);
@@ -1184,7 +1230,11 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
                     double val = 0.0;
                     if (gid < n) {
                         double x = in_ptr[gid];
-                        if (p_val == 1.0) {
+                        // p == 0: L0 "norm" = count of nonzero elements (see
+                        // the Float32 branch above for rationale).
+                        if (p_val == 0.0) {
+                            val = (x != 0.0) ? 1.0 : 0.0;
+                        } else if (p_val == 1.0) {
                             val = sycl::fabs(x);
                         } else if (p_val == 2.0) {
                             val = x * x;
@@ -1217,7 +1267,7 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
                     if (lid == 0) {
                         if (p_val == 2.0) {
                             out_ptr[0] = sycl::sqrt(sum);
-                        } else if (p_val == 1.0) {
+                        } else if (p_val == 0.0 || p_val == 1.0) {
                             out_ptr[0] = sum;
                         } else {
                             out_ptr[0] = sycl::pow(sum, 1.0 / p_val);
@@ -1246,7 +1296,8 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
         int64_t output_size = outer_size * inner_size;
 
         if (dim_size == 0) {
-            throw std::runtime_error("norm: reduction dimension is empty");
+            // Matches CPU/CUDA/ROCm exactly (message + exception type).
+            throw std::invalid_argument("norm: cannot reduce over a zero-size dimension");
         }
 
         std::vector<int64_t> out_shape;
@@ -1259,6 +1310,18 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
             }
         }
 
+        // p == 0 (L0 "norm": count of nonzero elements) and p == +/-inf
+        // (L-infinity / L-(-infinity) norm: max(|x|) / min(|x|)) are handled
+        // as dedicated branches inside the per-output-index kernels below,
+        // rather than folded into the general pow(sum(|x|^p), 1/p) loop --
+        // see the full-reduction branch above for why the general formula
+        // is wrong for those two cases. Matches CPU/ROCm's norm_kernel_dim /
+        // norm_along_dim_kernel convention (p<0 -> min, p>0 -> max).
+        bool p_is_zero = (p == 0.0f);
+        bool p_isinf = std::isinf(p);
+        bool p_is_neg_inf = p_isinf && std::signbit(p);
+        bool p_is_pos_inf = p_isinf && !std::signbit(p);
+
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
             Tensor output(out_shape, input.dtype(), input.device());
@@ -1270,6 +1333,26 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
                     int64_t idx = gid[0];
                     int64_t outer = idx / inner_size;
                     int64_t inner = idx % inner_size;
+
+                    if (p_is_zero) {
+                        int64_t count = 0;
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            float x = in_ptr[outer * dim_size * inner_size + d * inner_size + inner];
+                            if (x != 0.0f) ++count;
+                        }
+                        out_ptr[idx] = static_cast<float>(count);
+                        return;
+                    }
+                    if (p_is_pos_inf || p_is_neg_inf) {
+                        float m = p_is_neg_inf ? std::numeric_limits<float>::infinity() : 0.0f;
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            float x = in_ptr[outer * dim_size * inner_size + d * inner_size + inner];
+                            float a = sycl::fabs(x);
+                            if (p_is_neg_inf ? (a < m) : (a > m)) m = a;
+                        }
+                        out_ptr[idx] = m;
+                        return;
+                    }
 
                     float acc = 0.0f;
                     for (int64_t d = 0; d < dim_size; ++d) {
@@ -1306,6 +1389,26 @@ auto norm_kernel(const Tensor& input_raw, const OpAttributes& attrs, sycl::queue
                     int64_t idx = gid[0];
                     int64_t outer = idx / inner_size;
                     int64_t inner = idx % inner_size;
+
+                    if (p_is_zero) {
+                        int64_t count = 0;
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            double x = in_ptr[outer * dim_size * inner_size + d * inner_size + inner];
+                            if (x != 0.0) ++count;
+                        }
+                        out_ptr[idx] = static_cast<double>(count);
+                        return;
+                    }
+                    if (p_is_pos_inf || p_is_neg_inf) {
+                        double m = p_is_neg_inf ? std::numeric_limits<double>::infinity() : 0.0;
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            double x = in_ptr[outer * dim_size * inner_size + d * inner_size + inner];
+                            double a = sycl::fabs(x);
+                            if (p_is_neg_inf ? (a < m) : (a > m)) m = a;
+                        }
+                        out_ptr[idx] = m;
+                        return;
+                    }
 
                     double acc = 0.0;
                     for (int64_t d = 0; d < dim_size; ++d) {

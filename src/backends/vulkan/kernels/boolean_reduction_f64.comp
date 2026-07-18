@@ -14,7 +14,7 @@ layout(push_constant) uniform PushConstants {
     uint reduce_size;    // Size of dimension to reduce
     uint outer_size;     // Number of output elements
     uint inner_size;     // Product of dimensions after reduction dim
-    uint op;             // 0=any, 1=all
+    uint op;             // 0=any, 1=all, 2=count_nonzero
 } params;
 
 shared int shared_data[WORKGROUP_SIZE];
@@ -45,8 +45,10 @@ void main() {
             int val = (input_data[idx] != float64_t(0.0)) ? 1 : 0;
             if (params.op == 0) { // any
                 accum = accum | val;
-            } else { // all
+            } else if (params.op == 1) { // all
                 accum = accum & val;
+            } else { // count_nonzero
+                accum = accum + val;
             }
         }
     }
@@ -60,8 +62,10 @@ void main() {
         if (tid < s) {
             if (params.op == 0) { // any
                 shared_data[tid] = shared_data[tid] | shared_data[tid + s];
-            } else { // all
+            } else if (params.op == 1) { // all
                 shared_data[tid] = shared_data[tid] & shared_data[tid + s];
+            } else { // count_nonzero
+                shared_data[tid] = shared_data[tid] + shared_data[tid + s];
             }
         }
         barrier();

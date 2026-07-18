@@ -3,7 +3,7 @@
 // Integer pow for 32-bit dtypes (Int32 / UInt32). For a non-negative integer
 // exponent the result is exact modular exponentiation (matching PyTorch / the
 // CPU path: repeated multiply with two's-complement wraparound). Otherwise it
-// falls back to round(pow(base, e)) computed in float.
+// falls back to round-half-away-from-zero(pow(base, e)) computed in float.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) readonly buffer Input  { uint input_data[]; };
@@ -17,6 +17,17 @@ layout(push_constant) uniform PushConstants {
     float e;         // exponent as float (used when int_exp == 0)
 } p;
 
+// Round-half-away-from-zero to match std::round / CUDA/ROCm/OneAPI round
+// semantics. GLSL's round() has implementation-defined 0.5 tie-breaking
+// (often round-to-even on real hardware); every other backend rounds ties
+// away from zero, which matters here since e.g. pow(2,-1) == 0.5 exactly.
+//   sign(x) * floor(abs(x) + 0.5)
+//   round( 0.5) =  1 * floor(1.0) =  1  ✓ (away from zero, not 0)
+//   round(-0.5) = -1 * floor(1.0) = -1  ✓
+float round_half_away_f32(float x) {
+    return sign(x) * floor(abs(x) + 0.5);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= p.n_elements) return;
@@ -28,7 +39,7 @@ void main() {
         output_data[idx] = r;
     } else {
         float b = (p.is_signed != 0u) ? float(int(raw)) : float(raw);
-        float res = round(pow(b, p.e));
+        float res = round_half_away_f32(pow(b, p.e));
         output_data[idx] = (p.is_signed != 0u) ? uint(int(res)) : uint(res);
     }
 }

@@ -28,6 +28,15 @@ namespace {
 
 constexpr int MAX_INDEX_DIMS = 16;
 
+// Raw same-size PODs for dtype-agnostic gather/put (mirrors the existing
+// "treat 16-bit floats as raw uint16_t for bit-copy" idiom below): the
+// gather/put kernels only ever do a whole-element `dst[i] = src[i]`
+// assignment (no arithmetic), so any trivially-copyable type of the right
+// byte width reproduces CPU's dtype-agnostic memcpy semantics exactly.
+struct AdvIdxBytes1 { uint8_t b[1]; };
+struct AdvIdxBytes8 { uint8_t b[8]; };
+struct AdvIdxBytes16 { uint8_t b[16]; };
+
 struct AdvancedIndexMeta {
     int num_indices;
     int src_ndim;
@@ -288,6 +297,25 @@ auto launch_advanced_index_put(
                         dst_offset += coord * meta.src_strides[d];
                     }
                 }
+                // NOTE: intentional unsynchronized overwrite, not an oversight. When
+                // two different index tuples alias the same dst_offset (duplicate
+                // advanced indices), this is a benign data race: whichever
+                // work-item's write lands last physically wins, and that ordering
+                // is undefined across SYCL work-items/sub-groups. CPU is the only
+                // backend that is deterministic here (its sequential loop makes the
+                // highest broadcast-position index win by construction); ROCm,
+                // CUDA, and Vulkan all have the same unsynchronized-overwrite
+                // pattern for AdvancedIndexPut, since none of the 5 backends
+                // accumulate on duplicate indices (matching the documented
+                // non-differentiable design of this op). Making OneAPI's ordering
+                // deterministic would require an auxiliary "winning index" buffer
+                // sized to the full destination tensor plus a second kernel pass
+                // (atomic-max the winning broadcast position per dst_offset, then
+                // gate the write on it) — a real perf/memory cost paid on every
+                // call to guard a case (duplicate indices in an index_put) that is
+                // rare and already documented as backend-nondeterministic outside
+                // of CPU. Left as-is; exclude duplicate-index cases from
+                // cross-backend parity tests instead.
                 dst_ptr[dst_offset] = val_ptr[out_idx];
             });
     }).wait();
@@ -318,8 +346,21 @@ auto advanced_index_oneapi_kernel(
             return launch_advanced_index_gather<int64_t>(src, idx_ptrs.data(), num_indices, queue);
         case DType::Float16:
         case DType::BFloat16:
-            // Pure gather — treat 16-bit floats as raw uint16_t for bit-copy
+        case DType::Int16:
+        case DType::UInt16:
+            // Pure gather — treat 16-bit dtypes as raw uint16_t for bit-copy
             return launch_advanced_index_gather<uint16_t>(src, idx_ptrs.data(), num_indices, queue);
+        case DType::Bool:
+        case DType::Int8:
+        case DType::UInt8:
+            return launch_advanced_index_gather<AdvIdxBytes1>(src, idx_ptrs.data(), num_indices, queue);
+        case DType::UInt32:
+            return launch_advanced_index_gather<int32_t>(src, idx_ptrs.data(), num_indices, queue);
+        case DType::UInt64:
+        case DType::Complex64:
+            return launch_advanced_index_gather<AdvIdxBytes8>(src, idx_ptrs.data(), num_indices, queue);
+        case DType::Complex128:
+            return launch_advanced_index_gather<AdvIdxBytes16>(src, idx_ptrs.data(), num_indices, queue);
         default:
             throw std::runtime_error("AdvancedIndex OneAPI: unsupported dtype");
     }
@@ -346,7 +387,20 @@ auto advanced_index_put_oneapi_kernel(
             return launch_advanced_index_put<int64_t>(src, values, idx_ptrs.data(), num_indices, queue);
         case DType::Float16:
         case DType::BFloat16:
+        case DType::Int16:
+        case DType::UInt16:
             return launch_advanced_index_put<uint16_t>(src, values, idx_ptrs.data(), num_indices, queue);
+        case DType::Bool:
+        case DType::Int8:
+        case DType::UInt8:
+            return launch_advanced_index_put<AdvIdxBytes1>(src, values, idx_ptrs.data(), num_indices, queue);
+        case DType::UInt32:
+            return launch_advanced_index_put<int32_t>(src, values, idx_ptrs.data(), num_indices, queue);
+        case DType::UInt64:
+        case DType::Complex64:
+            return launch_advanced_index_put<AdvIdxBytes8>(src, values, idx_ptrs.data(), num_indices, queue);
+        case DType::Complex128:
+            return launch_advanced_index_put<AdvIdxBytes16>(src, values, idx_ptrs.data(), num_indices, queue);
         default:
             throw std::runtime_error("AdvancedIndexPut OneAPI: unsupported dtype");
     }

@@ -47,6 +47,15 @@ float lgamma_lanczos(float x) {
     return 0.5f * log(2.0f * PI) + (xm1 + 0.5f) * log(t) - t + log(a);
 }
 float lgamma_impl(float x) {
+    // Pole at every non-positive integer: the reflection formula below
+    // divides by sin(PI*x), which floating-point PI never lands on exactly
+    // zero for, so without this check it returns finite garbage instead of
+    // +inf (verified: lgamma_impl(-1.0f)=17.397, lgamma_impl(-2.0f)=16.011).
+    // Return the real IEEE +inf bit pattern directly, bypassing the
+    // reflection formula entirely at poles.
+    if (x <= 0.0f && x == floor(x)) {
+        return uintBitsToFloat(0x7F800000u);  // +inf
+    }
     if (x < 0.5f) {
         // Reflection: lgamma(x) = log(pi/sin(pi*x)) - lgamma(1-x)
         // The 1-x branch always satisfies (1-x) >= 0.5, so call lanczos directly.
@@ -55,11 +64,30 @@ float lgamma_impl(float x) {
     return lgamma_lanczos(x);
 }
 float tgamma_impl(float x) {
+    // gamma has a true sign-ambiguous pole at non-positive integers (it
+    // diverges to +inf from one side, -inf from the other); NaN is the
+    // standard convention (matches std::tgamma/scipy). Must be checked here
+    // too, not just inherited via exp(lgamma_impl(x)) -- exp(+inf) would
+    // wrongly give +inf instead of NaN.
+    if (x <= 0.0f && x == floor(x)) {
+        return uintBitsToFloat(0x7FC00000u);  // NaN
+    }
     return exp(lgamma_impl(x));
 }
 
 // ----- Digamma -----
 float digamma_impl(float x) {
+    // True pole at every non-positive integer: PI/tan(PI*x) below depends on
+    // tan(PI*x) hitting exactly zero, which floating-point PI never does --
+    // each backend's differing PI precision then makes the "near-pole"
+    // result diverge wildly and inconsistently from every other backend, not
+    // just from the true pole. Digamma has no single-valued limit at these
+    // poles, so NaN -- not a signed infinity -- is the mathematically
+    // honest, scipy/PyTorch-consistent convention shared by every backend
+    // after this fix.
+    if (x <= 0.0f && x == floor(x)) {
+        return uintBitsToFloat(0x7FC00000u);  // NaN
+    }
     float result = 0.0f;
     if (x < 0.5f) {
         float y = 1.0f - x;
@@ -142,7 +170,13 @@ float bessel_j1_impl(float x_in) {
 
 // ----- Bessel Y0 (Numerical Recipes rational approximation, ~1e-7) -----
 float bessel_y0_impl(float x) {
-    if (x <= 0.0f) return -1.0e38f;
+    // Y0 has a true pole at x=0 and is undefined for x<0. Standardize on the
+    // IEEE-754/native-libm convention (CUDA's y0f/ROCm's y0f, and this
+    // file's own digamma/lgamma pole convention above): NaN for x<0, real
+    // -inf exactly at x==0 -- a finite sentinel like -1e38 is silently
+    // indistinguishable from an actual finite Y0 result.
+    if (x < 0.0f) return uintBitsToFloat(0x7FC00000u);   // NaN
+    if (x == 0.0f) return uintBitsToFloat(0xFF800000u);  // -inf
     if (x < 8.0f) {
         float y = x * x;
         float r1 = -2957821389.0f + y * (7062834065.0f
@@ -166,7 +200,9 @@ float bessel_y0_impl(float x) {
 
 // ----- Bessel Y1 (Numerical Recipes rational approximation, ~1e-7) -----
 float bessel_y1_impl(float x) {
-    if (x <= 0.0f) return -1.0e38f;
+    // Same NaN-for-x<0/-inf-at-x==0 convention as bessel_y0_impl above.
+    if (x < 0.0f) return uintBitsToFloat(0x7FC00000u);   // NaN
+    if (x == 0.0f) return uintBitsToFloat(0xFF800000u);  // -inf
     if (x < 8.0f) {
         float y = x * x;
         float r1 = x * (-4.900604943e13f + y * (1.275274390e13f
@@ -386,13 +422,21 @@ float polygamma_impl(int n, float x) {
         -1.0f/1209600.0f,
         1.0f/47900160.0f
     );
+    // NOTE: same bug class as ROCm's polygamma (src/backends/rocm/kernels/
+    // math.hip.cpp) had before its fix -- `rising` alone only accumulates
+    // (n+2k-1)!/(n-1)!, so the term needs an explicit `* fact_nm1` to
+    // recover the full (n+2k-1)! numerator that CPU/CUDA/OneAPI's polygamma
+    // all include (OneAPI's special_math.cpp documents this exact
+    // requirement). `power` must also start at x^-n (not x^-(n+1)) so that
+    // after the k-th `power *= inv_x2` it equals x^-(n+2k), matching the
+    // term's x^-(n+2k) denominator.
     float inv_x2 = inv_x * inv_x;
-    float power = inv_x_n * inv_x;
+    float power = inv_x_n;
     float rising = 1.0f;
     for (int k = 1; k <= 5; ++k) {
         rising *= float(n + 2*k - 1) * float(n + 2*k - 2);
         power *= inv_x2;
-        sum_asym += B_over_fact[k-1] * rising * power;
+        sum_asym += B_over_fact[k-1] * rising * fact_nm1 * power;
     }
 
     return sgn * (fact_n * shifted + sum_asym);

@@ -1103,6 +1103,18 @@ auto group_norm(const Variable& input_arg, int64_t num_groups,
         throw std::runtime_error("F::group_norm: input must have at least 2 dims");
     }
     int64_t num_channels = in_shape[1];
+    // CPU/ROCm's kernels independently re-validate and throw for this, but
+    // CUDA's group_norm_forward_kernel and OneAPI's group_norm_kernel both
+    // silently truncate channels_per_group = C / num_groups with no check at
+    // all (Vulkan's dispatchGroupNorm only checks ndim >= 2) -- on OneAPI
+    // specifically this reaches a verified out-of-bounds device read for the
+    // tail channel. Validate once here, at the shared functional entry point,
+    // so every backend gets the same clean error instead of silently
+    // computing wrong (or, on OneAPI, OOB-reading) results.
+    if (num_groups <= 0 || num_channels % num_groups != 0) {
+        throw std::invalid_argument(
+            "F::group_norm: num_groups must be positive and divide the channel count");
+    }
     auto compute_dtype = input.tensor().dtype();
     auto compute_device = input.tensor().device();
 
@@ -1519,10 +1531,21 @@ auto scaled_dot_product_attention(
                                    dev_t == Device::Type::Vulkan);
     bool causal_path_ok = !opts.is_causal || device_supports_causal;
 
-    // FlashAttention dropout is currently only honored by the CPU kernel
-    // (the GPU FlashAttention/FusedAttention kernels ignore DropoutP/IsTraining).
-    // For dropout_p > 0 on a GPU backend, fall through to the manual BMM path
-    // which applies dropout as a separate Variable-level op. (#49)
+    // FlashAttention dropout: the CPU kernel has always applied the inverted-
+    // dropout scale correctly (1/(1-p) applied only to the V-accumulation
+    // weight, not folded into the softmax denominator). The CUDA/ROCm
+    // FlashAttention forward kernels previously computed dropout INCORRECTLY
+    // — the 1/(1-p) scale was folded into the running softmax sum, so it
+    // canceled against the denominator for surviving keys and silently
+    // turned "dropout" into a renormalize-over-survivors softmax instead of
+    // standard inverted dropout. That was a real, WRONG numerical result,
+    // not the DropoutP/IsTraining attrs being ignored. The kernel-level bug
+    // is now fixed (see flash_attention_v2_kernel in cuda/kernels/fused_ops.cu
+    // and rocm/kernels/fused_ops.hip.cpp), but this Variable-level dispatch
+    // still routes dropout_p > 0 on GPU backends to the manual BMM path below
+    // (which applies dropout as a separate Variable-level op) rather than the
+    // fused kernel, so device_supports_dropout intentionally stays CPU-only
+    // for now. (#49)
     bool device_supports_dropout = (dev_t == Device::Type::CPU);
     bool dropout_path_ok = (opts.dropout_p <= 0.0) || device_supports_dropout;
 

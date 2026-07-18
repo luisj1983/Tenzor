@@ -16,19 +16,55 @@ layout(push_constant) uniform PushConstants {
     int sign;        // +1 or -1 (same sign used for chirp generation)
 };
 
+const double TWO_PI_D = 6.28318530717958647692LF;
+
+// Double-precision sin/cos (GLSL built-ins are only float32). This kernel
+// must match fft_bluestein_chirp_gen_f64.comp's chirp exactly -- that file
+// already evaluates cos/sin in double precision (see its cos_fd/sin_fd);
+// this kernel previously range-reduced the angle in double but then cast
+// down to float before calling GLSL's cos/sin, silently discarding ~9
+// significant digits right before the trig evaluation and producing a
+// b[k] = conj(chirp[k]) that numerically disagreed with chirp[k] at only
+// float precision instead of double. Range-reduce into [-pi, pi] and
+// evaluate with a double-precision Taylor series (arguments are tiny,
+// |x| <= pi, so the series converges quickly).
+void sincos_d(double x, out double s, out double c) {
+    double q = floor(x / TWO_PI_D + 0.5LF);
+    x = x - q * TWO_PI_D;
+
+    double x2 = x * x;
+
+    double term = x;
+    s = term;
+    term = -term * x2 / (2.0LF * 3.0LF);   s += term;   // x^3/3!
+    term = -term * x2 / (4.0LF * 5.0LF);   s += term;   // x^5/5!
+    term = -term * x2 / (6.0LF * 7.0LF);   s += term;   // x^7/7!
+    term = -term * x2 / (8.0LF * 9.0LF);   s += term;   // x^9/9!
+    term = -term * x2 / (10.0LF * 11.0LF); s += term;   // x^11/11!
+    term = -term * x2 / (12.0LF * 13.0LF); s += term;   // x^13/13!
+    term = -term * x2 / (14.0LF * 15.0LF); s += term;   // x^15/15!
+
+    double ct = 1.0LF;
+    c = ct;
+    ct = -ct * x2 / (1.0LF * 2.0LF);   c += ct;   // x^2/2!
+    ct = -ct * x2 / (3.0LF * 4.0LF);   c += ct;   // x^4/4!
+    ct = -ct * x2 / (5.0LF * 6.0LF);   c += ct;   // x^6/6!
+    ct = -ct * x2 / (7.0LF * 8.0LF);   c += ct;   // x^8/8!
+    ct = -ct * x2 / (9.0LF * 10.0LF);  c += ct;   // x^10/10!
+    ct = -ct * x2 / (11.0LF * 12.0LF); c += ct;   // x^12/12!
+    ct = -ct * x2 / (13.0LF * 14.0LF); c += ct;   // x^14/14!
+    ct = -ct * x2 / (15.0LF * 16.0LF); c += ct;   // x^16/16!
+}
+
 void main() {
     uint k = gl_GlobalInvocationID.x;
     if (k >= N) return;
 
-    double angle = double(sign) * 3.14159265358979323846lf * double(k) * double(k) / double(N);
-    // Reduce angle to [-PI, PI] in double precision before float cast
-    // to preserve precision for large k^2/N values
-    double TWO_PI = 6.28318530717958647692lf;
-    angle = angle - TWO_PI * round(angle / TWO_PI);
-    // GLSL trig functions only work on float; cast down for cos/sin
-    float angle_f = float(angle);
-    double conj_re = double(cos(angle_f));
-    double conj_im = -double(sin(angle_f));  // conjugate: negate imaginary
+    double angle = double(sign) * 3.14159265358979323846LF * double(k) * double(k) / double(N);
+    double conj_re;
+    double conj_im;
+    sincos_d(angle, conj_im, conj_re);
+    conj_im = -conj_im;  // conjugate: negate imaginary
 
     // Write b[k]
     uint base_k = k * 2;

@@ -32,7 +32,12 @@ void main() {
 
     for (uint i = 1; i < slice_size; ++i) {
         double v = sorted_data[base + i];
-        if (v == cur_val) {
+        // NaN-aware equality: plain `==` is always false for NaN (even
+        // against itself), which would reset the run-length counter on
+        // every NaN-to-NaN comparison and hide a genuine NaN-mode even
+        // though the upstream sort groups NaNs contiguously.
+        bool eq = (isnan(v) && isnan(cur_val)) || (v == cur_val);
+        if (eq) {
             cur_count++;
         } else {
             if (cur_count > best_count) {

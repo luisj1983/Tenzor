@@ -98,31 +98,61 @@ float erf_f32(float x) {
 float erfc_f32(float x) {
     if (isnan(x)) return x;
     float ax = abs(x);
-    if (ax >= 3.92) return (x < 0.0) ? 2.0 : 0.0;
     // For |x| < 1.25, 1 - erf(x) has no catastrophic cancellation.
     if (ax < 1.25) {
         return 1.0 - erf_f32(x);
     }
-    // Direct erfc rational for |x| >= 1.25.
-    float s = 1.0 / (ax * ax);
-    float R, S;
-    if (ax < 2.857142857) {
-        R = -9.86494403e-03 + s * (-6.93858572e-01 + s * (-1.05586262e+01 +
-            s * (-6.23753324e+01 + s * (-1.62396669e+02 + s * (-1.84605092e+02 +
-            s * (-8.12874355e+01 + s * (-9.81432934e+00)))))));
-        S = 1.0 + s * (1.96512716e+01 + s * (1.37657754e+02 + s * (4.34565877e+02 +
-            s * (6.45387271e+02 + s * (4.29008140e+02 + s * (1.08635005e+02 +
-            s * (6.57024977e+00 + s * (-6.04244152e-02))))))));
-    } else {
-        R = -9.86494292e-03 + s * (-7.99283237e-01 + s * (-1.77579549e+01 +
-            s * (-1.60636384e+02 + s * (-6.37566443e+02 + s * (-1.25029579e+03 +
-            s * (-1.05089413e+03 + s * (-3.70319441e+02 + s * (-3.56042851e+01))))))));
-        S = 1.0 + s * (3.03380607e+01 + s * (3.25792510e+02 + s * (1.53672857e+03 +
-            s * (3.19985824e+03 + s * (2.55305040e+03 + s * (4.74528542e+02 +
-            s * (-2.24409525e+01)))))));
+    // Direct erfc rational for |x| >= 1.25, matching fdlibm's erff.c
+    // validity range (erf_f32 saturates to sgn*1.0 at ax>=3.92 because
+    // 1-erfc(3.92)~1-4e-8 already rounds to 1.0f in float32 -- but erfc(x)
+    // itself is a perfectly representable float32 magnitude on its own well
+    // past that point, e.g. CPU std::erfc(9.0f)=4.14e-37).
+    if (ax < 3.92) {
+        float s = 1.0 / (ax * ax);
+        float R, S;
+        if (ax < 2.857142857) {
+            R = -9.86494403e-03 + s * (-6.93858572e-01 + s * (-1.05586262e+01 +
+                s * (-6.23753324e+01 + s * (-1.62396669e+02 + s * (-1.84605092e+02 +
+                s * (-8.12874355e+01 + s * (-9.81432934e+00)))))));
+            S = 1.0 + s * (1.96512716e+01 + s * (1.37657754e+02 + s * (4.34565877e+02 +
+                s * (6.45387271e+02 + s * (4.29008140e+02 + s * (1.08635005e+02 +
+                s * (6.57024977e+00 + s * (-6.04244152e-02))))))));
+        } else {
+            R = -9.86494292e-03 + s * (-7.99283237e-01 + s * (-1.77579549e+01 +
+                s * (-1.60636384e+02 + s * (-6.37566443e+02 + s * (-1.25029579e+03 +
+                s * (-1.05089413e+03 + s * (-3.70319441e+02 + s * (-3.56042851e+01))))))));
+            S = 1.0 + s * (3.03380607e+01 + s * (3.25792510e+02 + s * (1.53672857e+03 +
+                s * (3.19985824e+03 + s * (2.55305040e+03 + s * (4.74528542e+02 +
+                s * (-2.24409525e+01)))))));
+        }
+        float erfc_pos = exp(-ax * ax - 0.5625) * exp(R / S) / ax;
+        return (x < 0.0) ? (2.0 - erfc_pos) : erfc_pos;
     }
-    float erfc_pos = exp(-ax * ax - 0.5625) * exp(R / S) / ax;
+    // |x| >= 3.92: fdlibm's erff.c rational above is only valid up to here.
+    // Use a Lentz continued fraction for erfc, the same technique the
+    // Float64 shader's erfc_double() (math_f64.comp) uses for its own
+    // large-|x| tail -- accurate with no 1-erf cancellation, and naturally
+    // decays toward 0 as exp(-x*x) underflows float32's representable range
+    // rather than hard-clamping at a fixed cutoff.
+    float cf = 0.0;
+    for (int k = 15; k >= 1; --k) {
+        cf = (float(k) * 0.5) / (ax + cf);
+    }
+    cf = 1.0 / (ax + cf);
+    const float INV_SQRT_PI = 0.5641895835477563;
+    float erfc_pos = exp(-ax * ax) * INV_SQRT_PI * cf;
     return (x < 0.0) ? (2.0 - erfc_pos) : erfc_pos;
+}
+
+// Round-half-away-from-zero to match std::round / CUDA/ROCm/OneAPI round
+// semantics. GLSL's round() has implementation-defined 0.5 tie-breaking
+// (often round-to-even on real hardware), but every other backend rounds
+// ties away from zero: round(2.5) == 3, round(-2.5) == -3.
+//   sign(x) * floor(abs(x) + 0.5)
+//   round( 2.5) =  1 * floor(3.0) =  3  ✓
+//   round(-2.5) = -1 * floor(3.0) = -3  ✓
+float round_half_away_f32(float x) {
+    return sign(x) * floor(abs(x) + 0.5);
 }
 
 void main() {
@@ -250,6 +280,14 @@ void main() {
                 float mag = pow(abs(val_a), params.param);
                 bool odd = mod(abs(params.param), 2.0) != 0.0;
                 result[idx] = floatBitsToUint(odd ? -mag : mag);
+            } else if (val_a < 0.0 && params.param != trunc(params.param)) {
+                // Negative base with a non-integer exponent: pow(x,y) =
+                // exp2(y*log2(x)) requires log2 of a negative number, which
+                // the GLSL spec leaves undefined. std::pow/powf/device pow
+                // deterministically return NaN here (e.g. CPU pow(-2, 0.5)) —
+                // match that instead of falling through to the raw,
+                // spec-undefined pow().
+                result[idx] = 0x7fc00000u;
             } else {
                 result[idx] = floatBitsToUint(pow(val_a, params.param));
             }
@@ -269,8 +307,10 @@ void main() {
         case 12: // ceil (unary)
             result[idx] = floatBitsToUint(ceil(val_a));
             break;
-        case 13: // round (unary)
-            result[idx] = floatBitsToUint(round(val_a));
+        case 13: // round (unary) — round-half-away-from-zero (matches
+                 // std::round / CUDA/ROCm/OneAPI), not GLSL round()'s
+                 // implementation-defined tie-break.
+            result[idx] = floatBitsToUint(round_half_away_f32(val_a));
             break;
         case 14: // trunc (unary)
             result[idx] = floatBitsToUint(trunc(val_a));
@@ -309,10 +349,16 @@ void main() {
         case 24: // fmod (binary)
             result[idx] = floatBitsToUint(val_a - trunc(val_a / val_b) * val_b);
             break;
-        case 25: { // remainder (binary) - IEEE remainder
-            float quot = val_a / val_b;
-            float rounded = round(quot);
-            result[idx] = floatBitsToUint(val_a - rounded * val_b);
+        case 25: { // remainder (binary) - divisor-sign convention (matches
+                   // CPU/CUDA/ROCm/OneAPI/Python/NumPy/PyTorch `%`/`remainder`:
+                   // a - floor(a/b)*b), NOT IEEE round-to-nearest-even.
+                   // e.g. remainder(-7, 3) == 2, not -1. Implemented via fmod
+                   // (sign of the dividend, same formula as case 24) with a
+                   // correction term when the fmod result's sign disagrees
+                   // with the divisor's sign.
+            float r = val_a - trunc(val_a / val_b) * val_b;
+            if (r != 0.0 && ((r < 0.0) != (val_b < 0.0))) r += val_b;
+            result[idx] = floatBitsToUint(r);
             break;
         }
         case 26: // minimum (binary) — NaN-propagating (torch.minimum): NaN in
@@ -335,11 +381,20 @@ void main() {
         case 30: // asinh (unary)
             result[idx] = floatBitsToUint(asinh(val_a));
             break;
-        case 31: // acosh (unary)
-            result[idx] = floatBitsToUint(acosh(val_a));
+        case 31: // acosh (unary) — GLSL acosh() is spec-undefined for x<1;
+                 // std::acosh/acoshf/device acosh deterministically return
+                 // NaN there. Domain [1, inf) is otherwise well-defined.
+            result[idx] = floatBitsToUint(
+                (val_a < 1.0) ? uintBitsToFloat(0x7fc00000u) : acosh(val_a));
             break;
-        case 32: // atanh (unary)
-            result[idx] = floatBitsToUint(atanh(val_a));
+        case 32: // atanh (unary) — GLSL atanh() is spec-undefined for
+                 // |x|>=1. std::atanh matches: NaN for |x|>1, +-Inf for the
+                 // exact pole |x|==1, finite result for |x|<1.
+            result[idx] = floatBitsToUint(
+                (abs(val_a) > 1.0) ? uintBitsToFloat(0x7fc00000u) :
+                (val_a == 1.0) ? uintBitsToFloat(0x7f800000u) :
+                (val_a == -1.0) ? uintBitsToFloat(0xff800000u) :
+                atanh(val_a));
             break;
         case 33: // hypot (binary)
             result[idx] = floatBitsToUint(sqrt(val_a * val_a + val_b * val_b));

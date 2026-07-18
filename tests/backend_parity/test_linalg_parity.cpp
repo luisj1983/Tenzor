@@ -359,12 +359,17 @@ TEST_P(LinalgParity, Eig_NonSymmetric) {
     auto ref_ev = eigvals_sorted(WRc, WIc);
 
     for (size_t b = 1; b < backends.size(); ++b) {
-        // Non-symmetric eig: CPU (LAPACK geev), CUDA (cuSOLVER Xgeev), and
-        // ROCm/OneAPI/Vulkan (native EISPACK-hqr2 eigensolver: orthogonal
-        // Hessenberg + Francis double-shift QR with exceptional shifts +
-        // strevc-style eigenvector back-substitution) all compute correct
-        // eigenvalues AND right eigenvectors. Every available backend is
-        // exercised against the CPU reference below.
+        // Non-symmetric eig: CPU (LAPACK geev) is ground truth. CUDA, ROCm,
+        // OneAPI, and Vulkan all run the SAME native EISPACK-hqr2 eigensolver
+        // (orthogonal Hessenberg + Francis double-shift QR with exceptional
+        // shifts + strevc-style eigenvector back-substitution, including
+        // analytic 2x2 real-Schur-block extraction for complex-conjugate
+        // pairs) — none of cuSOLVER/rocSOLVER/oneMKL/Vulkan expose a GPU
+        // geev, and CUDA deliberately abandoned cusolverDnXgeev (see
+        // linalg.cu) because its real->complex contract does not honour
+        // LAPACK's adjacent-conjugate-pair ordering. All four GPU backends
+        // compute correct eigenvalues AND right eigenvectors, verified
+        // against the CPU reference below.
         try {
             auto Ad = A.to(backends[b]);
             auto [WR, WI, V] = linalg::eig(Ad);
@@ -378,10 +383,17 @@ TEST_P(LinalgParity, Eig_NonSymmetric) {
 
             // Eigenvalues (as a multiset, sorted) must match CPU.
             auto dev_ev = eigvals_sorted(wr, wi);
-            // Backends without a correct non-symmetric eigensolver (no vendor geev:
-            // ROCm/OneAPI/Vulkan) currently return wrong/zero eigenvalues. Treat a
-            // gross eigenvalue mismatch as "eig not yet implemented correctly here"
-            // and skip with a loud, tracked notice rather than a silent false pass.
+            // CUDA, ROCm, and OneAPI's native EISPACK-hqr2 eigensolvers (see
+            // linalg.cu / linalg.hip.cpp / linalg.cpp) have been verified —
+            // both by hand-tracing the analytic 2x2 real-Schur-block formula
+            // (trace/det/discriminant -> complex-conjugate pair, matching
+            // LAPACK dlanv2) and by numerically replaying this exact matrix
+            // in Float32 and Float64 — to correctly extract complex-
+            // conjugate eigenvalue pairs. Vulkan's port of the same
+            // algorithm has likewise been verified. A gross eigenvalue
+            // mismatch on any backend is therefore a real regression, not a
+            // known limitation, and must fail loudly rather than silently
+            // skip.
             bool eig_matches = true;
             for (int64_t i = 0; i < n; ++i) {
                 if (std::abs(dev_ev[i].first - ref_ev[i].first) > 1e-2f ||
@@ -391,10 +403,8 @@ TEST_P(LinalgParity, Eig_NonSymmetric) {
                 }
             }
             if (!eig_matches) {
-                std::cerr << "[KNOWN-LIMITATION tracked] non-symmetric eig is not yet "
-                             "correct on " << backend_name(backends[b])
-                          << " (no vendor geev; native Francis QR incomplete for complex "
-                             "spectra). Skipping assertions." << std::endl;
+                ADD_FAILURE() << "Eig_NonSymmetric eigenvalues mismatch on "
+                              << backend_name(backends[b]);
                 continue;
             }
             for (int64_t i = 0; i < n; ++i) {

@@ -192,6 +192,31 @@ auto rms_norm_reference_row(const float* row, const float* weight, int64_t hidde
     }
     return out;
 }
+// Computes the "true" LayerNorm output for a single row by accumulating
+// mean and variance in double precision (independent of any backend
+// implementation), so the expected reference cannot itself be contaminated
+// by a float32 accumulation bug in whichever backend happens to be used as
+// backends[0] in the cross-backend comparison loop. Mirrors
+// rms_norm_reference_row's rationale/structure above.
+auto layer_norm_reference_row(const float* row, const float* weight, const float* bias,
+                              int64_t hidden, double eps) -> std::vector<float> {
+    double sum = 0.0;
+    for (int64_t i = 0; i < hidden; ++i) sum += static_cast<double>(row[i]);
+    double mean = sum / static_cast<double>(hidden);
+    double var_sum = 0.0;
+    for (int64_t i = 0; i < hidden; ++i) {
+        double d = static_cast<double>(row[i]) - mean;
+        var_sum += d * d;
+    }
+    double inv_std = 1.0 / std::sqrt(var_sum / static_cast<double>(hidden) + eps);
+    std::vector<float> out(hidden);
+    for (int64_t i = 0; i < hidden; ++i) {
+        double normalized = (static_cast<double>(row[i]) - mean) * inv_std;
+        out[i] = static_cast<float>(normalized * static_cast<double>(weight[i]) +
+                                    static_cast<double>(bias[i]));
+    }
+    return out;
+}
 }  // namespace
 
 // JIT-R153/JIT-R154/JIT-R164: RMSNorm's sum-of-squares accumulation drifted
@@ -412,6 +437,63 @@ TEST_P(NNNormParity, LayerNorm_MultiDim) {
 // ============================================================================
 // SyncBatchNorm (single-GPU: behaves like regular BatchNorm)
 // ============================================================================
+
+// cudnn_layer_norm_forward (CUDA, TENZOR_HAS_CUDNN builds) accumulated its
+// Float32 mean/variance reduction in float instead of double, a build-flag-
+// dependent divergence from the non-cuDNN-build fused_layer_norm_kernel
+// (Acc=double) and every other backend for the exact same op. Mirrors
+// RMSNorm_LargeHiddenDim_AccumulationPrecision's rationale/structure above:
+// a large normalized_shape (matching the finding's own "e.g. 8192" example,
+// scaled up further for a robust, clearly-detectable drift signal) with
+// uniform-magnitude data is what actually separates a float32 accumulator
+// from a double one.
+TEST_P(NNNormParity, LayerNorm_LargeNormalizedShape_AccumulationPrecision) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
+
+    constexpr int64_t kHidden = 1048576;
+    constexpr int64_t kBatch = 2;
+    constexpr double kEps = 1e-5;
+    nn::LayerNorm ln({kHidden}, kEps);
+    ln.eval();
+    auto input = make_uniform_magnitude_input(kBatch, kHidden);
+    auto weight = ln.parameters()[0]->tensor().contiguous();
+    auto bias = ln.parameters()[1]->tensor().contiguous();
+
+    std::vector<float> expected(kBatch * kHidden);
+    {
+        auto* in_p = input.data<float>();
+        auto* w_p = weight.data<float>();
+        auto* b_p = bias.data<float>();
+        for (int64_t b = 0; b < kBatch; ++b) {
+            auto row = layer_norm_reference_row(in_p + b * kHidden, w_p, b_p, kHidden, kEps);
+            std::copy(row.begin(), row.end(), expected.begin() + b * kHidden);
+        }
+    }
+    Tensor expected_t = Tensor::from_blob(expected.data(), {kBatch, kHidden}, DType::Float32).clone();
+
+    for (const auto& dev : backends) {
+        try {
+            nn::LayerNorm ln_dev({kHidden}, kEps);
+            ln_dev.eval();
+            auto params_dst = ln_dev.parameters();
+            params_dst[0]->tensor() = weight.clone();
+            params_dst[1]->tensor() = bias.clone();
+            ln_dev.to(dev);
+            auto input_dev = input.to(dev);
+            auto output = ln_dev.forward(Variable(input_dev, false)).tensor();
+            dev.synchronize();
+            if (!tenzor::testing::tensors_close(expected_t, output, 1e-5f, 1e-5f)) {
+                float diff = tenzor::testing::max_abs_diff(expected_t, output);
+                ADD_FAILURE() << "LayerNorm (large normalized_shape) mismatch on "
+                          << backend_name(dev) << ": max abs diff=" << std::scientific << diff;
+            }
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "LayerNorm (large normalized_shape) failed on "
+                      << backend_name(dev) << ": " << e.what() << std::endl;
+        }
+    }
+}
 
 TEST_P(NNNormParity, SyncBatchNorm) {
     auto backends = get_available_backends();

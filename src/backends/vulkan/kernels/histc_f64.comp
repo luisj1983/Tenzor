@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Histc (Float64) — fixed-bin histogram using atomicAdd, native double
+// precision. Bin membership (min/max/bin_width) is computed entirely in
+// double so values near bin edges (or beyond float32's ~7 significant
+// digits) land in the correct bin, matching the CPU/CUDA Float64 reference
+// instead of the precision loss from downcasting the input to Float32.
+// Bin counts still accumulate into a plain `uint` output buffer (not
+// float64_t): atomicAdd on a 32-bit unsigned integer is exact up to 2^32-1
+// hits per bin, so there's no accumulator precision concern here -- only the
+// binning math needs double precision.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { float64_t input_data[]; };
+layout(binding = 1)          buffer Output { uint       output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint num_bins;
+    // num_elements + num_bins is already 8 bytes, so min_val naturally lands
+    // on an 8-byte (float64_t) boundary -- no explicit padding field needed
+    // here (contrast fill_f64.comp / quantile_f64.comp, which pad a 4-byte
+    // remainder up to 8).
+    float64_t min_val;
+    float64_t max_val;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    float64_t val = input_data[idx];
+    // NaN: CPU explicitly skips NaN entries (std::isnan(val) -> continue).
+    // `val != val` is a reliable NaN test in shaders (GLSL isnan() is
+    // driver-flaky -- see histc.comp).
+    if (val != val) return;
+    if (val < params.min_val || val > params.max_val) return;
+
+    float64_t bw = (params.max_val - params.min_val) / float64_t(params.num_bins);
+    uint bin = uint((val - params.min_val) / bw);
+    if (bin >= params.num_bins) bin = params.num_bins - 1;
+
+    atomicAdd(output_data[bin], 1u);
+}

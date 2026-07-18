@@ -799,8 +799,16 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replaceme
         if (replacement) {
             for (int64_t s = 0; s < num_samples; ++s) {
                 float u = uniform(local);
-                // Binary search in cumsum
-                auto it = std::lower_bound(cumsum.begin(), cumsum.end(), u);
+                // Binary search in cumsum. Use upper_bound (first index with
+                // cdf[idx] > u) rather than lower_bound (first index with
+                // cdf[idx] >= u) to match the semantics used by every GPU
+                // backend (CUDA/ROCm/OneAPI/Vulkan hand-roll `cdf[mid] <= u`
+                // loops, i.e. upper_bound). This matters when u exactly ties
+                // a CDF breakpoint: lower_bound could select a zero-weight
+                // category whose cumulative sum equals u, while upper_bound
+                // correctly skips past it to the next positive-weight
+                // category.
+                auto it = std::upper_bound(cumsum.begin(), cumsum.end(), u);
                 int64_t idx = static_cast<int64_t>(std::distance(cumsum.begin(), it));
                 if (idx >= num_categories) idx = num_categories - 1;
                 out_row[s] = idx;
@@ -976,23 +984,34 @@ auto poisson_sample_kernel(const Tensor& rates) -> Tensor {
 auto exponential_sample_kernel(const Tensor& rate) -> Tensor {
     Tensor rate_f32 = (rate.dtype() != DType::Float32) ? rate.to(DType::Float32) : rate;
     int64_t n = rate_f32.numel();
+    const float* r_data = rate_f32.data<float>();
+
+    // The Exponential distribution is only defined for rate > 0 (rate==0
+    // gives an undefined +Inf-mean distribution; rate<0 has no valid support
+    // at all). Throw rather than silently clamping to FLT_MIN, which produced
+    // a ~1e38 "sample" for any non-positive/NaN rate — a placeholder value
+    // just as invalid as +Inf or a negative sample would have been. This
+    // matches the GPU backends (CUDA/ROCm/OneAPI/Vulkan), which all validate
+    // host-side before sampling instead of returning a numeric sentinel.
+    for (int64_t i = 0; i < n; ++i) {
+        if (!(r_data[i] > 0.0f)) {
+            throw std::invalid_argument(
+                "exponential: rate must be > 0 (got a non-positive or NaN rate)");
+        }
+    }
 
     Tensor result(std::vector<int64_t>(rate.shape().begin(), rate.shape().end()),
                   DType::Float32, rate.device());
-    const float* r_data = rate_f32.data<float>();
     float* out_data = result.data<float>();
 
     const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
     #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
     for (int64_t i = 0; i < n; ++i) {
         // Inverse CDF: -ln(1-U) / rate. philox_uniform_f32 is in [0,1) so
-        // (1-u) is in (0,1] and the log is finite.
-        // Clamp non-positive (or NaN) rate to the smallest positive normal so
-        // the divisor is always > 0, mirroring gamma_sample_kernel. A rate of
-        // 0 would otherwise yield +inf and a negative rate a negative sample.
-        float r = r_data[i] > 0.0f ? r_data[i] : std::numeric_limits<float>::min();
+        // (1-u) is in (0,1] and the log is finite. rate > 0 is guaranteed by
+        // the validation pass above.
         float u = philox::philox_uniform_f32(seed, i);
-        out_data[i] = -std::log(1.0f - u) / r;
+        out_data[i] = -std::log(1.0f - u) / r_data[i];
     }
 
     return result;

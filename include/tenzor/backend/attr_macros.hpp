@@ -37,6 +37,8 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
+#include <string>
 #include <vector>
 
 namespace tenzor::backend::attrs {
@@ -208,6 +210,31 @@ conv1d_to_conv2d_attrs(const OpAttributes& src) -> OpAttributes {
     dst.set(AttrKey::DilationH, int64_t{1});
     dst.set(AttrKey::DilationW, dilation[0]);
     return dst;
+}
+
+// =====================================================================
+// Shape -> AttrKey::InputShape / WeightShape string encoding
+// =====================================================================
+//
+// Several backends' Conv2dBackwardInput/Weight kernels (ROCm, Vulkan,
+// OneAPI) don't receive the actual input/weight tensor -- only
+// grad_output plus a target shape read from AttrKey::InputShape /
+// WeightShape (a comma-separated string, parsed via
+// `OpAttributes::get_int_list`). `conv1d_to_conv2d_attrs()` above only
+// projects Stride/Padding/Dilation and deliberately leaves
+// InputShape/WeightShape untouched (a 1-D caller's InputShape, if any,
+// is 3-D and not valid for the nested 4-D Conv2dBackward* call). Callers
+// that lower a 1-D backward wrapper onto the 2-D kernel must synthesize
+// the *4-D* shape string themselves from the already-unsqueezed operand
+// and set it via this helper before dispatching.
+[[nodiscard]] inline auto
+shape_to_attr_string(std::span<const int64_t> shape) -> std::string {
+    std::string s;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) s += ',';
+        s += std::to_string(shape[i]);
+    }
+    return s;
 }
 
 }  // namespace tenzor::backend::attrs

@@ -207,6 +207,18 @@ void run_grid_sample_forward(sycl::queue& queue, const std::string& mode,
                     if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
                     return input_ptr[((n * C + c) * H_in + y) * W_in + x];
                 }
+                if (H_in == 0 || W_in == 0) return T(0);
+                if (pad_mode == 2) {
+                    // reflection: true-reflect this out-of-range 4x4
+                    // neighbour back into [0, size-1] (PyTorch reflection
+                    // semantics), matching CPU's safe_get instead of
+                    // edge-clamping.
+                    int ry = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(y), H_in, align_corners));
+                    int rx = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(x), W_in, align_corners));
+                    ry = sycl::max(0, sycl::min(ry, H_in - 1));
+                    rx = sycl::max(0, sycl::min(rx, W_in - 1));
+                    return input_ptr[((n * C + c) * H_in + ry) * W_in + rx];
+                }
                 y = sycl::max(0, sycl::min(y, H_in - 1));
                 x = sycl::max(0, sycl::min(x, W_in - 1));
                 return input_ptr[((n * C + c) * H_in + y) * W_in + x];
@@ -398,6 +410,13 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                         bool valid_s = true;
                         if (pad_mode == 0) {
                             if (yy < 0 || yy >= H_in || xx < 0 || xx >= W_in) valid_s = false;
+                        } else if (pad_mode == 2) {
+                            // reflection: true-reflect (matches CPU backward
+                            // scatter), not edge-clamp.
+                            yy_s = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(yy), H_in, align_corners));
+                            xx_s = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(xx), W_in, align_corners));
+                            yy_s = sycl::max(0, sycl::min(yy_s, H_in - 1));
+                            xx_s = sycl::max(0, sycl::min(xx_s, W_in - 1));
                         } else {
                             yy_s = sycl::max(0, sycl::min(yy, H_in - 1));
                             xx_s = sycl::max(0, sycl::min(xx, W_in - 1));
@@ -410,6 +429,12 @@ void run_grid_sample_backward(sycl::queue& queue, const std::string& mode,
                             if (yy >= 0 && yy < H_in && xx >= 0 && xx < W_in) {
                                 v = input_ptr[((n * C + c) * H_in + yy) * W_in + xx];
                             }
+                        } else if (pad_mode == 2) {
+                            int yy_f = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(yy), H_in, align_corners));
+                            int xx_f = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(xx), W_in, align_corners));
+                            yy_f = sycl::max(0, sycl::min(yy_f, H_in - 1));
+                            xx_f = sycl::max(0, sycl::min(xx_f, W_in - 1));
+                            v = input_ptr[((n * C + c) * H_in + yy_f) * W_in + xx_f];
                         } else {
                             int yy_f = sycl::max(0, sycl::min(yy, H_in - 1));
                             int xx_f = sycl::max(0, sycl::min(xx, W_in - 1));

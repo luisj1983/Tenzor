@@ -3426,6 +3426,15 @@ __device__ __forceinline__ float blockReduceSum(float val, float* shared) {
     return val;
 }
 
+// Forward-declared here (defined later in this file, alongside the Float64
+// LayerNorm kernels that introduced it) so optimized_layer_norm_kernel below
+// can also accumulate its Float32 mean/variance reduction in double --
+// matches the non-cuDNN-build fused_layer_norm_kernel (fused_ops.cu), whose
+// `Acc = double` accumulator this build-flag-dependent path was silently
+// missing.
+template<int BLOCK_SIZE>
+__device__ __forceinline__ double blockReduceSumDouble(double val, double* shared);
+
 /**
  * @brief Optimized LayerNorm forward kernel with warp shuffles and vectorized loads
  *
@@ -3455,7 +3464,14 @@ __global__ void optimized_layer_norm_kernel(
     const float* batch_in = input + b * norm_size;
     float* batch_out = output + b * norm_size;
 
-    __shared__ float shared[BLOCK_SIZE / 32];
+    // Accumulate mean/variance stats in double to avoid catastrophic
+    // cancellation, matching the non-cuDNN-build fused_layer_norm_kernel
+    // (fused_ops.cu, `Acc = double`) and CPU/ROCm. This kernel previously
+    // accumulated in float, which was a build-flag-dependent (TENZOR_HAS_CUDNN)
+    // correctness divergence for the exact same Float32 LayerNorm op. Only
+    // the final mean/inv_std (saved for backward) and the normalized output
+    // are narrowed back to float.
+    __shared__ double shared[BLOCK_SIZE / 32];
 
     // Use vectorized loads only when each per-row base is 16-byte aligned.
     // cudaMalloc guarantees 256-byte base alignment, but per-row bases are
@@ -3473,46 +3489,48 @@ __global__ void optimized_layer_norm_kernel(
     // we lose precision. The stable two-pass `Σ(x - mean)²` form matches
     // every other LayerNorm backend (CPU oneDNN, ROCm) bit-for-bit at
     // Float32 precision.
-    float sum = 0.0f;
+    double sum = 0.0;
     const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
     for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
         float4 v = batch_in_vec[i];
-        sum += v.x + v.y + v.z + v.w;
+        sum += static_cast<double>(v.x) + static_cast<double>(v.y) +
+               static_cast<double>(v.z) + static_cast<double>(v.w);
     }
     for (int64_t i = remainder_start + threadIdx.x; i < norm_size; i += blockDim.x) {
-        sum += batch_in[i];
+        sum += static_cast<double>(batch_in[i]);
     }
-    sum = blockReduceSum<BLOCK_SIZE>(sum, shared);
+    sum = blockReduceSumDouble<BLOCK_SIZE>(sum, shared);
 
-    __shared__ float mean_shared;
+    __shared__ double mean_shared;
     if (threadIdx.x == 0) {
-        mean_shared = sum / static_cast<float>(norm_size);
+        mean_shared = sum / static_cast<double>(norm_size);
     }
     __syncthreads();
-    float mean = mean_shared;
+    double mean = mean_shared;
 
     // ===== Pass 2: Compute variance via Σ(x - mean)² =====
-    float var_sum = 0.0f;
+    double var_sum = 0.0;
     for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
         float4 v = batch_in_vec[i];
-        float dx = v.x - mean, dy = v.y - mean, dz = v.z - mean, dw = v.w - mean;
+        double dx = static_cast<double>(v.x) - mean, dy = static_cast<double>(v.y) - mean,
+               dz = static_cast<double>(v.z) - mean, dw = static_cast<double>(v.w) - mean;
         var_sum += dx * dx + dy * dy + dz * dz + dw * dw;
     }
     for (int64_t i = remainder_start + threadIdx.x; i < norm_size; i += blockDim.x) {
-        float diff = batch_in[i] - mean;
+        double diff = static_cast<double>(batch_in[i]) - mean;
         var_sum += diff * diff;
     }
-    var_sum = blockReduceSum<BLOCK_SIZE>(var_sum, shared);
+    var_sum = blockReduceSumDouble<BLOCK_SIZE>(var_sum, shared);
 
-    __shared__ float inv_std_shared;
+    __shared__ double inv_std_shared;
     if (threadIdx.x == 0) {
-        float variance = var_sum / static_cast<float>(norm_size);
-        inv_std_shared = rsqrtf(variance + eps);
-        mean_out[b] = mean;
-        inv_std_out[b] = inv_std_shared;
+        double variance = var_sum / static_cast<double>(norm_size);
+        inv_std_shared = 1.0 / sqrt(variance + static_cast<double>(eps));
+        mean_out[b] = static_cast<float>(mean);
+        inv_std_out[b] = static_cast<float>(inv_std_shared);
     }
     __syncthreads();
-    float inv_std = inv_std_shared;
+    double inv_std = inv_std_shared;
 
     // ===== Second pass: Normalize and apply affine transform =====
     // Vectorized writes

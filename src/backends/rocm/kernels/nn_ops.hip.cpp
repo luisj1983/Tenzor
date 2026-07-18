@@ -158,6 +158,7 @@ __global__ void embedding_kernel_hip(
     int64_t num_indices,
     int64_t embedding_dim,
     int64_t num_embeddings,
+    int64_t padding_idx,
     int* error_flag) {
 
     int64_t total_elements = num_indices * embedding_dim;
@@ -166,15 +167,22 @@ __global__ void embedding_kernel_hip(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
-        // F077: wrap negative token ids (matches CPU/CUDA) before the bounds check
-        // so a wrappable negative id reads its correct row instead of flagging OOB.
-        if (embedding_idx < 0) embedding_idx += num_embeddings;
-        // Bounds check: an out-of-range index writes 0 (memory-safe) and flags
-        // the error; the host throws std::out_of_range after sync, matching the
-        // CPU reference and the CUDA backend.
+        // Negative indices are OUT OF RANGE, not wrapped: CPU throws
+        // std::out_of_range for idx<0 (embedding.cpp), so silently wrapping
+        // here (idx += num_embeddings) would return weight[num_embeddings-1]
+        // for idx=-1 instead of matching CPU's throw. Bounds check: an
+        // out-of-range index writes 0 (memory-safe) and flags the error; the
+        // host throws std::out_of_range after sync.
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             output[tid] = T(0);
             atomicOr(error_flag, 1);
+            continue;
+        }
+        // PaddingIdx: zero the output row (matches CPU/CUDA/OneAPI/Vulkan
+        // forward-side semantics — the padding row is a valid index but
+        // must not contribute a nonzero embedding).
+        if (padding_idx >= 0 && embedding_idx == padding_idx) {
+            output[tid] = T(0);
             continue;
         }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
@@ -196,10 +204,9 @@ __global__ void embedding_backward_kernel_hip(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
-        // F077: wrap negative token ids (idx += num_embeddings), matching CPU/CUDA,
-        // before the range check — a negative id must route grad to its wrapped row.
-        if (embedding_idx < 0) embedding_idx += num_embeddings;
-        // Skip out-of-range indices to avoid OOB atomic writes.
+        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel
+        // above): skip them like any other out-of-range index instead of
+        // silently routing the gradient to a wrapped row.
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             continue;
         }
@@ -216,6 +223,7 @@ __global__ void embedding_kernel_hip_fp16(
     int64_t num_indices,
     int64_t embedding_dim,
     int64_t num_embeddings,
+    int64_t padding_idx,
     int* error_flag) {
 
     int64_t total_elements = num_indices * embedding_dim;
@@ -224,11 +232,15 @@ __global__ void embedding_kernel_hip_fp16(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
-        // F077: wrap negative token ids before the bounds check (matches CPU/CUDA).
-        if (embedding_idx < 0) embedding_idx += num_embeddings;
+        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             output[tid] = __float2half(0.0f);
             atomicOr(error_flag, 1);
+            continue;
+        }
+        // PaddingIdx: zero the output row (see forward kernel above).
+        if (padding_idx >= 0 && embedding_idx == padding_idx) {
+            output[tid] = __float2half(0.0f);
             continue;
         }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
@@ -250,8 +262,7 @@ __global__ void embedding_backward_kernel_hip_fp16(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
-        // F077: wrap negative token ids before the range check (matches CPU/CUDA).
-        if (embedding_idx < 0) embedding_idx += num_embeddings;
+        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             continue;
         }
@@ -267,7 +278,7 @@ __global__ void convert_f32_to_f16_kernel(const float* __restrict__ src, __half*
     }
 }
 
-auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t stream) -> Tensor {
+auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t padding_idx, hipStream_t stream) -> Tensor {
     // weight: [num_embeddings, embedding_dim]
     // indices: [*] (any shape of int64 indices)
     // output: [*, embedding_dim]
@@ -308,6 +319,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             num_indices,
             embedding_dim,
             num_embeddings,
+            padding_idx,
             err_ptr);
     } else if (weight.dtype() == DType::Float64) {
         hipLaunchKernelGGL(embedding_kernel_hip<double>,
@@ -318,6 +330,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             num_indices,
             embedding_dim,
             num_embeddings,
+            padding_idx,
             err_ptr);
     } else if (weight.dtype() == DType::Float16) {
         hipLaunchKernelGGL(embedding_kernel_hip_fp16,
@@ -328,10 +341,11 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             num_indices,
             embedding_dim,
             num_embeddings,
+            padding_idx,
             err_ptr);
     } else if (weight.dtype() == DType::BFloat16) {
         auto weight_f32 = weight.to(DType::Float32);
-        auto result_f32 = embedding_kernel(weight_f32, indices, stream);
+        auto result_f32 = embedding_kernel(weight_f32, indices, padding_idx, stream);
         return result_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error("Embedding only supports Float32, Float64, Float16, and BFloat16");
@@ -811,6 +825,17 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     // with "invalid configuration argument" (forward dropout_kernel guards the
     // same way). Return the empty grad_input instead of crashing.
     if (n == 0) return grad_input;
+
+    // p==1.0 drops every element (forward's mask is 0 everywhere, output is a
+    // clean zero tensor). scale=1/(1-p) is +inf at p=1.0, and mask(0)*scale(inf)
+    // is NaN under IEEE-754, not 0 -- unlike forward's direct T(0) write, this
+    // would poison every gradient element with NaN instead of the mathematically
+    // correct zero. Short-circuit before ever computing/using scale.
+    if (p >= 1.0f) {
+        HIP_CHECK(hipMemsetAsync(grad_input.data_ptr(), 0,
+            static_cast<size_t>(n) * dtype_size(grad_output.dtype()), stream));
+        return grad_input;
+    }
 
     float scale = 1.0f / (1.0f - p);
     int num_blocks = get_num_blocks(n);

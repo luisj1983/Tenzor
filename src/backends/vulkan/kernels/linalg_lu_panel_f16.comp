@@ -5,7 +5,9 @@
 // Input: A[n x n] stored row-major in packed uint32. This kernel factorizes
 // columns [col_start, col_start+32) using partial pivoting within the panel,
 // then applies row swaps to the full matrix.
-// One workgroup with 256 threads.
+// One workgroup (256 threads) per batch element; the whole batch is folded
+// into a single dispatch (dispatch = {batch_size, 1, 1}), batch index from
+// gl_WorkGroupID.x — see linalg_lu_panel.comp / runBlockedLU.
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { uint A[]; };
@@ -15,7 +17,6 @@ layout(push_constant) uniform PushConstants {
     uint n;          // matrix dimension
     uint col_start;  // starting column of this panel
     uint panel_cols; // number of columns in this panel (min(32, n - col_start))
-    uint batch_idx;  // batch element index
 };
 
 shared float panel[256][32];
@@ -55,6 +56,7 @@ void writeF16(uint element_idx, float val) {
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
     // Element base offset for this batch (n*n elements per batch matrix)
     uint elem_base = batch_idx * n * n;
 
@@ -84,9 +86,9 @@ void main() {
         }
         barrier();
 
-        // Store pivot
+        // Store pivot. Must include the batch offset — see linalg_lu_panel.comp.
         if (tid == 0) {
-            pivots[col_start + k] = pivot_idx;
+            pivots[batch_idx * n + col_start + k] = pivot_idx;
         }
 
         // Swap rows k and max_row in the panel

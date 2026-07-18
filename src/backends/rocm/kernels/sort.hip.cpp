@@ -355,14 +355,16 @@ static void sort_1d_thrust(const T* input, T* values, int64_t* indices_out,
                      thrust::device_pointer_cast(indices_out + n), int64_t(0));
 
     // F143: NaN-aware comparators (NaN as largest, sign-agnostic) — see functors.
+    // stable_sort_by_key (not sort_by_key) so duplicate-value tie order is
+    // deterministic (lowest original index first), matching CPU/CUDA/Vulkan.
     if (descending) {
-        thrust::sort_by_key(policy,
+        thrust::stable_sort_by_key(policy,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
             thrust::device_pointer_cast(indices_out),
             NanGreaterFunctor<T>());
     } else {
-        thrust::sort_by_key(policy,
+        thrust::stable_sort_by_key(policy,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
             thrust::device_pointer_cast(indices_out),
@@ -502,43 +504,43 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n,
         return;
     }
 
-    // Always use hipcub DeviceRadixSort with key-value pairs. A previous
-    // single-block bitonic fast path for n<=1024 only sorted correctly when n
-    // was a power of two (the merge network requires it); for non-power-of-2
-    // lengths it returned a wrong permutation. DeviceRadixSort is correct for
-    // any length, so we route every n>1 through it.
-    // RAII scratch: a throwing HIP_CHECK (iota launch error, SortPairs failure,
-    // sync) between the allocations and the frees would otherwise leak these.
-    ScopedDevicePtr<int64_t> d_indices_in_buf(n);
-    int64_t* d_indices_in = d_indices_in_buf.get();
+    // F143-parity fix: hipcub::DeviceRadixSort (used previously) sorts raw
+    // bit patterns with no custom comparator, reproducing the exact
+    // sign-dependent NaN misplacement F143 fixed for plain sort_kernel above
+    // (a negative-sign NaN would sort FIRST instead of last). DeviceRadixSort
+    // doesn't accept a custom comparator, so route through the same
+    // thrust::stable_sort_by_key + NaN-aware comparator technique
+    // sort_1d_thrust uses, so NaN consistently sorts LAST (any sign),
+    // matching CPU/CUDA/OneAPI/Vulkan. stable_sort_by_key (not sort_by_key)
+    // preserves the deterministic lowest-original-index tie order that
+    // DeviceRadixSort's stable contract previously provided.
+    // RAII scratch: a throwing HIP_CHECK (iota launch error, sort failure)
+    // between the allocation and the free would otherwise leak this.
+    ScopedDevicePtr<T> d_keys_buf(n);
+    T* d_keys = d_keys_buf.get();
+    HIP_CHECK(hipMemcpyAsync(d_keys, d_input, n * sizeof(T), hipMemcpyDeviceToDevice, stream));
 
     int init_blocks = get_num_blocks(n);
-    hipLaunchKernelGGL(iota_kernel, dim3(init_blocks), dim3(BLOCK_SIZE), 0, stream, d_indices_in, n);
+    hipLaunchKernelGGL(iota_kernel, dim3(init_blocks), dim3(BLOCK_SIZE), 0, stream, d_output, n);
     HIP_CHECK(hipGetLastError());
 
-    ScopedDevicePtr<T> d_keys_out_buf(n);
-    T* d_keys_out = d_keys_out_buf.get();
-
-    size_t temp_storage_bytes = 0;
+    auto policy = thrust::hip::par.on(stream);
     if (descending) {
-        HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(nullptr, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
+        thrust::stable_sort_by_key(policy,
+            thrust::device_pointer_cast(d_keys),
+            thrust::device_pointer_cast(d_keys + n),
+            thrust::device_pointer_cast(d_output),
+            NanGreaterFunctor<T>());
     } else {
-        HIP_CHECK(hipcub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
-    }
-    ScopedDevicePtr<char> d_temp_buf(static_cast<int64_t>(temp_storage_bytes));
-    void* d_temp_storage = d_temp_buf.get();
-    if (descending) {
-        HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
-    } else {
-        HIP_CHECK(hipcub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
+        thrust::stable_sort_by_key(policy,
+            thrust::device_pointer_cast(d_keys),
+            thrust::device_pointer_cast(d_keys + n),
+            thrust::device_pointer_cast(d_output),
+            NanLessFunctor<T>());
     }
 
-    // audit-9 JJ.5: DeviceRadixSort::SortPairs is async on `stream`; sync before
-    // the RAII buffers free at scope exit so the in-flight sort doesn't read freed
+    // audit-9 JJ.5: the sort is async on `stream`; sync before the RAII
+    // buffer frees at scope exit so the in-flight sort doesn't read freed
     // pages.
     HIP_CHECK(hipStreamSynchronize(stream));
 }

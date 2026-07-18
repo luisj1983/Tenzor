@@ -71,8 +71,9 @@ if(TENZOR_BUILD_ROCM)
     tenzor_discover_tests(test_rocm_rnn_kernels DISCOVERY_TIMEOUT 60 BACKENDS rocm)
 endif()
 
-# Sparse GPU tests (works with any GPU backend: CUDA or ROCm)
-if(TENZOR_BUILD_CUDA OR TENZOR_BUILD_ROCM)
+# Sparse GPU tests (works with any GPU backend: CUDA, ROCm, Vulkan, or OneAPI —
+# SparseTrsv/SparseTrsm now have genuine kernels on all four, not just CUDA/ROCm)
+if(TENZOR_BUILD_CUDA OR TENZOR_BUILD_ROCM OR TENZOR_BUILD_VULKAN OR TENZOR_BUILD_ONEAPI)
     add_executable(test_sparse_gpu test_sparse_gpu.cpp)
     target_link_libraries(test_sparse_gpu PRIVATE tenzor_core GTest::gtest_main)
     tenzor_discover_tests(test_sparse_gpu DISCOVERY_TIMEOUT 60)

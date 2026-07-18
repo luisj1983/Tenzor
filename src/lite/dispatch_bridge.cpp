@@ -11,6 +11,9 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 
+#include <cmath>
+#include <stdexcept>
+
 namespace tenzor::lite {
 
 namespace {
@@ -18,7 +21,11 @@ namespace {
 // Translate the positional LiteAttributes into the typed OpAttributes map for
 // a given OpId. Unsupported (or attribute-less) ops fall through to an empty
 // map; the dispatched kernel will surface any missing-attribute errors itself.
-auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
+// `inputs` is threaded through for the rare op (LayerNorm) that needs to
+// infer an attribute from an input tensor's shape when the positional
+// extras don't carry it explicitly.
+auto build_attrs(LiteOpType op, const LiteAttributes& la,
+                  std::span<const Tensor> inputs) -> OpAttributes {
     OpAttributes oa;
     switch (op) {
         // Element-wise binary / unary ops have no attributes.
@@ -221,6 +228,42 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
                     norm_shape_str += std::to_string(la.extra_i[k]);
                 }
                 oa.set(AttrKey::NormalizedShape, std::string_view(norm_shape_str));
+            } else {
+                // v1/v2 .tzlite files (and any truncated node) predate the
+                // explicit NormalizedShape extras added for the C.3 audit
+                // (see exporter.cpp emit_layernorm). Leaving NormalizedShape
+                // unset here is NOT safe: get_int_list() on a missing key
+                // returns {}, whose product is the empty-product identity 1,
+                // not 0 — so CPU/CUDA/ROCm/OneAPI's own `norm_size<=0` guards
+                // never fire and each backend silently computes a degenerate
+                // per-element LayerNorm, while Vulkan falls back to
+                // shape().back() — four different silent behaviors.
+                //
+                // nn::LayerNorm always allocates its weight parameter with
+                // shape == normalized_shape (see emit_layernorm's own
+                // comment: "reconstruct from the weight tensor's shape,
+                // which always matches normalized_shape"), and every emitted
+                // LayerNorm node's second input is that weight tensor
+                // (input_ids = {in_id, w_id, bias_id}). That is the implicit
+                // convention older files relied on, and unlike Vulkan's
+                // shape().back() heuristic it is exact even for multi-axis
+                // normalized_shape. Infer it explicitly here so all backends
+                // observe the SAME NormalizedShape instead of guessing
+                // differently.
+                if (inputs.size() >= 2) {
+                    const auto& w_shape = inputs[1].shape();
+                    std::string norm_shape_str;
+                    for (size_t k = 0; k < w_shape.size(); ++k) {
+                        if (k > 0) norm_shape_str += ",";
+                        norm_shape_str += std::to_string(w_shape[k]);
+                    }
+                    oa.set(AttrKey::NormalizedShape, std::string_view(norm_shape_str));
+                } else {
+                    throw std::invalid_argument(
+                        "LayerNorm: Lite node has no NormalizedShape extras "
+                        "and no weight input to infer normalized_shape from "
+                        "(expected inputs = {x, weight, bias})");
+                }
             }
             break;
         }
@@ -347,21 +390,39 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             break;
         case OpId::AdaptiveAvgPool2d:
         case OpId::AdaptiveMaxPool2d: {
-            // Backward-compatible default: also emit the legacy scalar key
-            // so any consumer keyed on AttrKey::OutputSize still resolves.
-            oa.set(AttrKey::OutputSize, la.i[0]);
+            // Only emit the legacy scalar OutputSize as a fallback when the
+            // full 2-element per-axis form isn't available. OneAPI's
+            // registration checks OutputSize's presence FIRST and treats it
+            // as a 2-element list; unconditionally emitting it alongside the
+            // correct OutputSizeH/OutputSizeW would shadow them and cause an
+            // out-of-bounds read past a 1-element list (sizes[1]). Since the
+            // exporter always writes a full 2-element extra_i for well-formed
+            // files, the per-axis branch is the common case.
             const auto& ei = la.extra_i;
-            if (ei.size() >= 1) oa.set(AttrKey::OutputSizeH, ei[0]);
-            if (ei.size() >= 2) oa.set(AttrKey::OutputSizeW, ei[1]);
+            if (ei.size() >= 2) {
+                oa.set(AttrKey::OutputSizeH, ei[0]);
+                oa.set(AttrKey::OutputSizeW, ei[1]);
+            } else {
+                oa.set(AttrKey::OutputSize, la.i[0]);
+                if (ei.size() >= 1) oa.set(AttrKey::OutputSizeH, ei[0]);
+            }
             break;
         }
         case OpId::AdaptiveAvgPool3d:
         case OpId::AdaptiveMaxPool3d: {
-            oa.set(AttrKey::OutputSize, la.i[0]);
+            // Same root cause / fix as the 2D case above: only fall back to
+            // the legacy scalar OutputSize when the 3-element per-axis form
+            // isn't present, so it never shadows OutputSizeD/H/W.
             const auto& ei = la.extra_i;
-            if (ei.size() >= 1) oa.set(AttrKey::OutputSizeD, ei[0]);
-            if (ei.size() >= 2) oa.set(AttrKey::OutputSizeH, ei[1]);
-            if (ei.size() >= 3) oa.set(AttrKey::OutputSizeW, ei[2]);
+            if (ei.size() >= 3) {
+                oa.set(AttrKey::OutputSizeD, ei[0]);
+                oa.set(AttrKey::OutputSizeH, ei[1]);
+                oa.set(AttrKey::OutputSizeW, ei[2]);
+            } else {
+                oa.set(AttrKey::OutputSize, la.i[0]);
+                if (ei.size() >= 1) oa.set(AttrKey::OutputSizeD, ei[0]);
+                if (ei.size() >= 2) oa.set(AttrKey::OutputSizeH, ei[1]);
+            }
             break;
         }
 
@@ -406,11 +467,12 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
             break;
 
         // Inf-E5: Cast — i[0] = target DType cast (underlying int value).
-        // The destination dtype is carried as Value (generic attr) since
-        // OpAttributes has no dedicated DType key today; consumers
-        // interpret it via `static_cast<DType>(Value)`.
+        // Every backend kernel reads this via
+        // `static_cast<DType>(attrs.get_int(AttrKey::TargetDtype))`, so the
+        // bridge must set the dedicated TargetDtype key (not the generic
+        // Value key, which no Cast kernel consults).
         case OpId::Cast:
-            oa.set(AttrKey::Value, static_cast<double>(la.i[0]));
+            oa.set(AttrKey::TargetDtype, la.i[0]);
             break;
 
         // H4 fix: RNN family uses LiteAttributes::extra_i for the richer
@@ -447,10 +509,31 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
         case OpId::FlashAttention:
         case OpId::FlexAttention:
         case OpId::FusedAttention: {
-            if (la.extra_i.size() >= 1) oa.set(AttrKey::NumHeads, la.extra_i[0]);
-            if (la.extra_i.size() >= 2) oa.set(AttrKey::HeadDim,  la.extra_i[1]);
-            if (la.extra_i.size() >= 4) oa.set(AttrKey::Causal,   la.extra_i[3] != 0);
+            // Causal MUST be explicit. Every backend's kernel defaults
+            // get_bool(AttrKey::Causal, false) when the attribute is
+            // missing, so a short extras array would silently run
+            // NON-causal attention for what was likely meant to be a
+            // causal/decoder model — an information leak from future
+            // tokens. A loud failure here is far safer than a silent,
+            // semantically-dangerous default.
+            if (la.extra_i.size() < 4) {
+                throw std::invalid_argument(
+                    "FlashAttention/FlexAttention/FusedAttention: Lite node "
+                    "is missing required attention configuration (extra_i "
+                    "must carry at least [num_heads, head_dim, embed_dim, "
+                    "causal]); refusing to silently default causal=false");
+            }
+            oa.set(AttrKey::NumHeads, la.extra_i[0]);
+            oa.set(AttrKey::HeadDim,  la.extra_i[1]);
+            oa.set(AttrKey::Causal,   la.extra_i[3] != 0);
             if (la.extra_f.size() >= 1) oa.set(AttrKey::DropoutP, la.extra_f[0]);
+            // Explicitly set Scale = 1/sqrt(head_dim), the standard
+            // scaled-dot-product-attention normalization, rather than
+            // relying on each backend's own fallback default to agree.
+            const int64_t head_dim = la.extra_i[1];
+            if (head_dim > 0) {
+                oa.set(AttrKey::Scale, 1.0 / std::sqrt(static_cast<double>(head_dim)));
+            }
             break;
         }
 
@@ -470,7 +553,7 @@ auto build_attrs(LiteOpType op, const LiteAttributes& la) -> OpAttributes {
 auto run_op(LiteOpType op,
             std::span<const Tensor> inputs,
             const LiteAttributes& attrs) -> std::vector<Tensor> {
-    return ::tenzor::dispatch(op, inputs, build_attrs(op, attrs));
+    return ::tenzor::dispatch(op, inputs, build_attrs(op, attrs, inputs));
 }
 
 }  // namespace tenzor::lite

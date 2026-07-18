@@ -2232,7 +2232,8 @@ __global__ void ldl_solve_bk_kernel(
     const T* __restrict__ ld_data,
     const int* __restrict__ pivots,
     T* __restrict__ b_data,
-    int n, int nrhs)
+    int n, int nrhs,
+    int* __restrict__ singular_flag)
 {
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
@@ -2317,6 +2318,12 @@ __global__ void ldl_solve_bk_kernel(
             if (p > 0) {
                 // 1x1 block: d = LD[k,k]
                 T d = LD[k * n + k];
+                // LAPACK's sytrf/sytrs convention: an exactly-zero pivot means
+                // the LDL^T factor is singular. Flag it so the host throws
+                // (matches Inv/Solve/Cholesky, which check cuSOLVER/native
+                // info for exactly this class of failure) instead of
+                // silently returning Inf/NaN.
+                if (d == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++)
                     B[k * nrhs + j] /= d;
                 k++;
@@ -2326,6 +2333,7 @@ __global__ void ldl_solve_bk_kernel(
                 T d21 = LD[(k + 1) * n + k];
                 T d22 = LD[(k + 1) * n + (k + 1)];
                 T det = d11 * d22 - d21 * d21;
+                if (det == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++) {
                     T y0 = B[k * nrhs + j];
                     T y1 = B[(k + 1) * nrhs + j];
@@ -2440,21 +2448,39 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
         }
     }
 
+    // Device-side singular-factor flag: an exactly-zero D-block pivot means
+    // the LDL^T factor is singular; the host raises a catchable error after
+    // synchronizing instead of silently returning Inf/NaN (matches Inv/Solve/
+    // Cholesky in this file, which check cuSOLVER/native info for the same
+    // class of failure).
+    int* d_singular = nullptr;
+    CUDA_CHECK_LINALG(cudaMalloc(&d_singular, sizeof(int)));
+    CUDA_CHECK_LINALG(cudaMemsetAsync(d_singular, 0, sizeof(int), stream));
+
     if (original_dtype == DType::Float32) {
         size_t smem = (n * n + n * nrhs) * sizeof(float);
         ldl_solve_bk_kernel<float><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<float>(), pivots.data<int32_t>(),
-            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         CUDA_CHECK_LINALG(cudaGetLastError());
     } else {
         size_t smem = (n * n + n * nrhs) * sizeof(double);
         ldl_solve_bk_kernel<double><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<double>(), pivots.data<int32_t>(),
-            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         CUDA_CHECK_LINALG(cudaGetLastError());
     }
 
+    int host_singular = 0;
+    CUDA_CHECK_LINALG(cudaMemcpyAsync(&host_singular, d_singular, sizeof(int),
+                                       cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    CUDA_CHECK_LINALG(cudaFree(d_singular));
+    if (host_singular != 0) {
+        throw std::runtime_error("linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+    }
     return work_b;
 }
 
@@ -5093,7 +5119,8 @@ __global__ void ldl_bk_solve_kernel(
     const T* __restrict__ ld_data,
     const int* __restrict__ pivots,
     T* __restrict__ b_data,
-    int n, int nrhs)
+    int n, int nrhs,
+    int* __restrict__ singular_flag)
 {
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
@@ -5159,11 +5186,18 @@ __global__ void ldl_bk_solve_kernel(
             int p = batch_piv[k];
             if (p > 0) {
                 T d = LD[k * n + k];
+                // LAPACK's sytrf/sytrs convention: an exactly-zero pivot means
+                // the LDL^T factor is singular. Flag it so the host throws
+                // (matches Inv/Solve/Cholesky in this file, which check
+                // cuSOLVER/native info for exactly this class of failure)
+                // instead of silently returning Inf/NaN.
+                if (d == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++) B[k * nrhs + j] /= d;
                 k++;
             } else {
                 T d11 = LD[k * n + k], d21 = LD[(k+1) * n + k], d22 = LD[(k+1) * n + (k+1)];
                 T det = d11 * d22 - d21 * d21;
+                if (det == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++) {
                     T y0 = B[k * nrhs + j], y1 = B[(k+1) * nrhs + j];
                     B[k * nrhs + j]     = (d22 * y0 - d21 * y1) / det;
@@ -5299,23 +5333,41 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
     int threads = min(static_cast<int>(n), 128);
     if (threads < 1) threads = 1;
 
+    // Device-side singular-factor flag: an exactly-zero D-block pivot means
+    // the LDL^T factor is singular; the host raises a catchable error after
+    // synchronizing instead of silently returning Inf/NaN (matches Inv/Solve/
+    // Cholesky in this file, which check cuSOLVER/native info for the same
+    // class of failure).
+    int* d_singular = nullptr;
+    CUDA_CHECK_LINALG(cudaMalloc(&d_singular, sizeof(int)));
+    CUDA_CHECK_LINALG(cudaMemsetAsync(d_singular, 0, sizeof(int), stream));
+
     if (original_dtype == DType::Float32) {
         check_size_limit<float>(n, "ldl_solve");
         size_t smem = (n * n + n * nrhs) * sizeof(float);
         ldl_bk_solve_kernel<float><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<float>(), pivots.data<int32_t>(),
-            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         CUDA_CHECK_LINALG(cudaGetLastError());
     } else {
         check_size_limit<double>(n, "ldl_solve");
         size_t smem = (n * n + n * nrhs) * sizeof(double);
         ldl_bk_solve_kernel<double><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<double>(), pivots.data<int32_t>(),
-            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         CUDA_CHECK_LINALG(cudaGetLastError());
     }
 
+    int host_singular = 0;
+    CUDA_CHECK_LINALG(cudaMemcpyAsync(&host_singular, d_singular, sizeof(int),
+                                       cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    CUDA_CHECK_LINALG(cudaFree(d_singular));
+    if (host_singular != 0) {
+        throw std::runtime_error("linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+    }
     return work_b;
 }
 

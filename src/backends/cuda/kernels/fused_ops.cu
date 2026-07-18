@@ -1582,7 +1582,12 @@ __global__ void fused_rms_norm_backward_kernel(
     const T* weight,         // Weight from forward pass
     const typename rms_acc_type<T>::type* rrms,  // F32 for half-types (per forward contract)
     T* grad_input,           // Output: gradient w.r.t. input (T storage)
-    typename rms_acc_type<T>::type* grad_weight,  // F32 for half-types (atomicAdd-safe)
+    // F-085 pattern: double-precision scratch accumulator, atomicAdd'd into by
+    // every batch-row block, then narrowed to the output dtype once by
+    // narrow_rms_norm_grad_accum_kernel after this kernel completes. A plain
+    // Acc(=float for Float32/F16/BF16) atomicAdd accumulator loses precision
+    // across large batch_size, unlike CPU's double accumulation.
+    double* grad_weight_accum,
     int64_t batch_size,
     int64_t norm_size
 ) {
@@ -1631,10 +1636,24 @@ __global__ void fused_rms_norm_backward_kernel(
         Acc gi = batch_rrms * (grad_out_i * w_i - x_i * batch_rrms * batch_rrms * mean_grad_x_w);
         batch_grad_in[i] = static_cast<T>(gi);
 
-        // grad_weight accumulation (atomic on Acc storage — atomicAdd<float>
-        // is well-defined on all SMs; atomicAdd<__half> requires SM 70+
-        // and has different precision semantics).
-        atomicAdd(&grad_weight[i], grad_out_i * x_i * batch_rrms);
+        // grad_weight accumulation in double precision (F-085 pattern),
+        // regardless of T/Acc, matching CPU's double accumulation.
+        atomicAdd(&grad_weight_accum[i],
+                  static_cast<double>(grad_out_i) * static_cast<double>(x_i) * static_cast<double>(batch_rrms));
+    }
+}
+
+// Narrows the double-precision grad_weight scratch accumulator (populated via
+// atomicAdd across every batch-row block in fused_rms_norm_backward_kernel)
+// down to the output dtype T, once per weight element.
+template<typename T>
+__global__ void narrow_rms_norm_grad_accum_kernel(
+    const double* __restrict__ grad_weight_accum,
+    T* __restrict__ grad_weight,
+    int64_t norm_size) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < norm_size) {
+        grad_weight[i] = static_cast<T>(grad_weight_accum[i]);
     }
 }
 
@@ -1664,6 +1683,10 @@ auto fused_rms_norm_backward_cuda(
     DType gw_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
                      ? DType::Float32 : input.dtype();
     Tensor grad_weight = create_cuda_zeros({norm_size}, gw_dtype, input.device());
+    // F-085 pattern: double-precision scratch accumulator, atomicAdd'd into by
+    // every batch-row block, then narrowed to gw_dtype in a single pass
+    // (narrow_rms_norm_grad_accum_kernel) once the main kernel completes.
+    Tensor grad_weight_accum = create_cuda_zeros({norm_size}, DType::Float64, input.device());
 
     // The half-precision kernels keep rrms (the per-row reciprocal-RMS scalar)
     // in F32 for accuracy. The autograd layer, however, narrows every saved
@@ -1676,6 +1699,7 @@ auto fused_rms_norm_backward_cuda(
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
+    int narrow_blocks = static_cast<int>((norm_size + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
     if (input.dtype() == DType::Float32) {
         fused_rms_norm_backward_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1684,9 +1708,13 @@ auto fused_rms_norm_backward_cuda(
             weight.data<float>(),
             rrms.data<float>(),
             grad_input.data<float>(),
-            grad_weight.data<float>(),
+            grad_weight_accum.data<double>(),
             batch_size,
             norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        narrow_rms_norm_grad_accum_kernel<float><<<narrow_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_weight.data<float>(), norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
@@ -1696,14 +1724,19 @@ auto fused_rms_norm_backward_cuda(
             weight.data<double>(),
             rrms.data<double>(),
             grad_input.data<double>(),
-            grad_weight.data<double>(),
+            grad_weight_accum.data<double>(),
             batch_size,
             norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+        narrow_rms_norm_grad_accum_kernel<double><<<narrow_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_weight.data<double>(), norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         // H1 fix: native F16 dispatch. Acc=float per rms_acc_type<__half>.
-        // Per forward contract, rrms is F32 and grad_weight is F32.
+        // Per forward contract, rrms is F32 and grad_weight accumulates in
+        // double (F-085 pattern) before narrowing to F32 storage.
         // grad_output / input / weight / grad_input are __half.
         fused_rms_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
@@ -1711,9 +1744,13 @@ auto fused_rms_norm_backward_cuda(
             reinterpret_cast<const __half*>(weight.data_ptr()),
             rrms_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data_ptr()),
-            grad_weight.data<float>(),
+            grad_weight_accum.data<double>(),
             batch_size,
             norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        narrow_rms_norm_grad_accum_kernel<float><<<narrow_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_weight.data<float>(), norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
@@ -1724,9 +1761,13 @@ auto fused_rms_norm_backward_cuda(
             reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
             rrms_f32.data<float>(),
             reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
-            grad_weight.data<float>(),
+            grad_weight_accum.data<double>(),
             batch_size,
             norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        narrow_rms_norm_grad_accum_kernel<float><<<narrow_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_weight.data<float>(), norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
@@ -2262,8 +2303,9 @@ __global__ void flash_attention_v2_kernel(
     float* K_tile = smem;                          // [Bc][K_STRIDE]
     float* V_tile = smem + Bc * K_STRIDE;          // [Bc][K_STRIDE]
     float* Q_shared = smem + 2 * Bc * K_STRIDE;    // [HEAD_DIM]
-    float* scores_shared = Q_shared + HEAD_DIM;    // [Bc]
-    float* reduce_buf = scores_shared + Bc;        // [num_warps]
+    float* scores_shared = Q_shared + HEAD_DIM;    // [Bc] — CLEAN pre-dropout exp(score-max)
+    float* drop_scale_shared = scores_shared + Bc; // [Bc] — 0 (dropped) or 1/(1-p) (kept), per key
+    float* reduce_buf = drop_scale_shared + Bc;    // [num_warps]
 
     // Load Q row into shared memory
     for (int d = tid; d < HEAD_DIM; d += BLOCK_SIZE) {
@@ -2354,32 +2396,42 @@ __global__ void flash_attention_v2_kernel(
             continue;
         }
 
-        // Step 2: Compute exp(score - max) and sum
+        // Step 2: Compute exp(score - max) and sum.
+        //
+        // The softmax denominator (local_sum -> block_sum -> l_new, and the
+        // LSE written at the end) must be the FULL softmax sum over ALL keys,
+        // computed from the pre-dropout weight. Dropout is applied ONLY to the
+        // separate P@V accumulation weight (drop_scale_shared, consumed in
+        // Step 4) — never folded into the denominator. Folding the 1/(1-p)
+        // scale into local_sum made it cancel against the denominator for
+        // surviving keys, silently turning "dropout" into a renormalized-
+        // over-survivors softmax that the backward never differentiates.
+        // Mirrors the CPU reference (flash_attention.cpp): row_sum
+        // accumulates the undropped `weight`; only `o_weight` (the V
+        // accumulation term) is masked/scaled.
         float local_sum = 0.0f;
 
-        // Apply Philox dropout post-softmax with inverted scaling 1/(1-p)
-        // when dropout_p > 0 and rng_seed != 0. Counter is (batch_head,
-        // query_idx, kv_pos, 0); each thread independently draws its own
-        // uniform sample so the mask is bit-reproducible from (seed,
-        // batch_head, query_idx, kv_pos) for the backward replay.
+        // Apply Philox dropout with inverted scaling 1/(1-p) when dropout_p >
+        // 0 and rng_seed != 0. Counter is (batch_head, query_idx, kv_pos, 0);
+        // each thread independently draws its own uniform sample so the mask
+        // is bit-reproducible from (seed, batch_head, query_idx, kv_pos) for
+        // the backward replay.
         const bool apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
         const float dropout_scale = apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
 
         for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
             float exp_score = expf(scores_shared[j] - block_max);
+            float drop_scale = 1.0f;
             if (apply_dropout) {
                 int kv_pos = k_start + j;
                 float u = philox_uniform(static_cast<uint32_t>(batch_head),
                                           static_cast<uint32_t>(query_idx),
                                           static_cast<uint32_t>(kv_pos),
                                           rng_seed);
-                if (u < dropout_p) {
-                    exp_score = 0.0f;
-                } else {
-                    exp_score *= dropout_scale;
-                }
+                drop_scale = (u < dropout_p) ? 0.0f : dropout_scale;
             }
-            scores_shared[j] = exp_score;  // Store exp (post-dropout) for P @ V
+            scores_shared[j] = exp_score;        // Clean (pre-dropout) — feeds the denominator
+            drop_scale_shared[j] = drop_scale;    // Applied only to the V-accumulation weight
             local_sum += exp_score;
         }
         __syncthreads();
@@ -2421,10 +2473,14 @@ __global__ void flash_attention_v2_kernel(
                 // Rescale previous accumulator
                 o_local[i] *= exp_prev;
 
-                // Add new contribution: sum over j of P[j] * V[j, d]
+                // Add new contribution: sum over j of P[j] * V[j, d]. The
+                // per-key dropout scale (drop_scale_shared) is applied here,
+                // on the V-accumulation term only — NOT on scores_shared
+                // (which fed local_sum/block_sum above as the clean softmax
+                // denominator).
                 float pv_sum = 0.0f;
                 for (int j = 0; j < actual_Bc; ++j) {
-                    pv_sum += scores_shared[j] * V_tile[j * K_STRIDE + d];
+                    pv_sum += scores_shared[j] * drop_scale_shared[j] * V_tile[j * K_STRIDE + d];
                 }
                 o_local[i] += exp_curr * pv_sum;
             }
@@ -2504,10 +2560,10 @@ auto fused_attention_cuda(
     cudaStream_t stream = cuda::cuda_current_stream();
 
     // Compute shared memory size based on head_dim
-    // Layout: K_tile[Bc][HEAD_DIM+4] + V_tile[Bc][HEAD_DIM+4] + Q_shared[HEAD_DIM] + scores[Bc] + reduce[8]
+    // Layout: K_tile[Bc][HEAD_DIM+4] + V_tile[Bc][HEAD_DIM+4] + Q_shared[HEAD_DIM] + scores[Bc] + drop_scale[Bc] + reduce[8]
     auto compute_smem_size = [](int hd) {
         int k_stride = hd + 4;
-        return (2 * Bc * k_stride + hd + Bc + 8) * sizeof(float);
+        return (2 * Bc * k_stride + hd + 2 * Bc + 8) * sizeof(float);
     };
 
     float* lse_ptr = lse.data<float>();
@@ -2578,7 +2634,7 @@ auto fused_attention_cuda(
 
         auto compute_smem_size_gen = [](int hd) {
             int k_stride = hd + 4;
-            return (2 * Bc * k_stride + hd + Bc + 8) * sizeof(float);
+            return (2 * Bc * k_stride + hd + 2 * Bc + 8) * sizeof(float);
         };
 
         if (padded_hd == 32) {
@@ -2789,10 +2845,11 @@ __global__ void flash_attention_backward_kernel(
 
         // Compute P_ij = exp(S_ij - l_i)  [Br x Bc]
         // Apply causal mask: P_ij = 0 where query_pos < key_pos
-        // Phase P0 / Fix 6: also replay the same dropout mask the forward
-        // kernel applied at lines 2027-2040. Counter is (batch_head,
-        // query_idx, kv_pos, 0) — identical to forward — so the same
-        // (seed, counter) triple deterministically reproduces the mask.
+        // Phase P0 / Fix 6: also replay the same dropout mask that
+        // flash_attention_v2_kernel's forward pass applied (see its dropout
+        // block above, `apply_dropout`/`dropout_scale`). Counter is
+        // (batch_head, query_idx, kv_pos, 0) — identical to forward — so the
+        // same (seed, counter) triple deterministically reproduces the mask.
         const bool apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
         const float dropout_scale = apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
         for (int idx = tid; idx < Br * Bc; idx += BLOCK_SIZE) {

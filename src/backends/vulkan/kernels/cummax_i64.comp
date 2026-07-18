@@ -1,0 +1,43 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Cumulative Maximum along a dimension — native Int64 variant.
+// Compares int64 values directly instead of promoting through Float64
+// (53-bit mantissa), which silently picks the wrong running max/index once
+// two candidate values differ only above 2^53.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input   { int64_t input_data[]; };
+layout(binding = 1) buffer Values  { int64_t values_data[]; };
+layout(binding = 2) buffer Indices { int     indices_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;     // outer_size * inner_size
+    uint reduce_size;     // size of the dimension to scan over
+    uint inner_size;      // product of dimensions after the scan dim
+} params;
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    int64_t running = input_data[base];
+    int     ri = 0;
+    values_data[base]  = running;
+    indices_data[base] = 0;
+
+    for (uint i = 1; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        int64_t val = input_data[idx];
+        if (val > running) {
+            running = val;
+            ri = int(i);
+        }
+        values_data[idx]  = running;
+        indices_data[idx] = ri;
+    }
+}

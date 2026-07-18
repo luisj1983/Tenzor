@@ -284,6 +284,29 @@ struct LogicalXorKernelInt32 {};
 struct LogicalXorKernelInt64 {};
 struct LogicalXorKernelBool {};
 
+// Broadcast logical kernel name classes
+struct BroadcastLogicalAndFloat32 {};
+struct BroadcastLogicalAndFloat64 {};
+struct BroadcastLogicalAndFloat16 {};
+struct BroadcastLogicalAndBFloat16 {};
+struct BroadcastLogicalAndInt32 {};
+struct BroadcastLogicalAndInt64 {};
+struct BroadcastLogicalAndBool {};
+struct BroadcastLogicalOrFloat32 {};
+struct BroadcastLogicalOrFloat64 {};
+struct BroadcastLogicalOrFloat16 {};
+struct BroadcastLogicalOrBFloat16 {};
+struct BroadcastLogicalOrInt32 {};
+struct BroadcastLogicalOrInt64 {};
+struct BroadcastLogicalOrBool {};
+struct BroadcastLogicalXorFloat32 {};
+struct BroadcastLogicalXorFloat64 {};
+struct BroadcastLogicalXorFloat16 {};
+struct BroadcastLogicalXorBFloat16 {};
+struct BroadcastLogicalXorInt32 {};
+struct BroadcastLogicalXorInt64 {};
+struct BroadcastLogicalXorBool {};
+
 // Element-wise min/max kernel name classes
 struct MinimumKernelFloat32 {};
 struct MinimumKernelFloat64 {};
@@ -559,6 +582,49 @@ static void sycl_broadcast_binary(
             b_idx += coord * bs_[d];
         }
         out_ptr[gid] = op(a_ptr[a_idx], b_ptr[b_idx]);
+    }).wait();
+}
+
+// Generic SYCL broadcast operation producing a Bool output from T-typed
+// operands. Unlike sycl_broadcast_binary above (which requires operands and
+// output to share the same type T), the logical ops (LogicalAnd/Or/Xor)
+// always output Bool regardless of the input dtype, so the output pointer is
+// fixed at uint8_t while the operands are read as T. Used to fix the OOB read
+// in logical_and/or/xor_kernel below: those previously allocated the output
+// at `a`'s shape and indexed `b` at the same linear index regardless of `b`'s
+// actual size, which is a heap-buffer-overflow read whenever `b` is a smaller
+// broadcastable operand (e.g. a scalar). Mirrors CPU's logical_binary_kernel
+// (src/backends/cpu/kernels/math.cpp:5934) which broadcasts via strides.
+template<typename T, typename KernelName, typename Op>
+static void sycl_broadcast_logical(
+    const Tensor& a, const Tensor& b, Tensor& output,
+    const BroadcastInfo& info, sycl::queue& queue, Op op) {
+
+    const T* a_ptr = get_data_ptr<const T>(a);
+    const T* b_ptr = get_data_ptr<const T>(b);
+    uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
+
+    int ndim = info.ndim;
+    int64_t out_numel = info.out_numel;
+
+    int64_t os[MAX_BROADCAST_DIMS], as_[MAX_BROADCAST_DIMS], bs_[MAX_BROADCAST_DIMS];
+    for (int i = 0; i < ndim; ++i) {
+        os[i] = info.out_strides[i];
+        as_[i] = info.a_strides[i];
+        bs_[i] = info.b_strides[i];
+    }
+
+    queue.parallel_for<KernelName>(sycl::range<1>(out_numel), [=](sycl::id<1> gid) {
+        int64_t flat = gid[0];
+        int64_t a_idx = 0, b_idx = 0;
+        int64_t remaining = flat;
+        for (int d = 0; d < ndim; ++d) {
+            int64_t coord = remaining / os[d];
+            remaining %= os[d];
+            a_idx += coord * as_[d];
+            b_idx += coord * bs_[d];
+        }
+        out_ptr[gid] = static_cast<uint8_t>(op(a_ptr[a_idx], b_ptr[b_idx]) ? 1 : 0);
     }).wait();
 }
 
@@ -4000,6 +4066,18 @@ auto where_kernel(const Tensor& condition_in, const Tensor& x_in, const Tensor& 
     // essentially random positions instead of the intended ones (the OneAPI
     // composed attention backward causal mask silently became a near-no-op).
     // Casting first yields a true 1-byte-per-element Bool buffer.
+    //
+    // Match CPU (indexing.cpp:1084-1089) and CUDA (validate_mask_dtype): a
+    // where() condition must be Bool or a floating dtype. OneAPI previously
+    // accepted any dtype here, silently succeeding on a call CPU/CUDA both
+    // reject (e.g. an Int32 condition).
+    {
+        DType cd = condition_in.dtype();
+        if (cd != DType::Bool && cd != DType::Float32 && cd != DType::Float64 &&
+            cd != DType::Float16 && cd != DType::BFloat16) {
+            throw std::invalid_argument("where: condition tensor must have dtype Bool or a floating dtype");
+        }
+    }
     Tensor condition_bool = (condition_in.dtype() == DType::Bool)
         ? condition_in : condition_in.to(DType::Bool);
 
@@ -4701,8 +4779,23 @@ auto has_inf_nan_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
     // -- this exact guard was simply missing for the unary math kernels.
     Tensor input_cont = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
     const Tensor& input = input_cont;
-    // Returns a scalar Bool tensor: true if any Inf or NaN
-    Tensor output({1}, DType::Bool, input.device());
+
+    // Float16/BFloat16 can represent Inf/NaN just like Float32/Float64, but
+    // the dtype dispatch below only explicitly handles Float32/Float64 --
+    // every other dtype (including F16/BF16) fell into the "integer types
+    // never have inf/nan" branch and unconditionally reported false. That
+    // silently breaks AMP gradient-scaling (src/nn/amp/grad_scaler.cpp:183),
+    // which relies on has_inf_nan to detect an overflowed Float16 gradient
+    // before unscaling. Widen to Float32 first, matching CPU/CUDA/ROCm/Vulkan
+    // (CPU: src/backends/cpu/kernels/reduction.cpp:4156).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return has_inf_nan_kernel(input.to(DType::Float32), queue);
+    }
+
+    // Returns a rank-0 scalar Bool tensor (true if any Inf or NaN), matching
+    // CPU/CUDA/ROCm's shape (they use Tensor({}, ...)) rather than a rank-1
+    // shape (1,).
+    Tensor output({}, DType::Bool, input.device());
     bool* out_ptr = static_cast<bool*>(const_cast<void*>(output.data_ptr()));
     int64_t numel = input.numel();
 
@@ -5448,6 +5541,22 @@ auto fmod_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor
     return output;
 }
 
+// Divisor-sign convention (matches CPU/CUDA/ROCm/Python/NumPy/PyTorch
+// `%`/`remainder`: a - floor(a/b)*b), NOT IEEE round-to-nearest-even
+// sycl::remainder. e.g. remainder(-7, 3) == 2, not -1. Implemented via fmod
+// (sign of the dividend) with a correction term when the fmod result's sign
+// disagrees with the divisor's sign.
+inline float remainder_divisor_sign(float x, float y) {
+    float r = sycl::fmod(x, y);
+    if (r != 0.0f && ((r < 0.0f) != (y < 0.0f))) r += y;
+    return r;
+}
+inline double remainder_divisor_sign(double x, double y) {
+    double r = sycl::fmod(x, y);
+    if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
+    return r;
+}
+
 auto remainder_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     if (a.dtype() != b.dtype()) {
         throw std::invalid_argument("remainder: input dtypes must match");
@@ -5466,22 +5575,22 @@ auto remainder_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> T
         if (a_cont.dtype() == DType::Float32) {
             sycl_broadcast_binary<float, BroadcastRemainderFloat32>(
                 a_cont, b_cont, output, info, queue,
-                [](float x, float y) { return sycl::remainder(x, y); });
+                [](float x, float y) { return remainder_divisor_sign(x, y); });
         } else if (a_cont.dtype() == DType::Float64) {
             sycl_broadcast_binary<double, BroadcastRemainderFloat64>(
                 a_cont, b_cont, output, info, queue,
-                [](double x, double y) { return sycl::remainder(x, y); });
+                [](double x, double y) { return remainder_divisor_sign(x, y); });
         } else if (a_cont.dtype() == DType::Float16) {
             sycl_broadcast_binary<sycl::half, BroadcastRemainderFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](sycl::half x, sycl::half y) {
-                    return sycl::half(sycl::remainder(static_cast<float>(x), static_cast<float>(y)));
+                    return sycl::half(remainder_divisor_sign(static_cast<float>(x), static_cast<float>(y)));
                 });
         } else if (a_cont.dtype() == DType::BFloat16) {
             sycl_broadcast_binary<uint16_t, BroadcastRemainderBFloat16>(
                 a_cont, b_cont, output, info, queue,
                 [](uint16_t x, uint16_t y) {
-                    return f32_to_bf16(sycl::remainder(bf16_to_f32(x), bf16_to_f32(y)));
+                    return f32_to_bf16(remainder_divisor_sign(bf16_to_f32(x), bf16_to_f32(y)));
                 });
         } else {
             throw std::runtime_error("remainder: unsupported dtype");
@@ -5498,28 +5607,28 @@ auto remainder_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> T
         const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
         queue.parallel_for<RemainderKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::remainder(a_ptr[idx], b_ptr[idx]);
+            out_ptr[idx] = remainder_divisor_sign(a_ptr[idx], b_ptr[idx]);
         }).wait();
     } else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
         const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
         queue.parallel_for<RemainderKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::remainder(a_ptr[idx], b_ptr[idx]);
+            out_ptr[idx] = remainder_divisor_sign(a_ptr[idx], b_ptr[idx]);
         }).wait();
     } else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
         const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for<RemainderKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = sycl::half(sycl::remainder(static_cast<float>(a_ptr[idx]), static_cast<float>(b_ptr[idx])));
+            out_ptr[idx] = sycl::half(remainder_divisor_sign(static_cast<float>(a_ptr[idx]), static_cast<float>(b_ptr[idx])));
         }).wait();
     } else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<RemainderKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = f32_to_bf16(sycl::remainder(bf16_to_f32(a_ptr[idx]), bf16_to_f32(b_ptr[idx])));
+            out_ptr[idx] = f32_to_bf16(remainder_divisor_sign(bf16_to_f32(a_ptr[idx]), bf16_to_f32(b_ptr[idx])));
         }).wait();
     } else {
         throw std::runtime_error("remainder: unsupported dtype");
@@ -5604,6 +5713,56 @@ auto logical_and_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& que
     // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
     Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
     Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
+    // Logical ops are dtype-agnostic (operands may differ in dtype, each
+    // independently reduced to bool) matching CPU/CUDA/ROCm/Vulkan's
+    // convention, NOT a hard dtype-equality requirement.
+    if (a.dtype() != b.dtype()) {
+        if (a.dtype() != DType::Bool) a = a.to(DType::Bool);
+        if (b.dtype() != DType::Bool) b = b.to(DType::Bool);
+    }
+
+    // Broadcasting path: the op layer (binary_op_raw) does not materialize a
+    // common shape before dispatch, so a and b may still be different but
+    // broadcast-compatible shapes here. Previously this function allocated
+    // the output at `a`'s shape and always indexed `b` at the same linear
+    // index as `a` regardless of `b`'s actual size — a heap-buffer-overflow
+    // read whenever `b` is a smaller broadcastable operand (e.g. a scalar).
+    // Route through stride-based broadcasting (mirrors minimum_kernel above
+    // and CPU's logical_binary_kernel, src/backends/cpu/kernels/math.cpp:5934).
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
+    if (!same_shape) {
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        Tensor output(out_shape, DType::Bool, a.device());
+        if (a.dtype() == DType::Float32) {
+            sycl_broadcast_logical<float, BroadcastLogicalAndFloat32>(a, b, output, info, queue,
+                [](float x, float y) { return x != 0.0f && y != 0.0f; });
+        } else if (a.dtype() == DType::Float64) {
+            sycl_broadcast_logical<double, BroadcastLogicalAndFloat64>(a, b, output, info, queue,
+                [](double x, double y) { return x != 0.0 && y != 0.0; });
+        } else if (a.dtype() == DType::Float16) {
+            sycl_broadcast_logical<sycl::half, BroadcastLogicalAndFloat16>(a, b, output, info, queue,
+                [](sycl::half x, sycl::half y) { return static_cast<float>(x) != 0.0f && static_cast<float>(y) != 0.0f; });
+        } else if (a.dtype() == DType::BFloat16) {
+            sycl_broadcast_logical<uint16_t, BroadcastLogicalAndBFloat16>(a, b, output, info, queue,
+                [](uint16_t x, uint16_t y) { return bf16_to_f32(x) != 0.0f && bf16_to_f32(y) != 0.0f; });
+        } else if (a.dtype() == DType::Int32) {
+            sycl_broadcast_logical<int32_t, BroadcastLogicalAndInt32>(a, b, output, info, queue,
+                [](int32_t x, int32_t y) { return x != 0 && y != 0; });
+        } else if (a.dtype() == DType::Int64) {
+            sycl_broadcast_logical<int64_t, BroadcastLogicalAndInt64>(a, b, output, info, queue,
+                [](int64_t x, int64_t y) { return x != 0 && y != 0; });
+        } else if (a.dtype() == DType::Bool) {
+            sycl_broadcast_logical<uint8_t, BroadcastLogicalAndBool>(a, b, output, info, queue,
+                [](uint8_t x, uint8_t y) { return x != 0 && y != 0; });
+        } else {
+            throw std::runtime_error("logical_and: unsupported dtype");
+        }
+        return output;
+    }
+
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   DType::Bool, a.device());
     const int64_t numel = a.numel();
@@ -5661,6 +5820,50 @@ auto logical_or_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queu
     // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
     Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
     Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
+    // Logical ops are dtype-agnostic (operands may differ in dtype, each
+    // independently reduced to bool) matching CPU/CUDA/ROCm/Vulkan's
+    // convention, NOT a hard dtype-equality requirement.
+    if (a.dtype() != b.dtype()) {
+        if (a.dtype() != DType::Bool) a = a.to(DType::Bool);
+        if (b.dtype() != DType::Bool) b = b.to(DType::Bool);
+    }
+
+    // Broadcasting path — see logical_and_kernel's comment above for why this
+    // is required (OOB read on a smaller broadcastable `b` otherwise).
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
+    if (!same_shape) {
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        Tensor output(out_shape, DType::Bool, a.device());
+        if (a.dtype() == DType::Float32) {
+            sycl_broadcast_logical<float, BroadcastLogicalOrFloat32>(a, b, output, info, queue,
+                [](float x, float y) { return x != 0.0f || y != 0.0f; });
+        } else if (a.dtype() == DType::Float64) {
+            sycl_broadcast_logical<double, BroadcastLogicalOrFloat64>(a, b, output, info, queue,
+                [](double x, double y) { return x != 0.0 || y != 0.0; });
+        } else if (a.dtype() == DType::Float16) {
+            sycl_broadcast_logical<sycl::half, BroadcastLogicalOrFloat16>(a, b, output, info, queue,
+                [](sycl::half x, sycl::half y) { return static_cast<float>(x) != 0.0f || static_cast<float>(y) != 0.0f; });
+        } else if (a.dtype() == DType::BFloat16) {
+            sycl_broadcast_logical<uint16_t, BroadcastLogicalOrBFloat16>(a, b, output, info, queue,
+                [](uint16_t x, uint16_t y) { return bf16_to_f32(x) != 0.0f || bf16_to_f32(y) != 0.0f; });
+        } else if (a.dtype() == DType::Int32) {
+            sycl_broadcast_logical<int32_t, BroadcastLogicalOrInt32>(a, b, output, info, queue,
+                [](int32_t x, int32_t y) { return x != 0 || y != 0; });
+        } else if (a.dtype() == DType::Int64) {
+            sycl_broadcast_logical<int64_t, BroadcastLogicalOrInt64>(a, b, output, info, queue,
+                [](int64_t x, int64_t y) { return x != 0 || y != 0; });
+        } else if (a.dtype() == DType::Bool) {
+            sycl_broadcast_logical<uint8_t, BroadcastLogicalOrBool>(a, b, output, info, queue,
+                [](uint8_t x, uint8_t y) { return x != 0 || y != 0; });
+        } else {
+            throw std::runtime_error("logical_or: unsupported dtype");
+        }
+        return output;
+    }
+
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   DType::Bool, a.device());
     const int64_t numel = a.numel();
@@ -5768,6 +5971,50 @@ auto logical_xor_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& que
     // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
     Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
     Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
+    // Logical ops are dtype-agnostic (operands may differ in dtype, each
+    // independently reduced to bool) matching CPU/CUDA/ROCm/Vulkan's
+    // convention, NOT a hard dtype-equality requirement.
+    if (a.dtype() != b.dtype()) {
+        if (a.dtype() != DType::Bool) a = a.to(DType::Bool);
+        if (b.dtype() != DType::Bool) b = b.to(DType::Bool);
+    }
+
+    // Broadcasting path — see logical_and_kernel's comment above for why this
+    // is required (OOB read on a smaller broadcastable `b` otherwise).
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
+    if (!same_shape) {
+        auto out_shape = broadcast_shapes(a_shape, b_shape);
+        auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+        Tensor output(out_shape, DType::Bool, a.device());
+        if (a.dtype() == DType::Float32) {
+            sycl_broadcast_logical<float, BroadcastLogicalXorFloat32>(a, b, output, info, queue,
+                [](float x, float y) { return (x != 0.0f) != (y != 0.0f); });
+        } else if (a.dtype() == DType::Float64) {
+            sycl_broadcast_logical<double, BroadcastLogicalXorFloat64>(a, b, output, info, queue,
+                [](double x, double y) { return (x != 0.0) != (y != 0.0); });
+        } else if (a.dtype() == DType::Float16) {
+            sycl_broadcast_logical<sycl::half, BroadcastLogicalXorFloat16>(a, b, output, info, queue,
+                [](sycl::half x, sycl::half y) { return (static_cast<float>(x) != 0.0f) != (static_cast<float>(y) != 0.0f); });
+        } else if (a.dtype() == DType::BFloat16) {
+            sycl_broadcast_logical<uint16_t, BroadcastLogicalXorBFloat16>(a, b, output, info, queue,
+                [](uint16_t x, uint16_t y) { return (bf16_to_f32(x) != 0.0f) != (bf16_to_f32(y) != 0.0f); });
+        } else if (a.dtype() == DType::Int32) {
+            sycl_broadcast_logical<int32_t, BroadcastLogicalXorInt32>(a, b, output, info, queue,
+                [](int32_t x, int32_t y) { return (x != 0) != (y != 0); });
+        } else if (a.dtype() == DType::Int64) {
+            sycl_broadcast_logical<int64_t, BroadcastLogicalXorInt64>(a, b, output, info, queue,
+                [](int64_t x, int64_t y) { return (x != 0) != (y != 0); });
+        } else if (a.dtype() == DType::Bool) {
+            sycl_broadcast_logical<uint8_t, BroadcastLogicalXorBool>(a, b, output, info, queue,
+                [](uint8_t x, uint8_t y) { return (x != 0) != (y != 0); });
+        } else {
+            throw std::runtime_error("logical_xor: unsupported dtype");
+        }
+        return output;
+    }
+
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
                   DType::Bool, a.device());
     const int64_t numel = a.numel();
@@ -6600,70 +6847,136 @@ struct BitwiseNotI8 {}; struct BitwiseNotI16 {}; struct BitwiseNotI64 {};
 struct BitwiseLShiftI8 {}; struct BitwiseLShiftI16 {}; struct BitwiseLShiftI64 {};
 struct BitwiseRShiftI8 {}; struct BitwiseRShiftI16 {}; struct BitwiseRShiftI64 {};
 
+// Unsigned + Bool coverage for And/Or/Xor, matching the dtype union CPU (Bool,
+// no unsigned) and CUDA (unsigned, no Bool) each support individually — ROCm
+// already documents/implements this same union (src/backends/rocm/kernels/
+// math.hip.cpp: launch_broadcast_bitwise), so OneAPI matches that reference.
+struct BitwiseAndU8 {}; struct BitwiseAndU16 {}; struct BitwiseAndU32 {}; struct BitwiseAndU64 {}; struct BitwiseAndBool {};
+struct BitwiseOrU8 {};  struct BitwiseOrU16 {};  struct BitwiseOrU32 {};  struct BitwiseOrU64 {};  struct BitwiseOrBool {};
+struct BitwiseXorU8 {}; struct BitwiseXorU16 {}; struct BitwiseXorU32 {}; struct BitwiseXorU64 {}; struct BitwiseXorBool {};
+
+// Broadcast-aware (the op layer validates shapes are broadcastable but does
+// not materialize the broadcast): flat-indexed b[i]/sh[i] access sized by
+// a.numel()/input.numel() alone would read out of bounds when the second
+// operand is a smaller-but-broadcastable shape (e.g. a scalar) -- use the
+// generic sycl_broadcast_binary helper (mirrors add_kernel's own broadcast
+// path) unconditionally instead of a same-shape-only flat fast path.
 auto bitwise_and_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
-    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
     Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
     Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
-    if (n == 0) return result;
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    auto out_shape = broadcast_shapes(a_shape, b_shape);
+    auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+    Tensor result(out_shape, a.dtype(), a.device());
+    if (result.numel() == 0) return result;
     if (a.dtype() == DType::Int8) {
-        const int8_t* ad = a.data<int8_t>(); const int8_t* bd = b.data<int8_t>(); int8_t* od = result.data<int8_t>();
-        queue.parallel_for<BitwiseAndI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
+        sycl_broadcast_binary<int8_t, BitwiseAndI8>(a, b, result, info, queue,
+            [](int8_t x, int8_t y) -> int8_t { return static_cast<int8_t>(x & y); });
     } else if (a.dtype() == DType::Int16) {
-        const int16_t* ad = a.data<int16_t>(); const int16_t* bd = b.data<int16_t>(); int16_t* od = result.data<int16_t>();
-        queue.parallel_for<BitwiseAndI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
+        sycl_broadcast_binary<int16_t, BitwiseAndI16>(a, b, result, info, queue,
+            [](int16_t x, int16_t y) -> int16_t { return static_cast<int16_t>(x & y); });
     } else if (a.dtype() == DType::Int32) {
-        const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
-        queue.parallel_for<BitwiseAndI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
+        sycl_broadcast_binary<int32_t, BitwiseAndI32>(a, b, result, info, queue,
+            [](int32_t x, int32_t y) { return x & y; });
     } else if (a.dtype() == DType::Int64) {
-        const int64_t* ad = a.data<int64_t>(); const int64_t* bd = b.data<int64_t>(); int64_t* od = result.data<int64_t>();
-        queue.parallel_for<BitwiseAndI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_and: unsupported dtype (expected Int8/16/32/64)"); }
+        sycl_broadcast_binary<int64_t, BitwiseAndI64>(a, b, result, info, queue,
+            [](int64_t x, int64_t y) { return x & y; });
+    } else if (a.dtype() == DType::UInt8) {
+        sycl_broadcast_binary<uint8_t, BitwiseAndU8>(a, b, result, info, queue,
+            [](uint8_t x, uint8_t y) -> uint8_t { return static_cast<uint8_t>(x & y); });
+    } else if (a.dtype() == DType::UInt16) {
+        sycl_broadcast_binary<uint16_t, BitwiseAndU16>(a, b, result, info, queue,
+            [](uint16_t x, uint16_t y) -> uint16_t { return static_cast<uint16_t>(x & y); });
+    } else if (a.dtype() == DType::UInt32) {
+        sycl_broadcast_binary<uint32_t, BitwiseAndU32>(a, b, result, info, queue,
+            [](uint32_t x, uint32_t y) { return x & y; });
+    } else if (a.dtype() == DType::UInt64) {
+        sycl_broadcast_binary<uint64_t, BitwiseAndU64>(a, b, result, info, queue,
+            [](uint64_t x, uint64_t y) { return x & y; });
+    } else if (a.dtype() == DType::Bool) {
+        sycl_broadcast_binary<uint8_t, BitwiseAndBool>(a, b, result, info, queue,
+            [](uint8_t x, uint8_t y) -> uint8_t { return static_cast<uint8_t>((x != 0) && (y != 0)); });
+    } else { throw std::runtime_error("bitwise_and: unsupported dtype (expected Int8/16/32/64, UInt8/16/32/64, or Bool)"); }
     return result;
 }
 auto bitwise_or_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
-    // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
     Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
     Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
-    if (n == 0) return result;
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    auto out_shape = broadcast_shapes(a_shape, b_shape);
+    auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+    Tensor result(out_shape, a.dtype(), a.device());
+    if (result.numel() == 0) return result;
     if (a.dtype() == DType::Int8) {
-        const int8_t* ad = a.data<int8_t>(); const int8_t* bd = b.data<int8_t>(); int8_t* od = result.data<int8_t>();
-        queue.parallel_for<BitwiseOrI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
+        sycl_broadcast_binary<int8_t, BitwiseOrI8>(a, b, result, info, queue,
+            [](int8_t x, int8_t y) -> int8_t { return static_cast<int8_t>(x | y); });
     } else if (a.dtype() == DType::Int16) {
-        const int16_t* ad = a.data<int16_t>(); const int16_t* bd = b.data<int16_t>(); int16_t* od = result.data<int16_t>();
-        queue.parallel_for<BitwiseOrI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
+        sycl_broadcast_binary<int16_t, BitwiseOrI16>(a, b, result, info, queue,
+            [](int16_t x, int16_t y) -> int16_t { return static_cast<int16_t>(x | y); });
     } else if (a.dtype() == DType::Int32) {
-        const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
-        queue.parallel_for<BitwiseOrI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
+        sycl_broadcast_binary<int32_t, BitwiseOrI32>(a, b, result, info, queue,
+            [](int32_t x, int32_t y) { return x | y; });
     } else if (a.dtype() == DType::Int64) {
-        const int64_t* ad = a.data<int64_t>(); const int64_t* bd = b.data<int64_t>(); int64_t* od = result.data<int64_t>();
-        queue.parallel_for<BitwiseOrI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_or: unsupported dtype (expected Int8/16/32/64)"); }
+        sycl_broadcast_binary<int64_t, BitwiseOrI64>(a, b, result, info, queue,
+            [](int64_t x, int64_t y) { return x | y; });
+    } else if (a.dtype() == DType::UInt8) {
+        sycl_broadcast_binary<uint8_t, BitwiseOrU8>(a, b, result, info, queue,
+            [](uint8_t x, uint8_t y) -> uint8_t { return static_cast<uint8_t>(x | y); });
+    } else if (a.dtype() == DType::UInt16) {
+        sycl_broadcast_binary<uint16_t, BitwiseOrU16>(a, b, result, info, queue,
+            [](uint16_t x, uint16_t y) -> uint16_t { return static_cast<uint16_t>(x | y); });
+    } else if (a.dtype() == DType::UInt32) {
+        sycl_broadcast_binary<uint32_t, BitwiseOrU32>(a, b, result, info, queue,
+            [](uint32_t x, uint32_t y) { return x | y; });
+    } else if (a.dtype() == DType::UInt64) {
+        sycl_broadcast_binary<uint64_t, BitwiseOrU64>(a, b, result, info, queue,
+            [](uint64_t x, uint64_t y) { return x | y; });
+    } else if (a.dtype() == DType::Bool) {
+        sycl_broadcast_binary<uint8_t, BitwiseOrBool>(a, b, result, info, queue,
+            [](uint8_t x, uint8_t y) -> uint8_t { return static_cast<uint8_t>((x != 0) || (y != 0)); });
+    } else { throw std::runtime_error("bitwise_or: unsupported dtype (expected Int8/16/32/64, UInt8/16/32/64, or Bool)"); }
     return result;
 }
 auto bitwise_xor_kernel(const Tensor& a_in, const Tensor& b_in, sycl::queue& queue) -> Tensor {
     // Flat-indexed element access below requires contiguous operands (mirror add_kernel).
     Tensor a = a_in.is_contiguous() ? a_in : contiguous_kernel(a_in, queue);
     Tensor b = b_in.is_contiguous() ? b_in : contiguous_kernel(b_in, queue);
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
-    if (n == 0) return result;
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    auto out_shape = broadcast_shapes(a_shape, b_shape);
+    auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+    Tensor result(out_shape, a.dtype(), a.device());
+    if (result.numel() == 0) return result;
     if (a.dtype() == DType::Int8) {
-        const int8_t* ad = a.data<int8_t>(); const int8_t* bd = b.data<int8_t>(); int8_t* od = result.data<int8_t>();
-        queue.parallel_for<BitwiseXorI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
+        sycl_broadcast_binary<int8_t, BitwiseXorI8>(a, b, result, info, queue,
+            [](int8_t x, int8_t y) -> int8_t { return static_cast<int8_t>(x ^ y); });
     } else if (a.dtype() == DType::Int16) {
-        const int16_t* ad = a.data<int16_t>(); const int16_t* bd = b.data<int16_t>(); int16_t* od = result.data<int16_t>();
-        queue.parallel_for<BitwiseXorI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
+        sycl_broadcast_binary<int16_t, BitwiseXorI16>(a, b, result, info, queue,
+            [](int16_t x, int16_t y) -> int16_t { return static_cast<int16_t>(x ^ y); });
     } else if (a.dtype() == DType::Int32) {
-        const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
-        queue.parallel_for<BitwiseXorI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
+        sycl_broadcast_binary<int32_t, BitwiseXorI32>(a, b, result, info, queue,
+            [](int32_t x, int32_t y) { return x ^ y; });
     } else if (a.dtype() == DType::Int64) {
-        const int64_t* ad = a.data<int64_t>(); const int64_t* bd = b.data<int64_t>(); int64_t* od = result.data<int64_t>();
-        queue.parallel_for<BitwiseXorI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
-    } else { throw std::runtime_error("bitwise_xor: unsupported dtype (expected Int8/16/32/64)"); }
+        sycl_broadcast_binary<int64_t, BitwiseXorI64>(a, b, result, info, queue,
+            [](int64_t x, int64_t y) { return x ^ y; });
+    } else if (a.dtype() == DType::UInt8) {
+        sycl_broadcast_binary<uint8_t, BitwiseXorU8>(a, b, result, info, queue,
+            [](uint8_t x, uint8_t y) -> uint8_t { return static_cast<uint8_t>(x ^ y); });
+    } else if (a.dtype() == DType::UInt16) {
+        sycl_broadcast_binary<uint16_t, BitwiseXorU16>(a, b, result, info, queue,
+            [](uint16_t x, uint16_t y) -> uint16_t { return static_cast<uint16_t>(x ^ y); });
+    } else if (a.dtype() == DType::UInt32) {
+        sycl_broadcast_binary<uint32_t, BitwiseXorU32>(a, b, result, info, queue,
+            [](uint32_t x, uint32_t y) { return x ^ y; });
+    } else if (a.dtype() == DType::UInt64) {
+        sycl_broadcast_binary<uint64_t, BitwiseXorU64>(a, b, result, info, queue,
+            [](uint64_t x, uint64_t y) { return x ^ y; });
+    } else if (a.dtype() == DType::Bool) {
+        sycl_broadcast_binary<uint8_t, BitwiseXorBool>(a, b, result, info, queue,
+            [](uint8_t x, uint8_t y) -> uint8_t { return static_cast<uint8_t>((x != 0) != (y != 0)); });
+    } else { throw std::runtime_error("bitwise_xor: unsupported dtype (expected Int8/16/32/64, UInt8/16/32/64, or Bool)"); }
     return result;
 }
 auto bitwise_not_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
@@ -6688,41 +7001,78 @@ auto bitwise_not_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
     } else { throw std::runtime_error("bitwise_not: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
-auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor {
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
-    if (n == 0) return result;
+// Shift amounts >= the operand's bit width, or negative, are undefined
+// behavior in C++; clamp defensively (matches CPU/CUDA's guarded shift):
+// left out-of-range -> 0, right out-of-range -> sign-saturated (0 or -1).
+auto bitwise_left_shift_kernel(const Tensor& input_in, const Tensor& shift_in, sycl::queue& queue) -> Tensor {
+    Tensor input = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    Tensor shift = shift_in.is_contiguous() ? shift_in : contiguous_kernel(shift_in, queue);
+    auto a_shape = input.shape();
+    auto b_shape = shift.shape();
+    auto out_shape = broadcast_shapes(a_shape, b_shape);
+    auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+    Tensor result(out_shape, input.dtype(), input.device());
+    if (result.numel() == 0) return result;
     if (input.dtype() == DType::Int8) {
-        const int8_t* id = input.data<int8_t>(); const int8_t* sd = shift.data<int8_t>(); int8_t* od = result.data<int8_t>();
-        queue.parallel_for<BitwiseLShiftI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+        sycl_broadcast_binary<int8_t, BitwiseLShiftI8>(input, shift, result, info, queue,
+            [](int8_t x, int8_t s) -> int8_t {
+                if (s < 0 || s >= 8) return 0;
+                return static_cast<int8_t>(static_cast<uint8_t>(x) << s);
+            });
     } else if (input.dtype() == DType::Int16) {
-        const int16_t* id = input.data<int16_t>(); const int16_t* sd = shift.data<int16_t>(); int16_t* od = result.data<int16_t>();
-        queue.parallel_for<BitwiseLShiftI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+        sycl_broadcast_binary<int16_t, BitwiseLShiftI16>(input, shift, result, info, queue,
+            [](int16_t x, int16_t s) -> int16_t {
+                if (s < 0 || s >= 16) return 0;
+                return static_cast<int16_t>(static_cast<uint16_t>(x) << s);
+            });
     } else if (input.dtype() == DType::Int32) {
-        const int32_t* id = input.data<int32_t>(); const int32_t* sd = shift.data<int32_t>(); int32_t* od = result.data<int32_t>();
-        queue.parallel_for<BitwiseLShiftI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+        sycl_broadcast_binary<int32_t, BitwiseLShiftI32>(input, shift, result, info, queue,
+            [](int32_t x, int32_t s) -> int32_t {
+                if (s < 0 || s >= 32) return 0;
+                return static_cast<int32_t>(static_cast<uint32_t>(x) << s);
+            });
     } else if (input.dtype() == DType::Int64) {
-        const int64_t* id = input.data<int64_t>(); const int64_t* sd = shift.data<int64_t>(); int64_t* od = result.data<int64_t>();
-        queue.parallel_for<BitwiseLShiftI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+        sycl_broadcast_binary<int64_t, BitwiseLShiftI64>(input, shift, result, info, queue,
+            [](int64_t x, int64_t s) -> int64_t {
+                if (s < 0 || s >= 64) return 0;
+                return static_cast<int64_t>(static_cast<uint64_t>(x) << s);
+            });
     } else { throw std::runtime_error("bitwise_left_shift: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
-auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor {
-    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
-    if (n == 0) return result;
+auto bitwise_right_shift_kernel(const Tensor& input_in, const Tensor& shift_in, sycl::queue& queue) -> Tensor {
+    Tensor input = input_in.is_contiguous() ? input_in : contiguous_kernel(input_in, queue);
+    Tensor shift = shift_in.is_contiguous() ? shift_in : contiguous_kernel(shift_in, queue);
+    auto a_shape = input.shape();
+    auto b_shape = shift.shape();
+    auto out_shape = broadcast_shapes(a_shape, b_shape);
+    auto info = compute_broadcast_info(a_shape, b_shape, out_shape);
+    Tensor result(out_shape, input.dtype(), input.device());
+    if (result.numel() == 0) return result;
     if (input.dtype() == DType::Int8) {
-        const int8_t* id = input.data<int8_t>(); const int8_t* sd = shift.data<int8_t>(); int8_t* od = result.data<int8_t>();
-        queue.parallel_for<BitwiseRShiftI8>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+        sycl_broadcast_binary<int8_t, BitwiseRShiftI8>(input, shift, result, info, queue,
+            [](int8_t x, int8_t s) -> int8_t {
+                if (s < 0 || s >= 8) return x < 0 ? -1 : 0;
+                return static_cast<int8_t>(x >> s);
+            });
     } else if (input.dtype() == DType::Int16) {
-        const int16_t* id = input.data<int16_t>(); const int16_t* sd = shift.data<int16_t>(); int16_t* od = result.data<int16_t>();
-        queue.parallel_for<BitwiseRShiftI16>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+        sycl_broadcast_binary<int16_t, BitwiseRShiftI16>(input, shift, result, info, queue,
+            [](int16_t x, int16_t s) -> int16_t {
+                if (s < 0 || s >= 16) return x < 0 ? -1 : 0;
+                return static_cast<int16_t>(x >> s);
+            });
     } else if (input.dtype() == DType::Int32) {
-        const int32_t* id = input.data<int32_t>(); const int32_t* sd = shift.data<int32_t>(); int32_t* od = result.data<int32_t>();
-        queue.parallel_for<BitwiseRShiftI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+        sycl_broadcast_binary<int32_t, BitwiseRShiftI32>(input, shift, result, info, queue,
+            [](int32_t x, int32_t s) -> int32_t {
+                if (s < 0 || s >= 32) return x < 0 ? -1 : 0;
+                return x >> s;
+            });
     } else if (input.dtype() == DType::Int64) {
-        const int64_t* id = input.data<int64_t>(); const int64_t* sd = shift.data<int64_t>(); int64_t* od = result.data<int64_t>();
-        queue.parallel_for<BitwiseRShiftI64>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+        sycl_broadcast_binary<int64_t, BitwiseRShiftI64>(input, shift, result, info, queue,
+            [](int64_t x, int64_t s) -> int64_t {
+                if (s < 0 || s >= 64) return x < 0 ? -1 : 0;
+                return x >> s;
+            });
     } else { throw std::runtime_error("bitwise_right_shift: unsupported dtype (expected Int8/16/32/64)"); }
     return result;
 }
@@ -7708,8 +8058,12 @@ auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
 
 struct CumMaxKernelFloat32 {};
 struct CumMaxKernelFloat64 {};
+struct CumMaxKernelInt32 {};
+struct CumMaxKernelInt64 {};
 struct CumMinKernelFloat32 {};
 struct CumMinKernelFloat64 {};
+struct CumMinKernelInt32 {};
+struct CumMinKernelInt64 {};
 struct FmaxKernelFloat32 {};
 struct FmaxKernelFloat64 {};
 struct FmaxKernelInt32 {};
@@ -7737,6 +8091,7 @@ struct QuantileInterpKernelFloat64 {};
 struct QuantileNanFilterFloat32 {};
 struct QuantileNanFilterFloat64 {};
 struct HistcKernelFloat32 {};
+struct HistcKernelFloat64 {};
 struct HistcBinKernelFloat32 {};
 struct HistcBinKernelFloat64 {};
 struct UniqueConsecutiveMaskFloat32 {};
@@ -7771,9 +8126,14 @@ auto cummax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std:
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
     int64_t total_slices = outer_size * inner_size;
 
-    auto launch = [&]<typename T, typename KernelName>() {
-        const T* in_ptr = get_data_ptr<const T>(input_cont);
-        T* val_ptr = get_data_ptr<T>(values);
+    // Takes the source tensor and destination values tensor as explicit
+    // parameters (rather than always closing over input_cont/values) so the
+    // Float16/BFloat16 branch below can reuse this same <float, ...>
+    // instantiation against a temporary Float32 buffer instead of writing
+    // through a mismatched-dtype `values` pointer.
+    auto launch = [&]<typename T, typename KernelName>(const Tensor& in_tensor, Tensor& out_values) {
+        const T* in_ptr = get_data_ptr<const T>(in_tensor);
+        T* val_ptr = get_data_ptr<T>(out_values);
         int64_t* idx_ptr = get_data_ptr<int64_t>(indices_out);
 
         queue.parallel_for<KernelName>(sycl::range<1>(total_slices), [=](sycl::id<1> id) {
@@ -7800,8 +8160,24 @@ auto cummax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std:
     };
 
     switch (dtype) {
-        case DType::Float32: launch.template operator()<float, CumMaxKernelFloat32>(); break;
-        case DType::Float64: launch.template operator()<double, CumMaxKernelFloat64>(); break;
+        case DType::Float32: launch.template operator()<float, CumMaxKernelFloat32>(input_cont, values); break;
+        case DType::Float64: launch.template operator()<double, CumMaxKernelFloat64>(input_cont, values); break;
+        case DType::Int32:   launch.template operator()<int32_t, CumMaxKernelInt32>(input_cont, values); break;
+        case DType::Int64:   launch.template operator()<int64_t, CumMaxKernelInt64>(input_cont, values); break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Float16/BFloat16: widen to Float32, compute, narrow values back.
+            // Indices are Int64 and dtype-independent throughout, so
+            // indices_out (already allocated above) is written directly.
+            // Mirrors CPU (src/backends/cpu/kernels/advanced.cpp:898-904) and
+            // CUDA (src/backends/cuda/kernels/advanced.cu:3700-3713).
+            DType orig = dtype;
+            Tensor input_f32 = input_cont.to(DType::Float32);
+            Tensor values_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+            launch.template operator()<float, CumMaxKernelFloat32>(input_f32, values_f32);
+            values = values_f32.to(orig);
+            break;
+        }
         default: throw std::runtime_error("cummax OneAPI: unsupported dtype");
     }
     return {values, indices_out};
@@ -7830,9 +8206,14 @@ auto cummin_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std:
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
     int64_t total_slices = outer_size * inner_size;
 
-    auto launch = [&]<typename T, typename KernelName>() {
-        const T* in_ptr = get_data_ptr<const T>(input_cont);
-        T* val_ptr = get_data_ptr<T>(values);
+    // Takes the source tensor and destination values tensor as explicit
+    // parameters (rather than always closing over input_cont/values) so the
+    // Float16/BFloat16 branch below can reuse this same <float, ...>
+    // instantiation against a temporary Float32 buffer instead of writing
+    // through a mismatched-dtype `values` pointer.
+    auto launch = [&]<typename T, typename KernelName>(const Tensor& in_tensor, Tensor& out_values) {
+        const T* in_ptr = get_data_ptr<const T>(in_tensor);
+        T* val_ptr = get_data_ptr<T>(out_values);
         int64_t* idx_ptr = get_data_ptr<int64_t>(indices_out);
 
         queue.parallel_for<KernelName>(sycl::range<1>(total_slices), [=](sycl::id<1> id) {
@@ -7859,8 +8240,24 @@ auto cummin_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std:
     };
 
     switch (dtype) {
-        case DType::Float32: launch.template operator()<float, CumMinKernelFloat32>(); break;
-        case DType::Float64: launch.template operator()<double, CumMinKernelFloat64>(); break;
+        case DType::Float32: launch.template operator()<float, CumMinKernelFloat32>(input_cont, values); break;
+        case DType::Float64: launch.template operator()<double, CumMinKernelFloat64>(input_cont, values); break;
+        case DType::Int32:   launch.template operator()<int32_t, CumMinKernelInt32>(input_cont, values); break;
+        case DType::Int64:   launch.template operator()<int64_t, CumMinKernelInt64>(input_cont, values); break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Float16/BFloat16: widen to Float32, compute, narrow values back.
+            // Indices are Int64 and dtype-independent throughout, so
+            // indices_out (already allocated above) is written directly.
+            // Mirrors CPU (src/backends/cpu/kernels/advanced.cpp:933-939) and
+            // CUDA (src/backends/cuda/kernels/advanced.cu:3805-3818).
+            DType orig = dtype;
+            Tensor input_f32 = input_cont.to(DType::Float32);
+            Tensor values_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, device);
+            launch.template operator()<float, CumMinKernelFloat32>(input_f32, values_f32);
+            values = values_f32.to(orig);
+            break;
+        }
         default: throw std::runtime_error("cummin OneAPI: unsupported dtype");
     }
     return {values, indices_out};
@@ -7996,9 +8393,19 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, sycl::queu
 
 #ifdef TENZOR_HAS_ONEDPL
         auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
-        ::oneapi::dpl::sort(policy, sorted_buf, sorted_buf + num_test);
+        // NaN-safe comparator: default operator< makes every NaN comparison
+        // false, violating strict-weak-ordering and leaving test_elements
+        // effectively unsorted around any NaN, which breaks the binary-search
+        // invariant below. sycl_nan_safe_less (sycl_sort_utils.hpp) sorts NaN
+        // to the end instead, mirroring CUDA's isin_nan_safe_less
+        // (src/backends/cuda/kernels/advanced.cu:4096).
+        ::oneapi::dpl::sort(policy, sorted_buf, sorted_buf + num_test,
+            [](T a, T b) { return sycl_nan_safe_less(a, b); });
 #else
-        // Fallback: device-side bitonic sort when oneDPL unavailable
+        // Fallback: device-side bitonic sort when oneDPL unavailable.
+        // sycl_bitonic_sort is itself NaN-safe (sycl_sort_utils.hpp), so a NaN
+        // test element sorts to the end rather than corrupting the
+        // binary-search invariant below — see the oneDPL branch's comment.
         sycl_bitonic_sort(sorted_buf, num_test, queue);
 #endif
 
@@ -8065,7 +8472,9 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
             out_shape.push_back(shape[i]);
         }
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/ROCm/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor values(out_shape, dtype, device);
     Tensor indices_out(out_shape, DType::Int64, device);
@@ -8096,7 +8505,13 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
             for (int64_t o = 0; o < outer_size; ++o) {
                 T* slice_vals = tmp_vals + o * dim_size;
                 int64_t* slice_idx = tmp_idx + o * dim_size;
-                ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size, slice_idx);
+                // NaN-safe comparator: default operator< is NaN-blind, which
+                // violates strict-weak-ordering (UB) when the slice contains
+                // NaN. sycl_nan_safe_less (sycl_sort_utils.hpp) sorts NaN
+                // deterministically to the end, matching CPU's nan_less-based
+                // kthvalue and this file's own Quantile NaN-aware comparator.
+                ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size, slice_idx,
+                    [](T a, T b) { return sycl_nan_safe_less(a, b); });
                 // Copy k-th element (0-indexed: k-1)
                 queue.memcpy(out_val_ptr + o, slice_vals + (k - 1), sizeof(T)).wait();
                 queue.memcpy(out_idx_ptr + o, slice_idx + (k - 1), sizeof(int64_t)).wait();
@@ -8124,6 +8539,8 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
             for (int64_t o = 0; o < outer_size; ++o) {
                 T* slice_vals = tmp_vals + o * dim_size;
                 int64_t* slice_idx = tmp_idx + o * dim_size;
+                // sycl_bitonic_sort_by_key is itself NaN-safe (sycl_sort_utils.hpp)
+                // — see the oneDPL branch's comment above.
                 sycl_bitonic_sort_by_key(slice_vals, slice_idx, dim_size, queue);
                 // Copy k-th element (0-indexed: k-1)
                 queue.memcpy(out_val_ptr + o, slice_vals + (k - 1), sizeof(T)).wait();
@@ -8154,7 +8571,9 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
                     idx_buf[i] = static_cast<int64_t>(i[0]);
                 }).wait();
 
-                ::oneapi::dpl::sort_by_key(policy, slice_buf, slice_buf + dim_size, idx_buf);
+                // NaN-safe comparator — see the contiguous-slice branch above.
+                ::oneapi::dpl::sort_by_key(policy, slice_buf, slice_buf + dim_size, idx_buf,
+                    [](T a, T b) { return sycl_nan_safe_less(a, b); });
                 queue.memcpy(out_val_ptr + s, slice_buf + (k - 1), sizeof(T)).wait();
                 queue.memcpy(out_idx_ptr + s, idx_buf + (k - 1), sizeof(int64_t)).wait();
             }
@@ -8180,6 +8599,8 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
                     idx_buf[i] = static_cast<int64_t>(i[0]);
                 }).wait();
 
+                // sycl_bitonic_sort_by_key is itself NaN-safe (sycl_sort_utils.hpp)
+                // — see the oneDPL branch's comment above.
                 sycl_bitonic_sort_by_key(slice_buf, idx_buf, dim_size, queue);
                 queue.memcpy(out_val_ptr + s, slice_buf + (k - 1), sizeof(T)).wait();
                 queue.memcpy(out_idx_ptr + s, idx_buf + (k - 1), sizeof(int64_t)).wait();
@@ -8234,7 +8655,9 @@ static auto quantile_impl(const Tensor& input, double q, int64_t dim, bool keepd
             out_shape.push_back(shape[i]);
         }
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/ROCm/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor output(out_shape, dtype, device);
 
@@ -8349,7 +8772,11 @@ static auto quantile_impl(const Tensor& input, double q, int64_t dim, bool keepd
                 continue;
             }
 
-            // Sort valid elements on device
+            // Sort valid elements on device. sycl_bitonic_sort is itself
+            // NaN-safe (sycl_sort_utils.hpp) so NaN sorts LAST, matching the
+            // oneDPL branch above and CPU's nan_less. For ignore_nan
+            // (nanquantile) NaNs are already partitioned out above, so this
+            // is a no-op there.
             sycl_bitonic_sort(slice_buf, valid_count, queue);
 
             // Compute interpolated quantile value on device
@@ -8392,7 +8819,117 @@ auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim
 auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim,
                       sycl::queue& queue) -> Tensor
 {
-    return nanquantile_kernel(input, 0.5, dim, keepdim, queue);
+    // Must NOT delegate to nanquantile_kernel(q=0.5): that linearly
+    // interpolates between the two middle values (e.g. nanmedian([1,2,3,4])
+    // would give 2.5). PyTorch/CPU nanmedian semantics pick the lower
+    // median with no interpolation -- index (count-1)/2 of the sorted
+    // non-NaN values (matches CPU's nanmedian_impl in
+    // src/backends/cpu/kernels/advanced.cpp and CUDA's dedicated
+    // nanmedian_kernel_impl in src/backends/cuda/kernels/advanced.cu). This
+    // mirrors quantile_impl's per-slice gather + NaN-partition + sort
+    // structure above, just swapping the final interpolation step for a
+    // direct index.
+    Tensor input_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/ROCm/Vulkan's convention -- do not force a size-1
+    // dim.
+
+    Tensor output(out_shape, dtype, device);
+
+    auto launch = [&]<typename T>() {
+        const T* in_ptr = get_data_ptr<const T>(input_cont);
+        T* out_ptr = get_data_ptr<T>(output);
+        T* slice_buf = sycl::malloc_device<T>(dim_size, queue);
+#ifdef TENZOR_HAS_ONEDPL
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+#endif
+
+        for (int64_t s = 0; s < total_slices; ++s) {
+            int64_t outer = s / inner_size;
+            int64_t inner = s % inner_size;
+            int64_t base = outer * dim_size * inner_size + inner;
+
+            // Gather slice to contiguous device buffer
+            queue.parallel_for(sycl::range<1>(dim_size), [=](sycl::id<1> i) {
+                slice_buf[i] = in_ptr[base + i[0] * inner_size];
+            }).wait();
+
+            int64_t valid_count;
+#ifdef TENZOR_HAS_ONEDPL
+            // Partition non-NaN values to the front on device
+            auto end_it = ::oneapi::dpl::partition(policy, slice_buf, slice_buf + dim_size,
+                [](T val) { return !sycl::isnan(static_cast<float>(val)); });
+            valid_count = end_it - slice_buf;
+#else
+            // Fallback: compact non-NaN values via a single-task pass
+            int64_t* d_count = sycl::malloc_device<int64_t>(1, queue);
+            T* compact_buf = sycl::malloc_device<T>(dim_size, queue);
+            queue.single_task([=]() {
+                int64_t c = 0;
+                for (int64_t i = 0; i < dim_size; ++i) {
+                    if (!sycl::isnan(static_cast<float>(slice_buf[i]))) {
+                        compact_buf[c++] = slice_buf[i];
+                    }
+                }
+                d_count[0] = c;
+            }).wait();
+            queue.memcpy(&valid_count, d_count, sizeof(int64_t)).wait();
+            queue.memcpy(slice_buf, compact_buf, valid_count * sizeof(T)).wait();
+            sycl::free(d_count, queue);
+            sycl::free(compact_buf, queue);
+#endif
+
+            if (valid_count == 0) {
+                T nan_val = static_cast<T>(NAN);
+                queue.memcpy(out_ptr + s, &nan_val, sizeof(T)).wait();
+                continue;
+            }
+
+            // Sort the (already NaN-free) valid elements on device.
+#ifdef TENZOR_HAS_ONEDPL
+            ::oneapi::dpl::sort(policy, slice_buf, slice_buf + valid_count,
+                [](T a, T b) { return a < b; });
+#else
+            sycl_bitonic_sort(slice_buf, valid_count, queue);
+#endif
+
+            // Lower median, no interpolation: index (count-1)/2, matching
+            // CPU's nanmedian_impl and CUDA's nanmedian_kernel_impl
+            // (nanmedian([1,2,3,4]) -> 2, not 2.5).
+            int64_t median_idx = (valid_count - 1) / 2;
+            queue.memcpy(out_ptr + s, slice_buf + median_idx, sizeof(T)).wait();
+        }
+
+        sycl::free(slice_buf, queue);
+    };
+
+    switch (dtype) {
+        case DType::Float32: launch.template operator()<float>(); break;
+        case DType::Float64: launch.template operator()<double>(); break;
+        default: throw std::runtime_error("nanmedian OneAPI: unsupported dtype");
+    }
+    return output;
 }
 
 // ============================================================================
@@ -8405,74 +8942,122 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
     Tensor input_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     int64_t n = input_cont.numel();
     const auto device = input_cont.device();
+    const auto dtype = input_cont.dtype();
 
-    // Work in float32 for the histogram accumulation
-    Tensor output({bins}, DType::Float32, device);
-
-    // Zero-initialize output on device
-    queue.memset(get_data_ptr<float>(output), 0, bins * sizeof(float)).wait();
-
-    // Get input as float32 on device
-    const float* in_ptr = nullptr;
-    Tensor f32_input;
-    if (input_cont.dtype() == DType::Float32) {
-        in_ptr = get_data_ptr<const float>(input_cont);
-    } else if (input_cont.dtype() == DType::Float64) {
-        f32_input = input_cont.to(DType::Float32);
-        in_ptr = get_data_ptr<const float>(f32_input);
-    } else {
-        throw std::runtime_error("histc OneAPI: unsupported dtype");
+    // Float16/BFloat16: widen to Float32, compute, narrow the result back
+    // (matches CPU/CUDA histc, which both widen half types through Float32).
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        Tensor out_f32 = histc_kernel(input_cont.to(DType::Float32), bins, min_val, max_val, queue);
+        return out_f32.to(dtype);
     }
 
-    // Auto-detect range on device
-    if (min_val >= max_val) {
+    // Native-precision path: bin (and return) in T = the input's own dtype,
+    // so Float64 input keeps double precision throughout instead of being
+    // downcast to Float32 first. Matches CPU's histc_kernel
+    // (src/backends/cpu/kernels/advanced.cpp) and CUDA's histc_kernel
+    // (src/backends/cuda/kernels/advanced.cu), which are both templated on T.
+    Tensor output({bins}, dtype, device);
+
+    auto launch = [&]<typename T, typename BinKernel, typename NarrowKernel>() {
+        const T* in_ptr = get_data_ptr<const T>(input_cont);
+
+        // Auto-detect range on device. Guarded by n > 0: both the oneDPL
+        // minmax_element below and the parallel_for reduction fallback
+        // unconditionally dereference/seed from element 0 of `in_ptr`, which on
+        // an empty input is a read past a zero-length device allocation (UB).
+        // An empty input contributes no bin increments regardless of range (the
+        // parallel_for below iterates 0 times), so skipping detection and
+        // leaving min_val/max_val at whatever was passed in is safe — the
+        // degenerate-range guard right below still produces a valid bin_width.
+        if (min_val >= max_val && n > 0) {
 #ifdef TENZOR_HAS_ONEDPL
-        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
-        auto minmax = ::oneapi::dpl::minmax_element(policy, in_ptr, in_ptr + n);
-        // Read two scalars from device (minimal transfer — just two floats for range)
-        float h_min, h_max;
-        queue.memcpy(&h_min, &(*minmax.first), sizeof(float)).wait();
-        queue.memcpy(&h_max, &(*minmax.second), sizeof(float)).wait();
-        min_val = h_min;
-        max_val = h_max;
+            auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+            auto minmax = ::oneapi::dpl::minmax_element(policy, in_ptr, in_ptr + n);
+            // Read two scalars from device (minimal transfer — just two T's for range)
+            T h_min, h_max;
+            queue.memcpy(&h_min, &(*minmax.first), sizeof(T)).wait();
+            queue.memcpy(&h_max, &(*minmax.second), sizeof(T)).wait();
+            min_val = static_cast<double>(h_min);
+            max_val = static_cast<double>(h_max);
 #else
-        // Fallback: reduction via parallel_for
-        float* d_min = sycl::malloc_device<float>(1, queue);
-        float* d_max = sycl::malloc_device<float>(1, queue);
-        queue.single_task([=]() { d_min[0] = in_ptr[0]; d_max[0] = in_ptr[0]; }).wait();
-        queue.parallel_for(sycl::range<1>(n), sycl::reduction(d_min, sycl::minimum<float>()),
-                           sycl::reduction(d_max, sycl::maximum<float>()),
-                           [=](sycl::id<1> idx, auto& mn, auto& mx) {
-                               mn.combine(in_ptr[idx]);
-                               mx.combine(in_ptr[idx]);
-                           }).wait();
-        float h_min, h_max;
-        queue.memcpy(&h_min, d_min, sizeof(float)).wait();
-        queue.memcpy(&h_max, d_max, sizeof(float)).wait();
-        sycl::free(d_min, queue);
-        sycl::free(d_max, queue);
-        min_val = h_min;
-        max_val = h_max;
+            // Fallback: reduction via parallel_for
+            T* d_min = sycl::malloc_device<T>(1, queue);
+            T* d_max = sycl::malloc_device<T>(1, queue);
+            queue.single_task([=]() { d_min[0] = in_ptr[0]; d_max[0] = in_ptr[0]; }).wait();
+            queue.parallel_for(sycl::range<1>(n), sycl::reduction(d_min, sycl::minimum<T>()),
+                               sycl::reduction(d_max, sycl::maximum<T>()),
+                               [=](sycl::id<1> idx, auto& mn, auto& mx) {
+                                   mn.combine(in_ptr[idx]);
+                                   mx.combine(in_ptr[idx]);
+                               }).wait();
+            T h_min, h_max;
+            queue.memcpy(&h_min, d_min, sizeof(T)).wait();
+            queue.memcpy(&h_max, d_max, sizeof(T)).wait();
+            sycl::free(d_min, queue);
+            sycl::free(d_max, queue);
+            min_val = static_cast<double>(h_min);
+            max_val = static_cast<double>(h_max);
 #endif
-    }
-
-    // Compute histogram on device using atomic operations
-    float* out_ptr = get_data_ptr<float>(output);
-    float f_min = static_cast<float>(min_val);
-    float f_max = static_cast<float>(max_val);
-    float bin_width = (f_max - f_min) / static_cast<float>(bins);
-
-    queue.parallel_for<HistcBinKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
-        float val = in_ptr[idx];
-        if (val >= f_min && val <= f_max) {
-            int64_t bin = static_cast<int64_t>((val - f_min) / bin_width);
-            if (bin >= bins) bin = bins - 1;
-            sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                             sycl::memory_scope::device,
-                             sycl::access::address_space::global_space> atom(out_ptr[bin]);
-            atom += 1.0f;
         }
-    }).wait();
+
+        T t_min = static_cast<T>(min_val);
+        T t_max = static_cast<T>(max_val);
+        // Degenerate-range guard: an all-identical input (or an explicit
+        // min==max request, or the n==0 case above where min_val/max_val were
+        // left untouched) would otherwise divide by a zero bin_width below,
+        // making (val-t_min)/bin_width evaluate to NaN and
+        // static_cast<int64_t>(NaN) UB. Matches CPU's `if (lo >= hi) hi = lo + 1`
+        // (src/backends/cpu/kernels/advanced.cpp:1503) and CUDA's equivalent
+        // guard (src/backends/cuda/kernels/advanced.cu:4956).
+        if (t_max <= t_min) {
+            t_max = t_min + T(1);
+        }
+        T bin_width = (t_max - t_min) / static_cast<T>(bins);
+
+        // Accumulate counts in an int64 scratch buffer rather than atomically
+        // incrementing the T output directly: a running
+        // `out_data[bin] += T(1)` in Float32 stops incrementing past 2^24
+        // elements per bin (float32 can't exactly represent integers beyond
+        // 2^24), silently undercounting large inputs. Matches CPU's int64
+        // `counts` buffer (src/backends/cpu/kernels/advanced.cpp:1510-1513) and
+        // CUDA's int64 scratch + narrow-kernel pattern
+        // (src/backends/cuda/kernels/advanced.cu:4877-4903). Cast to the output
+        // dtype only after accumulation is complete, via the NarrowKernel below.
+        int64_t* d_counts = sycl::malloc_device<int64_t>(bins, queue);
+        queue.memset(d_counts, 0, bins * sizeof(int64_t)).wait();
+
+        queue.parallel_for<BinKernel>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            T val = in_ptr[idx];
+            if (val >= t_min && val <= t_max) {
+                int64_t bin = static_cast<int64_t>((val - t_min) / bin_width);
+                if (bin >= bins) bin = bins - 1;
+                sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
+                                 sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> atom(d_counts[bin]);
+                atom += int64_t(1);
+            }
+        }).wait();
+
+        // Narrow the int64 counts to the T output now that accumulation
+        // (the only place that can race on a bin) is complete.
+        T* out_ptr = get_data_ptr<T>(output);
+        queue.parallel_for<NarrowKernel>(sycl::range<1>(bins), [=](sycl::id<1> b) {
+            out_ptr[b] = static_cast<T>(d_counts[b]);
+        }).wait();
+
+        sycl::free(d_counts, queue);
+    };
+
+    switch (dtype) {
+        case DType::Float32:
+            launch.template operator()<float, HistcBinKernelFloat32, HistcKernelFloat32>();
+            break;
+        case DType::Float64:
+            launch.template operator()<double, HistcBinKernelFloat64, HistcKernelFloat64>();
+            break;
+        default:
+            throw std::runtime_error("histc OneAPI: unsupported dtype");
+    }
 
     return output;
 }

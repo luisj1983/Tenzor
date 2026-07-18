@@ -8,6 +8,12 @@ layout(local_size_x = 32) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+// Set to 1 (via atomicOr) when a non-positive diagonal residual is seen,
+// i.e. the input is not positive definite. The host reads this back after
+// dispatch and throws — matches CPU/CUDA/ROCm's LAPACK/rocSOLVER info-code
+// check. Mirrors the same convention used by linalg_cholesky_tiled.comp so
+// both the small and tiled Cholesky paths behave identically on non-PD input.
+layout(set = 0, binding = 2) buffer ErrorFlag { uint error_flag[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;
@@ -40,7 +46,13 @@ void main() {
             for (uint k = 0; k < j; k++) {
                 sum -= L[j][k] * L[j][k];
             }
-            L[j][j] = (sum > 0.0) ? sqrt(sum) : 0.0;
+            if (sum <= 0.0) {
+                // Not positive definite: flag for the host to reject, and
+                // substitute a tiny positive epsilon (same convention as the
+                // tiled path) so later columns stay finite until it does.
+                atomicOr(error_flag[0], 1u);
+            }
+            L[j][j] = sqrt(max(sum, 1e-30));
         }
         barrier();
 

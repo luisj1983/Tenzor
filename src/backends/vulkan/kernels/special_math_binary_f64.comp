@@ -136,15 +136,28 @@ double lgamma_lanczos_d(double x) {
     return 0.5 * log_d(2.0 * PI_D) + (xm + 0.5) * log_d(t) - t + log_d(a);
 }
 double lgamma_impl_d(double x) {
+    // Pole at every non-positive integer: return the real IEEE +inf
+    // directly rather than relying on sin_d(PI_D*x)==0.0 (which used a
+    // finite 1e308 sentinel and, since sin_d is a custom polynomial
+    // approximation rather than an exact reduction, does not reliably hit
+    // bit-exact zero at every pole anyway). Independent copy of the same fix
+    // applied to special_math_unary_f64.comp's lgamma_impl_d -- each .comp
+    // shader is compiled standalone.
+    if (x <= 0.0 && x == floor(x)) {
+        return 1.0 / 0.0;  // +inf
+    }
     if (x < 0.5) {
         double sinpx = sin_d(PI_D * x);
-        if (sinpx == 0.0) return 1.0e308;
+        if (sinpx == 0.0) return 1.0 / 0.0;  // +inf (safety net; see check above)
         return log_d(PI_D / abs(sinpx)) - lgamma_lanczos_d(1.0 - x);
     }
     return lgamma_lanczos_d(x);
 }
 
 double beta_impl(double a, double b) {
+    // See the Float32 beta_impl in special_math_binary.comp: with
+    // lgamma_impl_d now returning a real +inf at poles, exp_d(...) here
+    // naturally propagates the pole instead of returning finite garbage.
     return exp_d(lgamma_impl_d(a) + lgamma_impl_d(b) - lgamma_impl_d(a + b));
 }
 
@@ -156,6 +169,14 @@ double zeta_impl(double s, double a) {
     double aN = a + 12.0;
     if (s != 1.0) result += exp_d((1.0 - s) * log_d(aN)) / (s - 1.0);
     result += 0.5 * exp_d(-s * log_d(aN));
+    // Leading Euler-Maclaurin Bernoulli correction terms (B2/12, B4/720,
+    // B6/30240), matching the CPU/CUDA/OneAPI hurwitz_zeta reference; without
+    // them the truncated sum carries an O(s·(a+N)^(-s-1)) error (~7.6e-5 for
+    // ζ(2,1)).
+    result += s * exp_d((-s - 1.0) * log_d(aN)) / 12.0;
+    result -= (s * (s + 1.0) * (s + 2.0)) * exp_d((-s - 3.0) * log_d(aN)) / 720.0;
+    result += (s * (s + 1.0) * (s + 2.0) * (s + 3.0) * (s + 4.0))
+              * exp_d((-s - 5.0) * log_d(aN)) / 30240.0;
     return result;
 }
 

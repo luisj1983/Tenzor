@@ -16,8 +16,23 @@ layout(push_constant) uniform PushConstants {
     uint total_slices;
     uint dim_size;
     uint inner_size;
-    float q;             // quantile value in [0, 1]
+    uint _pad;            // Padding to align q to 8 bytes (double/float64_t
+                           // alignment; see arange_f64.comp / clamp_f64.comp
+                           // for the same pattern)
+    float64_t q;          // quantile value in [0, 1] -- kept in double
+                           // precision so the fraction isn't rounded to ~7
+                           // sig figs (float32) before the f64 interpolation
 } params;
+
+// Strict-greater under NaN-as-largest ordering (NaN sorts LAST, any sign),
+// matching CPU nan_less and quantile.comp's f32 comparator. `a != a` is a
+// reliable NaN test in shaders.
+bool nan_gt(float64_t a, float64_t b) {
+    bool na = a != a;
+    bool nb = b != b;
+    if (na || nb) return na && !nb;   // NaN > finite; nothing > NaN
+    return a > b;
+}
 
 void main() {
     uint slice_idx = gl_GlobalInvocationID.x;
@@ -37,7 +52,7 @@ void main() {
     for (uint i = 1; i < params.dim_size; i++) {
         float64_t key = scratch_data[scratch_base + i];
         int j = int(i) - 1;
-        while (j >= 0 && scratch_data[scratch_base + uint(j)] > key) {
+        while (j >= 0 && nan_gt(scratch_data[scratch_base + uint(j)], key)) {
             scratch_data[scratch_base + uint(j) + 1] = scratch_data[scratch_base + uint(j)];
             j--;
         }
@@ -45,7 +60,7 @@ void main() {
     }
 
     // Linear interpolation (interpolation position computed in double)
-    float64_t pos = float64_t(params.q) * float64_t(params.dim_size - 1);
+    float64_t pos = params.q * float64_t(params.dim_size - 1);
     uint lo = uint(pos);
     uint hi = min(lo + 1, params.dim_size - 1);
     float64_t frac = pos - float64_t(lo);

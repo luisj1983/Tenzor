@@ -27,7 +27,12 @@ int frac_pool_start(int i, int in_size, int out_size, int pool, float u) {
         float alpha = float(in_size - pool) / float(out_size - 1);
         start = int((float(i) + u) * alpha) - int(u * alpha);
     }
-    return clamp(start, 0, in_size - pool);
+    // GLSL's clamp(x, minVal, maxVal) is undefined when minVal > maxVal
+    // (pool > in_size). Apply the bounds explicitly, upper first, matching
+    // the CPU reference's frac_pool_start.
+    start = min(start, in_size - pool);
+    start = max(start, 0);
+    return start;
 }
 
 void main() {

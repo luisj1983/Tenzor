@@ -7007,9 +7007,33 @@ __global__ void cast_f64_to_fp8_e5m2fnuz_kernel(const double* input, uint8_t* ou
 // ============================================================================
 
 template<typename From, typename To>
+__device__ __forceinline__ To cast_saturating(From val) {
+    if constexpr (std::is_floating_point_v<From> && std::is_integral_v<To> &&
+                  !std::is_same_v<To, bool>) {
+        // Saturating conversion (NaN->0, +Inf/overflow->max, -Inf/-overflow->
+        // min), matching what nvcc's native cvt instruction happens to give
+        // for SAME-width float/int pairs (e.g. f32->i32) but NOT for
+        // mixed-width pairs (e.g. f32->i64, f64->i32 previously gave
+        // NaN->INT_MIN, not 0 -- an inconsistency across width pairs, not
+        // just a NaN-handling gap) -- do it explicitly instead of relying on
+        // width-dependent hardware behavior.
+        if (isnan(val)) return To{0};
+        if (val >= static_cast<From>(std::numeric_limits<To>::max())) {
+            return std::numeric_limits<To>::max();
+        }
+        if (val <= static_cast<From>(std::numeric_limits<To>::min())) {
+            return std::numeric_limits<To>::min();
+        }
+        return static_cast<To>(val);
+    } else {
+        return static_cast<To>(val);
+    }
+}
+
+template<typename From, typename To>
 __global__ void cast_element_kernel(const From* input, To* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<To>(input[idx]);
+        output[idx] = cast_saturating<From, To>(input[idx]);
     }
 }
 
@@ -8680,8 +8704,27 @@ __global__ void logical_xor_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloa
 
 // Helper macro for binary logical host wrappers to avoid code duplication
 #define DEFINE_BINARY_LOGICAL_KERNEL(name) \
-auto name##_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor { \
-    if (a.dtype() != b.dtype()) throw std::runtime_error(#name ": tensors must have the same dtype"); \
+auto name##_kernel(const Tensor& a_in, const Tensor& b_in, cudaStream_t stream) -> Tensor { \
+    /* Logical ops are dtype-agnostic per PyTorch semantics: each operand is */ \
+    /* independently reduced to a truthiness bool, so mismatched dtypes are */ \
+    /* allowed (e.g. logical_and(int32_tensor, float32_tensor)). This matches */ \
+    /* CPU's logical_binary_kernel/to_bool_value (math.cpp) and Vulkan's */ \
+    /* dispatchLogicalOp (a.to(Bool)/b.to(Bool)), neither of which enforces */ \
+    /* equal dtypes -- CUDA previously threw here, diverging cross-backend for */ \
+    /* the identical call. When dtypes differ, cast both operands to Bool so */ \
+    /* the existing same-dtype kernels below apply unchanged; same-dtype calls */ \
+    /* keep the original native dispatch (no extra cast/copy). */ \
+    Tensor a_conv, b_conv; \
+    const Tensor* a_ptr = &a_in; \
+    const Tensor* b_ptr = &b_in; \
+    if (a_in.dtype() != b_in.dtype()) { \
+        a_conv = a_in.to(DType::Bool); \
+        b_conv = b_in.to(DType::Bool); \
+        a_ptr = &a_conv; \
+        b_ptr = &b_conv; \
+    } \
+    const Tensor& a = *a_ptr; \
+    const Tensor& b = *b_ptr; \
     /* Broadcast both operands to a common shape and materialize contiguous */ \
     /* copies. The kernels index lhs[idx]/rhs[idx] with one linear index, so a */ \
     /* smaller operand would otherwise be read out of bounds (and the result */ \
@@ -9497,6 +9540,19 @@ Tensor cross_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
 // tan(pi*x) is precision-sensitive near half-integers, so a native float32
 // evaluation would diverge from the CPU reference beyond typical tolerances.
 __device__ inline double digamma_dev_f64(double x) {
+    // True pole at every non-positive integer: PI/tan(PI*x) below depends on
+    // tan(PI*x) hitting exactly zero, which floating-point PI never does --
+    // each backend's differing PI precision then makes the "near-pole"
+    // result diverge wildly and inconsistently from every other backend, not
+    // just from the true pole (e.g. CPU/CUDA ~-2.565e16 vs ROCm/OneAPI/
+    // Vulkan ~+3.59e7 at x=-1 Float32 -- opposite sign, ~9 orders of
+    // magnitude apart). Digamma has no single-valued limit at these poles
+    // (it diverges to +inf from one side, -inf from the other), so NaN --
+    // not a signed infinity -- is the mathematically honest, scipy/PyTorch-
+    // consistent convention shared by every backend after this fix.
+    if (x <= 0.0 && x == floor(x)) {
+        return nan("");
+    }
     double result = 0.0;
     if (x < 0.5) {
         double y = 1.0 - x;

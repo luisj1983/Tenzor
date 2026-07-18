@@ -211,6 +211,31 @@ TEST_P(EmbeddingTest, OutOfRangeIndex) {
     }, std::out_of_range) << "Failed on " << device.to_string();
 }
 
+// Regression: CUDA/ROCm previously silently WRAPPED a negative index
+// (idx += num_embeddings) instead of treating it as out-of-range, so
+// embedding(weight, [-1]) returned weight[num_embeddings-1] on those two
+// backends while CPU/Vulkan/OneAPI correctly threw std::out_of_range for the
+// identical call.
+TEST_P(EmbeddingTest, NegativeIndex) {
+    auto embedding = std::make_shared<Embedding>(10, 5);
+
+    auto input_data = zeros({1}, DType::Int64, device);
+    auto input_cpu = input_data.to(Device::cpu());
+    auto input_ptr = input_cpu.data<int64_t>();
+    input_ptr[0] = -1;  // Negative: out of range, must not silently wrap
+
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
+
+    auto input = Variable(input_data, false);
+
+    EXPECT_THROW({
+        auto out = embedding->forward(input);
+        device.synchronize();
+    }, std::out_of_range) << "Failed on " << device.to_string();
+}
+
 TEST_P(EmbeddingTest, WeightAccess) {
     auto embedding = std::make_shared<Embedding>(10, 5);
 

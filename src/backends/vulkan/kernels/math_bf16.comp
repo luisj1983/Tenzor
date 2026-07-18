@@ -48,6 +48,39 @@ uint packBF16Pair(float v0, float v1) {
     return floatToBF16(v0) | (floatToBF16(v1) << 16);
 }
 
+// pow(base, exponent) with explicit domain handling. GLSL pow(x,y) is
+// exp2(y*log2(x)): NaN for x<0, and spec-undefined for the negative-base/
+// integer-exponent case (which is well-defined mathematically, e.g.
+// pow(-2,4)==16) and for negative-base/non-integer-exponent (where std::pow
+// deterministically returns NaN). Mirrors math.comp's case 9.
+float powSafeF32(float base, float exponent) {
+    if (exponent == 1.0) return base;
+    if (exponent == 0.0) return 1.0;
+    if (exponent == 2.0) return base * base;
+    if (exponent == 3.0) return base * base * base;
+    if (exponent == -1.0) return 1.0 / base;
+    if (base < 0.0) {
+        if (exponent == trunc(exponent)) {
+            float mag = pow(abs(base), exponent);
+            bool odd = mod(abs(exponent), 2.0) != 0.0;
+            return odd ? -mag : mag;
+        }
+        // Negative base, non-integer exponent: real-valued result is
+        // undefined (complex) — match std::pow's deterministic NaN instead
+        // of falling through to GLSL's spec-undefined pow().
+        return uintBitsToFloat(0x7fc00000u);
+    }
+    return pow(base, exponent);
+}
+
+// Round-half-away-from-zero to match std::round / CUDA/ROCm/OneAPI round
+// semantics. GLSL's round() has implementation-defined 0.5 tie-breaking;
+// every other backend rounds ties away from zero. Mirrors math.comp's
+// round_half_away_f32.
+float roundHalfAwayF32(float x) {
+    return sign(x) * floor(abs(x) + 0.5);
+}
+
 void main() {
     // Process 2 elements per thread
     uint pair_idx = gl_GlobalInvocationID.x;
@@ -110,17 +143,10 @@ void main() {
             res0 = abs(val_a0);
             res1 = abs(val_a1);
             break;
-        case 9: // pow (unary with parameter)
-            // Fast paths keep x^n finite for x<0 (GLSL pow returns NaN there).
-            if (params.param == 1.0) { res0 = val_a0; res1 = val_a1; }
-            else if (params.param == 0.0) { res0 = 1.0; res1 = 1.0; }
-            else if (params.param == 2.0) { res0 = val_a0 * val_a0; res1 = val_a1 * val_a1; }
-            else if (params.param == 3.0) { res0 = val_a0 * val_a0 * val_a0; res1 = val_a1 * val_a1 * val_a1; }
-            else if (params.param == -1.0) { res0 = 1.0 / val_a0; res1 = 1.0 / val_a1; }
-            else {
-                res0 = float(pow(float(val_a0), params.param));
-                res1 = float(pow(float(val_a1), params.param));
-            }
+        case 9: // pow (unary with parameter) — domain-guarded to match
+                // std::pow for negative bases; see powSafeF32 above.
+            res0 = powSafeF32(float(val_a0), params.param);
+            res1 = powSafeF32(float(val_a1), params.param);
             break;
         case 10: // sign (unary)
             res0 = float(sign(float(val_a0)));
@@ -134,9 +160,11 @@ void main() {
             res0 = float(ceil(float(val_a0)));
             res1 = float(ceil(float(val_a1)));
             break;
-        case 13: // round
-            res0 = float(round(float(val_a0)));
-            res1 = float(round(float(val_a1)));
+        case 13: // round — round-half-away-from-zero (matches
+                 // std::round / CUDA/ROCm/OneAPI), not GLSL round()'s
+                 // implementation-defined tie-break.
+            res0 = roundHalfAwayF32(float(val_a0));
+            res1 = roundHalfAwayF32(float(val_a1));
             break;
         case 14: // trunc
             res0 = float(trunc(float(val_a0)));
@@ -198,11 +226,14 @@ void main() {
             res0 = float(fa0 - trunc(fa0 / fb0) * fb0);
             res1 = float(fa1 - trunc(fa1 / fb1) * fb1);
             break;
-        case 25: { // remainder (binary)
-            float r0 = round(fa0 / fb0);
-            res0 = float(fa0 - r0 * fb0);
-            float r1 = round(fa1 / fb1);
-            res1 = float(fa1 - r1 * fb1);
+        case 25: { // remainder (binary) - divisor-sign convention, matches
+                   // the f32/f64 shaders and CPU/CUDA/ROCm/OneAPI.
+            float r0 = fa0 - trunc(fa0 / fb0) * fb0;
+            if (r0 != 0.0 && ((r0 < 0.0) != (fb0 < 0.0))) r0 += fb0;
+            res0 = float(r0);
+            float r1 = fa1 - trunc(fa1 / fb1) * fb1;
+            if (r1 != 0.0 && ((r1 < 0.0) != (fb1 < 0.0))) r1 += fb1;
+            res1 = float(r1);
             break;
         }
         case 26: // minimum (binary) — NaN-propagating (torch.minimum): NaN in
@@ -227,13 +258,21 @@ void main() {
             res0 = float(asinh(fa0));
             res1 = float(asinh(fa1));
             break;
-        case 31: // acosh (unary)
-            res0 = float(acosh(fa0));
-            res1 = float(acosh(fa1));
+        case 31: // acosh (unary) — GLSL acosh() is spec-undefined for x<1;
+                 // std::acosh deterministically returns NaN there (matches
+                 // math.comp's case 31).
+            res0 = (fa0 < 1.0) ? uintBitsToFloat(0x7fc00000u) : float(acosh(fa0));
+            res1 = (fa1 < 1.0) ? uintBitsToFloat(0x7fc00000u) : float(acosh(fa1));
             break;
-        case 32: // atanh (unary)
-            res0 = float(atanh(fa0));
-            res1 = float(atanh(fa1));
+        case 32: // atanh (unary) — GLSL atanh() is spec-undefined for
+                 // |x|>=1. std::atanh matches: NaN for |x|>1, +-Inf for the
+                 // exact pole |x|==1 (matches math.comp's case 32).
+            res0 = (abs(fa0) > 1.0) ? uintBitsToFloat(0x7fc00000u) :
+                   (fa0 == 1.0) ? uintBitsToFloat(0x7f800000u) :
+                   (fa0 == -1.0) ? uintBitsToFloat(0xff800000u) : float(atanh(fa0));
+            res1 = (abs(fa1) > 1.0) ? uintBitsToFloat(0x7fc00000u) :
+                   (fa1 == 1.0) ? uintBitsToFloat(0x7f800000u) :
+                   (fa1 == -1.0) ? uintBitsToFloat(0xff800000u) : float(atanh(fa1));
             break;
         case 33: // hypot (binary)
             res0 = float(sqrt(fa0 * fa0 + fb0 * fb0));

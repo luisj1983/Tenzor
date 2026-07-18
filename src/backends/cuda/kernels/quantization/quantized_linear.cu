@@ -223,7 +223,8 @@ __global__ void quantized_linear_int4_cuda_kernel(
     int64_t batch_size, int64_t in_features, int64_t out_features,
     float combined_scale,
     const float* __restrict__ weight_scales,  // per-channel (nullptr => per-tensor)
-    float input_over_output)
+    float input_over_output,
+    int32_t input_zp)
 {
     int64_t b = blockIdx.y;
     int64_t o = blockIdx.x * blockDim.x + threadIdx.x;
@@ -234,15 +235,26 @@ __global__ void quantized_linear_int4_cuda_kernel(
     const uint8_t* weight_row = weight_packed + o * packed_features;
 
     int64_t acc = 0;
+    // sum_w: needed for the asymmetric activation zero-point correction below.
+    // INT4 weights are symmetric (weight_zp==0 always), so unlike the INT8
+    // kernel's full 4-term correction, only the -input_zp*sum_w cross term is
+    // needed (mirrors CPU's fused_qlinear_dequant col_sum_w correction).
+    int64_t sum_w = 0;
     for (int64_t p = 0; p < packed_features; ++p) {
         int lo, hi;
         unpack_int4_dev(weight_row[p], lo, hi);
         acc += static_cast<int64_t>(input_row[p * 2]) * lo;
         acc += static_cast<int64_t>(input_row[p * 2 + 1]) * hi;
+        sum_w += lo + hi;
+    }
+
+    int64_t corrected = acc;
+    if (input_zp != 0) {
+        corrected -= static_cast<int64_t>(input_zp) * sum_w;
     }
 
     float scale = weight_scales ? (input_over_output * weight_scales[o]) : combined_scale;
-    float result = static_cast<float>(acc) * scale;
+    float result = static_cast<float>(corrected) * scale;
     if (bias != nullptr) result += bias[o];
     output[b * out_features + o] = result;
 }
@@ -259,7 +271,8 @@ auto quantized_linear_int4_cuda(
     float weight_scale,
     float output_scale,
     cudaStream_t stream,
-    const float* weight_scales  // per-channel [out_features]; nullptr => per-tensor
+    const float* weight_scales,  // per-channel [out_features]; nullptr => per-tensor
+    int32_t input_zp
 ) -> void {
     if (in_features % 2 != 0) {
         throw std::invalid_argument("quantized_linear_int4_cuda: in_features must be even");
@@ -281,7 +294,7 @@ auto quantized_linear_int4_cuda(
     quantized_linear_int4_cuda_kernel<<<grid, block, 0, stream>>>(
         input, weight_packed, bias, output,
         batch_size, in_features, out_features,
-        combined_scale, weight_scales, input_over_output);
+        combined_scale, weight_scales, input_over_output, input_zp);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 

@@ -295,6 +295,12 @@ __global__ void half_to_float_kernel(const __half* src, float* dst, int64_t n) {
     if (idx < n) dst[idx] = __half2float(src[idx]);
 }
 
+// Convert __nv_bfloat16 array to float array (same rationale as half_to_float_kernel above)
+__global__ void bf16_to_float_kernel(const __nv_bfloat16* src, float* dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) dst[idx] = __bfloat162float(src[idx]);
+}
+
 // Phase-2 reduction kernels: given block-level argmax/argmin indices,
 // compare original values at those indices to find the global winner.
 template<typename T>
@@ -1374,7 +1380,7 @@ static void launch_dim_reduction_max(
         // undefined, matching CPU's max_kernel guard (reduction.cpp), which
         // throws instead of leaving the output_size (real, non-empty) output
         // elements as stale/uninitialized device memory (F-031).
-        throw std::runtime_error("max: cannot reduce over a zero-size dimension");
+        throw std::invalid_argument("max: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1413,7 +1419,7 @@ static void launch_dim_reduction_min(
         // undefined, matching CPU's min_kernel guard (reduction.cpp), which
         // throws instead of leaving the output_size (real, non-empty) output
         // elements as stale/uninitialized device memory (F-031).
-        throw std::runtime_error("min: cannot reduce over a zero-size dimension");
+        throw std::invalid_argument("min: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1501,7 +1507,7 @@ static void launch_dim_reduction_max_half(
         return;
     }
     if (dim_size == 0) {
-        throw std::runtime_error("max: cannot reduce over a zero-size dimension");
+        throw std::invalid_argument("max: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1535,7 +1541,7 @@ static void launch_dim_reduction_min_half(
         return;
     }
     if (dim_size == 0) {
-        throw std::runtime_error("min: cannot reduce over a zero-size dimension");
+        throw std::invalid_argument("min: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1623,7 +1629,7 @@ static void launch_dim_reduction_max_bf16(
         return;
     }
     if (dim_size == 0) {
-        throw std::runtime_error("max: cannot reduce over a zero-size dimension");
+        throw std::invalid_argument("max: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -1657,7 +1663,7 @@ static void launch_dim_reduction_min_bf16(
         return;
     }
     if (dim_size == 0) {
-        throw std::runtime_error("min: cannot reduce over a zero-size dimension");
+        throw std::invalid_argument("min: cannot reduce over a zero-size dimension");
     }
 
     DimMeta meta = make_dim_meta(input_shape, input_strides);
@@ -5292,6 +5298,12 @@ auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, cu
         int64_t output_size = 1;
         for (auto s : output_shape) output_size *= s;
 
+        if (dim_size == 0 && output_size > 0) {
+            // Matches CPU norm_kernel_dim, which throws instead of silently
+            // returning 0 (or, for negative p, dividing by zero) for this case.
+            throw std::invalid_argument("norm: cannot reduce over a zero-size dimension");
+        }
+
         Tensor output(output_shape, input.dtype(), input.device());
 
         // Build DimMeta from input shape/strides
@@ -5749,6 +5761,24 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStrea
             const __half* d_half = reinterpret_cast<const __half*>(input_cont.data_ptr());
             int blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
             half_to_float_kernel<<<blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_half, d_float_buf, n);
+            CUDA_CHECK(cudaGetLastError());
+            if (single_slice) {
+                launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
+            } else {
+                launch_argsort_along_dim(d_float_buf, output.data<int64_t>(),
+                                         outer_size, dim_size, inner_size, descending, stream);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            // CUB RadixSort doesn't support __nv_bfloat16, so convert to
+            // float32 and sort that -- matches the Float16 widen-narrow
+            // path above and CPU/ROCm/OneAPI/Vulkan's BFloat16 support.
+            backend::CachedMemoryGuard d_float_buf_guard(n * sizeof(float));
+            auto* d_float_buf = static_cast<float*>(d_float_buf_guard.get());
+            const __nv_bfloat16* d_bf16 = reinterpret_cast<const __nv_bfloat16*>(input_cont.data_ptr());
+            int blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+            bf16_to_float_kernel<<<blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_bf16, d_float_buf, n);
             CUDA_CHECK(cudaGetLastError());
             if (single_slice) {
                 launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
@@ -6861,13 +6891,26 @@ auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaSt
         // Full reduction
         int64_t n = input.numel();
         if (n == 0) {
-            // logsumexp of empty set is -inf
+            // logsumexp of empty set is -inf (real IEEE -infinity, not a
+            // finite -FLT_MAX/-DBL_MAX sentinel -- matches CPU/Vulkan).
             switch (dtype) {
                 case DType::Float32:
-                    fill_scalar_kernel<<<1, 1, 0, stream>>>(output.data<float>(), -FLT_MAX);
+                    fill_scalar_kernel<<<1, 1, 0, stream>>>(
+                        output.data<float>(), static_cast<float>(-INFINITY));
                     break;
                 case DType::Float64:
-                    fill_scalar_kernel<<<1, 1, 0, stream>>>(output.data<double>(), -DBL_MAX);
+                    fill_scalar_kernel<<<1, 1, 0, stream>>>(
+                        output.data<double>(), static_cast<double>(-INFINITY));
+                    break;
+                case DType::Float16:
+                    fill_scalar_kernel<<<1, 1, 0, stream>>>(
+                        reinterpret_cast<__half*>(output.data_ptr()),
+                        __float2half(static_cast<float>(-INFINITY)));
+                    break;
+                case DType::BFloat16:
+                    fill_scalar_kernel<<<1, 1, 0, stream>>>(
+                        reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                        __float2bfloat16(static_cast<float>(-INFINITY)));
                     break;
                 default: break;
             }
@@ -6905,7 +6948,41 @@ auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaSt
             if (i != normalized_dim) output_size *= input_shape[i];
         }
 
-        if (output_size == 0 || dim_size == 0) {
+        if (output_size == 0) {
+            CUDA_PEEK_AND_THROW(stream, "logsumexp_kernel");
+            return output;
+        }
+        if (dim_size == 0) {
+            // logsumexp over a zero-size dim is logsumexp of the empty set
+            // per output slice = -inf (matches CPU's logsumexp_along_dim,
+            // where the max-accumulator starts at -infinity and the
+            // dim_size==0 loop never updates it). output_size > 0 here, so
+            // `output` is a real, non-empty tensor -- without this it was
+            // left as freshly-allocated, uninitialized device memory.
+            constexpr int fill_block = 256;
+            const int fill_grid = static_cast<int>((output_size + fill_block - 1) / fill_block);
+            switch (dtype) {
+                case DType::Float32:
+                    fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                        output.data<float>(), output_size, static_cast<float>(-INFINITY));
+                    break;
+                case DType::Float64:
+                    fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                        output.data<double>(), output_size, static_cast<double>(-INFINITY));
+                    break;
+                case DType::Float16:
+                    fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                        reinterpret_cast<__half*>(output.data_ptr()), output_size,
+                        __float2half(static_cast<float>(-INFINITY)));
+                    break;
+                case DType::BFloat16:
+                    fill_all_kernel<<<fill_grid, fill_block, 0, stream>>>(
+                        reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), output_size,
+                        __float2bfloat16(static_cast<float>(-INFINITY)));
+                    break;
+                default: break;
+            }
+            CUDA_CHECK(cudaGetLastError());
             CUDA_PEEK_AND_THROW(stream, "logsumexp_kernel");
             return output;
         }

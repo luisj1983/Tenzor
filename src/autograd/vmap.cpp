@@ -204,6 +204,16 @@ void init_builtin_batching_rules() {
     // primary hit-path entries for the corresponding Backward classes.
     for (OpId op : {
         OpId::Neg,
+        // F022: SigmoidBackward_AG/TanhBackward_AG's actual class names
+        // (RTTI-default, no name() override) are "SigmoidBackward_AG" /
+        // "TanhBackward_AG" — the string-keyed registrations below
+        // ("SigmoidBackward"/"TanhBackward", missing the "_AG" suffix)
+        // never match them, so they always fell through to the generic
+        // loop-and-stack path. Now that they report op_id()==Sigmoid/Tanh
+        // (see function.hpp), the OpId-keyed lookup finds them here
+        // instead — same trivial elementwise passthrough as every other
+        // activation in this list.
+        OpId::Sigmoid, OpId::Tanh,
         OpId::Gelu, OpId::Elu, OpId::Selu, OpId::Mish, OpId::Softplus,
         OpId::Exp, OpId::Log, OpId::Sqrt, OpId::Abs,
         OpId::Sin, OpId::Cos, OpId::Tan,
@@ -502,6 +512,15 @@ void init_builtin_batching_rules() {
     register_batching_rule("CholeskyBackward", shape_passthrough);
     register_batching_rule("SvdBackward", shape_passthrough);
     register_batching_rule("QrBackward", shape_passthrough);
+    // F022: same treatment for the linalg siblings that were missing here
+    // (pre-existing gap, independent of op_id() coverage — vmap falls back
+    // to the always-correct loop-and-stack for these regardless, so this is
+    // a pure optimization, not a correctness fix).
+    register_batching_rule("LUSolveBackward", shape_passthrough);
+    register_batching_rule("EigBackward", shape_passthrough);
+    register_batching_rule("CholeskySolveBackward", shape_passthrough);
+    register_batching_rule("LUBackward", shape_passthrough);
+    register_batching_rule("EigvalshBackward", shape_passthrough);
 
     // ====================================================================
     // FFT ops: operate on a specific `dim` that indexes the unbatched view
@@ -580,12 +599,47 @@ void init_builtin_batching_rules() {
     register_batching_rule("SpMMBackward", shape_passthrough);
     register_batching_rule("SpMVBackward", shape_passthrough);
     register_pt_generic("SparseAddBackward");
+    // F022: SparseTriSolveBackward was missing here (pre-existing gap);
+    // same "batch dim is the leading dimension" treatment as its SpMM/SpMV
+    // siblings above.
+    register_batching_rule("SparseTriSolveBackward", shape_passthrough);
 
     // ====================================================================
     // Upsample/Interpolation
     // ====================================================================
     register_batching_rule("UpsampleBilinearBackward", shape_passthrough);
     register_batching_rule("UpsampleNearestBackward", shape_passthrough);
+
+    // ====================================================================
+    // Device transfer / complex view ops (F022 — pre-existing string-name
+    // gaps, independent of op_id() coverage; vmap already falls back to the
+    // always-correct loop-and-stack for these without a rule, so this is a
+    // pure optimization).
+    // ====================================================================
+    // Device residency change is axis-agnostic — a single-shot raw
+    // passthrough (no batch-axis shifting needed) is correct for any
+    // batch_dim, unlike shape_passthrough's move-to-front dance.
+    register_pt_generic("DeviceTransferBackward");
+    // ViewAsReal/ViewAsComplex reinterpret the LAST axis (Complex<->Real
+    // trailing pair dim); vmap prepends the batch axis at the front, so the
+    // trailing axis stays trailing regardless of batch_dim — but use the
+    // conservative move-to-front-and-back treatment already applied to
+    // every other shape/view op in this file rather than assume a raw
+    // single-shot passthrough is safe for every batch_dim.
+    register_batching_rule("ViewAsRealBackward", shape_passthrough);
+    register_batching_rule("ViewAsComplexBackward", shape_passthrough);
+
+    // ====================================================================
+    // InstanceNorm (2D) — F022: the class's real name (RTTI-default, no
+    // name() override) is "InstanceNormBackwardFn", not
+    // "InstanceNorm2dBackward" (the string registered above under
+    // Normalization ops), so that string entry never matched it. Now that
+    // it reports op_id()==InstanceNorm (see normalization.cpp), register
+    // the OpId-keyed rule instead of fixing the stale string (OpId lookup
+    // takes priority in vmap() below, and matches the migration direction
+    // already used elsewhere in this file).
+    // ====================================================================
+    register_batching_rule(OpId::InstanceNorm, shape_passthrough);
 }
 
 // Install the built-in batching rules eagerly at load time, before any user

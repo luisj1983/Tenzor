@@ -634,10 +634,14 @@ auto batchnorm2d_backward_miopen(
 // HIP Kernel-Based Batch Normalization (fallback when MIOpen unavailable)
 // ==============================================================================
 
-auto batchnorm2d_mean_var(const Tensor& input,
+auto batchnorm2d_mean_var(const Tensor& input_orig,
                           Tensor& mean,
                           Tensor& variance,
                           hipStream_t stream) -> void {
+    // The mean/variance kernels index the raw NCHW buffer via linear offsets
+    // derived from N/C/H/W alone, so the input must be contiguous (mirrors
+    // the CPU batchnorm2d_mean_var_kernel and CUDA sibling contiguity guard).
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -708,11 +712,17 @@ auto batchnorm2d_mean_var(const Tensor& input,
 }
 
 // Forward pass (normalization only, no affine)
-auto batchnorm2d_forward(const Tensor& input,
-                         const Tensor& mean,
-                         const Tensor& variance,
+auto batchnorm2d_forward(const Tensor& input_orig,
+                         const Tensor& mean_orig,
+                         const Tensor& variance_orig,
                          float epsilon,
                          hipStream_t stream) -> Tensor {
+    // The normalize kernel indexes the raw NCHW buffer via linear offsets
+    // derived from N/C/H/W alone, so all operands must be contiguous (mirrors
+    // the CPU batchnorm2d_forward_kernel and CUDA sibling contiguity guard).
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -763,13 +773,21 @@ auto batchnorm2d_forward(const Tensor& input,
 }
 
 // Forward pass with affine transform
-auto batchnorm2d_forward_affine(const Tensor& input,
-                                const Tensor& mean,
-                                const Tensor& variance,
-                                const Tensor& gamma,
-                                const Tensor& beta,
+auto batchnorm2d_forward_affine(const Tensor& input_orig,
+                                const Tensor& mean_orig,
+                                const Tensor& variance_orig,
+                                const Tensor& gamma_orig,
+                                const Tensor& beta_orig,
                                 float epsilon,
                                 hipStream_t stream) -> Tensor {
+    // The affine kernel indexes the raw NCHW buffer via linear offsets derived
+    // from N/C/H/W alone, so all operands must be contiguous (mirrors the CPU
+    // batchnorm2d_forward_affine_kernel and CUDA sibling contiguity guard).
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
+    Tensor gamma = gamma_orig.is_contiguous() ? gamma_orig : gamma_orig.contiguous();
+    Tensor beta = beta_orig.is_contiguous() ? beta_orig : beta_orig.contiguous();
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -878,13 +896,21 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean,
 }
 
 // Backward pass - compute gradients
-auto batchnorm2d_backward(const Tensor& grad_output,
-                         const Tensor& input,
-                         const Tensor& mean,
-                         const Tensor& variance,
-                         const Tensor& gamma,
+auto batchnorm2d_backward(const Tensor& grad_output_orig,
+                         const Tensor& input_orig,
+                         const Tensor& mean_orig,
+                         const Tensor& variance_orig,
+                         const Tensor& gamma_orig,
                          float epsilon,
                          hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Backward indexes grad_output/input as linear NCHW buffers and reads the
+    // per-channel stats by [c], so all operands must be contiguous (mirrors
+    // the CPU batchnorm2d_backward_kernel and CUDA sibling contiguity guard).
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
+    Tensor gamma = gamma_orig.is_contiguous() ? gamma_orig : gamma_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];

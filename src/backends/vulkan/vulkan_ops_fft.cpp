@@ -219,6 +219,12 @@ auto VulkanBackend::dispatchTake(const Tensor& input_in, const Tensor& indices) 
         return Tensor({0}, input_in.dtype(), input_in.device());
     }
 
+    // The take shaders silently no-op on an out-of-range index instead of
+    // throwing (no error-reporting path back to the host); validate host-side
+    // first, matching CPU/CUDA/ROCm/OneAPI. Take treats input as a flat 1D
+    // array, so bounds are against its total element count.
+    vulkan_validate_index_bounds(indices, input_in.numel(), "take");
+
     // The take shaders treat the source buffer as a flat contiguous array
     // (push-constant `numel`, flat index lookup) and carry no offset push
     // constant, so a non-contiguous / non-zero-offset input would index into
@@ -534,6 +540,35 @@ auto VulkanBackend::dispatchPut(const Tensor& input, const Tensor& indices_in,
 
     if (indices_in.numel() == 0) return output;
 
+    // Validate indices host-side (normalize negatives, throw on out-of-range),
+    // matching CPU/CUDA/OneAPI. The shaders below have no error-reporting path
+    // back to the host and previously silently no-op'd on an out-of-range
+    // index instead of raising -- unlike CPU/CUDA/OneAPI which all throw.
+    {
+        int64_t num_indices = indices_in.numel();
+        int64_t total_size = input.numel();
+        Tensor idx_host = indices_in.contiguous().to(Device::cpu());
+        if (idx_host.dtype() == DType::Int64) {
+            const int64_t* p = idx_host.data<int64_t>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                int64_t t = p[i];
+                if (t < 0) t += total_size;
+                if (t < 0 || t >= total_size) {
+                    throw std::out_of_range("put: index out of range for flattened tensor");
+                }
+            }
+        } else {
+            const int32_t* p = idx_host.data<int32_t>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                int64_t t = static_cast<int64_t>(p[i]);
+                if (t < 0) t += total_size;
+                if (t < 0 || t >= total_size) {
+                    throw std::out_of_range("put: index out of range for flattened tensor");
+                }
+            }
+        }
+    }
+
     // put shaders read `int indices[]` (32-bit). If the caller passed Int64
     // we must cast down; otherwise the 4-byte stride misaligns every other
     // element just like take did.
@@ -576,6 +611,27 @@ auto VulkanBackend::dispatchPut(const Tensor& input, const Tensor& indices_in,
         endSingleTimeCommands(cmd, dev_id);
 
         return output_f16;
+    }
+
+    // [MEMORY CORRUPTION FIX] The generic "put"/"put_f64" shaders below declare
+    // their Output/Source buffers as 4-byte (put) or 8-byte (put_f64) word
+    // arrays and index them by element index -- there is no dedicated shader
+    // for sub-4-byte element widths. Falling through unwidened here would make
+    // the shader address Int8/UInt8/Bool storage at 4x the correct byte offset
+    // (2x for Int16/UInt16), corrupting unrelated buffer regions instead of
+    // writing the intended element. Widen to Int32 first: unlike dispatchTake's
+    // widen-to-float pattern, an integer->Int32 widen is exact for every value
+    // these dtypes can hold (no precision loss), so both accumulate=false
+    // (overwrite) and accumulate=true (integer add) round-trip correctly.
+    // Mirrors dispatchIndexSelect's own Int8/UInt8-via-Int32 cast-and-back.
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 ||
+        input.dtype() == DType::Int16 || input.dtype() == DType::UInt16 ||
+        input.dtype() == DType::Bool) {
+        DType orig_dtype = input.dtype();
+        Tensor input_i32 = input.to(DType::Int32);
+        Tensor source_i32 = source.to(DType::Int32);
+        Tensor result_i32 = dispatchPut(input_i32, indices_in, source_i32, accumulate);
+        return result_i32.to(orig_dtype);
     }
 
     int32_t device_id = input.device().index;
@@ -1427,11 +1483,18 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
-    // Float16: the packed-half RFFT path produces zero/garbage spectra. Compute
-    // in Float32 (the complex output dtype is Complex64 either way — there is no
-    // half-complex type — so this is dtype-transparent to callers). This also
-    // fixes the IRFFT roundtrip, whose error originates in the RFFT stage.
-    if (input.dtype() == DType::Float16) {
+    // Float16/BFloat16: the packed-half RFFT path produces zero/garbage spectra.
+    // Compute in Float32 (the complex output dtype is Complex64 either way —
+    // there is no half-complex type — so this is dtype-transparent to
+    // callers). This also fixes the IRFFT roundtrip, whose error originates
+    // in the RFFT stage. Without the BFloat16 redirect, `is_f64`/`is_f16`
+    // below are both false for a BFloat16 input, so it fell through to the
+    // default Float32 shader/size-math path, which assumes 4 bytes/real-
+    // element — but BFloat16 is 2 bytes/element, misinterpreting the input
+    // buffer and producing garbage. CPU's rfft_kernel widens both Float16 and
+    // BFloat16 to Float32 before computing (fft.cpp, "Audit item F.10");
+    // mirror that here.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         return dispatchRFFT(dispatchCast(input, DType::Float32), dim, n, norm);
     }
 

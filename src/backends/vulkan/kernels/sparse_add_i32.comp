@@ -1,0 +1,38 @@
+#version 450
+
+// Sparse + Dense (Int32): result = sparse + dense (result is dense).
+// The output buffer must be pre-filled with dense matrix values before dispatch.
+// One workgroup per row, threads handle a subset of nonzeros in that row.
+//
+// A row's nonzeros are striped across threads in the workgroup, so two
+// threads can land on the same output column within a row (duplicate CSR
+// entries). The accumulation into output_data must therefore be atomic.
+// atomicAdd on a 32-bit int buffer slot is a core GLSL built-in (no extension
+// required), unlike the float-atomic path in sparse_add.comp.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { int values[];     };
+layout(set = 0, binding = 3) buffer Output              { int output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+
+    for (uint i = row_start + tid; i < row_end; i += gl_WorkGroupSize.x) {
+        uint col = uint(col_indices[i]);
+        // atomicAdd: distinct threads in this workgroup can target the same
+        // (row,col) slot when a row has duplicate column entries.
+        atomicAdd(output_data[row * n_cols + col], values[i]);
+    }
+}

@@ -1,0 +1,36 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Histc (Float64) auto-range variant: reads min/max/bin_width from a
+// device-side range buffer (histogram_pack_range_f64 output; 3-double layout
+// matching histc_dyn.comp's 3-float layout) instead of taking them as push
+// constants. Native double precision throughout, matching the CPU/CUDA
+// Float64 reference.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { float64_t input_data[]; };
+layout(binding = 1)          buffer Output { uint       output_data[]; };
+layout(binding = 2) readonly buffer Range  { float64_t range[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint num_bins;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    float64_t min_val   = range[0];
+    float64_t max_val   = range[1];
+    float64_t bin_width = range[2];
+
+    float64_t val = input_data[idx];
+    // NaN: CPU explicitly skips NaN entries. `val != val` is a reliable NaN
+    // test in shaders (GLSL isnan() is driver-flaky -- see histc.comp).
+    if (val != val) return;
+    if (val < min_val || val > max_val) return;
+    uint bin = uint((val - min_val) / bin_width);
+    if (bin >= params.num_bins) bin = params.num_bins - 1;
+    atomicAdd(output_data[bin], 1u);
+}

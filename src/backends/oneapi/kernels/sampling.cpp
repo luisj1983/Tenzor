@@ -34,10 +34,10 @@ struct BucketizeKernelTag {};
 struct HistogramKernelTag {};
 struct HistogramFillEdgesTag {};
 struct HistogramMinMaxTag {};
-struct HistogramddMinMaxTag {};
-struct HistogramddBinTag {};
-struct HistogramddEdgesTag {};
-struct HistogramddDensityTag {};
+template <typename T> struct HistogramddMinMaxTag {};
+template <typename T> struct HistogramddBinTag {};
+template <typename T> struct HistogramddEdgesTag {};
+template <typename T> struct HistogramddDensityTag {};
 struct CDistKernelTag {};
 struct CDistL2Tag {};
 struct CDistL1Tag {};
@@ -339,9 +339,17 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
         throw std::runtime_error("histogramdd_kernel: bins length must equal D");
     }
 
+    // Native-precision path: Float64 input computes and returns edges/density
+    // in Float64 instead of being unconditionally downcast to Float32 first.
+    // Matches CPU's histogramdd_kernel (src/backends/cpu/kernels/reduction.cpp),
+    // CUDA's (src/backends/cuda/kernels/advanced.cu), and ROCm's
+    // (src/backends/rocm/kernels/sampling.hip.cpp), all of which are
+    // templated on T = float/double and select T from the input dtype.
+    const bool use_f64 = (input.dtype() == DType::Float64);
+    const DType compute_dtype = use_f64 ? DType::Float64 : DType::Float32;
+
     auto in_contig = input.contiguous();
-    if (in_contig.dtype() != DType::Float32) in_contig = in_contig.to(DType::Float32);
-    const float* in_ptr = get_data_ptr<const float>(in_contig);
+    if (in_contig.dtype() != compute_dtype) in_contig = in_contig.to(compute_dtype);
     const auto& device = input.device();
 
     // Auto-detect ranges from data if not provided
@@ -350,187 +358,207 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
         ranges.resize(static_cast<size_t>(D));
     }
 
-    if (auto_range && N > 0) {
-        // Per-dimension min/max: allocate D min/max pairs on device
-        float* d_mins = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
-        float* d_maxs = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
+    auto launch = [&]<typename T>() -> std::pair<Tensor, std::vector<Tensor>> {
+        const T* in_ptr = get_data_ptr<const T>(in_contig);
 
-        // Initialize from first sample
-        queue.memcpy(d_mins, &in_ptr[0], static_cast<size_t>(D) * sizeof(float));
-        queue.memcpy(d_maxs, &in_ptr[0], static_cast<size_t>(D) * sizeof(float));
-        queue.wait_and_throw();
+        if (auto_range && N > 0) {
+            // Per-dimension min/max: allocate D min/max pairs on device
+            T* d_mins = sycl::malloc_device<T>(static_cast<size_t>(D), queue);
+            T* d_maxs = sycl::malloc_device<T>(static_cast<size_t>(D), queue);
 
-        // Parallel min/max over all samples using atomic_ref (no sycl::reduction needed)
-        const int64_t local_D = D;
-        const int64_t local_N = N;
-        queue.parallel_for<HistogramddMinMaxTag>(sycl::range<1>(N * D), [=](sycl::id<1> idx_) {
-            int64_t linear = static_cast<int64_t>(idx_);
-            int64_t i = linear / local_D;
-            int64_t dd = linear % local_D;
-            float v = in_ptr[i * local_D + dd];
+            // Initialize from first sample
+            queue.memcpy(d_mins, &in_ptr[0], static_cast<size_t>(D) * sizeof(T));
+            queue.memcpy(d_maxs, &in_ptr[0], static_cast<size_t>(D) * sizeof(T));
+            queue.wait_and_throw();
 
-            sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                              sycl::memory_scope::device,
-                              sycl::access::address_space::global_space>
-                atomic_min(d_mins[dd]);
-            sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                              sycl::memory_scope::device,
-                              sycl::access::address_space::global_space>
-                atomic_max(d_maxs[dd]);
-            atomic_min.fetch_min(v);
-            atomic_max.fetch_max(v);
-        });
-        queue.wait_and_throw();
+            // Parallel min/max over all samples using atomic_ref (no sycl::reduction needed)
+            const int64_t local_D = D;
+            queue.parallel_for<HistogramddMinMaxTag<T>>(sycl::range<1>(N * D), [=](sycl::id<1> idx_) {
+                int64_t linear = static_cast<int64_t>(idx_);
+                int64_t i = linear / local_D;
+                int64_t dd = linear % local_D;
+                T v = in_ptr[i * local_D + dd];
 
-        // Copy results back
-        std::vector<float> h_mins(static_cast<size_t>(D)), h_maxs(static_cast<size_t>(D));
-        queue.memcpy(h_mins.data(), d_mins, static_cast<size_t>(D) * sizeof(float)).wait();
-        queue.memcpy(h_maxs.data(), d_maxs, static_cast<size_t>(D) * sizeof(float)).wait();
-        sycl::free(d_mins, queue);
-        sycl::free(d_maxs, queue);
-
-        for (int64_t d = 0; d < D; ++d) {
-            float mn = h_mins[static_cast<size_t>(d)];
-            float mx = h_maxs[static_cast<size_t>(d)];
-            if (mn == mx) {
-                mn -= 0.5f;
-                mx += 0.5f;
-            }
-            ranges[static_cast<size_t>(d)] = {static_cast<double>(mn),
-                                                static_cast<double>(mx)};
-        }
-    } else if (auto_range) {
-        for (int64_t d = 0; d < D; ++d) {
-            ranges[static_cast<size_t>(d)] = {0.0, 1.0};
-        }
-    }
-
-    // Build per-dimension parameters
-    std::vector<float> dim_min_vec(static_cast<size_t>(D));
-    std::vector<float> dim_step_vec(static_cast<size_t>(D));
-
-    for (int64_t d = 0; d < D; ++d) {
-        auto sd = static_cast<size_t>(d);
-        float fmin = static_cast<float>(ranges[sd].first);
-        float fmax = static_cast<float>(ranges[sd].second);
-        float step = (fmax - fmin) / static_cast<float>(bins[sd]);
-        dim_min_vec[sd] = fmin;
-        dim_step_vec[sd] = step;
-    }
-
-    // Compute strides (row-major)
-    std::vector<int64_t> out_shape(bins.begin(), bins.end());
-    std::vector<int64_t> out_strides_vec(static_cast<size_t>(D));
-    int64_t stride = 1;
-    for (int64_t d = D - 1; d >= 0; --d) {
-        out_strides_vec[static_cast<size_t>(d)] = stride;
-        stride *= bins[static_cast<size_t>(d)];
-    }
-    int64_t total_bins = stride;
-
-    // Allocate device buffers for dim parameters and strides
-    float* d_dim_min = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
-    float* d_dim_step = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
-    int64_t* d_strides = sycl::malloc_device<int64_t>(static_cast<size_t>(D), queue);
-    int64_t* d_bins = sycl::malloc_device<int64_t>(static_cast<size_t>(D), queue);
-
-    queue.memcpy(d_dim_min, dim_min_vec.data(), static_cast<size_t>(D) * sizeof(float));
-    queue.memcpy(d_dim_step, dim_step_vec.data(), static_cast<size_t>(D) * sizeof(float));
-    queue.memcpy(d_strides, out_strides_vec.data(), static_cast<size_t>(D) * sizeof(int64_t));
-    queue.memcpy(d_bins, bins.data(), static_cast<size_t>(D) * sizeof(int64_t));
-    queue.wait_and_throw();
-
-    // Allocate counts
-    Tensor counts(out_shape, DType::Int64, device);
-    int64_t* counts_ptr = get_data_ptr<int64_t>(counts);
-    queue.memset(counts_ptr, 0, static_cast<size_t>(total_bins) * sizeof(int64_t)).wait();
-
-    // Bin each sample
-    if (N > 0) {
-        const int64_t local_D = D;
-        queue.parallel_for<HistogramddBinTag>(sycl::range<1>(N), [=](sycl::id<1> idx_) {
-            int64_t i = static_cast<int64_t>(idx_);
-            int64_t flat = 0;
-            bool in_range = true;
-
-            for (int64_t dd = 0; dd < local_D; ++dd) {
-                float v = in_ptr[i * local_D + dd];
-                float fmin_d = d_dim_min[dd];
-                float step_d = d_dim_step[dd];
-                int64_t nb = d_bins[dd];
-
-                float range_max = fmin_d + step_d * static_cast<float>(nb);
-                if (v < fmin_d || v > range_max) {
-                    in_range = false;
-                    break;
-                }
-
-                int64_t b = static_cast<int64_t>((v - fmin_d) / step_d);
-                if (b >= nb) b = nb - 1;
-                if (b < 0) b = 0;
-                flat += b * d_strides[dd];
-            }
-
-            if (in_range) {
-                sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
+                sycl::atomic_ref<T, sycl::memory_order::relaxed,
                                   sycl::memory_scope::device,
                                   sycl::access::address_space::global_space>
-                    atomic_count(counts_ptr[flat]);
-                atomic_count.fetch_add(int64_t{1});
+                    atomic_min(d_mins[dd]);
+                sycl::atomic_ref<T, sycl::memory_order::relaxed,
+                                  sycl::memory_scope::device,
+                                  sycl::access::address_space::global_space>
+                    atomic_max(d_maxs[dd]);
+                atomic_min.fetch_min(v);
+                atomic_max.fetch_max(v);
+            });
+            queue.wait_and_throw();
+
+            // Copy results back
+            std::vector<T> h_mins(static_cast<size_t>(D)), h_maxs(static_cast<size_t>(D));
+            queue.memcpy(h_mins.data(), d_mins, static_cast<size_t>(D) * sizeof(T)).wait();
+            queue.memcpy(h_maxs.data(), d_maxs, static_cast<size_t>(D) * sizeof(T)).wait();
+            sycl::free(d_mins, queue);
+            sycl::free(d_maxs, queue);
+
+            for (int64_t d = 0; d < D; ++d) {
+                T mn = h_mins[static_cast<size_t>(d)];
+                T mx = h_maxs[static_cast<size_t>(d)];
+                if (mn == mx) {
+                    mn -= T(0.5);
+                    mx += T(0.5);
+                }
+                ranges[static_cast<size_t>(d)] = {static_cast<double>(mn),
+                                                    static_cast<double>(mx)};
             }
-        });
-        queue.wait_and_throw();
-    }
-
-    // Build edge tensors on-device
-    std::vector<Tensor> edges_vec;
-    edges_vec.reserve(static_cast<size_t>(D));
-    for (int64_t d = 0; d < D; ++d) {
-        auto sd = static_cast<size_t>(d);
-        int64_t nb = bins[sd];
-        int64_t num_edges = nb + 1;
-        Tensor edge({num_edges}, DType::Float32, device);
-        float* edge_ptr = get_data_ptr<float>(edge);
-        const float local_min = dim_min_vec[sd];
-        const float local_step = dim_step_vec[sd];
-        queue.parallel_for<HistogramddEdgesTag>(sycl::range<1>(num_edges),
-            [=](sycl::id<1> idx_) {
-                int64_t j = static_cast<int64_t>(idx_);
-                edge_ptr[j] = local_min + static_cast<float>(j) * local_step;
-            });
-        queue.wait_and_throw();
-        edges_vec.push_back(std::move(edge));
-    }
-
-    // Density normalization on device
-    Tensor result = counts;
-    if (density && N > 0) {
-        double bin_volume = 1.0;
-        for (int64_t d = 0; d < D; ++d) {
-            bin_volume *= static_cast<double>(dim_step_vec[static_cast<size_t>(d)]);
+        } else if (auto_range) {
+            for (int64_t d = 0; d < D; ++d) {
+                ranges[static_cast<size_t>(d)] = {0.0, 1.0};
+            }
         }
-        double norm = static_cast<double>(N) * bin_volume;
-        float inv_norm = static_cast<float>(1.0 / norm);
 
-        Tensor density_out(out_shape, DType::Float32, device);
-        float* ddata = get_data_ptr<float>(density_out);
-        const int64_t local_total = total_bins;
-        queue.parallel_for<HistogramddDensityTag>(sycl::range<1>(total_bins),
-            [=](sycl::id<1> idx_) {
-                int64_t j = static_cast<int64_t>(idx_);
-                ddata[j] = static_cast<float>(counts_ptr[j]) * inv_norm;
-            });
+        // Build per-dimension parameters
+        std::vector<T> dim_min_vec(static_cast<size_t>(D));
+        std::vector<T> dim_step_vec(static_cast<size_t>(D));
+
+        for (int64_t d = 0; d < D; ++d) {
+            auto sd = static_cast<size_t>(d);
+            T fmin = static_cast<T>(ranges[sd].first);
+            T fmax = static_cast<T>(ranges[sd].second);
+            // A caller-supplied degenerate range (fmin >= fmax) yields step<=0, so
+            // (v - fmin)/step at bin time is NaN/Inf (silently clamped afterward,
+            // but the bin assignment would be unspecified). The auto-range path
+            // already widens an equal-bounds interval by +-0.5 above; reuse that
+            // same widening here — matches CPU's histogramdd_kernel
+            // (src/backends/cpu/kernels/reduction.cpp) so step stays strictly
+            // positive.
+            if (fmin >= fmax) {
+                fmin -= T(0.5);
+                fmax += T(0.5);
+            }
+            T step = (fmax - fmin) / static_cast<T>(bins[sd]);
+            dim_min_vec[sd] = fmin;
+            dim_step_vec[sd] = step;
+        }
+
+        // Compute strides (row-major)
+        std::vector<int64_t> out_shape(bins.begin(), bins.end());
+        std::vector<int64_t> out_strides_vec(static_cast<size_t>(D));
+        int64_t stride = 1;
+        for (int64_t d = D - 1; d >= 0; --d) {
+            out_strides_vec[static_cast<size_t>(d)] = stride;
+            stride *= bins[static_cast<size_t>(d)];
+        }
+        int64_t total_bins = stride;
+
+        // Allocate device buffers for dim parameters and strides
+        T* d_dim_min = sycl::malloc_device<T>(static_cast<size_t>(D), queue);
+        T* d_dim_step = sycl::malloc_device<T>(static_cast<size_t>(D), queue);
+        int64_t* d_strides = sycl::malloc_device<int64_t>(static_cast<size_t>(D), queue);
+        int64_t* d_bins = sycl::malloc_device<int64_t>(static_cast<size_t>(D), queue);
+
+        queue.memcpy(d_dim_min, dim_min_vec.data(), static_cast<size_t>(D) * sizeof(T));
+        queue.memcpy(d_dim_step, dim_step_vec.data(), static_cast<size_t>(D) * sizeof(T));
+        queue.memcpy(d_strides, out_strides_vec.data(), static_cast<size_t>(D) * sizeof(int64_t));
+        queue.memcpy(d_bins, bins.data(), static_cast<size_t>(D) * sizeof(int64_t));
         queue.wait_and_throw();
-        result = density_out;
+
+        // Allocate counts
+        Tensor counts(out_shape, DType::Int64, device);
+        int64_t* counts_ptr = get_data_ptr<int64_t>(counts);
+        queue.memset(counts_ptr, 0, static_cast<size_t>(total_bins) * sizeof(int64_t)).wait();
+
+        // Bin each sample
+        if (N > 0) {
+            const int64_t local_D = D;
+            queue.parallel_for<HistogramddBinTag<T>>(sycl::range<1>(N), [=](sycl::id<1> idx_) {
+                int64_t i = static_cast<int64_t>(idx_);
+                int64_t flat = 0;
+                bool in_range = true;
+
+                for (int64_t dd = 0; dd < local_D; ++dd) {
+                    T v = in_ptr[i * local_D + dd];
+                    T fmin_d = d_dim_min[dd];
+                    T step_d = d_dim_step[dd];
+                    int64_t nb = d_bins[dd];
+
+                    T range_max = fmin_d + step_d * static_cast<T>(nb);
+                    if (v < fmin_d || v > range_max) {
+                        in_range = false;
+                        break;
+                    }
+
+                    int64_t b = static_cast<int64_t>((v - fmin_d) / step_d);
+                    if (b >= nb) b = nb - 1;
+                    if (b < 0) b = 0;
+                    flat += b * d_strides[dd];
+                }
+
+                if (in_range) {
+                    sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
+                                      sycl::memory_scope::device,
+                                      sycl::access::address_space::global_space>
+                        atomic_count(counts_ptr[flat]);
+                    atomic_count.fetch_add(int64_t{1});
+                }
+            });
+            queue.wait_and_throw();
+        }
+
+        // Build edge tensors on-device
+        std::vector<Tensor> edges_vec;
+        edges_vec.reserve(static_cast<size_t>(D));
+        for (int64_t d = 0; d < D; ++d) {
+            auto sd = static_cast<size_t>(d);
+            int64_t nb = bins[sd];
+            int64_t num_edges = nb + 1;
+            Tensor edge({num_edges}, compute_dtype, device);
+            T* edge_ptr = get_data_ptr<T>(edge);
+            const T local_min = dim_min_vec[sd];
+            const T local_step = dim_step_vec[sd];
+            queue.parallel_for<HistogramddEdgesTag<T>>(sycl::range<1>(num_edges),
+                [=](sycl::id<1> idx_) {
+                    int64_t j = static_cast<int64_t>(idx_);
+                    edge_ptr[j] = local_min + static_cast<T>(j) * local_step;
+                });
+            queue.wait_and_throw();
+            edges_vec.push_back(std::move(edge));
+        }
+
+        // Density normalization on device
+        Tensor result = counts;
+        if (density && N > 0) {
+            double bin_volume = 1.0;
+            for (int64_t d = 0; d < D; ++d) {
+                bin_volume *= static_cast<double>(dim_step_vec[static_cast<size_t>(d)]);
+            }
+            double norm = static_cast<double>(N) * bin_volume;
+
+            Tensor density_out(out_shape, compute_dtype, device);
+            T* ddata = get_data_ptr<T>(density_out);
+            // Direct count/norm division in double (rather than pre-computing
+            // a T-precision reciprocal) so Float64 density values keep double
+            // precision throughout, matching ROCm's histogramdd_density_kernel.
+            queue.parallel_for<HistogramddDensityTag<T>>(sycl::range<1>(total_bins),
+                [=](sycl::id<1> idx_) {
+                    int64_t j = static_cast<int64_t>(idx_);
+                    ddata[j] = static_cast<T>(static_cast<double>(counts_ptr[j]) / norm);
+                });
+            queue.wait_and_throw();
+            result = density_out;
+        }
+
+        // Free device buffers
+        sycl::free(d_dim_min, queue);
+        sycl::free(d_dim_step, queue);
+        sycl::free(d_strides, queue);
+        sycl::free(d_bins, queue);
+
+        return {result, std::move(edges_vec)};
+    };
+
+    if (use_f64) {
+        return launch.template operator()<double>();
     }
-
-    // Free device buffers
-    sycl::free(d_dim_min, queue);
-    sycl::free(d_dim_step, queue);
-    sycl::free(d_strides, queue);
-    sycl::free(d_bins, queue);
-
-    return {result, std::move(edges_vec)};
+    return launch.template operator()<float>();
 }
 
 // =========================================================================
@@ -768,26 +796,76 @@ auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor {
     queue.parallel_for<PoissonSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
         int64_t i = static_cast<int64_t>(idx_);
 
-        // Per-element LCG PRNG (same constants as bernoulli_kernel)
+        // Per-element LCG PRNG (same constants as bernoulli_kernel), threaded
+        // through a local `state` via next_uniform() so both the Knuth and
+        // Hormann PTRS branches below draw from the same evolving stream.
         uint64_t state = seed + static_cast<uint64_t>(i) * 6364136223846793005ULL + 1442695040888963407ULL;
+        auto next_uniform = [&state]() -> float {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+            return sycl::fmax(u, 1.0e-7f);  // clamp away from 0 so log() is safe
+        };
 
         float lambda = in_ptr[i];
 
-        // Knuth algorithm: generate Poisson(lambda) by counting uniform
-        // samples until their product drops below exp(-lambda).
-        float L = sycl::exp(-lambda);
+        if (!(lambda > 0.0f)) {
+            out_ptr[i] = 0;
+            return;
+        }
+
+        if (lambda < 12.0f) {
+            // Knuth algorithm: generate Poisson(lambda) by counting uniform
+            // samples until their product drops below exp(-lambda). Fine for
+            // lambda < ~88 where exp(-lambda) doesn't underflow; capped here
+            // at 12 to match the crossover into Hormann PTRS below.
+            const double L = sycl::exp(-static_cast<double>(lambda));
+            int64_t k = 0;
+            double p = 1.0;
+            const int64_t max_iter = 1 << 20;
+            do {
+                k++;
+                p *= static_cast<double>(next_uniform());
+            } while (p > L && k < max_iter);
+            out_ptr[i] = k - 1;
+            return;
+        }
+
+        // Transformed rejection (Hoermann PTRS) for moderate/large lambda,
+        // where Knuth's expected iteration count grows linearly and
+        // exp(-lambda) underflows to exactly 0 for lambda gtr ~104 (silently
+        // truncating the Knuth loop after ~100-150 iterations regardless of
+        // true lambda, which severely low-biases the samples). Ported
+        // faithfully from CUDA's reference implementation
+        // (src/backends/cuda/kernels/advanced.cu).
+        const double dlam = static_cast<double>(lambda);
+        const double b = 0.931 + 2.53 * sycl::sqrt(dlam);
+        const double a = -0.059 + 0.02483 * b;
+        const double inv_alpha = 1.1239 + 1.1328 / (b - 3.4);
+        const double v_r = 0.9277 - 3.6224 / (b - 2.0);
+        const double loglam = sycl::log(dlam);
+
         int64_t k = 0;
-        float p = 1.0f;
-
-        do {
-            ++k;
-            // Advance LCG and produce a uniform in (0, 1)
-            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-            float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-            p *= u;
-        } while (p > L && k < 1000000);  // guard against infinite loop for huge lambda
-
-        out_ptr[i] = k - 1;
+        for (int iter = 0; iter < 1024; ++iter) {
+            double U = static_cast<double>(next_uniform()) - 0.5;
+            double V = static_cast<double>(next_uniform());
+            double us = 0.5 - sycl::fabs(U);
+            double kd = sycl::floor((2.0 * a / us + b) * U + dlam + 0.43);
+            if (us >= 0.07 && V <= v_r) {
+                k = static_cast<int64_t>(kd);
+                break;
+            }
+            if (kd < 0.0 || (us < 0.013 && V > us)) {
+                continue;
+            }
+            // lgamma(kd+1) = log(kd!)
+            double logV = sycl::log(V) + sycl::log(inv_alpha) - sycl::log(a / (us * us) + b);
+            double rhs = -dlam + kd * loglam - sycl::lgamma(kd + 1.0);
+            if (logV <= rhs) {
+                k = static_cast<int64_t>(kd);
+                break;
+            }
+        }
+        out_ptr[i] = k;
     });
     queue.wait_and_throw();
     return result;
@@ -850,16 +928,51 @@ namespace {
 struct ExponentialSampleKernelTag {};
 }  // namespace
 
+namespace {
+struct ExponentialValidateRateTag {};
+}  // namespace
+
 auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor {
     auto input = rate.contiguous();
     if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
 
+    int64_t n = input.numel();
+    const float* rate_ptr = get_data_ptr<const float>(input);
+
+    if (n > 0) {
+        // The Exponential distribution is only defined for rate > 0 (rate==0
+        // gives an undefined +Inf-mean distribution; rate<0 has no valid
+        // support at all). Every work-item independently flags its own
+        // element into a single atomic int (no reduction-tree ordering to
+        // worry about, so NaN is always caught). One scratch int + one
+        // readback is an O(1) host<->device sync regardless of tensor size,
+        // not an elementwise CPU round-trip.
+        int* d_flag = sycl::malloc_device<int>(1, queue);
+        queue.memset(d_flag, 0, sizeof(int)).wait();
+        queue.parallel_for<ExponentialValidateRateTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
+            int64_t i = static_cast<int64_t>(idx_);
+            if (!(rate_ptr[i] > 0.0f)) {
+                sycl::atomic_ref<int, sycl::memory_order::relaxed,
+                                  sycl::memory_scope::device,
+                                  sycl::access::address_space::global_space>
+                    flag_ref(*d_flag);
+                flag_ref.fetch_or(1);
+            }
+        });
+        queue.wait_and_throw();
+        int h_flag = 0;
+        queue.memcpy(&h_flag, d_flag, sizeof(int)).wait();
+        sycl::free(d_flag, queue);
+        if (h_flag != 0) {
+            throw std::invalid_argument(
+                "exponential: rate must be > 0 (got a non-positive or NaN rate)");
+        }
+    }
+
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Float32, input.device());
-    int64_t n = input.numel();
     if (n == 0) return result;
 
-    const float* rate_ptr = get_data_ptr<const float>(input);
     float* out_ptr = get_data_ptr<float>(result);
     uint64_t seed = ::tenzor::get_global_seed();
 
@@ -885,6 +998,12 @@ auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor
 // state threads through inline uniform/normal helpers.
 auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
                          sycl::queue& queue) -> Tensor {
+    // Preserve the caller's dtype: sampling runs in Float32 for RNG, but
+    // gamma(Float64/BFloat16, ...) must return that dtype — matches the
+    // widen-compute-narrow pattern normal_sample_kernel/bernoulli_kernel
+    // already use in this file (was previously always Float32 regardless of
+    // input dtype).
+    const DType orig_dtype = concentration.dtype();
     auto a = concentration.contiguous();
     if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
     auto b = rate.contiguous();
@@ -903,7 +1022,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, DType::Float32, a.device());
     int64_t n = a.numel();
-    if (n == 0) return result;
+    if (n == 0) return orig_dtype != DType::Float32 ? result.to(orig_dtype) : result;
 
     const float* a_ptr = get_data_ptr<const float>(a);
     const float* b_ptr = get_data_ptr<const float>(b);
@@ -956,7 +1075,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
         out_ptr[i] = boost * res / beta;
     });
     queue.wait_and_throw();
-    return result;
+    return orig_dtype != DType::Float32 ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
@@ -986,7 +1105,8 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
     for (int64_t d = 0; d < ndim; d++) {
         if (d != dim) out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input) is a true 0-dim scalar, matching
+    // CPU/CUDA/ROCm/Vulkan's convention -- do not force a size-1 dim.
 
     Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;

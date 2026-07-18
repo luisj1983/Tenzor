@@ -389,24 +389,37 @@ auto VulkanBackend::dispatchAffineGrid(const Tensor& theta, const std::vector<in
     int32_t total = static_cast<int32_t>(total64);
 
     DType orig_dtype = theta.dtype();
-    // Materialize read operand to a packed offset-0 buffer before binding.
-    Tensor theta_f32 = (orig_dtype == DType::Float32) ? dispatchContiguous(theta) : dispatchCast(theta, DType::Float32);
-
-    Tensor grid(std::vector<int64_t>{N, H, W, 2}, DType::Float32, theta.device());
-    if (total == 0) return (orig_dtype == DType::Float32) ? grid : dispatchCast(grid, orig_dtype);
-
     int32_t device_id = theta.device().index;
-    auto* pipeline = getPipeline("affine_grid", device_id);
+
+    // Native double compute for Float64 theta (matches CPU/CUDA/OneAPI, and
+    // ROCm after its own downcast-precision fix) -- the previous unconditional
+    // dispatchCast(theta, Float32) computed in single precision and only
+    // restored the OUTPUT dtype label afterward via the final dispatchCast,
+    // silently losing precision instead of preserving it end-to-end.
+    bool use_f64 = (orig_dtype == DType::Float64);
+    if (use_f64) {
+        vulkan::ensure_fp64_supported(device_id, "AffineGrid");
+    }
+    DType compute_dtype = use_f64 ? DType::Float64 : DType::Float32;
+
+    // Materialize read operand to a packed offset-0 buffer before binding.
+    Tensor theta_c = (orig_dtype == compute_dtype) ? dispatchContiguous(theta) : dispatchCast(theta, compute_dtype);
+
+    Tensor grid(std::vector<int64_t>{N, H, W, 2}, compute_dtype, theta.device());
+    if (total == 0) return (orig_dtype == compute_dtype) ? grid : dispatchCast(grid, orig_dtype);
+
+    auto* pipeline = getPipeline(use_f64 ? "affine_grid_f64" : "affine_grid", device_id);
 
     AffineGridPushConstants pc{N, H, W, align_corners ? 1 : 0, total};
 
+    size_t elem_size = use_f64 ? sizeof(double) : sizeof(float);
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, theta_f32.data_ptr()},
+        {0, theta_c.data_ptr()},
         {1, grid.data_ptr()},
     };
     std::vector<size_t> sizes = {
-        static_cast<size_t>(theta_f32.numel()) * sizeof(float),
-        static_cast<size_t>(grid.numel())      * sizeof(float),
+        static_cast<size_t>(theta_c.numel()) * elem_size,
+        static_cast<size_t>(grid.numel())    * elem_size,
     };
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -422,7 +435,7 @@ auto VulkanBackend::dispatchAffineGrid(const Tensor& theta, const std::vector<in
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
 
-    return (orig_dtype == DType::Float32) ? grid : dispatchCast(grid, orig_dtype);
+    return (orig_dtype == compute_dtype) ? grid : dispatchCast(grid, orig_dtype);
 }
 
 }  // namespace tenzor

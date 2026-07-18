@@ -142,6 +142,45 @@ TEST_P(UntestedOpsMultiDTypeTest, AffineGridShape) {
     expectDevice(grid);
 }
 
+// Regression: ROCm previously computed affine_grid forward by unconditionally
+// downcasting theta to Float32, computing, then casting the OUTPUT back to
+// Float64 -- restoring the dtype label but not the precision. Use theta
+// values that differ only in the low bits a Float32 round-trip would erase
+// (matches 1.0 + i*1e-10, the same pattern used elsewhere in this codebase
+// to catch an accidental F32 round-trip) and require the CPU (native double)
+// vs device() result to match far tighter than Float32's ~7 decimal digits.
+TEST_P(UntestedOpsMultiDTypeTest, AffineGridFloat64PrecisionNoRoundTrip) {
+    if (dtype() != DType::Float64) {
+        GTEST_SKIP() << "Precision regression only meaningful for Float64";
+    }
+    auto theta_cpu = tenzor::zeros({1, 2, 3}, DType::Float64, Device::cpu());
+    {
+        double* p = theta_cpu.data<double>();
+        // Identity-like affine transform, perturbed at the 1e-10 digit --
+        // indistinguishable from the unperturbed identity once rounded to
+        // Float32, but resolvable in true double precision.
+        p[0] = 1.0 + 1e-10; p[1] = 0.0;        p[2] = 0.0;
+        p[3] = 0.0;        p[4] = 1.0 + 2e-10; p[5] = 0.0;
+    }
+
+    auto grid_cpu = ops::affine_grid(theta_cpu, {1, 3, 64, 64}, /*align_corners=*/false);
+
+    auto theta_dev = theta_cpu.to(device());
+    auto grid_dev = ops::affine_grid(theta_dev, {1, 3, 64, 64}, /*align_corners=*/false).to(Device::cpu());
+
+    double max_diff = 0.0;
+    const double* a = grid_cpu.data<double>();
+    const double* b = grid_dev.data<double>();
+    for (int64_t i = 0; i < grid_cpu.numel(); ++i) {
+        max_diff = std::max(max_diff, std::abs(a[i] - b[i]));
+    }
+    // A Float32 round-trip would collapse the 1e-10-scale perturbation
+    // entirely (Float32 has ~7 decimal digits); require far tighter
+    // agreement than that, proving the device computed in true double.
+    EXPECT_LT(max_diff, 1e-12) << "affine_grid diverges from CPU by more than Float32 "
+                                   "precision would allow on " << device().to_string();
+}
+
 TEST_P(UntestedOpsMultiDTypeTest, GridSampleShape) {
     skipIfHalf();
     auto input = tenzor::randn({1, 3, 8, 8}, dtype(), device());

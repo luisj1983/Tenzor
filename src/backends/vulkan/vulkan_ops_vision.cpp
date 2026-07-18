@@ -316,8 +316,20 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
     uint32_t n = static_cast<uint32_t>(numel);
     uint32_t n_workgroups = div_wg_checked(n, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
 
-    // Ensure input is Float32 for the nonzero_count shader
-    Tensor input_f32 = (input.dtype() == DType::Float32) ? input : input.to(DType::Float32);
+    // Test nonzero-ness at the input's native precision instead of always
+    // downcasting to Float32 first. A Float64 value with magnitude below
+    // Float32's smallest subnormal (~1.4e-45) would round to exactly 0.0f and
+    // be silently dropped from the output — unlike CPU/CUDA/ROCm/OneAPI's
+    // nonzero, which compare against T(0) in the input's own dtype. The other
+    // dtypes nonzero supports here (Bool/Int8/UInt8/Int32/Int64/Float16/
+    // BFloat16) are all exactly representable in Float32 — or, for Int64,
+    // cannot round a nonzero value down to exact zero — so widening those to
+    // Float32 first (as before) is safe and keeps one fast shader path for
+    // the common case. Float64 gets its own native-precision shader.
+    const bool is_f64 = (input.dtype() == DType::Float64);
+    Tensor input_native = is_f64
+        ? ((input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input))
+        : ((input.dtype() == DType::Float32) ? input : input.to(DType::Float32));
 
     // Allocate flags buffer (one uint per element: 1=nonzero, 0=zero)
     Tensor flags({static_cast<int64_t>(n)}, DType::Int32, input.device());
@@ -325,16 +337,18 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
     Tensor count_buf({static_cast<int64_t>(n_workgroups + 1)}, DType::Int32, input.device());
     count_buf = dispatchFill(count_buf, 0.0f);
 
-    const void* buf_input = input_f32.data_ptr();
+    const void* buf_input = input_native.data_ptr();
     const void* buf_flags = flags.data_ptr();
     const void* buf_count = count_buf.data_ptr();
-    size_t input_bytes = n * sizeof(float);
+    size_t input_bytes = n * (is_f64 ? sizeof(double) : sizeof(float));
     size_t flags_bytes = n * sizeof(uint32_t);
     size_t count_bytes = (n_workgroups + 1) * sizeof(uint32_t);
 
+    const char* nonzero_count_shader = is_f64 ? "nonzero_count_f64" : "nonzero_count";
+
     // ---- Pass 1a: Per-element flags + workgroup counts ----
     {
-        auto* pipeline = getPipeline("nonzero_count", device_id);
+        auto* pipeline = getPipeline(nonzero_count_shader, device_id);
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_input}, {1, buf_flags}, {2, buf_count}
         };
@@ -356,7 +370,7 @@ auto VulkanBackend::dispatchNonzero(const Tensor& input) -> Tensor {
 
     // ---- Pass 1b: Reduce workgroup counts to get total ----
     {
-        auto* pipeline = getPipeline("nonzero_count", device_id);
+        auto* pipeline = getPipeline(nonzero_count_shader, device_id);
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buf_input}, {1, buf_flags}, {2, buf_count}
         };

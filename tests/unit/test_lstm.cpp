@@ -311,6 +311,120 @@ TEST_P(LSTMTestFixture, OutputConsistency) {
     }
 }
 
+TEST_P(LSTMTestFixture, LearnableInitialStateGradientFlow) {
+    // The fused cuDNN-training fast path (CUDA, Float32, unidirectional,
+    // no projection) used to build next_functions/input_variables without
+    // h0/c0 at all, and CudnnLSTMTrainBackward::backward() dropped
+    // grad_hx/grad_cx from its returned gradient vector -- a user-supplied
+    // learnable initial hidden/cell state silently received a zero
+    // gradient instead of the correct one. Other backends exercise a
+    // different (already-correct) autograd path, so this is a genuine
+    // cross-backend regression check, not a CUDA-only assertion.
+    nn::LSTM lstm(10, 20, 1);
+    lstm.to(device);
+
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
+    auto h0 = Variable(randn({1, 5, 20}, DType::Float32, device), true);
+    auto c0 = Variable(randn({1, 5, 20}, DType::Float32, device), true);
+
+    auto [output, states] = lstm.forward(input, {h0, c0});
+    auto [h_n, c_n] = states;
+
+    auto loss = sum(output) + sum(h_n) + sum(c_n);
+    loss.backward();
+
+    ASSERT_TRUE(h0.grad().has_value()) << "h0 gradient missing on " << device.to_string();
+    ASSERT_TRUE(c0.grad().has_value()) << "c0 gradient missing on " << device.to_string();
+
+    auto h0_grad_cpu = h0.grad()->to(Device::cpu()).to(DType::Float32).contiguous();
+    auto c0_grad_cpu = c0.grad()->to(Device::cpu()).to(DType::Float32).contiguous();
+    float h0_grad_sum = 0.0f, c0_grad_sum = 0.0f;
+    const float* hp = h0_grad_cpu.data<float>();
+    const float* cp = c0_grad_cpu.data<float>();
+    for (int64_t i = 0; i < h0_grad_cpu.numel(); ++i) h0_grad_sum += std::abs(hp[i]);
+    for (int64_t i = 0; i < c0_grad_cpu.numel(); ++i) c0_grad_sum += std::abs(cp[i]);
+
+    EXPECT_GT(h0_grad_sum, 0.0f) << "h0 gradient is all-zero on " << device.to_string();
+    EXPECT_GT(c0_grad_sum, 0.0f) << "c0 gradient is all-zero on " << device.to_string();
+}
+
+// The fused fast path (Float32, eval(), no_grad, unidirectional, no
+// projection -- the standard fast-path-eligible config) used to ignore
+// `lengths` entirely, processing the full padded seq_len for every batch
+// row instead of falling through to the lengths-aware per-timestep loop.
+// Row 1 here is padded to seq_len=6 but has a true length of 3; its output
+// for timesteps 0..2 and its h_n/c_n must match an independent run of the
+// same 3-timestep sequence with no padding at all -- if the fused path were
+// still ignoring lengths, the padding (garbage/zero timesteps 3..5) would
+// contaminate row 1's h_n/c_n and this would fail.
+TEST_P(LSTMTestFixture, FusedFastPathRespectsLengths) {
+    nn::LSTM lstm(4, 6, 1);
+    lstm.to(device);
+    lstm.eval();
+
+    const int64_t seq_len = 6, true_len = 3, feat = 4, hidden = 6;
+
+    auto padded_cpu = randn({seq_len, 2, feat}, DType::Float32, Device::cpu());
+    // Row 1 (batch index 1)'s timesteps beyond true_len are padding -- give
+    // them a distinct, easily-wrong-if-leaked value.
+    {
+        float* p = padded_cpu.data<float>();
+        for (int64_t t = true_len; t < seq_len; ++t) {
+            for (int64_t f = 0; f < feat; ++f) {
+                p[(t * 2 + 1) * feat + f] = 1000.0f;
+            }
+        }
+    }
+    auto lengths_cpu = zeros({2}, DType::Int64, Device::cpu());
+    lengths_cpu.data<int64_t>()[0] = seq_len;
+    lengths_cpu.data<int64_t>()[1] = true_len;
+
+    // Unpadded reference: row 1's true_len-length sequence run entirely on
+    // its own, no padding, no lengths argument.
+    auto row1_unpadded_cpu = zeros({true_len, 1, feat}, DType::Float32, Device::cpu());
+    {
+        const float* src = padded_cpu.data<float>();
+        float* dst = row1_unpadded_cpu.data<float>();
+        for (int64_t t = 0; t < true_len; ++t) {
+            for (int64_t f = 0; f < feat; ++f) {
+                dst[t * feat + f] = src[(t * 2 + 1) * feat + f];
+            }
+        }
+    }
+
+    tenzor::NoGradGuard no_grad;
+    Variable padded_in(padded_cpu.to(device), false);
+    auto [padded_out, padded_states] = lstm.forward(
+        padded_in, {Variable{}, Variable{}}, lengths_cpu);
+    auto [padded_h, padded_c] = padded_states;
+
+    Variable row1_in(row1_unpadded_cpu.to(device), false);
+    auto [row1_out, row1_states] = lstm.forward(row1_in, {Variable{}, Variable{}}, Tensor{});
+    auto [row1_h, row1_c] = row1_states;
+
+    auto padded_out_cpu = padded_out.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto row1_out_cpu = row1_out.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* po = padded_out_cpu.data<float>();
+    const float* ro = row1_out_cpu.data<float>();
+    for (int64_t t = 0; t < true_len; ++t) {
+        for (int64_t h = 0; h < hidden; ++h) {
+            EXPECT_NEAR(po[(t * 2 + 1) * hidden + h], ro[t * hidden + h], 1e-3f)
+                << "output[t=" << t << ",h=" << h << "] diverges on " << device.to_string()
+                << " -- fused fast path leaked padding into row 1";
+        }
+    }
+
+    auto padded_h_cpu = padded_h.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto row1_h_cpu = row1_h.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* ph = padded_h_cpu.data<float>();
+    const float* rh = row1_h_cpu.data<float>();
+    for (int64_t h = 0; h < hidden; ++h) {
+        EXPECT_NEAR(ph[hidden + h], rh[h], 1e-3f)
+            << "h_n[h=" << h << "] diverges on " << device.to_string()
+            << " -- fused fast path leaked padding into row 1's final hidden state";
+    }
+}
+
 TEST_P(LSTMTestFixture, GradientFlow) {
     // Test that gradients can flow through LSTM
     nn::LSTM lstm(10, 20);

@@ -276,8 +276,37 @@ public:
                     idx_ptr[i] = src_ptr[i];
                 }
 
-                Tensor grad_values = grad_output.to(Device::cpu())
-                                                .reshape({num_indices, embedding_dim_});
+                // Build the sparse values, EXCLUDING (zeroing) any entry whose
+                // row index is padding_idx_ — see the identical comment on
+                // the CPU sparse branch above for why: accumulate_sparse_grad()
+                // is a pure additive merge with no padding awareness, so an
+                // un-zeroed padding row here would leak a nonzero gradient
+                // into weight.sparse_grad even though grad_weight_dev above
+                // (the dense return value) is already correctly zeroed via
+                // index_fill.
+                Tensor grad_output_cpu = grad_output.to(Device::cpu());
+                Tensor grad_output_cpu_c = grad_output_cpu.is_contiguous()
+                    ? grad_output_cpu : grad_output_cpu.contiguous();
+                Tensor grad_values = zeros({num_indices, embedding_dim_}, grad_output_cpu_c.dtype());
+                auto copy_masked_gpu = [&]<typename T>() {
+                    const auto* src = grad_output_cpu_c.data<T>();
+                    auto* dst = grad_values.data<T>();
+                    for (int64_t i = 0; i < num_indices; ++i) {
+                        bool is_pad = (padding_idx_ >= 0 && src_ptr[i] == padding_idx_);
+                        for (int64_t j = 0; j < embedding_dim_; ++j) {
+                            dst[i * embedding_dim_ + j] = is_pad ? T{} : src[i * embedding_dim_ + j];
+                        }
+                    }
+                };
+                switch (grad_output_cpu_c.dtype()) {
+                    case DType::Float32:  copy_masked_gpu.template operator()<float>(); break;
+                    case DType::Float64:  copy_masked_gpu.template operator()<double>(); break;
+                    case DType::Float16:  copy_masked_gpu.template operator()<Float16>(); break;
+                    case DType::BFloat16: copy_masked_gpu.template operator()<BFloat16>(); break;
+                    default:
+                        grad_values = grad_output_cpu_c.reshape({num_indices, embedding_dim_});
+                        break;
+                }
 
                 auto sparse_grad = SparseTensor::sparse_coo(
                     idx_tensor, grad_values, {num_embeddings_, embedding_dim_});
@@ -313,8 +342,40 @@ public:
             for (int64_t i = 0; i < num_indices; ++i) {
                 idx_ptr[i] = input_ptr[i];
             }
-            // Reshape grad_output to [num_indices, embedding_dim]
-            auto grad_values = grad_output.reshape({num_indices, embedding_dim_});
+            // Build the sparse values, EXCLUDING (zeroing) any entry whose row
+            // index is padding_idx_. accumulate_sparse_grad() (variable.cpp)
+            // is a pure additive merge with no padding awareness, so without
+            // this the padding row would leak a nonzero gradient into
+            // weight.sparse_grad (consumed by sparse-aware optimizers like
+            // SparseAdam) even though the dense grad_weight returned below
+            // correctly zeroes it (see "Zero padding row" further down) —
+            // this keeps both consistent. Freshly allocated (not a view of
+            // grad_output via reshape) so writing here cannot alias/mutate
+            // the caller's incoming gradient tensor.
+            Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+            auto grad_values = zeros({num_indices, embedding_dim_}, grad_output_c.dtype());
+            auto copy_masked = [&]<typename T>() {
+                const auto* src = grad_output_c.data<T>();
+                auto* dst = grad_values.data<T>();
+                for (int64_t i = 0; i < num_indices; ++i) {
+                    bool is_pad = (padding_idx_ >= 0 && input_ptr[i] == padding_idx_);
+                    for (int64_t j = 0; j < embedding_dim_; ++j) {
+                        dst[i * embedding_dim_ + j] = is_pad ? T{} : src[i * embedding_dim_ + j];
+                    }
+                }
+            };
+            switch (grad_output_c.dtype()) {
+                case DType::Float32:  copy_masked.template operator()<float>(); break;
+                case DType::Float64:  copy_masked.template operator()<double>(); break;
+                case DType::Float16:  copy_masked.template operator()<Float16>(); break;
+                case DType::BFloat16: copy_masked.template operator()<BFloat16>(); break;
+                default:
+                    // Unexpected dtype for a gradient tensor — fall back to the
+                    // previous behavior (no padding exclusion) rather than
+                    // mis-copying raw bytes through the wrong element type.
+                    grad_values = grad_output_c.reshape({num_indices, embedding_dim_});
+                    break;
+            }
             auto sparse_grad = SparseTensor::sparse_coo(
                 idx_tensor, grad_values, {num_embeddings_, embedding_dim_});
 

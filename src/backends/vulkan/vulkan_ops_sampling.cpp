@@ -412,14 +412,24 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
         throw std::runtime_error("dispatchHistogramdd: bins length must equal D");
     }
 
-    // in_f32 is bound directly into STORAGE_BUFFER descriptors below; route
-    // views through dispatchContiguous so offset()==0 (Tensor::contiguous()
-    // alone does not reset the storage offset).
-    Tensor in_f32 = (input.dtype() == DType::Float32) ? input
-                                                       : dispatchCast(input, DType::Float32);
-    in_f32 = (in_f32.is_contiguous() && in_f32.offset() == 0) ? in_f32
-                                                              : dispatchContiguous(in_f32);
+    const bool is_f64 = (input.dtype() == DType::Float64);
+    const DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
     int32_t device_id = input.device().index;
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "Histogramdd");
+    }
+
+    // in_work is bound directly into STORAGE_BUFFER descriptors below; route
+    // views through dispatchContiguous so offset()==0 (Tensor::contiguous()
+    // alone does not reset the storage offset). Float64 input computes and
+    // returns natively in double precision, matching CPU's histogramdd_kernel
+    // (src/backends/cpu/kernels/reduction.cpp), which keeps Float64 input at
+    // Float64 throughout instead of downcasting to Float32; every other
+    // dtype still promotes to Float32.
+    Tensor in_work = (input.dtype() == compute_dtype) ? input
+                                                       : dispatchCast(input, compute_dtype);
+    in_work = (in_work.is_contiguous() && in_work.offset() == 0) ? in_work
+                                                                  : dispatchContiguous(in_work);
 
     // Auto-detect ranges from data if not provided.
     // Phase 8.4: in the auto-range path, dim_params and edges are built on
@@ -449,7 +459,8 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
 
     // Allocate dim_params on device. In the auto_with_data path the pack
     // shader fills it from col_min/col_max; otherwise we stage from host.
-    Tensor params_buf({static_cast<int64_t>(D) * 2}, DType::Float32, input.device());
+    const size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    Tensor params_buf({static_cast<int64_t>(D) * 2}, compute_dtype, input.device());
     Tensor bins_buf({D}, DType::Int32, input.device());
 
     if (auto_with_data) {
@@ -461,10 +472,11 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
         bins_buf = bins_cpu.to(input.device());
 
         // Per-column min/max via standard GPU reductions (D-element vectors).
-        Tensor col_min = tenzor::min(in_f32, /*dim=*/0, /*keepdim=*/false).contiguous();
-        Tensor col_max = tenzor::max(in_f32, /*dim=*/0, /*keepdim=*/false).contiguous();
+        Tensor col_min = tenzor::min(in_work, /*dim=*/0, /*keepdim=*/false).contiguous();
+        Tensor col_max = tenzor::max(in_work, /*dim=*/0, /*keepdim=*/false).contiguous();
 
-        auto* pack_pipeline = getPipeline("histogramdd_pack_params", device_id);
+        auto* pack_pipeline = getPipeline(
+            is_f64 ? "histogramdd_pack_params_f64" : "histogramdd_pack_params", device_id);
         struct { uint32_t D; } pack_pc{static_cast<uint32_t>(D)};
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, col_min.data_ptr()},
@@ -473,10 +485,10 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
             {3, params_buf.data_ptr()},
         };
         std::vector<size_t> sizes = {
-            static_cast<size_t>(D) * sizeof(float),
-            static_cast<size_t>(D) * sizeof(float),
+            static_cast<size_t>(D) * elem_size,
+            static_cast<size_t>(D) * elem_size,
             static_cast<size_t>(D) * sizeof(int32_t),
-            static_cast<size_t>(D) * 2 * sizeof(float),
+            static_cast<size_t>(D) * 2 * elem_size,
         };
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pack_pipeline, bindings, sizes);
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -489,6 +501,30 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
         vkCmdDispatch(cmd, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
+    } else if (is_f64) {
+        // Explicit ranges OR auto-range with N == 0: stage params from host,
+        // in native double precision (matches CPU's histogramdd_kernel
+        // computing dim_min/dim_step in T=double for a Float64 input, rather
+        // than rounding through float first).
+        std::vector<double> dim_params(static_cast<size_t>(D) * 2);
+        for (int64_t d = 0; d < D; ++d) {
+            auto sd = static_cast<size_t>(d);
+            double fmin = ranges[sd].first;
+            double fmax = ranges[sd].second;
+            // See the Float32 branch below for the degenerate-range rationale.
+            if (fmin >= fmax) {
+                fmin -= 0.5;
+                fmax += 0.5;
+                ranges[sd] = {fmin, fmax};
+            }
+            double step = (fmax - fmin) / static_cast<double>(bins[sd]);
+            dim_params[sd * 2]     = fmin;
+            dim_params[sd * 2 + 1] = step;
+        }
+        Tensor params_cpu({static_cast<int64_t>(D) * 2}, DType::Float64, Device::cpu());
+        std::memcpy(params_cpu.data<double>(), dim_params.data(),
+                    dim_params.size() * sizeof(double));
+        params_buf = params_cpu.to(input.device());
     } else {
         // Explicit ranges OR auto-range with N == 0: stage params from host.
         std::vector<float> dim_params(static_cast<size_t>(D) * 2);
@@ -496,6 +532,22 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
             auto sd = static_cast<size_t>(d);
             float fmin = static_cast<float>(ranges[sd].first);
             float fmax = static_cast<float>(ranges[sd].second);
+            // A degenerate explicit range (fmax<=fmin) yields step<=0 and a
+            // NaN/Inf bin-index computation in the histogramdd shader. CPU's
+            // histogramdd_kernel (src/backends/cpu/kernels/reduction.cpp,
+            // mirrored by CUDA/ROCm/OneAPI) treats a caller-supplied
+            // degenerate range the same as an auto-detected one and widens
+            // it by +-0.5 rather than throwing. Mirror that here — and
+            // write the widened bounds back into ranges[sd] so both the
+            // edge-tensor construction below and the density bin-volume
+            // computation further down see the same widened range — so
+            // Vulkan returns the same result as every other backend for
+            // identical input instead of uniquely throwing.
+            if (fmin >= fmax) {
+                fmin -= 0.5f;
+                fmax += 0.5f;
+                ranges[sd] = {static_cast<double>(fmin), static_cast<double>(fmax)};
+            }
             float step = (fmax - fmin) / static_cast<float>(bins[sd]);
             dim_params[sd * 2]     = fmin;
             dim_params[sd * 2 + 1] = step;
@@ -512,18 +564,19 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
     std::vector<Tensor> edges_vec;
     edges_vec.reserve(static_cast<size_t>(D));
     if (auto_with_data) {
-        auto* edge_pipeline = getPipeline("histogramdd_make_edges", device_id);
+        auto* edge_pipeline = getPipeline(
+            is_f64 ? "histogramdd_make_edges_f64" : "histogramdd_make_edges", device_id);
         for (int64_t d = 0; d < D; ++d) {
             int64_t nb = bins[static_cast<size_t>(d)];
-            Tensor edge({nb + 1}, DType::Float32, input.device());
+            Tensor edge({nb + 1}, compute_dtype, input.device());
             struct { uint32_t d; uint32_t nb; } edge_pc{static_cast<uint32_t>(d), static_cast<uint32_t>(nb)};
             std::vector<std::pair<uint32_t, const void*>> bindings = {
                 {0, params_buf.data_ptr()},
                 {1, edge.data_ptr()},
             };
             std::vector<size_t> sizes = {
-                static_cast<size_t>(D) * 2 * sizeof(float),
-                static_cast<size_t>(nb + 1) * sizeof(float),
+                static_cast<size_t>(D) * 2 * elem_size,
+                static_cast<size_t>(nb + 1) * elem_size,
             };
             VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, edge_pipeline, bindings, sizes);
             VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -537,6 +590,18 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
             vkCmdDispatch(cmd, workgroups, 1, 1);
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
+            edges_vec.push_back(std::move(edge));
+        }
+    } else if (is_f64) {
+        for (int64_t d = 0; d < D; ++d) {
+            auto sd = static_cast<size_t>(d);
+            int64_t nb = bins[sd];
+            double fmin = ranges[sd].first;
+            double fmax = ranges[sd].second;
+            double step = (fmax - fmin) / static_cast<double>(bins[sd]);
+            Tensor edge = tenzor::arange(0, nb + 1, 1, DType::Float64, input.device());
+            edge = tenzor::mul(edge, tenzor::full({nb + 1}, step, DType::Float64, input.device()));
+            edge = tenzor::add(edge, tenzor::full({nb + 1}, fmin, DType::Float64, input.device()));
             edges_vec.push_back(std::move(edge));
         }
     } else {
@@ -566,21 +631,21 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
     }
 
     if (N > 0) {
-        auto* pipeline = getPipeline("histogramdd", device_id);
+        auto* pipeline = getPipeline(is_f64 ? "histogramdd_f64" : "histogramdd", device_id);
         HistogramddPC pc{static_cast<uint32_t>(N),
                          static_cast<uint32_t>(D),
                          static_cast<uint32_t>(total_bins)};
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, in_f32.data_ptr()},
+            {0, in_work.data_ptr()},
             {1, counts_i32.data_ptr()},
             {2, params_buf.data_ptr()},
             {3, strides_buf.data_ptr()},
         };
         std::vector<size_t> sizes = {
-            static_cast<size_t>(N * D) * sizeof(float),
+            static_cast<size_t>(N * D) * elem_size,
             static_cast<size_t>(total_bins) * sizeof(int32_t),
-            static_cast<size_t>(D) * 2 * sizeof(float),
+            static_cast<size_t>(D) * 2 * elem_size,
             static_cast<size_t>(D) * sizeof(int32_t),
         };
 
@@ -604,25 +669,26 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
     // Density normalization
     Tensor result = counts_i64;
     if (density && N > 0) {
-        Tensor counts_f = dispatchCast(counts_i32, DType::Float32);
+        Tensor counts_f = dispatchCast(counts_i32, compute_dtype);
         if (auto_with_data) {
             // Phase 8.4: bin_volume = prod(step[d]) is computed entirely on device
-            // by reading params_buf via the histogramdd_density shader.
-            auto* dens_pipeline = getPipeline("histogramdd_density", device_id);
+            // by reading params_buf via the histogramdd_density[_f64] shader.
+            auto* dens_pipeline = getPipeline(
+                is_f64 ? "histogramdd_density_f64" : "histogramdd_density", device_id);
             struct { uint32_t total_bins; uint32_t D; uint32_t N; } dens_pc{
                 static_cast<uint32_t>(total_bins),
                 static_cast<uint32_t>(D),
                 static_cast<uint32_t>(N)};
-            Tensor dens_out(out_shape, DType::Float32, input.device());
+            Tensor dens_out(out_shape, compute_dtype, input.device());
             std::vector<std::pair<uint32_t, const void*>> bindings = {
                 {0, counts_f.data_ptr()},
                 {1, params_buf.data_ptr()},
                 {2, dens_out.data_ptr()},
             };
             std::vector<size_t> sizes = {
-                static_cast<size_t>(total_bins) * sizeof(float),
-                static_cast<size_t>(D) * 2 * sizeof(float),
-                static_cast<size_t>(total_bins) * sizeof(float),
+                static_cast<size_t>(total_bins) * elem_size,
+                static_cast<size_t>(D) * 2 * elem_size,
+                static_cast<size_t>(total_bins) * elem_size,
             };
             VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, dens_pipeline, bindings, sizes);
             VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -639,24 +705,21 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
             synchronize(device_id);
             result = dens_out;
         } else {
+            // ranges[] was already widened above (fmin>=fmax fixup) for the
+            // explicit-range / N==0 path, so width is guaranteed > 0 here —
+            // matches CPU's histogramdd_kernel, which computes bin_volume
+            // from the same post-widening dim_step values rather than
+            // throwing.
             double bin_volume = 1.0;
             for (int64_t d = 0; d < D; ++d) {
                 auto sd = static_cast<size_t>(d);
                 double width = ranges[sd].second - ranges[sd].first;
-                if (!(width > 0.0)) {
-                    throw std::runtime_error(
-                        "histogramdd: density=true requires each explicit range to "
-                        "have first < second, but dimension " + std::to_string(d) +
-                        " has range [" + std::to_string(ranges[sd].first) + ", " +
-                        std::to_string(ranges[sd].second) + "] (zero or negative width "
-                        "yields an undefined bin volume)");
-                }
                 double step = width / static_cast<double>(bins[sd]);
                 bin_volume *= step;
             }
             double norm = static_cast<double>(N) * bin_volume;
-            float inv_norm = static_cast<float>(1.0 / norm);
-            result = tenzor::mul(counts_f, tenzor::full(out_shape, inv_norm, DType::Float32, input.device()));
+            double inv_norm = 1.0 / norm;
+            result = tenzor::mul(counts_f, tenzor::full(out_shape, inv_norm, compute_dtype, input.device()));
         }
     }
 
@@ -885,6 +948,21 @@ auto VulkanBackend::dispatchExponentialSample(const Tensor& rate) -> Tensor {
     Tensor output(shape, DType::Float32, rate.device());
     if (n == 0) return output;
 
+    // The Exponential distribution is only defined for rate > 0 (rate==0
+    // gives an undefined +Inf-mean distribution; rate<0 has no valid support
+    // at all). Rather than silently emitting a numeric placeholder for
+    // invalid input (0.0, +Inf, or a negative "sample" are all equally
+    // wrong), validate host-side before ever dispatching the shader. A
+    // single on-device min-reduction plus one scalar readback bounds the
+    // check to O(1) host<->device syncs regardless of tensor size, so it
+    // does not reintroduce the elementwise CPU-roundtrip this file's other
+    // dispatch functions were written to avoid.
+    float min_rate = tenzor::min(rate_f32).item<float>();
+    if (!(min_rate > 0.0f)) {
+        throw std::invalid_argument(
+            "exponential: rate must be > 0 (got a non-positive or NaN rate)");
+    }
+
     int32_t device_id = rate.device().index;
     auto* pipeline = getPipeline("exponential_sample", device_id);
 
@@ -918,6 +996,7 @@ auto VulkanBackend::dispatchExponentialSample(const Tensor& rate) -> Tensor {
 
 
 auto VulkanBackend::dispatchGammaSample(const Tensor& concentration, const Tensor& rate) -> Tensor {
+    DType orig_dtype = concentration.dtype();
     Tensor alpha_f32 = (concentration.dtype() == DType::Float32)
                            ? concentration.contiguous()
                            : dispatchCast(concentration.contiguous(), DType::Float32);
@@ -928,7 +1007,7 @@ auto VulkanBackend::dispatchGammaSample(const Tensor& concentration, const Tenso
     std::vector<int64_t> shape(alpha_f32.shape().begin(), alpha_f32.shape().end());
     int64_t n = alpha_f32.numel();
     Tensor output(shape, DType::Float32, concentration.device());
-    if (n == 0) return output;
+    if (n == 0) return (orig_dtype == DType::Float32) ? output : dispatchCast(output, orig_dtype);
 
     int32_t device_id = concentration.device().index;
     auto* pipeline = getPipeline("gamma_sample", device_id);
@@ -960,7 +1039,13 @@ auto VulkanBackend::dispatchGammaSample(const Tensor& concentration, const Tenso
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
 
-    return output;
+    // Preserve the caller's dtype: sampling runs in Float32 for RNG, but
+    // gamma(Float64/BFloat16, ...) must return that dtype (was always
+    // Float32, unlike Normal/Bernoulli in this same file which already
+    // restore it — narrowed back from the Float32 compute, matching the
+    // established GPU convention here rather than a genuine double-precision
+    // compute path).
+    return (orig_dtype == DType::Float32) ? output : dispatchCast(output, orig_dtype);
 }
 
 auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
@@ -1195,7 +1280,8 @@ auto VulkanBackend::dispatchTrapezoid(const Tensor& y, int64_t dim, double dx,
     for (int64_t d = 0; d < ndim; d++) {
         if (d != dim) out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input) is a true 0-dim scalar, matching
+    // CPU/CUDA/ROCm/OneAPI's convention -- do not force a size-1 dim.
 
     Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;

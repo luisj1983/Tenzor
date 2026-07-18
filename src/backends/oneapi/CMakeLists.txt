@@ -252,6 +252,17 @@ foreach(SRC ${ONEAPI_SYCL_SOURCES})
         # which diverges ~3e-3 from the precise CPU/CUDA reference (cross-backend
         # parity failure). Compile these with precise FP so they match.
         set(_fp_extra EXTRA_FLAGS -fp-model=precise)
+    elseif(SRC STREQUAL "kernels/ctc_loss.cpp")
+        # Mirrors ROCm's ctc_loss.hip.cpp -fno-fast-math exemption (see
+        # src/backends/rocm/CMakeLists.txt, AA.10): ctc_loss relies on IEEE
+        # -inf semantics for its log-add sentinel (NEG_INF), isfinite() for
+        # the zero_infinity branch, and log1p/exp at the extremes of the
+        # log-sum-exp reduction. icpx's default -fp-model=fast permits the
+        # same finite-math-only assumptions as -ffast-math, which lets the
+        # compiler treat isfinite()/-inf comparisons as always-true and
+        # eliminate the branches guarding them — producing NaN forward
+        # outputs for any T > ~25. -fp-model=precise disables that.
+        set(_fp_extra EXTRA_FLAGS -fp-model=precise)
     endif()
     tenzor_compile_sycl(${SRC} OBJ_FILE ${_fp_extra})
     list(APPEND ALL_OBJECTS ${OBJ_FILE})

@@ -3699,8 +3699,13 @@ __device__ __forceinline__ int64_t frac_pool_start(
         start = static_cast<int64_t>((static_cast<float>(i) + sample) * alpha) -
                 static_cast<int64_t>(sample * alpha);
     }
-    if (start < 0) start = 0;
+    // Upper bound MUST be applied before the lower bound: when pool > in_size,
+    // in_size - pool is negative, so clamping to it last would drive start
+    // negative again -- an out-of-bounds input read (confirmed as a live GPU
+    // memory fault on ROCm). Matches the CPU reference's frac_pool_start
+    // (src/backends/cpu/kernels/pooling.cpp).
     if (start > in_size - pool) start = in_size - pool;
+    if (start < 0) start = 0;
     return start;
 }
 

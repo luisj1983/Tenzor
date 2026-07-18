@@ -58,7 +58,20 @@ inline auto broadcast_binary_operands(const Tensor& a, const Tensor& b)
 // Device-side approximations (callable from SYCL kernel lambdas)
 // =========================================================================
 
+// True pole at every non-positive integer: PI/tan(PI*x) below depends on
+// tan(PI*x) hitting exactly zero, which floating-point PI never does -- each
+// backend's differing PI precision then makes the "near-pole" result diverge
+// wildly and inconsistently from every other backend, not just from the true
+// pole (e.g. CPU/CUDA ~-2.565e16 vs ROCm/OneAPI/Vulkan ~+3.59e7 at x=-1
+// Float32 -- opposite sign, ~9 orders of magnitude apart). Digamma has no
+// single-valued limit at these poles (it diverges to +inf from one side,
+// -inf from the other), so NaN -- not a signed infinity -- is the
+// mathematically honest, scipy/PyTorch-consistent convention shared by every
+// backend after this fix.
 inline float digamma_dev_f32(float x) {
+    if (x <= 0.0f && x == sycl::floor(x)) {
+        return sycl::nan(0u);
+    }
     float result = 0.0f;
     if (x < 0.5f) {
         float y = 1.0f - x;
@@ -78,6 +91,10 @@ inline float digamma_dev_f32(float x) {
     return result;
 }
 inline double digamma_dev_f64(double x) {
+    // See digamma_dev_f32 above for the pole-convention rationale.
+    if (x <= 0.0 && x == sycl::floor(x)) {
+        return sycl::nan(0u);
+    }
     double result = 0.0;
     if (x < 0.5) {
         double y = 1.0 - x;
@@ -164,8 +181,14 @@ inline double bessel_j1_dev_f64(double x_in) {
 }
 
 // Bessel Y0
+// Y0 has a true pole at x=0 and is undefined for x<0. Standardize on the
+// IEEE-754/native-libm convention used by CUDA's y0()/ROCm's y0f() (and this
+// file's own digamma pole convention above): NaN for x<0, real -inf exactly
+// at x==0 -- collapsing both cases to -INFINITY (as this used to do) is
+// wrong for x<0, where the function is genuinely undefined, not -inf.
 inline float bessel_y0_dev_f32(float x) {
-    if (x <= 0.0f) return -INFINITY;
+    if (x < 0.0f) return sycl::nan(0u);
+    if (x == 0.0f) return -INFINITY;
     if (x <= 3.0f) {
         float y = x * x / 9.0f;
         // y0 needs j0 inside the small-x branch
@@ -182,7 +205,8 @@ inline float bessel_y0_dev_f32(float x) {
     return sycl::sqrt(2.0f / (3.14159265358979f * x)) * (p * sycl::sin(z) + q * sycl::cos(z));
 }
 inline double bessel_y0_dev_f64(double x) {
-    if (x <= 0.0) return -INFINITY;
+    if (x < 0.0) return sycl::nan(0u);
+    if (x == 0.0) return -INFINITY;
     if (x <= 3.0) {
         double y = x * x / 9.0;
         return (2.0 / 3.14159265358979323846) * sycl::log(x / 2.0) * bessel_j0_dev_f64(x)
@@ -199,8 +223,10 @@ inline double bessel_y0_dev_f64(double x) {
 }
 
 // Bessel Y1
+// Same NaN-for-x<0/-inf-at-x==0 convention as bessel_y0_dev_f32/f64 above.
 inline float bessel_y1_dev_f32(float x) {
-    if (x <= 0.0f) return -INFINITY;
+    if (x < 0.0f) return sycl::nan(0u);
+    if (x == 0.0f) return -INFINITY;
     if (x <= 3.0f) {
         float y = x * x / 9.0f;
         return (2.0f / 3.14159265358979f) * (sycl::log(x / 2.0f) * bessel_j1_dev_f32(x) - 1.0f / x)
@@ -216,7 +242,8 @@ inline float bessel_y1_dev_f32(float x) {
     return sycl::sqrt(2.0f / (3.14159265358979f * x)) * (p * sycl::sin(z) + q * sycl::cos(z));
 }
 inline double bessel_y1_dev_f64(double x) {
-    if (x <= 0.0) return -INFINITY;
+    if (x < 0.0) return sycl::nan(0u);
+    if (x == 0.0) return -INFINITY;
     if (x <= 3.0) {
         double y = x * x / 9.0;
         return (2.0 / 3.14159265358979323846) * (sycl::log(x / 2.0) * bessel_j1_dev_f64(x) - 1.0 / x)

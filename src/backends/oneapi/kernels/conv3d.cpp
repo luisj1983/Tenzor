@@ -1741,8 +1741,20 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
         return out.to(orig);
     }
 
-    auto input_shape = input.shape();
-    auto weight_shape = weight.shape();
+    // conv_transpose3d_forward indexes input/weight/bias with dense
+    // NCDHW / (C_in, C_out/groups, kD,kH,kW) strides, so a non-contiguous
+    // view (e.g. a permuted input) would be read at the wrong offsets.
+    // Materialize contiguous copies once (no-op when already packed),
+    // mirroring CPU's conv_transpose3d_forward_kernel and this file's own
+    // conv3d_forward.
+    const Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c;
+    const Tensor* bias_ptr_in = bias;
+    if (bias != nullptr && !bias->is_contiguous()) { bias_c = bias->contiguous(); bias_ptr_in = &bias_c; }
+
+    auto input_shape = input_c.shape();
+    auto weight_shape = weight_c.shape();
 
     const int64_t N = input_shape[0];
     const int64_t C_in = input_shape[1];
@@ -1750,7 +1762,15 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
     const int64_t H_in = input_shape[3];
     const int64_t W_in = input_shape[4];
 
-    const int64_t C_out = weight_shape[1];
+    // ConvTranspose3d weight layout is [in_channels, out_channels/groups,
+    // kD,kH,kW], so the true output-channel count is weight_shape[1] * groups
+    // (mirrors CPU's conv_transpose3d_forward_kernel / this file's own
+    // conv_transpose2d_forward: out_channels_per_group * groups). The previous
+    // code used weight_shape[1] directly, producing out_channels/groups
+    // channels and silently ignoring grouping.
+    const int64_t out_channels_per_group = weight_shape[1];
+    const int64_t C_out = out_channels_per_group * groups;
+    const int64_t in_channels_per_group = C_in / groups;
     const int64_t kD = weight_shape[2];
     const int64_t kH = weight_shape[3];
     const int64_t kW = weight_shape[4];
@@ -1778,10 +1798,10 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
     Tensor output({N, C_out, D_out, H_out, W_out}, input.dtype(), input.device());
     const int64_t total_elements = output.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* input_ptr = get_data_ptr<const float>(input);
-        const float* weight_ptr = get_data_ptr<const float>(weight);
-        const float* bias_ptr = (bias != nullptr) ? get_data_ptr<const float>(*bias) : nullptr;
+    if (input_c.dtype() == DType::Float32) {
+        const float* input_ptr = get_data_ptr<const float>(input_c);
+        const float* weight_ptr = get_data_ptr<const float>(weight_c);
+        const float* bias_ptr = (bias_ptr_in != nullptr) ? get_data_ptr<const float>(*bias_ptr_in) : nullptr;
         float* output_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<ConvTranspose3dForwardKernelFloat32>(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
@@ -1792,15 +1812,22 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
             int64_t oc = tmp % C_out; tmp /= C_out;
             int64_t n = tmp;
 
+            // Grouped transposed conv: weight is [in_channels, out_channels/groups,
+            // kD,kH,kW]. Each output channel only sees its own group's input
+            // channels. groups==1 reproduces the dense behaviour.
+            int64_t g = oc / out_channels_per_group;
+            int64_t oc_in_g = oc % out_channels_per_group;
+
             float sum = bias_ptr ? bias_ptr[oc] : 0.0f;
 
-            for (int64_t ic = 0; ic < C_in; ++ic) {
+            for (int64_t ic_local = 0; ic_local < in_channels_per_group; ++ic_local) {
+                int64_t ic = g * in_channels_per_group + ic_local;
                 for (int64_t kd = 0; kd < kD; ++kd) {
                     for (int64_t kh = 0; kh < kH; ++kh) {
                         for (int64_t kw_iter = 0; kw_iter < kW; ++kw_iter) {
-                            int64_t d_off = od + pad_d - kd;
-                            int64_t h_off = oh + pad_h - kh;
-                            int64_t w_off = ow + pad_w - kw_iter;
+                            int64_t d_off = od + pad_d - kd * dil_d;
+                            int64_t h_off = oh + pad_h - kh * dil_h;
+                            int64_t w_off = ow + pad_w - kw_iter * dil_w;
                             if (d_off % stride_d != 0 || h_off % stride_h != 0 || w_off % stride_w != 0) continue;
                             int64_t id = d_off / stride_d;
                             int64_t ih = h_off / stride_h;
@@ -1808,8 +1835,8 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                             if (id >= 0 && id < D_in && ih >= 0 && ih < H_in && iw >= 0 && iw < W_in) {
                                 int64_t input_idx = n * (C_in * D_in * H_in * W_in) +
                                                    ic * (D_in * H_in * W_in) + id * (H_in * W_in) + ih * W_in + iw;
-                                int64_t weight_idx = ic * (C_out * kD * kH * kW) +
-                                                    oc * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw_iter;
+                                int64_t weight_idx = ic * (out_channels_per_group * kD * kH * kW) +
+                                                    oc_in_g * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw_iter;
                                 sum += input_ptr[input_idx] * weight_ptr[weight_idx];
                             }
                         }
@@ -1818,10 +1845,10 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
             }
             output_ptr[idx] = sum;
         });
-    } else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = get_data_ptr<const double>(input);
-        const double* weight_ptr = get_data_ptr<const double>(weight);
-        const double* bias_ptr = (bias != nullptr) ? get_data_ptr<const double>(*bias) : nullptr;
+    } else if (input_c.dtype() == DType::Float64) {
+        const double* input_ptr = get_data_ptr<const double>(input_c);
+        const double* weight_ptr = get_data_ptr<const double>(weight_c);
+        const double* bias_ptr = (bias_ptr_in != nullptr) ? get_data_ptr<const double>(*bias_ptr_in) : nullptr;
         double* output_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<ConvTranspose3dForwardKernelFloat64>(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
@@ -1832,15 +1859,19 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
             int64_t oc = tmp % C_out; tmp /= C_out;
             int64_t n = tmp;
 
+            int64_t g = oc / out_channels_per_group;
+            int64_t oc_in_g = oc % out_channels_per_group;
+
             double sum = bias_ptr ? bias_ptr[oc] : 0.0;
 
-            for (int64_t ic = 0; ic < C_in; ++ic) {
+            for (int64_t ic_local = 0; ic_local < in_channels_per_group; ++ic_local) {
+                int64_t ic = g * in_channels_per_group + ic_local;
                 for (int64_t kd = 0; kd < kD; ++kd) {
                     for (int64_t kh = 0; kh < kH; ++kh) {
                         for (int64_t kw_iter = 0; kw_iter < kW; ++kw_iter) {
-                            int64_t d_off = od + pad_d - kd;
-                            int64_t h_off = oh + pad_h - kh;
-                            int64_t w_off = ow + pad_w - kw_iter;
+                            int64_t d_off = od + pad_d - kd * dil_d;
+                            int64_t h_off = oh + pad_h - kh * dil_h;
+                            int64_t w_off = ow + pad_w - kw_iter * dil_w;
                             if (d_off % stride_d != 0 || h_off % stride_h != 0 || w_off % stride_w != 0) continue;
                             int64_t id = d_off / stride_d;
                             int64_t ih = h_off / stride_h;
@@ -1848,8 +1879,8 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                             if (id >= 0 && id < D_in && ih >= 0 && ih < H_in && iw >= 0 && iw < W_in) {
                                 int64_t input_idx = n * (C_in * D_in * H_in * W_in) +
                                                    ic * (D_in * H_in * W_in) + id * (H_in * W_in) + ih * W_in + iw;
-                                int64_t weight_idx = ic * (C_out * kD * kH * kW) +
-                                                    oc * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw_iter;
+                                int64_t weight_idx = ic * (out_channels_per_group * kD * kH * kW) +
+                                                    oc_in_g * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw_iter;
                                 sum += input_ptr[input_idx] * weight_ptr[weight_idx];
                             }
                         }
@@ -1858,10 +1889,10 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
             }
             output_ptr[idx] = sum;
         });
-    } else if (input.dtype() == DType::Float16) {
-        const sycl::half* input_ptr = get_data_ptr<const sycl::half>(input);
-        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
-        const sycl::half* bias_ptr = (bias != nullptr) ? get_data_ptr<const sycl::half>(*bias) : nullptr;
+    } else if (input_c.dtype() == DType::Float16) {
+        const sycl::half* input_ptr = get_data_ptr<const sycl::half>(input_c);
+        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight_c);
+        const sycl::half* bias_ptr = (bias_ptr_in != nullptr) ? get_data_ptr<const sycl::half>(*bias_ptr_in) : nullptr;
         sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<ConvTranspose3dForwardKernelFloat16>(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
@@ -1872,15 +1903,19 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
             int64_t oc = tmp % C_out; tmp /= C_out;
             int64_t n = tmp;
 
+            int64_t g = oc / out_channels_per_group;
+            int64_t oc_in_g = oc % out_channels_per_group;
+
             float sum = bias_ptr ? static_cast<float>(bias_ptr[oc]) : 0.0f;
 
-            for (int64_t ic = 0; ic < C_in; ++ic) {
+            for (int64_t ic_local = 0; ic_local < in_channels_per_group; ++ic_local) {
+                int64_t ic = g * in_channels_per_group + ic_local;
                 for (int64_t kd = 0; kd < kD; ++kd) {
                     for (int64_t kh = 0; kh < kH; ++kh) {
                         for (int64_t kw_iter = 0; kw_iter < kW; ++kw_iter) {
-                            int64_t d_off = od + pad_d - kd;
-                            int64_t h_off = oh + pad_h - kh;
-                            int64_t w_off = ow + pad_w - kw_iter;
+                            int64_t d_off = od + pad_d - kd * dil_d;
+                            int64_t h_off = oh + pad_h - kh * dil_h;
+                            int64_t w_off = ow + pad_w - kw_iter * dil_w;
                             if (d_off % stride_d != 0 || h_off % stride_h != 0 || w_off % stride_w != 0) continue;
                             int64_t id = d_off / stride_d;
                             int64_t ih = h_off / stride_h;
@@ -1888,8 +1923,8 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                             if (id >= 0 && id < D_in && ih >= 0 && ih < H_in && iw >= 0 && iw < W_in) {
                                 int64_t input_idx = n * (C_in * D_in * H_in * W_in) +
                                                    ic * (D_in * H_in * W_in) + id * (H_in * W_in) + ih * W_in + iw;
-                                int64_t weight_idx = ic * (C_out * kD * kH * kW) +
-                                                    oc * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw_iter;
+                                int64_t weight_idx = ic * (out_channels_per_group * kD * kH * kW) +
+                                                    oc_in_g * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw_iter;
                                 sum += static_cast<float>(input_ptr[input_idx]) * static_cast<float>(weight_ptr[weight_idx]);
                             }
                         }

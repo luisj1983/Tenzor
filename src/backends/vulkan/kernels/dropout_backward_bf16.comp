@@ -29,22 +29,17 @@ float readMask(uint element_idx) {
     return float(uintBitsToFloat(bits << 16));
 }
 
-uint float_to_half(float f) {
+// Convert float to BFloat16 (truncation of upper 16 bits of IEEE 754 float32,
+// with round-to-nearest-even). Must match random_bf16.comp's float_to_bf16 —
+// this shader's own readGradOutput()/readMask() decode BF16 as
+// uintBitsToFloat(bits << 16), so the encoder must produce the upper-16-bits
+// truncation, NOT an FP16 (binary16) encoding. Using an FP16 encoder here
+// previously corrupted every gradient by ~128x (e.g. float_to_half(1.0) ==
+// 0x3C00, which decodes as a BF16 bit pattern to 2^-7 ≈ 0.0078, not 1.0).
+uint float_to_bf16(float f) {
     uint bits = floatBitsToUint(f);
-    uint sign = (bits >> 16) & 0x8000;
-    int exp = int((bits >> 23) & 0xFF) - 127 + 15;
-    uint mant = bits & 0x7FFFFF;
-
-    if (exp <= 0) {
-        if (exp < -10) return sign;
-        mant |= 0x800000;
-        uint shift = uint(14 - exp);
-        mant >>= shift;
-        return sign | mant;
-    } else if (exp >= 31) {
-        return sign | 0x7C00;
-    }
-    return sign | (uint(exp) << 10) | (mant >> 13);
+    // Round-to-nearest-even: add 0x7FFF + bit 16 (LSB of result) for unbiased rounding
+    return (bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16;
 }
 
 void main() {
@@ -67,7 +62,7 @@ void main() {
         out1 = g1 * m1 * params.scale;
     }
 
-    uint half0 = float_to_half(out0);
-    uint half1 = float_to_half(out1);
+    uint half0 = float_to_bf16(out0);
+    uint half1 = float_to_bf16(out1);
     grad_input[word_idx] = half0 | (half1 << 16);
 }

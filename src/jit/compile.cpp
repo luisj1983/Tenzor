@@ -613,17 +613,27 @@ auto CompiledFunction::operator()(std::span<const Variable> inputs) -> Variable 
             // side effects a second time (a double RNG draw, a double
             // running-stat update, or reading an already-mutated input a
             // second time) even though fn_ itself has never run this call.
-            // Graph::has_side_effecting_node() is a static, sound (if
-            // conservative) property of the compiled graph: if it contains
-            // no such node anywhere, NOTHING observable could have fired
-            // before the failure, so eager fallback is genuinely safe; if
-            // it does, we can't cheaply prove the failure happened before
-            // all of them, so fail loudly instead of risking a silent
-            // double-execution -- matching this codebase's established
-            // "fail loudly instead of producing wrong numerics" discipline
-            // (RoPE/KVCache/WindowAttention/QuantizedLinear/Dropout-replay).
+            //
+            // JIT-R203: this used to call Graph::has_side_effecting_node(),
+            // a STATIC "does the compiled graph contain such a node
+            // anywhere" property -- which flags a graph as unsafe even when
+            // the ONLY side-effecting node it contains is the very node that
+            // just threw (e.g. a single-node RReLU(training=true) graph:
+            // execute_node's OpType::RReLU case throws unconditionally
+            // BEFORE dispatching, so nothing has actually fired yet, and a
+            // fresh eager call is genuinely safe). Graph::side_effect_fired_
+            // this_call() is the precise, dynamic replacement: it reflects
+            // whether a side-effecting node actually COMPLETED during this
+            // specific forward() call before the failure, not merely
+            // whether one exists anywhere in the graph. If it did fire, we
+            // can't cheaply prove which OTHER side-effecting nodes (if any)
+            // also already fired, so fail loudly instead of risking a
+            // silent double-execution -- matching this codebase's
+            // established "fail loudly instead of producing wrong numerics"
+            // discipline (RoPE/KVCache/WindowAttention/QuantizedLinear/
+            // Dropout-replay).
             if (compiled_module->graph() &&
-                compiled_module->graph()->has_side_effecting_node()) {
+                compiled_module->graph()->side_effect_fired_this_call()) {
                 throw std::runtime_error(
                     "JIT cache-hit replay failed after this graph may already "
                     "have executed a side-effecting node (in-place mutation, "

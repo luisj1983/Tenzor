@@ -5901,13 +5901,26 @@ auto to_bool_value(const Tensor& t, size_t idx) -> bool {
         case DType::Bool: return t.data<bool>()[idx];
         case DType::Float32: return t.data<float>()[idx] != 0.0f;
         case DType::Float64: return t.data<double>()[idx] != 0.0;
+        case DType::Int8: return t.data<int8_t>()[idx] != 0;
+        case DType::Int16: return t.data<int16_t>()[idx] != 0;
         case DType::Int32: return t.data<int32_t>()[idx] != 0;
         case DType::Int64: return t.data<int64_t>()[idx] != 0;
-        case DType::Int8: return t.data<int8_t>()[idx] != 0;
         case DType::UInt8: return t.data<uint8_t>()[idx] != 0;
+        case DType::UInt16: return t.data<uint16_t>()[idx] != 0;
+        case DType::UInt32: return t.data<uint32_t>()[idx] != 0;
+        case DType::UInt64: return t.data<uint64_t>()[idx] != 0;
         case DType::Float16: return static_cast<float>(t.data<Float16>()[idx]) != 0.0f;
         case DType::BFloat16: return static_cast<float>(t.data<BFloat16>()[idx]) != 0.0f;
-        default: return t.data<float>()[idx] != 0.0f;
+        case DType::Complex64:
+            return t.data<std::complex<float>>()[idx] != std::complex<float>(0.0f, 0.0f);
+        case DType::Complex128:
+            return t.data<std::complex<double>>()[idx] != std::complex<double>(0.0, 0.0);
+        default:
+            // No more misinterpreting an arbitrary byte width as float32 (the
+            // old default branch): every registered dtype now has an exact
+            // case above, so this only fires for a truly unknown dtype.
+            throw std::runtime_error(
+                "logical op: unsupported dtype " + std::string(dtype_name(t.dtype())));
     }
 }
 } // anonymous namespace
@@ -6490,6 +6503,21 @@ auto lgamma_kernel(const Tensor& input) -> Tensor {
 auto digamma_kernel(const Tensor& input) -> Tensor {
     // Digamma via recurrence + asymptotic expansion
     auto digamma_fn = [](double x) -> double {
+        // True pole at every non-positive integer (x = 0, -1, -2, ...): the
+        // reflection formula below divides by tan(PI*x), which floating-point
+        // PI never lands on exactly zero for -- each backend's differing PI
+        // precision then makes the "near-pole" result diverge wildly and
+        // inconsistently from every other backend as well as from the true
+        // pole (e.g. CPU/CUDA ~-2.565e16 vs ROCm/OneAPI/Vulkan ~+3.59e7 at
+        // x=-1 Float32 -- opposite sign, ~9 orders of magnitude apart).
+        // Digamma has no single-valued limit at these poles (it diverges to
+        // +inf from one side and -inf from the other), so NaN -- not a
+        // signed infinity -- is the mathematically honest, scipy/PyTorch-
+        // consistent convention. Short-circuit before the tan(PI*x) term
+        // is ever evaluated.
+        if (x <= 0.0 && x == std::floor(x)) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
         double result = 0.0;
         if (x < 0.5) {
             // Reflection: ψ(x) = ψ(1-x) - π*cot(πx)
@@ -6532,6 +6560,11 @@ auto polygamma_kernel(const Tensor& input, int64_t n) -> Tensor {
 
     auto polygamma_fn = [n](double x) -> double {
         if (n == 0) {
+            // Digamma pole: see digamma_kernel's digamma_fn above for the
+            // full rationale (NaN convention, imprecise-PI divergence).
+            if (x <= 0.0 && x == std::floor(x)) {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
             // Digamma
             double result = 0.0;
             if (x < 0.5) {
@@ -6788,9 +6821,24 @@ auto bessel_j1_kernel(const Tensor& input) -> Tensor {
 
 auto bessel_y0_kernel(const Tensor& input) -> Tensor {
 #if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    // std::cyl_neumann throws std::domain_error for x < 0 (uncaught, this
+    // would crash the whole process rather than signal a defined result) and
+    // is undefined at x == 0. Standardize on the IEEE-754/native-libm
+    // convention used by CUDA's y0()/ROCm's y0f() (and this codebase's own
+    // digamma/lgamma out-of-domain handling elsewhere in this file): NaN for
+    // x < 0, -inf exactly at x == 0, never throw. Special-case both before
+    // ever calling into std::cyl_neumann.
     return unary_math_kernel(input,
-        [](float x) { return static_cast<float>(std::cyl_neumann(0, static_cast<double>(x))); },
-        [](double x) { return std::cyl_neumann(0, x); }, "bessel_y0");
+        [](float x) -> float {
+            if (x < 0.0f) return std::numeric_limits<float>::quiet_NaN();
+            if (x == 0.0f) return -std::numeric_limits<float>::infinity();
+            return static_cast<float>(std::cyl_neumann(0, static_cast<double>(x)));
+        },
+        [](double x) -> double {
+            if (x < 0.0) return std::numeric_limits<double>::quiet_NaN();
+            if (x == 0.0) return -std::numeric_limits<double>::infinity();
+            return std::cyl_neumann(0, x);
+        }, "bessel_y0");
 #else
     // J0(x) polynomial (Abramowitz & Stegun 9.4.1, valid for |x| <= 3), used by
     // the small-x Y0 series below. The fallback branch must NOT call
@@ -6804,7 +6852,8 @@ auto bessel_y0_kernel(const Tensor& input) -> Tensor {
         return num / den;
     };
     auto y0_approx = [&j0_small](double x) -> double {
-        if (x <= 0.0) return -std::numeric_limits<double>::infinity();
+        if (x < 0.0) return std::numeric_limits<double>::quiet_NaN();
+        if (x == 0.0) return -std::numeric_limits<double>::infinity();
         if (x <= 3.0) {
             double y = x * x / 9.0;
             return (2.0 / M_PI) * std::log(x / 2.0) * j0_small(x)
@@ -6827,9 +6876,20 @@ auto bessel_y0_kernel(const Tensor& input) -> Tensor {
 
 auto bessel_y1_kernel(const Tensor& input) -> Tensor {
 #if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    // Same std::cyl_neumann domain-error/undefined-at-zero handling as
+    // bessel_y0_kernel above: NaN for x < 0, -inf exactly at x == 0, never
+    // throw.
     return unary_math_kernel(input,
-        [](float x) { return static_cast<float>(std::cyl_neumann(1, static_cast<double>(x))); },
-        [](double x) { return std::cyl_neumann(1, x); }, "bessel_y1");
+        [](float x) -> float {
+            if (x < 0.0f) return std::numeric_limits<float>::quiet_NaN();
+            if (x == 0.0f) return -std::numeric_limits<float>::infinity();
+            return static_cast<float>(std::cyl_neumann(1, static_cast<double>(x)));
+        },
+        [](double x) -> double {
+            if (x < 0.0) return std::numeric_limits<double>::quiet_NaN();
+            if (x == 0.0) return -std::numeric_limits<double>::infinity();
+            return std::cyl_neumann(1, x);
+        }, "bessel_y1");
 #else
     // J1(x) polynomial (Abramowitz & Stegun 9.4.4, valid for |x| <= 3), used by
     // the small-x Y1 series below. The fallback branch must NOT call
@@ -6844,7 +6904,8 @@ auto bessel_y1_kernel(const Tensor& input) -> Tensor {
         return num / den;
     };
     auto y1_approx = [&j1_small](double x) -> double {
-        if (x <= 0.0) return -std::numeric_limits<double>::infinity();
+        if (x < 0.0) return std::numeric_limits<double>::quiet_NaN();
+        if (x == 0.0) return -std::numeric_limits<double>::infinity();
         if (x <= 3.0) {
             double y = x * x / 9.0;
             return (2.0 / M_PI) * (std::log(x / 2.0) * j1_small(x) - 1.0 / x)
@@ -7556,7 +7617,10 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim) -> Tensor {
                 if (data[i] != static_cast<scalar_t>(0.0f)) count++;
             }
         });
-        auto result = Tensor({1}, DType::Int64, input.device());
+        // Full reduction collapses to a true 0-dim scalar, matching this
+        // codebase's canonical reduction-shape convention -- not a forced
+        // rank-1 {1} shape.
+        auto result = Tensor({}, DType::Int64, input.device());
         *result.data<int64_t>() = count;
         return result;
     }
@@ -7571,7 +7635,11 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim) -> Tensor {
     for (int64_t d = 0; d < ndim; d++) {
         if (d != dim) out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+    // matches this codebase's canonical reduction-shape convention (see
+    // compute_reduction_shape in reduction.cpp, and median_kernel's
+    // output_shape.erase() a few hundred lines up) -- do not force a
+    // size-1 dim.
 
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
@@ -7634,7 +7702,11 @@ auto nansum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         if (d == dim) { if (keepdim) out_shape.push_back(1); }
         else out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+    // matches this codebase's canonical reduction-shape convention (see
+    // compute_reduction_shape in reduction.cpp, and median_kernel's
+    // output_shape.erase() a few hundred lines up) -- do not force a
+    // size-1 dim.
 
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
@@ -7697,7 +7769,11 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         if (d == dim) { if (keepdim) out_shape.push_back(1); }
         else out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+    // matches this codebase's canonical reduction-shape convention (see
+    // compute_reduction_shape in reduction.cpp, and median_kernel's
+    // output_shape.erase() a few hundred lines up) -- do not force a
+    // size-1 dim.
 
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
@@ -7745,12 +7821,19 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::pair
         TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "aminmax", [&]() {
             const scalar_t* data = input.data<scalar_t>();
             scalar_t mn = data[0], mx = data[0];
-            for (int64_t i = 1; i < n; i++) {
-                if (data[i] < mn) mn = data[i];
-                if (data[i] > mx) mx = data[i];
+            bool saw_nan = std::isnan(mn);
+            for (int64_t i = 1; i < n && !saw_nan; i++) {
+                scalar_t v = data[i];
+                if (std::isnan(v)) { saw_nan = true; break; }
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
             }
-            *min_out.data<scalar_t>() = mn;
-            *max_out.data<scalar_t>() = mx;
+            // Full-tensor Aminmax propagates NaN like CPU's own max_along_dim/
+            // min_along_dim (reduction.cpp saw_nan pattern) instead of silently
+            // dropping it via plain </> comparisons.
+            scalar_t nan_val = std::numeric_limits<scalar_t>::quiet_NaN();
+            *min_out.data<scalar_t>() = saw_nan ? nan_val : mn;
+            *max_out.data<scalar_t>() = saw_nan ? nan_val : mx;
         });
         return {min_out, max_out};
     }
@@ -7763,7 +7846,9 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::pair
     }
     int64_t reduce_size = shape[dim];
     if (reduce_size == 0) {
-        throw std::runtime_error("aminmax(): cannot compute aminmax over a zero-size dimension");
+        // Matches max/min/argmax/argmin/norm's convention exactly (message +
+        // exception type) for cross-op and cross-backend consistency.
+        throw std::invalid_argument("aminmax: cannot reduce over a zero-size dimension");
     }
 
     std::vector<int64_t> out_shape;
@@ -7771,7 +7856,11 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::pair
         if (d == dim) { if (keepdim) out_shape.push_back(1); }
         else out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+    // matches this codebase's canonical reduction-shape convention (see
+    // compute_reduction_shape in reduction.cpp, and median_kernel's
+    // output_shape.erase() a few hundred lines up) -- do not force a
+    // size-1 dim.
 
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
@@ -9038,7 +9127,11 @@ auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
         if (d == dim) { if (keepdim) out_shape.push_back(1); }
         else out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+    // matches this codebase's canonical reduction-shape convention (see
+    // compute_reduction_shape in reduction.cpp, and median_kernel's
+    // output_shape.erase() a few hundred lines up) -- do not force a
+    // size-1 dim.
 
     int64_t outer = 1, inner = 1;
     for (int64_t d = 0; d < dim; d++) outer *= shape[d];
@@ -9118,7 +9211,11 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         for (int64_t d = 0; d < ndim; d++) {
             if (d != dim) out_shape.push_back(shape[d]);
         }
-        if (out_shape.empty()) out_shape.push_back(1);
+        // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+        // matches this codebase's canonical reduction-shape convention (see
+        // compute_reduction_shape in reduction.cpp, and median_kernel's
+        // output_shape.erase() a few hundred lines up) -- do not force a
+        // size-1 dim.
         return Tensor(out_shape, y.dtype(), y.device());
     }
 
@@ -9130,7 +9227,11 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
     for (int64_t d = 0; d < ndim; d++) {
         if (d != dim) out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+    // matches this codebase's canonical reduction-shape convention (see
+    // compute_reduction_shape in reduction.cpp, and median_kernel's
+    // output_shape.erase() a few hundred lines up) -- do not force a
+    // size-1 dim.
 
     Tensor result(out_shape, y.dtype(), y.device());
 
@@ -9642,7 +9743,11 @@ auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
     for (int64_t i = 0; i < ndim; i++) {
         if (i != dim) out_shape.push_back(shape[i]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar --
+    // matches this codebase's canonical reduction-shape convention (see
+    // compute_reduction_shape in reduction.cpp, and median_kernel's
+    // output_shape.erase() a few hundred lines up) -- do not force a
+    // size-1 dim.
 
     int64_t dim_size = shape[dim];
     int64_t outer = 1, inner = 1;

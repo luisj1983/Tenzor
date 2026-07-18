@@ -3,7 +3,11 @@
 // Blocked LU Panel Factorization — factorizes a single 32-column panel
 // Input: A[n x n] stored row-major. This kernel factorizes columns [col_start, col_start+32)
 // using partial pivoting within the panel, then applies row swaps to the full matrix.
-// One workgroup with 256 threads.
+// One workgroup (256 threads) per batch element; the whole batch is folded
+// into a single dispatch (dispatch = {batch_size, 1, 1}), with the batch
+// index taken from gl_WorkGroupID.x rather than a push constant — this
+// avoids one host-side command-buffer submission per batch element per
+// column panel (see runBlockedLU).
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { float A[]; };
@@ -13,7 +17,6 @@ layout(push_constant) uniform PushConstants {
     uint n;          // matrix dimension
     uint col_start;  // starting column of this panel
     uint panel_cols; // number of columns in this panel (min(32, n - col_start))
-    uint batch_idx;  // batch element index
 };
 
 shared float panel[256][32];  // rows of current panel (max 256 rows)
@@ -23,6 +26,7 @@ shared int pivot_idx;
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
     uint base = batch_idx * n * n;
 
     // Load panel columns into shared memory
@@ -51,9 +55,17 @@ void main() {
         }
         barrier();
 
-        // Store pivot
+        // Store pivot. Must include the batch offset (batch_idx * n) — the
+        // consumer (linalg_trsm.comp) reads pivots[batch_idx * n + i]. Before
+        // folding the batch dimension into a single dispatch, this omission
+        // meant every batch element's host-side dispatch wrote the same
+        // unbatched indices, so only the last batch's pivots survived
+        // (silently corrupting dispatchLinalgLU / det / inv / solve for
+        // batch_size > 1). With batch now folded into gl_WorkGroupID.x within
+        // one dispatch, the same omission would instead be a data race
+        // between concurrently-executing batch workgroups.
         if (tid == 0) {
-            pivots[col_start + k] = pivot_idx;
+            pivots[batch_idx * n + col_start + k] = pivot_idx;
         }
 
         // Swap rows k and max_row in the panel

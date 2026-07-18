@@ -1045,12 +1045,31 @@ private:
     /// at the end, so it gets pinned exactly like a normal intermediate.
     /// Guarded by CompiledModule's forward_mutex_ like exec_target_device_.
     mutable std::vector<Tensor> capture_scratch_tensors_;
+    /// JIT-R203: whether a genuinely side-effecting node (a recorded in-place
+    /// mutation, or a stateful op — is_stateful_op() — actually run in
+    /// training mode) COMPLETED during the most recent forward() call on this
+    /// graph, including nested If/Loop branches. Reset at the start of every
+    /// forward(). Unlike has_side_effecting_node() (a static "does the
+    /// compiled graph contain such a node anywhere" property, used by
+    /// GraphHasSideEffectingNodeDetectsInplaceMutation_JIT175 and the
+    /// ShapeGuard-retrace refusals in compiled_module.cpp), this tracks
+    /// whether one has actually FIRED by the time execution was interrupted
+    /// (by an exception, or by a ShapeGuard trip) — distinguishing "some
+    /// earlier node's side effect already fired for real" (unsafe to fall
+    /// back to eager) from "the node that just failed IS the side-effecting
+    /// node, and it never got far enough to fire anything" (safe). See
+    /// CompiledFunction::operator()'s cache-hit catch block (compile.cpp).
+    mutable bool side_effect_fired_this_call_{false};
 
 public:
     /// Check if a shape guard triggered a retrace request
     auto needs_retrace() const -> bool { return needs_retrace_; }
     /// Reset the retrace flag
     auto reset_retrace() -> void { needs_retrace_ = false; }
+    /// JIT-R203: see side_effect_fired_this_call_'s doc comment.
+    auto side_effect_fired_this_call() const -> bool {
+        return side_effect_fired_this_call_;
+    }
 
 private:
     /**

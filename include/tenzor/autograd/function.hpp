@@ -1557,6 +1557,15 @@ public:
     // adjoint Function (`UpsampleBilinearForwardAdjoint`) that dispatches
     // `OpId::Interpolate` for higher-order grads.
     auto is_higher_order_stub() const -> bool override { return false; }
+    // This node's own tensor-level `backward()` dispatches
+    // `OpId::InterpolateBackward` (see .cpp) — report that OpId so the JVP
+    // walker can identify it instead of falling back to Unknown. The
+    // registered JVP rule for InterpolateBackward is a NonDifferentiable
+    // stub (2nd-order forward-mode isn't implemented as a direct rule here;
+    // it's instead reached via `backward_with_variables`'s real
+    // `UpsampleBilinearForwardAdjoint` subgraph), so this is a safe,
+    // exception-clean rejection rather than a silently wrong tangent.
+    auto op_id() const -> OpId override { return OpId::InterpolateBackward; }
 private:
     int64_t input_h_;   ///< Input height
     int64_t input_w_;   ///< Input width
@@ -1592,6 +1601,26 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto is_higher_order_stub() const -> bool override { return false; }
     auto name() const -> std::string override { return "UpsampleBilinearForwardAdjoint"; }
+    // This node's own `backward()` dispatches `OpId::Interpolate` on the
+    // incoming next-level gradient (see .cpp) — the JVP rule registered for
+    // Interpolate (`jvp_adapter_interpolate`, a linear_unary_jvp over the
+    // same OpId) computes exactly that operation on both primal and
+    // tangent, so this mapping is both safe and functional (not just a
+    // clean-reject stub).
+    auto op_id() const -> OpId override { return OpId::Interpolate; }
+    // Mirror backward()'s exact attrs construction so the JVP walker's
+    // dispatch(OpId::Interpolate, ..., attrs) call reproduces the same
+    // upsample this node's own backward() performs — without this the
+    // walker would pass empty attrs (missing OutputSize), which the
+    // Interpolate kernel is not guaranteed to handle safely.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::OutputSize,
+                  std::to_string(output_h_) + "," + std::to_string(output_w_));
+        attrs.set(AttrKey::Mode, "bilinear");
+        attrs.set(AttrKey::AlignCorners, align_corners_);
+        return attrs;
+    }
 private:
     int64_t input_h_;
     int64_t input_w_;
@@ -1610,6 +1639,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto op_id() const -> OpId override { return OpId::Sigmoid; }
 };
 
 class TanhBackward_AG : public Function {
@@ -1618,6 +1648,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto op_id() const -> OpId override { return OpId::Tanh; }
 };
 
 class GeluBackward : public Function {
@@ -2071,6 +2102,14 @@ public:
 class DeviceTransferBackward : public Function {
 public:
     Device source_device;  // Device to transfer gradients back to
+    // Device the forward `.to(target)` transferred TO (i.e. the device the
+    // primal output — and therefore the tangent — must live on). Not the
+    // same as source_device: backward() moves grad_output back to
+    // source_device, but the JVP rule below needs the opposite direction
+    // (tangent forward, same direction as the primal), so it needs the
+    // actual target, which nothing else on this class stores. Set by
+    // `to_device()` in ops.cpp alongside source_device.
+    Device target_device;
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
@@ -2080,6 +2119,25 @@ public:
     // backward_with_variables override wraps without a grad_fn — declare the
     // higher-order wrapping as a stub explicitly.
     auto is_higher_order_stub() const -> bool override { return true; }
+    // `Tensor::to(Device)` (see `to_device()` in ops.cpp) is a raw backend
+    // copy with zero dispatch() calls, so OpId::DeviceTransfer is a
+    // registry-only OpId (no backend kernel-table entries anywhere — see
+    // its comment in op_id.hpp). That's safe here specifically because
+    // jvp_adapter_device_transfer (jvp_rules.cpp) is hand-written to call
+    // `Tensor::to()` directly instead of `tenzor::dispatch()` — unlike the
+    // JVP walker's `linear_unary_jvp`-style rules, which re-dispatch the
+    // SAME OpId on the tangent via `tenzor::dispatch()` and would run a
+    // same-device kernel (or find no kernel at all) instead of an actual
+    // device transfer.
+    auto op_id() const -> OpId override { return OpId::DeviceTransfer; }
+    // Surfaces target_device (as two int attrs) so jvp_adapter_device_transfer
+    // knows where to land the tangent — see AttrKey::DeviceType/DeviceIndex.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::DeviceType, static_cast<int64_t>(target_device.type));
+        attrs.set(AttrKey::DeviceIndex, static_cast<int64_t>(target_device.index));
+        return attrs;
+    }
 };
 
 class FlattenBackward : public Function {
@@ -2184,6 +2242,14 @@ public:
     // lands — engine counter + WARN_ONCE in backward_with_variables.
     auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "IndexBackward"; }
+    // This class is never actually constructed (superseded by the live
+    // AdvancedIndexBackward path — see ops.cpp/function_shape_ext.cpp; both
+    // backward()/backward_with_variables() here unconditionally throw
+    // NonDifferentiable). Report the same OpId as its live sibling
+    // (AdvancedIndexBackward::op_id() == OpId::AdvancedIndex) for identity
+    // consistency; the registered JVP rule for AdvancedIndex is itself a
+    // NonDifferentiable stub that ignores attrs, so this is safe regardless.
+    auto op_id() const -> OpId override { return OpId::AdvancedIndex; }
 
 private:
     int64_t num_indices_ = 0;
@@ -2196,6 +2262,14 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "NarrowBackward"; }
+    // narrow() is recorded as a special case of slice() (implicit step=1;
+    // see the JIT-tracer comment in ops.cpp's narrow()), so its forward-mode
+    // JVP is exactly jvp_adapter_slice's. saved_attributes() below now emits
+    // Start/End (in addition to Dim) so that adapter gets the real slice
+    // window instead of silently defaulting to [0, full_dim_size) — see the
+    // saved_attributes() comment for why that default would otherwise be a
+    // silent-wrong-tangent trap, not just a missing-rule one.
+    auto op_id() const -> OpId override { return OpId::Slice; }
     // V.9: expose the saved `dim` so vmap can route NarrowBackward through
     // a per-slice loop fallback (no forward OpId::Narrow exists for the
     // generic dim_shifted_passthrough re-dispatch). The vmap rule reads
@@ -2203,10 +2277,25 @@ public:
     // captured user function; without this override the dim was lost and
     // the passthrough_rule applied narrow to the batched tensor along
     // the unbatched dim — silently wrong for batch_dim != 0.
+    //
+    // Also now exposes Start/End: jvp_adapter_slice (registered for
+    // OpId::Slice above) reads AttrKey::Start (default 0) and AttrKey::End
+    // (default = full dim size) from saved_attributes() — with ONLY Dim
+    // set, those defaults silently describe a full [0, dim_size) no-op
+    // slice covering the WHOLE dimension instead of the actual narrowed
+    // [start, start+length) window, i.e. a wrong (not merely missing) JVP
+    // rule. saved_tensors_[3] (End) is populated by narrow() in ops.cpp
+    // alongside the pre-existing [0]=dim/[1]=start/[2]=original_shape.
     auto saved_attributes() const -> OpAttributes override {
         OpAttributes attrs;
         if (!saved_tensors_.empty()) {
             attrs.set(AttrKey::Dim, saved_tensors_[0].data<int64_t>()[0]);
+        }
+        if (saved_tensors_.size() > 1) {
+            attrs.set(AttrKey::Start, saved_tensors_[1].data<int64_t>()[0]);
+        }
+        if (saved_tensors_.size() > 3) {
+            attrs.set(AttrKey::End, saved_tensors_[3].data<int64_t>()[0]);
         }
         return attrs;
     }
@@ -2664,6 +2753,7 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "DetBackward"; }
+    auto op_id() const -> OpId override { return OpId::LinalgDet; }
 };
 
 /**
@@ -2681,6 +2771,7 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "InvBackward"; }
+    auto op_id() const -> OpId override { return OpId::LinalgInv; }
 };
 
 /**
@@ -2700,6 +2791,9 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SolveBackward"; }
+    // solve()'s input_variables() is always {A, B} (see solve() in
+    // ops.cpp), matching jvp_adapter_solve's 2-input (A, B) contract exactly.
+    auto op_id() const -> OpId override { return OpId::LinalgSolve; }
 };
 
 /**
@@ -2711,6 +2805,19 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "LUSolveBackward"; }
+    // lu_solve(LU_data, pivots, B) takes LU_data/pivots as plain (non-
+    // Variable) Tensors — only B is tracked in input_variables() (see
+    // lu_solve() in ops.cpp) — so the walker's primals/tangents here will
+    // always have size 1, while jvp_adapter_lu_solve_s15 (registered for
+    // LinalgLUSolve) requires exactly 3 (LU_data, pivots, B). That arity
+    // mismatch makes the adapter throw immediately, which the walker
+    // catches and safely treats as "no rule" (same net FD-fallback outcome
+    // as OpId::Unknown, just reached via a caught exception instead of the
+    // pre-check) — reporting the OpId is a correct, harmless identification
+    // even though it does not yet make this op's JVP analytically
+    // reachable; that would additionally need LU_data/pivots exposed via a
+    // jvp_pack_inputs_for_walker override.
+    auto op_id() const -> OpId override { return OpId::LinalgLUSolve; }
 };
 
 /**
@@ -2730,6 +2837,19 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "EigBackward"; }
+    // A.4 multi-output JVP walker integration, mirroring EighBackward.
+    // eig() takes 1 input (A), matching jvp_adapter_linalg_eig_s15's
+    // contract; input_variables() = {A} for every output-slot instance.
+    auto op_id() const -> OpId override { return OpId::LinalgEig; }
+    // EigBackward saves {W_re, W_im, V} (see `eig` in ops.cpp), which maps
+    // 1:1 to jvp_adapter_linalg_eig_s15's returned tangent order
+    // {dRe, dIm, dV} (outputs 0, 1, 2). Without this override the base
+    // class's default (always 0) would silently route a downstream
+    // consumer of W_imag or V to dRe instead.
+    auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t override {
+        return saved_idx < 3 ? saved_idx : 0;
+    }
 private:
     int output_slot_;  // 0=W_real, 1=W_imag, 2=V; -1 = legacy combined
 };
@@ -2766,6 +2886,19 @@ public:
         -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CholeskySolveBackward"; }
+    // cholesky_solve(B, L, upper)'s input_variables() is always {B, L} (see
+    // cholesky_solve() in ops.cpp), matching jvp_adapter_cholesky_solve_s15's
+    // 2-input (B, L) contract exactly.
+    auto op_id() const -> OpId override { return OpId::LinalgCholeskySolve; }
+    // jvp_adapter_cholesky_solve_s15 reads AttrKey::Upper (default false)
+    // to know which triangle of L is significant — without this override
+    // the walker would pass empty attrs and silently assume upper=false
+    // regardless of the actual `upper_` this instance was constructed with.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Upper, upper_);
+        return attrs;
+    }
 private:
     bool upper_;
 };
@@ -2778,6 +2911,17 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CholeskyBackward"; }
+    // cholesky(A, upper)'s input_variables() is {A} (see cholesky() in
+    // ops.cpp), matching jvp_adapter_cholesky's 1-input contract.
+    auto op_id() const -> OpId override { return OpId::LinalgCholesky; }
+    // jvp_adapter_cholesky reads AttrKey::Upper (default false) — without
+    // this override the walker would silently assume upper=false regardless
+    // of the actual `upper_` this instance was constructed with.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Upper, upper_);
+        return attrs;
+    }
 private:
     bool upper_;
 };
@@ -2804,6 +2948,18 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "LUBackward"; }
+    // A.4 multi-output JVP walker integration, mirroring EighBackward.
+    // lu() takes 1 input (A), matching jvp_adapter_linalg_lu_s15's contract.
+    auto op_id() const -> OpId override { return OpId::LinalgLU; }
+    // LUBackward saves {L, U, pivots} (see `lu` in ops.cpp), matching
+    // jvp_adapter_linalg_lu_s15's returned tangent order {dL, dU, dPiv}
+    // (outputs 0, 1, 2 — dPiv is always zero since pivots are integer/
+    // non-differentiable). Without this override a downstream consumer of
+    // U would silently be routed to dL instead.
+    auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t override {
+        return saved_idx < 3 ? saved_idx : 0;
+    }
 private:
     int output_slot_;  // 0=L, 1=U; -1 = legacy combined (kept for compat)
 };;
@@ -2829,6 +2985,19 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SvdBackward"; }
+    // A.4 multi-output JVP walker integration, mirroring EighBackward.
+    // svd() takes 1 input (A), matching jvp_adapter_linalg_svd_s15's
+    // contract (which itself restricts to rank-2 A, throwing
+    // NonDifferentiable — safely caught by the walker — otherwise).
+    auto op_id() const -> OpId override { return OpId::LinalgSVD; }
+    // SvdBackward saves {U, S, Vh} (see `svd` in ops.cpp), matching
+    // jvp_adapter_linalg_svd_s15's returned tangent order {dU, dS, dVh}
+    // (outputs 0, 1, 2). Without this override a downstream consumer of S
+    // or Vh would silently be routed to dU instead.
+    auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t override {
+        return saved_idx < 3 ? saved_idx : 0;
+    }
 private:
     bool full_matrices_;
     int output_slot_;
@@ -2858,6 +3027,17 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "QrBackward"; }
+    // A.4 multi-output JVP walker integration, mirroring EighBackward.
+    // qr() takes 1 input (A), matching jvp_adapter_linalg_qr_s15's contract.
+    auto op_id() const -> OpId override { return OpId::LinalgQR; }
+    // QrBackward saves {Q, R} (see `qr` in ops.cpp), matching
+    // jvp_adapter_linalg_qr_s15's returned tangent order {dQ, dR} (outputs
+    // 0, 1). Without this override a downstream consumer of R would
+    // silently be routed to dQ instead.
+    auto jvp_saved_tensor_to_output_idx(std::size_t saved_idx) const
+        -> std::size_t override {
+        return saved_idx < 2 ? saved_idx : 0;
+    }
 private:
     int output_slot_;  // 0=Q, 1=R; -1 = legacy combined (kept for compat)
 };
@@ -2919,6 +3099,16 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "EigvalshBackward"; }
+    // eigvalsh() takes 1 input (A) and produces the single Variable W
+    // (eigenvalues only — V is computed internally for backward() but never
+    // exposed as a second output). jvp_adapter_linalg_eigh (registered for
+    // LinalgEigh, multi-output) ignores attrs and recomputes eigh(A)
+    // itself, returning {dW, dV} — output slot 0 (dW) is exactly what this
+    // single-output node needs, and since W is not among this class's
+    // saved_tensors_ ({V} only), the walker's root-resolution falls through
+    // to the canonical output-0 tangent by construction — no
+    // jvp_saved_tensor_to_output_idx override needed here.
+    auto op_id() const -> OpId override { return OpId::LinalgEigh; }
 };
 
 /**
@@ -2938,6 +3128,29 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "NormBackward_Linalg"; }
+    // This class backs `linalg::norm(A, ord)` (a STRING-ord API:
+    // 'fro','nuc','1','-1','2','-2','inf','-inf' — see backward()'s full
+    // branch list and linalg::norm() in ops/linalg.cpp), which for "fro"
+    // flattens the WHOLE tensor and reduces to a SCALAR — batch-agnostic.
+    // LinalgMatrixNorm's registered JVP rule (jvp_adapter_linalg_matrix_
+    // norm_s15) instead PRESERVES batch dims (reduces only the trailing two
+    // axes), a different result shape for any rank>2 input — so it is NOT
+    // reused here. OpId::LinalgNorm is a dedicated (registry-only) OpId for
+    // this string-ord API instead (see its comment in op_id.hpp).
+    // jvp_adapter_linalg_norm_fro (jvp_rules.cpp) is scoped to "fro" only:
+    // it reads AttrKey::NormOrd (populated by saved_attributes() below) and
+    // throws for any of the other 7 ord values, which the JVP walker
+    // catches and correctly falls back to finite differences for — see
+    // try_traverse_jvp in functional.cpp. Nuclear/induced norms are a
+    // separate, larger derivation (SVD-based JVP for "nuc"; non-
+    // differentiable at ties for the induced norms) and are intentionally
+    // left unmapped.
+    auto op_id() const -> OpId override { return OpId::LinalgNorm; }
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::NormOrd, ord_);
+        return attrs;
+    }
 private:
     std::string ord_;
 };
@@ -2958,6 +3171,37 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SlogdetBackward"; }
+    // OpId::LinalgSlogdet is a dedicated (registry-only) OpId — NOT
+    // OpId::LinalgDet (jvp_adapter_det), which is mathematically a
+    // DIFFERENT tangent: d(det)/dA = det(A)*trace(A^{-1}dA) vs.
+    // d(logabsdet)/dA = trace(A^{-1}dA) — the det(A) scale factor this
+    // class's own formula divides out (see this class's doc comment above
+    // and backward()). Reusing LinalgDet's OpId here would silently return
+    // a tangent scaled by det(A), a genuinely wrong (not merely missing)
+    // result.
+    //
+    // A.4 multi-output JVP walker integration (mirrors EighBackward), with
+    // one important difference in the output-slot convention. EighBackward
+    // saves {W, V} — its saved_tensors_ literally ARE the forward outputs
+    // — so the walker's data_ptr root-matching (try_traverse_jvp in
+    // functional.cpp) naturally resolves which output slot is being
+    // queried. SlogdetBackward instead saves only A^{-1} (see backward()
+    // below and save_for_backward({inv_tensor}) in slogdet(), ops.cpp) —
+    // an internal quantity, not one of slogdet's two outputs — so that
+    // root-matching can never succeed here and ALWAYS falls through to the
+    // canonical `node_tangents[this]` entry, i.e. index 0 of whatever
+    // jvp_adapter_slogdet (registered multi-output) returns. Separately,
+    // slogdet(Variable) in ops.cpp wraps `sign` as a detached
+    // Variable(sign_tensor, /*requires_grad=*/false) with NO grad_fn (sign
+    // is piecewise-constant), so this node is in practice only ever
+    // queried through `logabsdet`. jvp_adapter_slogdet therefore returns
+    // {d_logabsdet, d_sign} in THAT order — logabsdet at index 0 —
+    // deliberately inverted from slogdet's nominal (sign, logabsdet)
+    // forward output order, because index 0 is what the walker actually
+    // reads. Putting d_sign (structurally zero) at index 0 would silently
+    // return a zero tangent for every logabsdet query — wrong, not just
+    // imprecise.
+    auto op_id() const -> OpId override { return OpId::LinalgSlogdet; }
 };
 
 // =========================================================================
@@ -2990,6 +3234,19 @@ public:
     // audit-10 NN.6: drop ad-hoc transposed-CSR cache on cleanup.
     void release_op_specific_state() override { sparse_transposed_.reset(); }
 
+    // spmm(sparse, dense)'s input_variables() is {dense} only — S is a
+    // non-differentiable constant carried out-of-band via
+    // sparse_transposed_, not a Tensor/Variable input (see spmm() in
+    // ops.cpp). jvp_adapter_sparse_spmm (registered for SparseSpMM)
+    // requires exactly 4 primals (crow, col, values, dense), so this arity
+    // mismatch (1 vs 4) makes it throw immediately — caught by the walker
+    // and safely treated as "no rule" (same FD-fallback outcome as
+    // OpId::Unknown). Reporting the OpId is a correct, harmless
+    // identification; making this op's JVP actually reachable would
+    // additionally need S's CSR components exposed via a
+    // jvp_pack_inputs_for_walker override.
+    auto op_id() const -> OpId override { return OpId::SparseSpMM; }
+
 private:
     std::optional<SparseTensor> sparse_transposed_;  ///< S^T stored in sparse format
 };
@@ -3019,6 +3276,13 @@ public:
 
     // audit-10 NN.6: drop ad-hoc transposed-CSR cache on cleanup.
     void release_op_specific_state() override { sparse_transposed_.reset(); }
+
+    // Same reasoning as SpMMBackward::op_id() above: input_variables() is
+    // {vec} only (1), while jvp_adapter_sparse_spmv (registered for
+    // SparseSpMV) requires 4 (crow, col, values, vec) — safe-but-currently-
+    // inert until a jvp_pack_inputs_for_walker override exposes S's CSR
+    // components.
+    auto op_id() const -> OpId override { return OpId::SparseSpMV; }
 
 private:
     std::optional<SparseTensor> sparse_transposed_;  ///< S^T stored in sparse format
@@ -3060,6 +3324,12 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SpGEMMBackward"; }
+    // This class is never actually constructed (no differentiable spgemm()
+    // forward exists yet — see this class's own doc comment above; both
+    // backward()/backward_with_variables() unconditionally throw). Report
+    // the matching forward OpId for identity consistency with its sibling
+    // sparse Backward classes; harmless since it's dead code today.
+    auto op_id() const -> OpId override { return OpId::SparseSpGEMM; }
 };
 
 /**
@@ -3082,6 +3352,27 @@ public:
 
     // audit-10 NN.6: drop ad-hoc transposed-CSR cache on cleanup.
     void release_op_specific_state() override { sparse_l_t_.reset(); }
+
+    // sparse_triangular_solve(L, b, upper) dispatches SparseTrsv for a
+    // vector b (ndim==1) or SparseTrsm for a matrix b — the forward picks
+    // between them dynamically (see that function in ops.cpp), so op_id()
+    // must too; saved_tensors_[0] (the solution x, same ndim as b) is
+    // always saved (see set_input_variables/save_for_backward call sites)
+    // and lets us recover which one this instance corresponds to.
+    // input_variables() is {b} only (1) — L is a non-differentiable
+    // constant carried via sparse_l_t_, not a Tensor input — while both
+    // jvp_adapter_sparse_trsv_s15/trsm_s15 (registered for SparseTrsv/
+    // SparseTrsm) require 4 primals (crow, col, values, b/B). That arity
+    // mismatch (1 vs 4) makes the adapter throw immediately, safely caught
+    // by the walker as "no rule" — reporting the OpId is a correct, harmless
+    // identification; full functionality would additionally need L's CSR
+    // components exposed via a jvp_pack_inputs_for_walker override.
+    auto op_id() const -> OpId override {
+        if (!saved_tensors_.empty() && saved_tensors_[0].ndim() == 1) {
+            return OpId::SparseTrsv;
+        }
+        return OpId::SparseTrsm;
+    }
 
 private:
     std::optional<SparseTensor> sparse_l_t_;  ///< L^T (or U^T) in sparse format
@@ -3668,6 +3959,17 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto is_higher_order_stub() const -> bool override { return false; }
     auto name() const -> std::string override { return "ViewAsRealBackward"; }
+    // `tenzor::view_as_real()` (see view_as_real() in ops.cpp) is "pure
+    // metadata reinterpretation with zero dispatch() calls" (per that
+    // function's own comment), so OpId::ViewAsReal is registry-only (no
+    // backend kernel-table entries — see its comment in op_id.hpp). Every
+    // existing OpId with a similar-looking "linear op, same op on tangent"
+    // JVP rule (Real/Imag/Conj/Cast/...) computes a DIFFERENT operation
+    // (e.g. Real discards the imaginary part instead of doubling the last
+    // dim), so those are NOT reused here — jvp_adapter_view_as_real
+    // (jvp_rules.cpp) instead calls tenzor::view_as_real() directly (never
+    // tenzor::dispatch(), which has no kernel for this OpId anyway).
+    auto op_id() const -> OpId override { return OpId::ViewAsReal; }
 };
 
 /**
@@ -3688,6 +3990,11 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto is_higher_order_stub() const -> bool override { return false; }
     auto name() const -> std::string override { return "ViewAsComplexBackward"; }
+    // Same reasoning as ViewAsRealBackward above: `tenzor::view_as_complex()`
+    // is a zero-dispatch() metadata reinterpretation, so OpId::ViewAsComplex
+    // is registry-only; jvp_adapter_view_as_complex (jvp_rules.cpp) calls
+    // tenzor::view_as_complex() directly.
+    auto op_id() const -> OpId override { return OpId::ViewAsComplex; }
 };
 
 // ============================================================================

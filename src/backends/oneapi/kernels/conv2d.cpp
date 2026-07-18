@@ -1984,8 +1984,19 @@ auto conv_transpose2d_forward(
         return out.to(orig);
     }
 
-    auto input_shape = input.shape();
-    auto weight_shape = weight.shape();
+    // conv_transpose2d_forward indexes input/weight/bias with dense
+    // NCHW / (C_in, C_out/groups, kH,kW) strides, so a non-contiguous view
+    // (e.g. a permuted input) would be read at the wrong offsets. Materialize
+    // contiguous copies once (no-op when already packed), mirroring CPU's
+    // ConvTranspose2d forward and this file's own conv2d_forward_im2col.
+    const Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    Tensor bias_c;
+    const Tensor* bias_ptr_in = bias;
+    if (bias != nullptr && !bias->is_contiguous()) { bias_c = bias->contiguous(); bias_ptr_in = &bias_c; }
+
+    auto input_shape = input_c.shape();
+    auto weight_shape = weight_c.shape();
 
     int64_t batch = input_shape[0];
     int64_t in_channels = input_shape[1];
@@ -2013,8 +2024,8 @@ auto conv_transpose2d_forward(
     int64_t total_output = batch * out_channels * out_h * out_w;
 
     if (input.dtype() == DType::Float32) {
-        const float* input_data = get_data_ptr<const float>(input);
-        const float* weight_data = get_data_ptr<const float>(weight);
+        const float* input_data = get_data_ptr<const float>(input_c);
+        const float* weight_data = get_data_ptr<const float>(weight_c);
         float* output_data = get_data_ptr<float>(output);
 
         queue.parallel_for<ConvTranspose2dForwardKernelFloat32>(
@@ -2061,8 +2072,8 @@ auto conv_transpose2d_forward(
         );
 
         // Add bias if present
-        if (bias != nullptr) {
-            const float* bias_data = get_data_ptr<const float>(*bias);
+        if (bias_ptr_in != nullptr) {
+            const float* bias_data = get_data_ptr<const float>(*bias_ptr_in);
             queue.parallel_for<ConvTranspose2dBiasKernelFloat32>(
                 sycl::range<1>(total_output),
                 [=](sycl::id<1> idx) {
@@ -2073,8 +2084,8 @@ auto conv_transpose2d_forward(
         }
     }
     else if (input.dtype() == DType::Float64) {
-        const double* input_data = get_data_ptr<const double>(input);
-        const double* weight_data = get_data_ptr<const double>(weight);
+        const double* input_data = get_data_ptr<const double>(input_c);
+        const double* weight_data = get_data_ptr<const double>(weight_c);
         double* output_data = get_data_ptr<double>(output);
 
         queue.parallel_for<ConvTranspose2dForwardKernelFloat64>(
@@ -2120,8 +2131,8 @@ auto conv_transpose2d_forward(
             }
         );
 
-        if (bias != nullptr) {
-            const double* bias_data = get_data_ptr<const double>(*bias);
+        if (bias_ptr_in != nullptr) {
+            const double* bias_data = get_data_ptr<const double>(*bias_ptr_in);
             queue.parallel_for<ConvTranspose2dBiasKernelFloat64>(
                 sycl::range<1>(total_output),
                 [=](sycl::id<1> idx) {
@@ -2132,8 +2143,8 @@ auto conv_transpose2d_forward(
         }
     }
     else if (input.dtype() == DType::Float16) {
-        const sycl::half* input_data = get_data_ptr<const sycl::half>(input);
-        const sycl::half* weight_data = get_data_ptr<const sycl::half>(weight);
+        const sycl::half* input_data = get_data_ptr<const sycl::half>(input_c);
+        const sycl::half* weight_data = get_data_ptr<const sycl::half>(weight_c);
         sycl::half* output_data = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<ConvTranspose2dForwardKernelFloat16>(
@@ -2179,8 +2190,8 @@ auto conv_transpose2d_forward(
             }
         );
 
-        if (bias != nullptr) {
-            const sycl::half* bias_data = get_data_ptr<const sycl::half>(*bias);
+        if (bias_ptr_in != nullptr) {
+            const sycl::half* bias_data = get_data_ptr<const sycl::half>(*bias_ptr_in);
             queue.parallel_for<ConvTranspose2dBiasKernelFloat16>(
                 sycl::range<1>(total_output),
                 [=](sycl::id<1> idx) {
@@ -2472,12 +2483,22 @@ auto deformable_conv2d_forward_kernel(
 
     Tensor output({N, C_out, H_out, W_out}, input.dtype(), input.device());
 
+    // get_data_ptr() ignores strides -- contiguify all raw-pointer operands
+    // so a non-contiguous (channels-last/permuted/sliced) view is read
+    // correctly. Matches the CPU kernel's guard
+    // (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor input_c  = input.is_contiguous()  ? input  : input.contiguous();
+    const Tensor offset_c = offset.is_contiguous() ? offset : offset.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor bias_c   = bias.is_contiguous()   ? bias   : bias.contiguous();
+    const Tensor mask_c   = mask.is_contiguous()   ? mask   : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        const float* off_ptr = get_data_ptr<const float>(offset);
-        const float* w_ptr = get_data_ptr<const float>(weight);
-        const float* b_ptr = use_bias ? get_data_ptr<const float>(bias) : nullptr;
-        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask) : nullptr;
+        const float* in_ptr = get_data_ptr<const float>(input_c);
+        const float* off_ptr = get_data_ptr<const float>(offset_c);
+        const float* w_ptr = get_data_ptr<const float>(weight_c);
+        const float* b_ptr = use_bias ? get_data_ptr<const float>(bias_c) : nullptr;
+        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask_c) : nullptr;
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<DeformableConv2dForwardF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
@@ -2531,11 +2552,11 @@ auto deformable_conv2d_forward_kernel(
             out_ptr[idx] = sum;
         });
     } else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        const double* off_ptr = get_data_ptr<const double>(offset);
-        const double* w_ptr = get_data_ptr<const double>(weight);
-        const double* b_ptr = use_bias ? get_data_ptr<const double>(bias) : nullptr;
-        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask) : nullptr;
+        const double* in_ptr = get_data_ptr<const double>(input_c);
+        const double* off_ptr = get_data_ptr<const double>(offset_c);
+        const double* w_ptr = get_data_ptr<const double>(weight_c);
+        const double* b_ptr = use_bias ? get_data_ptr<const double>(bias_c) : nullptr;
+        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask_c) : nullptr;
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<DeformableConv2dForwardF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
@@ -2647,6 +2668,15 @@ auto deformable_conv2d_backward_input_kernel(
         grad_mask = Tensor(std::vector<int64_t>(mshape.begin(), mshape.end()), input.dtype(), input.device());
     }
 
+    // get_data_ptr() ignores strides -- contiguify all raw-pointer read
+    // operands. Matches the CPU kernel's guard
+    // (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c       = input.is_contiguous()       ? input       : input.contiguous();
+    const Tensor offset_c      = offset.is_contiguous()      ? offset      : offset.contiguous();
+    const Tensor weight_c      = weight.is_contiguous()      ? weight      : weight.contiguous();
+    const Tensor mask_c        = mask.is_contiguous()        ? mask        : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         float* gi_ptr = get_data_ptr<float>(grad_input);
         float* go_off_ptr = get_data_ptr<float>(grad_offset);
@@ -2657,11 +2687,11 @@ auto deformable_conv2d_backward_input_kernel(
         if (use_mask) queue.fill(gm_ptr, 0.0f, static_cast<size_t>(mask.numel()));
         queue.wait_and_throw();
 
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
-        const float* off_ptr = get_data_ptr<const float>(offset);
-        const float* w_ptr = get_data_ptr<const float>(weight);
-        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask) : nullptr;
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output_c);
+        const float* in_ptr = get_data_ptr<const float>(input_c);
+        const float* off_ptr = get_data_ptr<const float>(offset_c);
+        const float* w_ptr = get_data_ptr<const float>(weight_c);
+        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask_c) : nullptr;
 
         queue.parallel_for<DeformableConv2dBackwardInputF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t ow = idx % W_out;
@@ -2755,11 +2785,11 @@ auto deformable_conv2d_backward_input_kernel(
         if (use_mask) queue.fill(gm_ptr, 0.0, static_cast<size_t>(mask.numel()));
         queue.wait_and_throw();
 
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
-        const double* off_ptr = get_data_ptr<const double>(offset);
-        const double* w_ptr = get_data_ptr<const double>(weight);
-        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask) : nullptr;
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output_c);
+        const double* in_ptr = get_data_ptr<const double>(input_c);
+        const double* off_ptr = get_data_ptr<const double>(offset_c);
+        const double* w_ptr = get_data_ptr<const double>(weight_c);
+        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask_c) : nullptr;
 
         queue.parallel_for<DeformableConv2dBackwardInputF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t ow = idx % W_out;
@@ -2889,15 +2919,23 @@ auto deformable_conv2d_backward_weight_kernel(
 
     Tensor grad_weight(weight_shape, input.dtype(), input.device());
 
+    // get_data_ptr() ignores strides -- contiguify all raw-pointer read
+    // operands. Matches the CPU kernel's guard
+    // (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c       = input.is_contiguous()       ? input       : input.contiguous();
+    const Tensor offset_c      = offset.is_contiguous()      ? offset      : offset.contiguous();
+    const Tensor mask_c        = mask.is_contiguous()        ? mask        : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         float* gw_ptr = get_data_ptr<float>(grad_weight);
         queue.fill(gw_ptr, 0.0f, static_cast<size_t>(C_out * channels_per_group * kH * kW));
         queue.wait_and_throw();
 
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
-        const float* off_ptr = get_data_ptr<const float>(offset);
-        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask) : nullptr;
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output_c);
+        const float* in_ptr = get_data_ptr<const float>(input_c);
+        const float* off_ptr = get_data_ptr<const float>(offset_c);
+        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask_c) : nullptr;
 
         queue.parallel_for<DeformableConv2dBackwardWeightF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t kw_idx = idx % kW;
@@ -2952,10 +2990,10 @@ auto deformable_conv2d_backward_weight_kernel(
         queue.fill(gw_ptr, 0.0, static_cast<size_t>(C_out * channels_per_group * kH * kW));
         queue.wait_and_throw();
 
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
-        const double* off_ptr = get_data_ptr<const double>(offset);
-        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask) : nullptr;
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output_c);
+        const double* in_ptr = get_data_ptr<const double>(input_c);
+        const double* off_ptr = get_data_ptr<const double>(offset_c);
+        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask_c) : nullptr;
 
         queue.parallel_for<DeformableConv2dBackwardWeightF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
             const int64_t kw_idx = idx % kW;

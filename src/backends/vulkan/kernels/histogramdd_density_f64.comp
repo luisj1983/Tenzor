@@ -1,0 +1,34 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Phase 8.4 (Float64): density normalization for histogramdd that reads bin
+// steps from params_buf on device. inv_norm = 1 / (N * prod_d step[d]).
+// Mirrors histogramdd_density.comp in native double precision.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer CountsF { float64_t counts_f[]; };
+layout(binding = 1) buffer ParamsB { float64_t dim_params[]; };
+layout(binding = 2) buffer OutputB { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_bins;
+    uint D;
+    uint N;
+} params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.total_bins) return;
+
+    // Compute bin_volume on each invocation. D is small (typically 2-3) so
+    // recomputing per-thread is cheaper than a separate reduce + sync.
+    float64_t bin_volume = 1.0LF;
+    for (uint d = 0u; d < params.D; ++d) {
+        bin_volume *= dim_params[d * 2u + 1u];  // step
+    }
+    float64_t norm = float64_t(params.N) * bin_volume;
+    float64_t inv_norm = (norm > 0.0LF) ? (1.0LF / norm) : 0.0LF;
+
+    output_data[i] = counts_f[i] * inv_norm;
+}

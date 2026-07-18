@@ -1,0 +1,43 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// IndexFill (Int64): fills output with a scalar integer value along indexed
+// positions of a dimension. Used for Int64/UInt64 (and any 8-byte integer
+// dtype) so the fill target's OTHER (untouched) elements are never rounded
+// through Float32 (24 mantissa bits) — the pre-existing Vulkan implementation
+// round-tripped the ENTIRE self tensor through Float32 for any non-Float32/
+// Float64 dtype, silently corrupting Int64 values above 2^24 even at
+// positions the fill never touches.
+// output[(o * dim_size + index[k]) * inner + j] = value
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { int64_t out_data[]; };   // Output (readwrite)
+layout(binding = 1) buffer Index { int idx_data[]; };         // 1-D index tensor
+
+layout(push_constant) uniform PushConstants {
+    uint outer;         // Product of dims before target dim
+    uint dim_size;      // Size of target dim in output
+    uint idx_n;         // Number of indices
+    uint inner;         // Product of dims after target dim
+    int64_t value;       // Fill value (8-byte aligned; the 4 leading uint32s
+                          // sum to 16 bytes, a multiple of 8, so no explicit
+                          // pad field is needed)
+} params;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint total = params.outer * params.idx_n * params.inner;
+    if (tid >= total) return;
+
+    uint j = tid % params.inner;
+    uint k = (tid / params.inner) % params.idx_n;
+    uint o = tid / (params.inner * params.idx_n);
+
+    int dest_idx = idx_data[k];
+    if (dest_idx < 0) dest_idx += int(params.dim_size);  // wrap negatives (match CPU/OneAPI)
+    if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
+
+    uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;
+
+    out_data[out_pos] = params.value;
+}

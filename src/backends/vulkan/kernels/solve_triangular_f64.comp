@@ -1,11 +1,15 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// SolveTriangular (Float64) — solve AX = B where A is triangular.
-// Each invocation handles one column of B. Mirrors solve_triangular.comp
-// but keeps all arithmetic in double precision — Float64 gradcheck of
-// cholesky_inverse showed that round-tripping through Float32 loses enough
-// precision for a 4x4 case to drift off the atol=1e-5 budget.
+// SolveTriangular (Float64) — solve AX = B where A is triangular, batched.
+// Mirrors solve_triangular.comp but keeps all arithmetic in double
+// precision — Float64 gradcheck of cholesky_inverse showed that
+// round-tripping through Float32 loses enough precision for a 4x4 case to
+// drift off the atol=1e-5 budget.
+// Each invocation handles one column of B for one batch element:
+//   x = gl_GlobalInvocationID.x -> RHS column (0..M)
+//   y = gl_GlobalInvocationID.y -> batch index (0..batch), local_size_y == 1
+//     so gl_GlobalInvocationID.y == gl_WorkGroupID.y (one workgroup row per batch).
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) readonly buffer MatA { double A_data[]; };
@@ -17,34 +21,39 @@ layout(push_constant) uniform PushConstants {
     uint M;
     uint upper;
     uint unitriangular;
+    uint batch;
 } params;
 
 void main() {
     uint col = gl_GlobalInvocationID.x;
-    if (col >= params.M) return;
+    uint batch_idx = gl_GlobalInvocationID.y;
+    if (col >= params.M || batch_idx >= params.batch) return;
+
+    uint a_off = batch_idx * params.N * params.N;
+    uint b_off = batch_idx * params.N * params.M;
 
     if (params.upper != 0) {
         for (int i = int(params.N) - 1; i >= 0; i--) {
-            double sum = B_data[uint(i) * params.M + col];
+            double sum = B_data[b_off + uint(i) * params.M + col];
             for (uint j = uint(i) + 1; j < params.N; j++) {
-                sum -= A_data[uint(i) * params.N + j] * X_data[j * params.M + col];
+                sum -= A_data[a_off + uint(i) * params.N + j] * X_data[b_off + j * params.M + col];
             }
             if (params.unitriangular != 0) {
-                X_data[uint(i) * params.M + col] = sum;
+                X_data[b_off + uint(i) * params.M + col] = sum;
             } else {
-                X_data[uint(i) * params.M + col] = sum / A_data[uint(i) * params.N + uint(i)];
+                X_data[b_off + uint(i) * params.M + col] = sum / A_data[a_off + uint(i) * params.N + uint(i)];
             }
         }
     } else {
         for (uint i = 0; i < params.N; i++) {
-            double sum = B_data[i * params.M + col];
+            double sum = B_data[b_off + i * params.M + col];
             for (uint j = 0; j < i; j++) {
-                sum -= A_data[i * params.N + j] * X_data[j * params.M + col];
+                sum -= A_data[a_off + i * params.N + j] * X_data[b_off + j * params.M + col];
             }
             if (params.unitriangular != 0) {
-                X_data[i * params.M + col] = sum;
+                X_data[b_off + i * params.M + col] = sum;
             } else {
-                X_data[i * params.M + col] = sum / A_data[i * params.N + i];
+                X_data[b_off + i * params.M + col] = sum / A_data[a_off + i * params.N + i];
             }
         }
     }

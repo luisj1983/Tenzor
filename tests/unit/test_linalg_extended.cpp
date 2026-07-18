@@ -229,4 +229,33 @@ TEST_P(LinalgExtendedTest, LdlFactorConsistency) {
     EXPECT_NEAR(d1[1], d2[1], 1e-6);
 }
 
+// Regression: ldl_solve's diagonal-solve step (ldl_solve_bk_kernel /
+// ldl_bk_solve_kernel on ROCm) divided by the 1x1/2x2 D-block pivot with no
+// zero check, silently returning Inf/NaN for a singular factor instead of
+// throwing (unlike Inv/Solve/Cholesky in the same file, which check
+// rocSOLVER/native info for exactly this class of failure). ldl_factor's own
+// singularity check (rocSOLVER's sytrf info) means a genuinely-singular
+// matrix never reaches ldl_solve via the normal factor->solve pipeline on
+// the rocSOLVER build -- so construct a hand-crafted LD/pivots pair with an
+// exact-zero 1x1 D-block pivot directly, bypassing ldl_factor entirely, to
+// exercise ldl_solve's own guard regardless of how LD/pivots were obtained
+// (matches the native-fallback build, whose factor step has no info check at
+// all, making ldl_solve the only line of defense there).
+TEST_P(LinalgExtendedTest, LdlSolveZeroPivotThrows) {
+    // n=2, D(0,0) = 0 (zero pivot), both blocks are 1x1 (no swaps).
+    double ld_data[] = {0.0, 0.0,
+                         0.0, 1.0};
+    int32_t piv_data[] = {1, 2};
+    double b_data[] = {1.0, 1.0};
+
+    auto LD = from_data(ld_data, {2, 2}, device);
+    auto pivots = from_data(piv_data, {2}, device);
+    auto b = from_data(b_data, {2, 1}, device);
+
+    EXPECT_THROW({
+        auto x = ldl_solve(LD, pivots, b);
+        device.synchronize();
+    }, std::exception) << "Failed on " << device.to_string();
+}
+
 INSTANTIATE_BACKEND_TESTS(LinalgExtendedTest);

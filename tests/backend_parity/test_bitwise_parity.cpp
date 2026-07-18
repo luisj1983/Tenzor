@@ -103,6 +103,74 @@ DEFINE_SHIFT_TEST(BitwiseRightShift, bitwise_right_shift, Int64)
 
 #undef DEFINE_SHIFT_TEST
 
+// ----------------------------------------------------------------------------
+// Regression: broadcasting. ROCm's BitwiseAnd/Or/Xor/LeftShift/RightShift
+// kernels previously sized the launch by a.numel() alone and read b at the
+// same flat index with no broadcast-shape handling at all -- a scalar (or
+// any smaller-but-broadcastable) second operand read out of bounds past the
+// end of its buffer instead of broadcasting.
+// ----------------------------------------------------------------------------
+
+#define DEFINE_BINARY_BITWISE_BROADCAST_TEST(NAME, OP, DTYPE)                 \
+    TEST_P(BitwiseParity, NAME##_##DTYPE##_Broadcast) {                       \
+        auto a = randint(-128, 127, {4, 8}, DType::DTYPE, Device::cpu());     \
+        auto b = randint(1, 4, {1}, DType::DTYPE, Device::cpu());             \
+        test_operation_parity_single([](const std::vector<Tensor>& inputs) {  \
+            return OP(inputs[0], inputs[1]);                                  \
+        }, {a, b}, device, kIntRtol, kIntAtol, #NAME "_" #DTYPE "_Broadcast");\
+    }
+
+DEFINE_BINARY_BITWISE_BROADCAST_TEST(BitwiseAnd, bitwise_and, Int32)
+DEFINE_BINARY_BITWISE_BROADCAST_TEST(BitwiseOr,  bitwise_or,  Int32)
+DEFINE_BINARY_BITWISE_BROADCAST_TEST(BitwiseXor, bitwise_xor, Int32)
+
+#undef DEFINE_BINARY_BITWISE_BROADCAST_TEST
+
+#define DEFINE_SHIFT_BROADCAST_TEST(NAME, OP, DTYPE)                          \
+    TEST_P(BitwiseParity, NAME##_##DTYPE##_Broadcast) {                       \
+        auto a = randint(-128, 127, {4, 8}, DType::DTYPE, Device::cpu());     \
+        auto s = randint(0, 5, {1}, DType::DTYPE, Device::cpu());             \
+        test_operation_parity_single([](const std::vector<Tensor>& inputs) {  \
+            return OP(inputs[0], inputs[1]);                                  \
+        }, {a, s}, device, kIntRtol, kIntAtol, #NAME "_" #DTYPE "_Broadcast");\
+    }
+
+DEFINE_SHIFT_BROADCAST_TEST(BitwiseLeftShift,  bitwise_left_shift,  Int32)
+DEFINE_SHIFT_BROADCAST_TEST(BitwiseRightShift, bitwise_right_shift, Int32)
+
+#undef DEFINE_SHIFT_BROADCAST_TEST
+
+// ----------------------------------------------------------------------------
+// Regression: shift-amount UB. CPU/CUDA define an out-of-[0,bitwidth) shift
+// count as 0 (left) / sign-saturated (right); ROCm/OneAPI/Vulkan previously
+// performed the raw native shift with no guard -- real undefined behavior in
+// C++/HIP/SYCL and GLSL-spec-undefined in the shader.
+// ----------------------------------------------------------------------------
+
+TEST_P(BitwiseParity, LeftShift_OutOfRangeAmount) {
+    auto a = full({4, 8}, -7, DType::Int32, Device::cpu());
+    auto s = full({4, 8}, 35, DType::Int32, Device::cpu());  // >= 32-bit width
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return bitwise_left_shift(inputs[0], inputs[1]);
+    }, {a, s}, device, kIntRtol, kIntAtol, "LeftShift_OutOfRangeAmount");
+}
+
+TEST_P(BitwiseParity, RightShift_OutOfRangeAmount) {
+    auto a = full({4, 8}, -7, DType::Int32, Device::cpu());
+    auto s = full({4, 8}, 35, DType::Int32, Device::cpu());  // >= 32-bit width
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return bitwise_right_shift(inputs[0], inputs[1]);
+    }, {a, s}, device, kIntRtol, kIntAtol, "RightShift_OutOfRangeAmount");
+}
+
+TEST_P(BitwiseParity, LeftShift_NegativeAmount) {
+    auto a = full({4, 8}, -7, DType::Int32, Device::cpu());
+    auto s = full({4, 8}, -1, DType::Int32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return bitwise_left_shift(inputs[0], inputs[1]);
+    }, {a, s}, device, kIntRtol, kIntAtol, "LeftShift_NegativeAmount");
+}
+
 INSTANTIATE_BACKEND_TESTS(BitwiseParity);
 
 int main(int argc, char** argv) {

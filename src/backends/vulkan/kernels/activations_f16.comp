@@ -15,6 +15,13 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 const float PI = 3.14159265359;
+// Use the exact Float32 representation that the C++ compiler produces for
+// these constants (matches activations.comp's SELU forward constants). GLSL
+// compilers may round the long decimal literal to a different Float32 value
+// (off by 1 ULP), which causes a systematic 2^-22 error in SELU(x) for
+// |x| >= ~2.
+const float SELU_ALPHA = 1.67326319217681884766;  // 0x3FD62D7D
+const float SELU_SCALE = 1.05070102214813232422;  // 0x3F867D5F
 
 // Helper to read float16 from input
 float16_t readF16(uint element_idx) {
@@ -38,6 +45,14 @@ float relu(float x) {
 
 float sigmoid(float x) {
     return 1.0 / (1.0 + exp(-x));
+}
+
+// Stable tanh: tanh(x) = 2*sigmoid(2x) - 1. Routes through exp()-based
+// sigmoid instead of GLSL's intrinsic tanh — driver tanh approximations
+// drift noticeably from std::tanh (see activations.comp's tanh_stable for
+// the full rationale); same fix applied here for the f16 forward path.
+float tanh_stable(float x) {
+    return 2.0 * sigmoid(2.0 * x) - 1.0;
 }
 
 // erf via Abramowitz & Stegun 7.1.26 (max abs error ~1.5e-7). Exact erf GELU
@@ -73,14 +88,54 @@ float hardsigmoid(float x) {
     return clamp(x + 3.0, 0.0, 6.0) * (1.0 / 6.0);
 }
 
+float elu(float x, float alpha) {
+    // ELU: x if x > 0, alpha * (exp(x) - 1) otherwise
+    return x > 0.0 ? x : alpha * (exp(x) - 1.0);
+}
+
+float selu(float x) {
+    if (x > 0.0)
+        return SELU_SCALE * x;
+    // Two paths for negative x to avoid precision loss (mirrors
+    // activations.comp's selu()): Taylor-expand expm1 near 0 to avoid
+    // catastrophic cancellation in exp(x)-1 for small |x|.
+    float lambda = SELU_SCALE * SELU_ALPHA;
+    if (x > -0.025) {
+        float t = x * 0.2 + 1.0;
+        t = x * 0.25 * t + 1.0;
+        t = x / 3.0 * t + 1.0;
+        t = x * 0.5 * t + 1.0;
+        return lambda * (x * t);
+    }
+    return lambda * exp(x) - lambda;
+}
+
+float softplus(float x, float beta) {
+    // Softplus: (1/beta) * log(1 + exp(beta * x)), numerically stable.
+    float bx = beta * x;
+    if (bx > 20.0) return x;
+    if (bx < -20.0) return exp(bx) / beta;
+    return log(1.0 + exp(bx)) / beta;
+}
+
+float mish(float x) {
+    // Mish: x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+    float sp = x > 20.0 ? x : (x < -20.0 ? exp(x) : log(1.0 + exp(x)));
+    return x * tanh_stable(sp);
+}
+
 float apply_activation(float x) {
     switch (params.activation) {
         case 0: return relu(x);
         case 1: return sigmoid(x);
-        case 2: return tanh(x);
+        case 2: return tanh_stable(x);
         case 3: return gelu(x);
         case 4: return leaky_relu(x, params.alpha);
         case 5: return swish(x);
+        case 6: return elu(x, params.alpha);
+        case 7: return selu(x);
+        case 8: return mish(x);
+        case 9: return softplus(x, params.alpha);
         case 10: return hardswish(x);
         case 11: return hardsigmoid(x);
         default: return x;

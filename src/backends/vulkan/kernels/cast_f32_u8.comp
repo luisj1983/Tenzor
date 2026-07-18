@@ -2,7 +2,13 @@
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
 
-// Cast Float32 to UInt8, clamped to [0, 255] with truncation toward zero.
+// Cast Float32 to UInt8: truncate toward zero to a signed 32-bit int (so
+// negative inputs are well-defined), then take the low 8 bits (modular
+// truncation/wraparound). Matches CPU/CUDA/ROCm's raw static_cast (no
+// clamping) and numpy/PyTorch's `.to(uint8)` semantics, e.g. -1.0f -> 255
+// and 300.0f -> 44 rather than saturating to 0 / 255. The previous
+// clamp([0,255]) diverged from the majority-backend/PyTorch/numpy convention
+// for out-of-range values.
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer InputBuffer {
@@ -20,7 +26,6 @@ layout(push_constant) uniform PushConstants {
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.num_elements) return;
-    float v = input_buf.data[idx];
-    float clamped = clamp(v, 0.0, 255.0);
-    output_buf.data[idx] = uint8_t(uint(clamped));
+    int iv = int(input_buf.data[idx]);   // truncate toward zero (signed, well-defined for negatives)
+    output_buf.data[idx] = uint8_t(iv);  // modular narrowing (low 8 bits)
 }

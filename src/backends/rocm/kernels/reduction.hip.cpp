@@ -404,6 +404,25 @@ __global__ void var_along_dim_kernel(
                                 : tenzor::rocm::make_qnan<T>();
 }
 
+// Positive-infinity bit-pattern test, paired with is_neg_inf_bits from
+// rocm_nan_helpers.hip.h. Under -ffast-math the `isinf()`/`signbit()`
+// intrinsics can fold comparisons against +/-infinity to compile-time
+// constants (this target restores -fno-finite-math-only library-wide via
+// CMakeLists.txt, but the bit-pattern check is kept for defense in depth,
+// matching the existing is_neg_inf_bits/is_nan_bits convention). Used by
+// norm_along_dim_kernel/norm_kernel/norm_final_kernel below to special-case
+// p == +/-inf (L-infinity / L-(-infinity) norm).
+__device__ __host__ inline bool is_pos_inf_bits(float x) {
+    union { float f; uint32_t u; } pun;
+    pun.f = x;
+    return pun.u == 0x7F800000u;
+}
+__device__ __host__ inline bool is_pos_inf_bits(double x) {
+    union { double d; uint64_t u; } pun;
+    pun.d = x;
+    return pun.u == 0x7FF0000000000000ull;
+}
+
 /**
  * @brief Norm reduction along a specific dimension (p-norm)
  * @tparam T Data type
@@ -436,6 +455,44 @@ __global__ void norm_along_dim_kernel(
     // float input) to preserve precision, matching sum_along_dim and the
     // variance/p-norm kernels; narrow on store.
     using Acc = reduction_accum_t<T>;
+
+    // p == 0 is the L0 "norm": count of nonzero elements. The general
+    // pow(x,p) branch below gives pow(x,0)==1 for every element (including
+    // zero, per IEEE-754), which would wrongly sum to dim_size instead of the
+    // nonzero count. Matches CPU's norm_kernel_dim
+    // (src/backends/cpu/kernels/reduction.cpp).
+    if (p == T(0)) {
+        int64_t count = 0;
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+            if (static_cast<Acc>(input[in_idx]) != Acc(0)) ++count;
+        }
+        output[out_idx] = static_cast<T>(count);
+        return;
+    }
+
+    // p == +/-inf: max(|x|) / min(|x|) respectively -- NOT the general
+    // pow(sum, 1/p) formula, which collapses per-element to 0/1/inf
+    // (depending on |x| vs 1) and always evaluates pow(sum, 1/inf)==1.
+    // Matches CPU's norm_kernel_dim.
+    const bool is_pos_inf = is_pos_inf_bits(p);
+    const bool is_neg_inf = tenzor::rocm::is_neg_inf_bits(p);
+    if (is_pos_inf || is_neg_inf) {
+        Acc m = is_neg_inf ? std::numeric_limits<Acc>::infinity() : Acc(0);
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) in_idx += indices[d] * input_strides[d];
+            Acc val = static_cast<Acc>(input[in_idx]);
+            Acc abs_val = val < Acc(0) ? -val : val;
+            if (is_neg_inf ? (abs_val < m) : (abs_val > m)) m = abs_val;
+        }
+        output[out_idx] = static_cast<T>(m);
+        return;
+    }
+
     const Acc p_acc = static_cast<Acc>(p);
     Acc acc = Acc(0);
     for (int64_t i = 0; i < dim_size; i++) {
@@ -932,7 +989,11 @@ static void launch_dim_reduction_sum(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
+        // dim_size == 0 is NOT bailed out here: sum_along_dim_kernel naturally
+        // writes the correct identity (0) for every output element even when
+        // the reduced dimension is empty, matching CPU. Returning early would
+        // leave the freshly-allocated output as uninitialized device memory.
         return;
     }
 
@@ -981,7 +1042,11 @@ static void launch_dim_reduction_var(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
+        // dim_size == 0 is NOT bailed out here: var_along_dim_kernel already
+        // yields the correct identity (NaN, since count<=correction) even when
+        // the reduced dimension is empty, matching CPU. Returning early would
+        // leave the freshly-allocated output as uninitialized device memory.
         return;
     }
 
@@ -1030,8 +1095,13 @@ static void launch_dim_reduction_norm(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // Matches CPU norm_kernel_dim, which throws instead of silently
+        // returning 0 for this case.
+        throw std::invalid_argument("norm: cannot reduce over a zero-size dimension");
     }
 
     // Copy shape and strides to device
@@ -1077,8 +1147,13 @@ static void launch_dim_reduction_max(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // Matches CPU/CUDA, which throw instead of reading an out-of-bounds
+        // index or leaving the output uninitialized.
+        throw std::invalid_argument("max: cannot reduce over a zero-size dimension");
     }
 
     int64_t* d_shape;
@@ -1122,8 +1197,13 @@ static void launch_dim_reduction_min(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // Matches CPU/CUDA, which throw instead of reading an out-of-bounds
+        // index or leaving the output uninitialized.
+        throw std::invalid_argument("min: cannot reduce over a zero-size dimension");
     }
 
     int64_t* d_shape;
@@ -1167,8 +1247,13 @@ static void launch_dim_argmax(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // Matches CPU/CUDA, which throw instead of reading an out-of-bounds
+        // index or leaving the output uninitialized.
+        throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
     }
 
     int64_t* d_shape;
@@ -1211,8 +1296,13 @@ static void launch_dim_argmin(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
         return;
+    }
+    if (dim_size == 0) {
+        // Matches CPU/CUDA, which throw instead of reading an out-of-bounds
+        // index or leaving the output uninitialized.
+        throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
     }
 
     int64_t* d_shape;
@@ -1255,7 +1345,11 @@ static void launch_dim_prod(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
+        // dim_size == 0 is NOT bailed out here: prod_along_dim_kernel already
+        // writes the correct identity (1) for every output element even when
+        // the reduced dimension is empty, matching CPU. Returning early would
+        // leave the freshly-allocated output as uninitialized device memory.
         return;
     }
 
@@ -2016,6 +2110,14 @@ template<typename T>
 __global__ void norm_kernel(const T* input, T* output, int64_t n, T p) {
     // Accumulate sum of |x|^p in the higher-precision accum type (double for
     // float input), matching the sum-reduce contract; narrow on store.
+    //
+    // p == 0 (L0: count of nonzero) and p == +/-inf (max/min of |x|) need a
+    // DIFFERENT per-block reduction than "sum of pow(|x|,p)": pow(x,0)==1 for
+    // every x (including 0), and pow(|x|,+-inf) collapses to 0/1/inf
+    // depending on |x| vs 1 -- neither is meaningful to sum. This block
+    // computes a per-block partial (count-as-sum for p==0, running max/min
+    // for p==+/-inf) that norm_final_kernel below finishes identically.
+    // Matches CPU's norm_kernel (src/backends/cpu/kernels/reduction.cpp).
     using Acc = reduction_accum_t<T>;
     __shared__ Acc sdata[REDUCTION_BLOCK_SIZE];
 
@@ -2023,20 +2125,35 @@ __global__ void norm_kernel(const T* input, T* output, int64_t n, T p) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     Acc pa = static_cast<Acc>(p);
 
+    const bool is_l0 = (p == T(0));
+    const bool is_pos_inf = is_pos_inf_bits(p);
+    const bool is_neg_inf = tenzor::rocm::is_neg_inf_bits(p);
+
     Acc sum = Acc(0);
+    Acc extremum = is_neg_inf ? std::numeric_limits<Acc>::infinity() : Acc(0);
     while (idx < n) {
         Acc val = static_cast<Acc>(input[idx]);
         if (val < Acc(0)) val = -val;  // abs
-        sum += pow(val, pa);
+        if (is_l0) {
+            if (val != Acc(0)) sum += Acc(1);
+        } else if (is_pos_inf) {
+            if (val > extremum) extremum = val;
+        } else if (is_neg_inf) {
+            if (val < extremum) extremum = val;
+        } else {
+            sum += pow(val, pa);
+        }
         idx += blockDim.x * gridDim.x;
     }
 
-    sdata[tid] = sum;
+    sdata[tid] = (is_pos_inf || is_neg_inf) ? extremum : sum;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            sdata[tid] += sdata[tid + s];
+            if (is_pos_inf) sdata[tid] = sdata[tid] > sdata[tid + s] ? sdata[tid] : sdata[tid + s];
+            else if (is_neg_inf) sdata[tid] = sdata[tid] < sdata[tid + s] ? sdata[tid] : sdata[tid + s];
+            else sdata[tid] += sdata[tid + s];
         }
         __syncthreads();
     }
@@ -2113,10 +2230,31 @@ template<typename T>
 __global__ void norm_final_kernel(const T* partials, T* output, int num_partials, T p) {
     __shared__ T sdata[REDUCTION_BLOCK_SIZE];
 
+    // Mirrors norm_kernel's per-block special-casing: p==0 partials are
+    // per-block nonzero counts (finish with a sum, no pow); p==+/-inf
+    // partials are per-block max/min of |x| (finish with a max/min, no pow).
+    // Only the general case combines with a sum followed by pow(sum, 1/p).
+    const bool is_l0 = (p == T(0));
+    const bool is_pos_inf = is_pos_inf_bits(p);
+    const bool is_neg_inf = tenzor::rocm::is_neg_inf_bits(p);
+
     int tid = threadIdx.x;
-    T val = T(0);
-    for (int i = tid; i < num_partials; i += blockDim.x) {
-        val += partials[i];
+    T val;
+    if (is_pos_inf) {
+        val = T(0);
+        for (int i = tid; i < num_partials; i += blockDim.x) {
+            if (partials[i] > val) val = partials[i];
+        }
+    } else if (is_neg_inf) {
+        val = std::numeric_limits<T>::infinity();
+        for (int i = tid; i < num_partials; i += blockDim.x) {
+            if (partials[i] < val) val = partials[i];
+        }
+    } else {
+        val = T(0);
+        for (int i = tid; i < num_partials; i += blockDim.x) {
+            val += partials[i];
+        }
     }
 
     sdata[tid] = val;
@@ -2124,13 +2262,15 @@ __global__ void norm_final_kernel(const T* partials, T* output, int num_partials
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            sdata[tid] += sdata[tid + s];
+            if (is_pos_inf) sdata[tid] = sdata[tid] > sdata[tid + s] ? sdata[tid] : sdata[tid + s];
+            else if (is_neg_inf) sdata[tid] = sdata[tid] < sdata[tid + s] ? sdata[tid] : sdata[tid + s];
+            else sdata[tid] += sdata[tid + s];
         }
         __syncthreads();
     }
 
     if (tid == 0) {
-        output[0] = pow(sdata[0], T(1) / p);
+        output[0] = (is_l0 || is_pos_inf || is_neg_inf) ? sdata[0] : pow(sdata[0], T(1) / p);
     }
 }
 
@@ -2201,8 +2341,21 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream
     const auto& input_shape = input.shape();
     int64_t n = input.numel();
 
-    if (n == 0) {
-        throw std::runtime_error("argmax: cannot compute argmax of empty tensor");
+    // Distinguish "whole tensor empty" (dim == INT64_MIN sentinel, full
+    // reduction) from "the specifically-requested dim is empty" (checked via
+    // input_shape[dim], NOT input.numel()==0 -- numel() can be 0 merely
+    // because some OTHER dim is empty, e.g. shape (3,0,5) reducing dim=0,
+    // in which case output_size is also 0 and there is nothing to throw
+    // about). Matches CPU's argmax_kernel exactly (message + exception type).
+    if (dim == INT64_MIN) {
+        if (n == 0) {
+            throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+        }
+    } else {
+        int64_t check_dim = dim < 0 ? dim + static_cast<int64_t>(input_shape.size()) : dim;
+        if (input_shape[check_dim] == 0) {
+            throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+        }
     }
 
     // Small integer / Bool inputs are exactly representable in Float32; widen and
@@ -2344,8 +2497,21 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream
     const auto& input_shape = input.shape();
     int64_t n = input.numel();
 
-    if (n == 0) {
-        throw std::runtime_error("argmin: cannot compute argmin of empty tensor");
+    // Distinguish "whole tensor empty" (dim == INT64_MIN sentinel, full
+    // reduction) from "the specifically-requested dim is empty" (checked via
+    // input_shape[dim], NOT input.numel()==0 -- numel() can be 0 merely
+    // because some OTHER dim is empty, e.g. shape (3,0,5) reducing dim=0,
+    // in which case output_size is also 0 and there is nothing to throw
+    // about). Matches CPU's argmin_kernel exactly (message + exception type).
+    if (dim == INT64_MIN) {
+        if (n == 0) {
+            throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
+        }
+    } else {
+        int64_t check_dim = dim < 0 ? dim + static_cast<int64_t>(input_shape.size()) : dim;
+        if (input_shape[check_dim] == 0) {
+            throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
+        }
     }
 
     // Small integer / Bool inputs are exactly representable in Float32; widen and
@@ -2506,6 +2672,36 @@ auto prod_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t
 
     if (dim < 0) {
         // Full product
+        if (n == 0) {
+            // n==0 makes num_blocks compute to 0 below: the kernel launch
+            // with dim3(0) never runs, d_partial is a 0-byte hipMalloc, and
+            // (num_blocks > 1) is false so the code would hipMemcpy from that
+            // never-written/0-byte allocation into output -- undefined
+            // behavior instead of the mathematically-correct product
+            // identity (1), matching CPU/CUDA/OneAPI/Vulkan.
+            if (dtype == DType::Float32) {
+                float one = 1.0f;
+                HIP_CHECK(hipMemcpyAsync(output.data<float>(), &one, sizeof(float), hipMemcpyHostToDevice, stream));
+            } else if (dtype == DType::Float64) {
+                double one = 1.0;
+                HIP_CHECK(hipMemcpyAsync(output.data<double>(), &one, sizeof(double), hipMemcpyHostToDevice, stream));
+            } else if (dtype == DType::Int32) {
+                int32_t one = 1;
+                HIP_CHECK(hipMemcpyAsync(output.data<int32_t>(), &one, sizeof(int32_t), hipMemcpyHostToDevice, stream));
+            } else if (dtype == DType::Int64) {
+                int64_t one = 1;
+                HIP_CHECK(hipMemcpyAsync(output.data<int64_t>(), &one, sizeof(int64_t), hipMemcpyHostToDevice, stream));
+            } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+                auto input_f32 = input.to(DType::Float32);
+                auto result_f32 = prod_kernel(input_f32, dim, keepdim, stream);
+                return result_f32.to(dtype);
+            } else {
+                throw std::runtime_error("prod: unsupported dtype");
+            }
+            HIP_CHECK(hipStreamSynchronize(stream));
+            return output;
+        }
+
         int num_blocks = std::min((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, static_cast<int64_t>(1024));
 
         if (dtype == DType::Float32) {
@@ -3196,7 +3392,11 @@ static void launch_dim_any(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
+        // dim_size == 0 is NOT bailed out here: any_along_dim_kernel already
+        // writes the correct identity (false) for every output element even
+        // when the reduced dimension is empty, matching CPU. Returning early
+        // would leave the freshly-allocated output as uninitialized memory.
         return;
     }
 
@@ -3240,7 +3440,11 @@ static void launch_dim_all(
         }
     }
 
-    if (output_size == 0 || dim_size == 0) {
+    if (output_size == 0) {
+        // dim_size == 0 is NOT bailed out here: all_along_dim_kernel already
+        // writes the correct identity (true) for every output element even
+        // when the reduced dimension is empty, matching CPU. Returning early
+        // would leave the freshly-allocated output as uninitialized memory.
         return;
     }
 
@@ -3661,17 +3865,24 @@ auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStr
         // Full reduction
         int64_t n = input.numel();
         if (n == 0) {
-            // logsumexp of empty set is -inf
+            // logsumexp of empty set is -inf (real IEEE -infinity, not a
+            // finite -FLT_MAX/-DBL_MAX sentinel -- matches CPU/Vulkan).
             switch (dtype) {
                 case DType::Float32: {
-                    float neg_inf = -FLT_MAX;
+                    float neg_inf = -std::numeric_limits<float>::infinity();
                     HIP_CHECK(hipMemcpyAsync(output.data<float>(), &neg_inf, sizeof(float),
                               hipMemcpyHostToDevice, stream));
                     break;
                 }
                 case DType::Float64: {
-                    double neg_inf = -DBL_MAX;
+                    double neg_inf = -std::numeric_limits<double>::infinity();
                     HIP_CHECK(hipMemcpyAsync(output.data<double>(), &neg_inf, sizeof(double),
+                              hipMemcpyHostToDevice, stream));
+                    break;
+                }
+                case DType::Float16: {
+                    __half neg_inf = __float2half(-std::numeric_limits<float>::infinity());
+                    HIP_CHECK(hipMemcpyAsync(output.data<Float16>(), &neg_inf, sizeof(__half),
                               hipMemcpyHostToDevice, stream));
                     break;
                 }
@@ -3708,9 +3919,14 @@ auto logsumexp_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStr
             if (i != normalized_dim) output_size *= input_shape[i];
         }
 
-        if (output_size == 0 || dim_size == 0) {
+        if (output_size == 0) {
             return output;
         }
+        // dim_size == 0 is NOT bailed out here: logsumexp_max_along_dim_kernel/
+        // logsumexp_sum_exp_kernel already compute the correct result (-inf,
+        // via m=-FLT_MAX/-DBL_MAX and log(sum=0)) even when the reduced
+        // dimension is empty. Returning early would leave the freshly-
+        // allocated output as uninitialized device memory.
 
         auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
         auto strides_vec = std::vector<int64_t>(input_strides.begin(), input_strides.end());
@@ -3864,13 +4080,12 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
     const auto& input_shape = input.shape();
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    if (input.numel() == 0) {
-        throw std::runtime_error("median: cannot compute median of empty tensor");
-    }
-
     // Normalize dim: INT64_MIN means full reduction
     int64_t normalized_dim = dim;
     if (normalized_dim == INT64_MIN) {
+        if (input.numel() == 0) {
+            throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
+        }
         // Full reduction: flatten and reduce along dim 0
         Tensor flat = input.contiguous().reshape({input.numel()});
         auto result = median_kernel(flat, 0, false, stream);
@@ -3889,6 +4104,13 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         normalized_dim, keepdim);
 
     int64_t dim_size = input_shape[normalized_dim];
+    // Matches CPU's guard exactly (std::invalid_argument, same message) --
+    // check the REDUCED dimension specifically, not input.numel()==0 (which
+    // is also true when some OTHER dimension is empty and would wrongly
+    // reject an otherwise-valid reduction).
+    if (dim_size == 0) {
+        throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
+    }
     int64_t outer_size = 1;
     for (int64_t d = 0; d < ndim; ++d) {
         if (d != normalized_dim) outer_size *= input_shape[d];
@@ -3987,6 +4209,16 @@ __global__ void mode_per_slice_kernel(
     __shared__ int64_t s_idx[256];
     __shared__ T       s_val[256];
 
+    // NaN-aware equality: plain `==` is always false for NaN, even against
+    // itself, so a NaN candidate would count 0 occurrences of its own value
+    // (losing to every real value unconditionally) instead of being counted
+    // like any other repeated value.
+    auto nan_aware_eq = [](T a, T b) -> bool {
+        bool an = (a != a), bn = (b != b);
+        if (an || bn) return an && bn;
+        return a == b;
+    };
+
     int64_t local_count = -1;
     int64_t local_idx = 0;
     T local_val = T(0);
@@ -3994,13 +4226,13 @@ __global__ void mode_per_slice_kernel(
         T val_i = input[base_offset + i * strides[dim]];
         int64_t count = 0;
         for (int64_t j = 0; j < dim_size; ++j) {
-            if (input[base_offset + j * strides[dim]] == val_i) {
+            if (nan_aware_eq(input[base_offset + j * strides[dim]], val_i)) {
                 count++;
             }
         }
         bool better = (count > local_count)
             || (count == local_count && val_i < local_val)
-            || (count == local_count && val_i == local_val && i > local_idx);
+            || (count == local_count && nan_aware_eq(val_i, local_val) && i > local_idx);
         if (better) {
             local_count = count;
             local_val = val_i;
@@ -4019,7 +4251,7 @@ __global__ void mode_per_slice_kernel(
         for (int t = 0; t < blockDim.x; ++t) {
             bool better = (s_count[t] > best_count)
                 || (s_count[t] == best_count && s_val[t] < best_val)
-                || (s_count[t] == best_count && s_val[t] == best_val && s_idx[t] > best_idx);
+                || (s_count[t] == best_count && nan_aware_eq(s_val[t], best_val) && s_idx[t] > best_idx);
             if (better) {
                 best_count = s_count[t];
                 best_val = s_val[t];
@@ -4039,12 +4271,11 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     const auto& input_shape = input.shape();
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    if (input.numel() == 0) {
-        throw std::runtime_error("mode: cannot compute mode of empty tensor");
-    }
-
     int64_t normalized_dim = dim;
     if (normalized_dim == INT64_MIN) {
+        if (input.numel() == 0) {
+            throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
+        }
         Tensor flat = input.contiguous().reshape({input.numel()});
         auto result = mode_kernel(flat, 0, false, stream);
         if (keepdim) {
@@ -4062,6 +4293,13 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
         normalized_dim, keepdim);
 
     int64_t dim_size = input_shape[normalized_dim];
+    // Matches CPU's guard exactly (std::invalid_argument, same message) --
+    // check the REDUCED dimension specifically, not input.numel()==0 (which
+    // is also true when some OTHER dimension is empty and would wrongly
+    // reject an otherwise-valid reduction).
+    if (dim_size == 0) {
+        throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
+    }
     int64_t outer_size = 1;
     for (int64_t d = 0; d < ndim; ++d) {
         if (d != normalized_dim) outer_size *= input_shape[d];
@@ -4144,7 +4382,9 @@ auto count_nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         in = in.to(DType::Float32);
     }
     int64_t n = in.numel();
-    Tensor result({1}, DType::Int64, in.device());
+    // Full reduction (no dim) collapses to a true 0-dim scalar, matching
+    // CPU/OneAPI's convention -- not a forced rank-1 {1} shape.
+    Tensor result({}, DType::Int64, in.device());
     // Single block — shared memory reduction requires all threads in same block
     hipLaunchKernelGGL(count_nonzero_all_f32,
                        dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
@@ -4218,7 +4458,13 @@ static void launch_dim_count_nonzero(
     for (int64_t i = 0; i < ndim; i++) {
         if (i != dim) output_size *= input_shape[i];
     }
-    if (output_size == 0 || dim_size == 0) return;
+    if (output_size == 0) {
+        // dim_size == 0 is NOT bailed out here: count_nonzero_along_dim_kernel
+        // already writes the correct identity (0) even when the reduced
+        // dimension is empty, matching CPU. Returning early would leave the
+        // freshly-allocated output as uninitialized device memory.
+        return;
+    }
 
     // Copy shape and strides to device
     int64_t* d_shape;
@@ -4248,7 +4494,8 @@ auto count_nonzero_dim_kernel(const Tensor& input, int64_t dim, hipStream_t stre
     for (int64_t d = 0; d < ndim; d++) {
         if (d != normalized_dim) output_shape.push_back(input_shape[d]);
     }
-    if (output_shape.empty()) output_shape.push_back(1);
+    // Empty output_shape (1-D input, dim reduced) is a true 0-dim scalar,
+    // matching CPU/OneAPI's convention -- do not force a size-1 dim.
 
     Tensor result(output_shape, DType::Int64, in.device());
 
@@ -4470,6 +4717,12 @@ auto nanmean_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 // Aminmax — compute min and max in a single pass
 // ============================================================================
 
+// NaN-propagating full-tensor min/max in a single pass, mirroring the
+// nan_prop_max/nan_prop_min convention this file's standalone Max/Min
+// full-reduction kernels use (see max_reduce_kernel/min_reduce_kernel above).
+// Plain `<`/`>` against a NaN sentinel is always false, so a NaN element
+// would silently fail to update local_min/local_max and be dropped from the
+// result instead of propagating — nan_prop_max/nan_prop_min close that gap.
 __global__ void aminmax_all_f32(const float* __restrict__ input,
                                 float* __restrict__ out_min,
                                 float* __restrict__ out_max,
@@ -4484,8 +4737,8 @@ __global__ void aminmax_all_f32(const float* __restrict__ input,
     int64_t grid_size = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += grid_size) {
         float v = input[i];
-        if (v < local_min) local_min = v;
-        if (v > local_max) local_max = v;
+        local_min = nan_prop_min(v, local_min);
+        local_max = nan_prop_max(v, local_max);
     }
 
     smin[threadIdx.x] = local_min;
@@ -4495,10 +4748,8 @@ __global__ void aminmax_all_f32(const float* __restrict__ input,
     // Block-level tree reduction
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (static_cast<int>(threadIdx.x) < stride) {
-            if (smin[threadIdx.x + stride] < smin[threadIdx.x])
-                smin[threadIdx.x] = smin[threadIdx.x + stride];
-            if (smax[threadIdx.x + stride] > smax[threadIdx.x])
-                smax[threadIdx.x] = smax[threadIdx.x + stride];
+            smin[threadIdx.x] = nan_prop_min(smin[threadIdx.x + stride], smin[threadIdx.x]);
+            smax[threadIdx.x] = nan_prop_max(smax[threadIdx.x + stride], smax[threadIdx.x]);
         }
         __syncthreads();
     }
@@ -4523,8 +4774,8 @@ __global__ void aminmax_all_f64(const double* __restrict__ input,
     int64_t grid_size = blockDim.x * gridDim.x;
     for (int64_t i = idx; i < n; i += grid_size) {
         double v = input[i];
-        if (v < local_min) local_min = v;
-        if (v > local_max) local_max = v;
+        local_min = nan_prop_min(v, local_min);
+        local_max = nan_prop_max(v, local_max);
     }
 
     smin[threadIdx.x] = local_min;
@@ -4533,10 +4784,8 @@ __global__ void aminmax_all_f64(const double* __restrict__ input,
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (static_cast<int>(threadIdx.x) < stride) {
-            if (smin[threadIdx.x + stride] < smin[threadIdx.x])
-                smin[threadIdx.x] = smin[threadIdx.x + stride];
-            if (smax[threadIdx.x + stride] > smax[threadIdx.x])
-                smax[threadIdx.x] = smax[threadIdx.x + stride];
+            smin[threadIdx.x] = nan_prop_min(smin[threadIdx.x + stride], smin[threadIdx.x]);
+            smax[threadIdx.x] = nan_prop_max(smax[threadIdx.x + stride], smax[threadIdx.x]);
         }
         __syncthreads();
     }
@@ -4552,6 +4801,14 @@ auto aminmax_kernel(const Tensor& input, hipStream_t stream)
     DType orig_dtype = input.dtype();
     int64_t n = input.numel();
     int num_blocks = 1; // Single block — shared-memory reduction
+
+    // Empty tensor: no minimum/maximum exists. Matches CPU
+    // ("aminmax(): cannot compute aminmax over an empty tensor") and Vulkan
+    // ("aminmax: cannot compute min/max of empty tensor"), which both throw
+    // a clean error instead of returning the +Inf/-Inf sentinel values.
+    if (n == 0) {
+        throw std::runtime_error("aminmax: input tensor is empty");
+    }
 
     if (orig_dtype == DType::Float64) {
         Tensor min_result({1}, DType::Float64, input.device());

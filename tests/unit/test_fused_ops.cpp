@@ -246,6 +246,25 @@ TEST_P(FusedOpsTest, FusedSoftmaxCrossEntropy_NoReduction) {
     }
 }
 
+TEST_P(FusedOpsTest, FusedSoftmaxCrossEntropy_OutOfRangeTargetThrows) {
+    // AttrKey::ComputeGrad defaults to true, so this exercises the grad
+    // kernel (fused_softmax_cross_entropy_grad_hip on ROCm and its siblings),
+    // not just the loss-only path. A target index >= num_classes previously
+    // caused an unguarded out-of-bounds read of the logits row instead of a
+    // clean error.
+    auto logits = randn({4, 5}, DType::Float32, device);
+    auto targets = zeros({4}, DType::Int64, device);
+    {
+        Tensor t_cpu = targets.cpu();
+        int64_t* t_data = t_cpu.data<int64_t>();
+        t_data[2] = 5;  // out of range: valid classes are [0, 5)
+        targets = t_cpu.to(device);
+    }
+
+    EXPECT_THROW(fused_softmax_cross_entropy(logits, targets, "mean"), std::exception)
+        << "out-of-range target should throw cleanly on " << device.to_string();
+}
+
 TEST_P(FusedOpsTest, FusedSoftmaxCrossEntropy_NumericalStability) {
     // Large logits to test numerical stability
     auto logits = randn({4, 3}, DType::Float32, device) * 100.0f;

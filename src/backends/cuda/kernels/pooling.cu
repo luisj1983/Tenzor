@@ -2691,8 +2691,14 @@ __device__ __forceinline__ int64_t frac_pool_start(
         start = static_cast<int64_t>((static_cast<float>(i) + sample) * alpha) -
                 static_cast<int64_t>(sample * alpha);
     }
-    if (start < 0) start = 0;
+    // Clamp so the pool-wide window stays inside [0, in_size). The lower bound
+    // (>= 0) MUST be applied AFTER the upper bound: when pool > in_size the
+    // upper bound (in_size - pool) is negative, so clamping to it first (and
+    // the lower bound second) leaves start negative -- an out-of-bounds input
+    // read in the h_start/h_end consuming loop below. Matches the CPU
+    // reference's frac_pool_start (src/backends/cpu/kernels/pooling.cpp).
     if (start > in_size - pool) start = in_size - pool;
+    if (start < 0) start = 0;
     return start;
 }
 

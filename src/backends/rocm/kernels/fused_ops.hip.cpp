@@ -248,8 +248,13 @@ auto fused_batchnorm_relu_hip(
     // Contiguify: the kernel indexes input flat as NCHW, so a channels-last /
     // permuted view would map elements to the wrong channel (matches CPU).
     const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
-    // Non-Float32: upcast to Float32, compute, convert back
-    if (input.dtype() != DType::Float32) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back. Float64 is
+    // computed NATIVELY below (fused_batchnorm_relu_kernel is dtype-generic:
+    // T(0)/T(1)/sqrt() all work for T=double) — routing it through this
+    // Float32 widen was a silent precision-losing downcast, unlike CPU/CUDA's
+    // FusedBatchNormReLU and this backend's own unfused batchnorm kernel,
+    // which all compute Float64 natively.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto rm_f32 = running_mean.to(DType::Float32);
@@ -270,6 +275,12 @@ auto fused_batchnorm_relu_hip(
     Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
 
     int64_t total_elements = input.numel();
+    // Empty input: skip the launch. A zero-element grid makes HIP reject the
+    // launch with hipErrorInvalidConfiguration (matches activations.hip.cpp's
+    // established zero-guard pattern / fused_linear_relu_hip above).
+    if (total_elements == 0) {
+        return output;
+    }
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
     blocks = std::min(blocks, 65535);
@@ -288,8 +299,22 @@ auto fused_batchnorm_relu_hip(
             spatial_size,
             eps
         );
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(fused_batchnorm_relu_kernel<double>,
+            dim3(blocks), dim3(threads), 0, 0,
+            input.data<double>(),
+            running_mean.data<double>(),
+            running_var.data<double>(),
+            weight.data<double>(),
+            bias.data<double>(),
+            output.data<double>(),
+            batch_size,
+            num_features,
+            spatial_size,
+            eps
+        );
     } else {
-        throw std::runtime_error("fused_batchnorm_relu_hip: Only Float32 supported");
+        throw std::runtime_error("fused_batchnorm_relu_hip: Only Float32/Float64 supported (Float16/BFloat16 widen above)");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -400,31 +425,38 @@ auto fused_softmax_cross_entropy_hip(
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
 
-    if (logits.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(fused_softmax_cross_entropy_kernel<float, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
-            logits.data<float>(),
-            targets.data<int64_t>(),
-            losses.data<float>(),
-            batch_size,
-            num_classes
-        );
-    } else if (logits.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(fused_softmax_cross_entropy_kernel<double, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
-            logits.data<double>(),
-            targets.data<int64_t>(),
-            losses.data<double>(),
-            batch_size,
-            num_classes
-        );
-    } else {
-        throw std::runtime_error("fused_softmax_cross_entropy_hip: only Float32/Float64/Float16/BFloat16 supported");
-    }
+    // Empty batch: skip the launch. A zero-element grid (dim3(0)) makes HIP
+    // reject the launch with hipErrorInvalidConfiguration, matching
+    // activations.hip.cpp's established zero-guard pattern / fused_linear_relu_hip
+    // above. `losses` is already the correctly-shaped (batch_size==0) zero tensor,
+    // so the reduction below still produces the right empty/degenerate result.
+    if (batch_size > 0) {
+        if (logits.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(
+                HIP_KERNEL_NAME(fused_softmax_cross_entropy_kernel<float, BLOCK_SIZE>),
+                dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+                logits.data<float>(),
+                targets.data<int64_t>(),
+                losses.data<float>(),
+                batch_size,
+                num_classes
+            );
+        } else if (logits.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(
+                HIP_KERNEL_NAME(fused_softmax_cross_entropy_kernel<double, BLOCK_SIZE>),
+                dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+                logits.data<double>(),
+                targets.data<int64_t>(),
+                losses.data<double>(),
+                batch_size,
+                num_classes
+            );
+        } else {
+            throw std::runtime_error("fused_softmax_cross_entropy_hip: only Float32/Float64/Float16/BFloat16 supported");
+        }
 
-    HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipGetLastError());
+    }
 
     // Apply reduction
     if (reduction == "mean") {
@@ -455,16 +487,20 @@ __global__ void fused_softmax_ce_grad_kernel(
 
     __shared__ T shared_data[BLOCK_SIZE];
 
+    // Use the type-generic fmax/exp/log (not fmaxf/expf/logf) so a Float64
+    // instantiation computes in double instead of silently truncating through
+    // the float-only intrinsics (audit finding #8; mirrors the loss-only
+    // fused_softmax_cross_entropy_kernel above, which already does this).
     // Block-wide max for numerical stability.
     T max_val = std::numeric_limits<T>::lowest();
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        max_val = fmaxf(max_val, row[i]);
+        max_val = fmax(max_val, row[i]);
     }
     shared_data[threadIdx.x] = max_val;
     __syncthreads();
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s)
-            shared_data[threadIdx.x] = fmaxf(shared_data[threadIdx.x], shared_data[threadIdx.x + s]);
+            shared_data[threadIdx.x] = fmax(shared_data[threadIdx.x], shared_data[threadIdx.x + s]);
         __syncthreads();
     }
     T global_max = shared_data[0];
@@ -473,7 +509,7 @@ __global__ void fused_softmax_ce_grad_kernel(
     // Block-wide sum(exp(x - max)).
     T sum_exp = 0;
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        sum_exp += expf(row[i] - global_max);
+        sum_exp += exp(row[i] - global_max);
     }
     shared_data[threadIdx.x] = sum_exp;
     __syncthreads();
@@ -486,11 +522,11 @@ __global__ void fused_softmax_ce_grad_kernel(
 
     // grad_i = softmax_i - [i == target]; per-sample loss = logsumexp - row[target].
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
-        T p = expf(row[i] - global_max) / total;
+        T p = exp(row[i] - global_max) / total;
         grad_row[i] = p - (i == target ? T(1) : T(0));
     }
     if (threadIdx.x == 0) {
-        losses[b] = (logf(total) + global_max) - row[target];
+        losses[b] = (log(total) + global_max) - row[target];
     }
 }
 
@@ -499,27 +535,66 @@ auto fused_softmax_cross_entropy_grad_hip(
     const Tensor& logits,
     const Tensor& targets
 ) -> std::pair<Tensor, Tensor> {
-    if (logits.dtype() != DType::Float32) {
-        throw std::runtime_error("fused_softmax_cross_entropy_grad_hip: Only Float32 supported");
+    // Audit finding #8: Float64 previously fell through the registry's
+    // Float16/BFloat16-only widen logic unchanged and hit this throw. The
+    // kernel above is now genuinely dtype-generic (fmax/exp/log instead of
+    // fmaxf/expf/logf), so dispatch Float64 to its own native double
+    // instantiation instead of rejecting it — matches CPU's native double
+    // branch and CUDA's fused_softmax_cross_entropy_kernel<double>.
+    if (logits.dtype() != DType::Float32 && logits.dtype() != DType::Float64) {
+        throw std::runtime_error("fused_softmax_cross_entropy_grad_hip: Only Float32/Float64 supported");
     }
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
 
-    Tensor losses = create_hip_zeros({batch_size}, DType::Float32, logits.device());
-    Tensor grad = create_hip_zeros({batch_size, num_classes}, DType::Float32, logits.device());
+    // Validate target labels host-side: the kernel reads row[target] with no
+    // bounds check, so an out-of-range label would read logits out of bounds.
+    // Mirrors the loss-only fused_softmax_cross_entropy_hip above.
+    if (batch_size > 0) {
+        Tensor t_host = targets.is_contiguous() ? targets : targets.contiguous();
+        t_host = t_host.to(Device::cpu());
+        const int64_t* tp = t_host.data<int64_t>();
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (tp[i] < 0 || tp[i] >= num_classes) {
+                throw std::out_of_range("cross_entropy: target " + std::to_string(tp[i]) +
+                    " out of range [0, " + std::to_string(num_classes) + ")");
+            }
+        }
+    }
+
+    Tensor losses = create_hip_zeros({batch_size}, logits.dtype(), logits.device());
+    Tensor grad = create_hip_zeros({batch_size, num_classes}, logits.dtype(), logits.device());
 
     constexpr int BLOCK_SIZE = 256;
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(fused_softmax_ce_grad_kernel<float, BLOCK_SIZE>),
-        dim3(batch_size), dim3(BLOCK_SIZE), 0, 0,
-        logits.data<float>(),
-        targets.data<int64_t>(),
-        losses.data<float>(),
-        grad.data<float>(),
-        batch_size,
-        num_classes
-    );
-    HIP_CHECK(hipGetLastError());
+    // Empty batch: skip the launch. dim3(0) is rejected by HIP with
+    // hipErrorInvalidConfiguration; `losses`/`grad` are already the correctly-
+    // shaped (batch_size==0) zero tensors to return.
+    if (batch_size > 0) {
+        if (logits.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(
+                HIP_KERNEL_NAME(fused_softmax_ce_grad_kernel<float, BLOCK_SIZE>),
+                dim3(batch_size), dim3(BLOCK_SIZE), 0, 0,
+                logits.data<float>(),
+                targets.data<int64_t>(),
+                losses.data<float>(),
+                grad.data<float>(),
+                batch_size,
+                num_classes
+            );
+        } else {
+            hipLaunchKernelGGL(
+                HIP_KERNEL_NAME(fused_softmax_ce_grad_kernel<double, BLOCK_SIZE>),
+                dim3(batch_size), dim3(BLOCK_SIZE), 0, 0,
+                logits.data<double>(),
+                targets.data<int64_t>(),
+                losses.data<double>(),
+                grad.data<double>(),
+                batch_size,
+                num_classes
+            );
+        }
+        HIP_CHECK(hipGetLastError());
+    }
     return {losses, grad};
 }
 
@@ -648,6 +723,12 @@ auto fused_add_relu_hip(const Tensor& a_orig, const Tensor& b_orig) -> Tensor {
     if (detail_fused::have_same_shape(a, b)) {
         Tensor result = create_hip_zeros(a_shape, a.dtype(), a.device());
         int64_t n = a.numel();
+        // Empty input: skip the launch. A zero-element grid (blocks==0) is
+        // rejected by HIP with hipErrorInvalidConfiguration, matching
+        // activations.hip.cpp's established zero-guard pattern.
+        if (n == 0) {
+            return result;
+        }
         int threads = 256;
         int blocks = std::min((int)((n + threads - 1) / threads), 65535);
 
@@ -673,6 +754,14 @@ auto fused_add_relu_hip(const Tensor& a_orig, const Tensor& b_orig) -> Tensor {
     for (auto d : output_shape) n *= d;
 
     Tensor result = create_hip_zeros(output_shape, a.dtype(), a.device());
+
+    // Empty broadcast output: skip the launch. A zero-element grid (blocks==0)
+    // is rejected by HIP with hipErrorInvalidConfiguration, matching
+    // activations.hip.cpp's established zero-guard pattern (F-fused-add-relu-
+    // broadcast-zero-grid).
+    if (n == 0) {
+        return result;
+    }
 
     // Copy strides and shape to device. RAII buffers are freed on any exception
     // path (e.g. a throwing HIP_CHECK below) instead of leaking.
@@ -737,8 +826,14 @@ __global__ void fused_gelu_kernel(
 auto fused_gelu_hip(const Tensor& input_orig) -> Tensor {
     // Contiguify: the kernel reads/writes input flat (matches the CPU kernel).
     const Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
-    // Non-Float32: upcast to Float32, compute, convert back
-    if (input.dtype() != DType::Float32) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back. Float64 is
+    // computed NATIVELY below (fused_gelu_kernel is dtype-generic: T(0.5)/
+    // T(1.0)/erf() all resolve to the double overloads for T=double) —
+    // routing it through this Float32 widen was a silent precision-losing
+    // downcast, unlike CPU/CUDA's FusedGelu and this backend's own unfused
+    // gelu_forward_kernel<double> (activations.hip.cpp), which all compute
+    // Float64 natively.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto result = fused_gelu_hip(input_f32);
@@ -748,6 +843,12 @@ auto fused_gelu_hip(const Tensor& input_orig) -> Tensor {
     Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device());
 
     int64_t n = input.numel();
+    // Empty input: skip the launch. A zero-element grid (blocks==0) is
+    // rejected by HIP with hipErrorInvalidConfiguration, matching
+    // activations.hip.cpp's established zero-guard pattern.
+    if (n == 0) {
+        return output;
+    }
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
     blocks = std::min(blocks, 65535);
@@ -759,8 +860,15 @@ auto fused_gelu_hip(const Tensor& input_orig) -> Tensor {
             output.data<float>(),
             n
         );
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(fused_gelu_kernel<double>,
+            dim3(blocks), dim3(threads), 0, 0,
+            input.data<double>(),
+            output.data<double>(),
+            n
+        );
     } else {
-        throw std::runtime_error("fused_gelu_hip: Only Float32 supported");
+        throw std::runtime_error("fused_gelu_hip: Only Float32/Float64 supported (Float16/BFloat16 widen above)");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -1281,8 +1389,9 @@ __global__ void flash_attention_v2_kernel_hip(
     float* K_tile = smem;                              // [Bc][K_STRIDE]
     float* V_tile = smem + Bc * K_STRIDE;              // [Bc][K_STRIDE]
     float* Q_shared = smem + 2 * Bc * K_STRIDE;        // [HEAD_DIM]
-    float* scores_shared = Q_shared + HEAD_DIM;        // [Bc]
-    float* reduce_buf = scores_shared + Bc;            // [num_warps + 1]
+    float* scores_shared = Q_shared + HEAD_DIM;        // [Bc] — CLEAN pre-dropout exp(score-max)
+    float* drop_scale_shared = scores_shared + Bc;     // [Bc] — 0 (dropped) or 1/(1-p) (kept), per key
+    float* reduce_buf = drop_scale_shared + Bc;        // [Bc] scratch (max-restore stash + sum reduction)
 
     // Pointers for this batch/head
     const float* Q_row = Q + (batch_head * seq_len_q + q_row) * HEAD_DIM;
@@ -1408,31 +1517,40 @@ __global__ void flash_attention_v2_kernel_hip(
         }
         __syncthreads();
 
-        // Compute exp(score - tile_max), apply Philox dropout (post-softmax,
-        // inverted-scaled), and store P. Counter is (batch_head, q_row,
-        // kv_pos, 0) so backward replays bit-exactly given the same seed.
+        // Compute exp(score - tile_max) and the per-key dropout scale
+        // (Philox, inverted-scaled). scores_shared is kept as the CLEAN
+        // (pre-dropout) P value — it feeds tile_sum below, which becomes part
+        // of l_new, the softmax DENOMINATOR. Dropout must NOT be folded into
+        // that sum: doing so makes the 1/(1-p) scale cancel against the
+        // denominator for surviving keys, silently turning "dropout" into a
+        // renormalized-over-survivors softmax that the backward never
+        // differentiates. The dropout scale is applied ONLY to the separate
+        // P@V accumulation weight (drop_scale_shared, consumed below).
+        // Mirrors the CPU reference (flash_attention.cpp): row_sum
+        // accumulates the undropped weight; only o_weight is masked/scaled.
+        // Counter is (batch_head, q_row, kv_pos, 0) so backward replays
+        // bit-exactly given the same seed.
         const bool apply_dropout = (dropout_p > 0.0f) && (rng_seed != 0u);
         const float dropout_scale = apply_dropout ? (1.0f / (1.0f - dropout_p)) : 1.0f;
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
             float exp_val = expf(scores_shared[j] - tile_max);
+            float drop_scale = 1.0f;
             if (apply_dropout) {
                 int kv_pos = kv_start + j;
                 float u = philox_uniform_hip(static_cast<uint32_t>(batch_head),
                                               static_cast<uint32_t>(q_row),
                                               static_cast<uint32_t>(kv_pos),
                                               rng_seed);
-                if (u < dropout_p) {
-                    exp_val = 0.0f;
-                } else {
-                    exp_val *= dropout_scale;
-                }
+                drop_scale = (u < dropout_p) ? 0.0f : dropout_scale;
             }
             scores_shared[j] = exp_val;
+            drop_scale_shared[j] = drop_scale;
         }
         __syncthreads();
 
-        // Sum reduction over scores_shared via in-place pairwise (wavefront-agnostic).
-        // We use reduce_buf[0..Bc-1] as a scratch copy so scores_shared keeps the P values.
+        // Sum reduction over scores_shared (clean, pre-dropout P) via in-place
+        // pairwise (wavefront-agnostic). We use reduce_buf[0..Bc-1] as a
+        // scratch copy so scores_shared keeps the P values.
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
             reduce_buf[j] = scores_shared[j];
         }
@@ -1458,10 +1576,13 @@ __global__ void flash_attention_v2_kernel_hip(
             if (d < HEAD_DIM) {
                 // Rescale previous accumulation
                 o_acc[e] *= rescale_prev;
-                // Accumulate P @ V for this dimension
+                // Accumulate P @ V for this dimension. The per-key dropout
+                // scale is applied here, on the V-accumulation term only —
+                // NOT on scores_shared (which fed tile_sum above as the
+                // clean softmax denominator).
                 float pv = 0.0f;
                 for (int j = 0; j < Bc; ++j) {
-                    pv += scores_shared[j] * V_tile[j * K_STRIDE + d];
+                    pv += scores_shared[j] * drop_scale_shared[j] * V_tile[j * K_STRIDE + d];
                 }
                 o_acc[e] += pv * rescale_tile;
             }
@@ -1953,13 +2074,16 @@ auto fused_attention_hip(
 
         // Shared memory layout (post-M5-rem reduction rewrite):
         //   K_tile[Bc * K_STRIDE] + V_tile[Bc * K_STRIDE] + Q_shared[HD]
-        //   + scores_shared[Bc] + reduce_buf[Bc]
-        // The new reduce_buf needs Bc entries for the in-place pairwise sum
+        //   + scores_shared[Bc] + drop_scale_shared[Bc] + reduce_buf[Bc]
+        // The reduce_buf needs Bc entries for the in-place pairwise sum
         // reduction (was previously num_warps+1 — too small once we stopped
         // using the broken atomicMax-based reduction at line 1325).
+        // drop_scale_shared (audit finding #12) holds the per-key dropout
+        // scale separately from scores_shared, so the softmax denominator
+        // (tile_sum) is computed from the clean pre-dropout P values.
         auto compute_fwd_smem = [&](int hd) -> size_t {
             int k_stride = hd + 4;
-            return (2 * Bc * k_stride + hd + Bc + Bc) * sizeof(float);
+            return (2 * Bc * k_stride + hd + Bc + Bc + Bc) * sizeof(float);
         };
 
         const float* q_ptr = Q.data<float>();
@@ -2156,6 +2280,13 @@ auto fused_rms_norm_hip(
     Tensor output = create_hip_zeros(to_vec(input.shape()), input.dtype(), input.device(), stream);
     Tensor rrms = create_hip_zeros({batch_size}, input.dtype(), input.device(), stream);
 
+    // Empty batch: skip the launch. A zero-element grid (blocks==0) is
+    // rejected by HIP with hipErrorInvalidConfiguration, matching
+    // activations.hip.cpp's established zero-guard pattern.
+    if (batch_size == 0) {
+        return {output, rrms};
+    }
+
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
 
@@ -2275,8 +2406,9 @@ auto fused_conv2d_bn_relu_full_hip(
     int64_t padding,
     float eps
 ) -> Tensor {
-    // Non-Float32: upcast to Float32, compute, convert back
-    if (input.dtype() != DType::Float32) {
+    // Float64 computes natively (see the dedicated dispatch branch below);
+    // only Float16/BFloat16 need the upcast-to-Float32-and-back path.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -2311,6 +2443,12 @@ auto fused_conv2d_bn_relu_full_hip(
     Tensor output = create_hip_zeros({batch_size, out_channels, out_h, out_w}, input.dtype(), input.device());
 
     int64_t total_elements = batch_size * out_channels * out_h * out_w;
+    // Empty output: skip the launch. A zero-element grid (blocks==0) is
+    // rejected by HIP with hipErrorInvalidConfiguration, matching
+    // activations.hip.cpp's established zero-guard pattern.
+    if (total_elements == 0) {
+        return output;
+    }
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
     blocks = std::min(blocks, 65535);
@@ -2341,8 +2479,34 @@ auto fused_conv2d_bn_relu_full_hip(
             eps,
             bias != nullptr
         );
+    } else if (input.dtype() == DType::Float64) {
+        const double* bias_ptr = bias ? bias->data<double>() : nullptr;
+        hipLaunchKernelGGL(fused_conv2d_bn_relu_full_kernel<double>,
+            dim3(blocks), dim3(threads), 0, 0,
+            input.data<double>(),
+            weight.data<double>(),
+            bias_ptr,
+            bn_mean.data<double>(),
+            bn_var.data<double>(),
+            bn_gamma.data<double>(),
+            bn_beta.data<double>(),
+            output.data<double>(),
+            batch_size,
+            in_channels,
+            out_channels,
+            in_h,
+            in_w,
+            out_h,
+            out_w,
+            kernel_h,
+            kernel_w,
+            stride,
+            padding,
+            static_cast<double>(eps),
+            bias != nullptr
+        );
     } else {
-        throw std::runtime_error("fused_conv2d_bn_relu_full_hip: Only Float32 supported");
+        throw std::runtime_error("fused_conv2d_bn_relu_full_hip: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2365,7 +2529,8 @@ __global__ void fused_sgd_kernel(
     float weight_decay,
     float dampening,
     bool nesterov,
-    bool has_momentum_buffer
+    bool has_momentum_buffer,
+    bool first_step
 ) {
     const int64_t stride = int64_t(blockDim.x) * gridDim.x;
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2379,10 +2544,21 @@ __global__ void fused_sgd_kernel(
         }
 
         if (has_momentum_buffer && momentum > 0.0f) {
-            T v = momentum_buffer[idx];
+            T v;
 
-            // Update momentum buffer
-            v = T(momentum) * v + T(1.0f - dampening) * g;
+            // PyTorch SGD: on the very first momentum step the buffer is
+            // initialised to the (weight-decayed) gradient with NO dampening;
+            // dampening is only applied on subsequent steps. Always blending
+            // via momentum*v+(1-dampening)*g (audit finding #15) is wrong on
+            // step 1 when the buffer was just zero-initialized — it silently
+            // scales the first gradient by (1-dampening) instead of using it
+            // directly. Matches CPU's fused_sgd_step_kernel and CUDA's
+            // fused_sgd_kernel first_step branch.
+            if (first_step) {
+                v = g;
+            } else {
+                v = T(momentum) * momentum_buffer[idx] + T(1.0f - dampening) * g;
+            }
             momentum_buffer[idx] = v;
 
             if (nesterov) {
@@ -2406,6 +2582,7 @@ auto fused_sgd_step_hip(
     float weight_decay,
     float dampening,
     bool nesterov,
+    bool first_step,
     hipStream_t stream
 ) -> void {
     // Float16/BFloat16: upcast to Float32, compute, convert back
@@ -2420,7 +2597,7 @@ auto fused_sgd_step_hip(
             mom_f32_ptr = &mom_f32;
         }
         fused_sgd_step_hip(param_f32, grad_f32, mom_f32_ptr, lr, momentum,
-                           weight_decay, dampening, nesterov, stream);
+                           weight_decay, dampening, nesterov, first_step, stream);
         param = param_f32.to(orig_dtype);
         if (momentum_buffer) *momentum_buffer = mom_f32.to(orig_dtype);
         return;
@@ -2440,7 +2617,7 @@ auto fused_sgd_step_hip(
             grad.data<float>(),
             momentum_ptr,
             numel, lr, momentum, weight_decay, dampening,
-            nesterov, momentum_buffer != nullptr
+            nesterov, momentum_buffer != nullptr, first_step
         );
     } else if (param.dtype() == DType::Float64) {
         double* momentum_ptr = momentum_buffer ? momentum_buffer->data<double>() : nullptr;
@@ -2451,7 +2628,7 @@ auto fused_sgd_step_hip(
             grad.data<double>(),
             momentum_ptr,
             numel, lr, momentum, weight_decay, dampening,
-            nesterov, momentum_buffer != nullptr
+            nesterov, momentum_buffer != nullptr, first_step
         );
     } else {
         throw std::runtime_error("fused_sgd_step_hip: Only Float32 and Float64 supported");
@@ -2643,14 +2820,18 @@ __global__ void fused_rmsprop_step_kernel(
     sq = T(alpha) * sq + T(1.0f - alpha) * g * g;
     square_avg[idx] = sq;
 
+    // eps OUTSIDE the sqrt (PyTorch convention) — matches CPU/CUDA/Vulkan.
+    // `sqrt(square_avg + eps)` (eps inside) was a divergent formula here
+    // (audit finding #14); a stale CUDA comment (tag "F092") falsely claimed
+    // ROCm/OneAPI already did it correctly.
     T avg;
     if (centered && grad_avg) {
         T ga = grad_avg[idx];
         ga = T(alpha) * ga + T(1.0f - alpha) * g;
         grad_avg[idx] = ga;
-        avg = sqrt(sq - ga * ga + T(eps));
+        avg = sqrt(sq - ga * ga) + T(eps);
     } else {
-        avg = sqrt(sq + T(eps));
+        avg = sqrt(sq) + T(eps);
     }
 
     if (momentum > 0.0f && momentum_buffer) {
@@ -3017,7 +3198,12 @@ __global__ void fused_rms_norm_backward_kernel_hip(
     const T* weight,
     const T* rrms,
     T* grad_input,
-    T* grad_weight,
+    // F-085 pattern: double-precision scratch accumulator, atomicAdd'd into by
+    // every batch-row block, then narrowed to the output dtype once by
+    // narrow_rms_norm_grad_accum_kernel_hip after this kernel completes. A
+    // plain-T atomicAdd accumulator (previous behavior) loses precision for
+    // Float32 across large batch_size, unlike CPU's double accumulation.
+    double* grad_weight_accum,
     int64_t batch_size,
     int64_t norm_size
 ) {
@@ -3063,8 +3249,24 @@ __global__ void fused_rms_norm_backward_kernel_hip(
         // grad_input = rrms * (grad_out * weight - x * rrms^2 * mean_grad_x_w)
         batch_grad_in[i] = batch_rrms * (grad_out_i * w_i - x_i * batch_rrms * batch_rrms * mean_grad_x_w);
 
-        // grad_weight accumulation (atomic for thread safety across batches)
-        atomicAdd(&grad_weight[i], grad_out_i * x_i * batch_rrms);
+        // grad_weight accumulation in double precision (F-085 pattern),
+        // regardless of T, matching CPU's double accumulation.
+        atomicAdd(&grad_weight_accum[i],
+                  static_cast<double>(grad_out_i) * static_cast<double>(x_i) * static_cast<double>(batch_rrms));
+    }
+}
+
+// Narrows the double-precision grad_weight scratch accumulator (populated via
+// atomicAdd across every batch-row block in fused_rms_norm_backward_kernel_hip)
+// down to the output dtype T, once per weight element.
+template<typename T>
+__global__ void narrow_rms_norm_grad_accum_kernel_hip(
+    const double* __restrict__ grad_weight_accum,
+    T* __restrict__ grad_weight,
+    int64_t norm_size) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < norm_size) {
+        grad_weight[i] = static_cast<T>(grad_weight_accum[i]);
     }
 }
 
@@ -3072,7 +3274,8 @@ auto fused_rms_norm_backward_hip(
     const Tensor& grad_output,
     const Tensor& input,
     const Tensor& weight,
-    const Tensor& rrms
+    const Tensor& rrms,
+    hipStream_t stream
 ) -> std::tuple<Tensor, Tensor> {
     // Half precision (BFloat16/Float16): upcast to Float32, compute, convert
     // back. The native kernel only has Float32/Float64 instantiations, and the
@@ -3085,7 +3288,7 @@ auto fused_rms_norm_backward_hip(
         auto input_f32 = input.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto rrms_f32 = rrms.to(DType::Float32);
-        auto [gi, gw] = fused_rms_norm_backward_hip(go_f32, input_f32, w_f32, rrms_f32);
+        auto [gi, gw] = fused_rms_norm_backward_hip(go_f32, input_f32, w_f32, rrms_f32, stream);
         return {gi.to(orig), gw.to(orig)};
     }
 
@@ -3101,41 +3304,61 @@ auto fused_rms_norm_backward_hip(
     std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
     Tensor grad_input(input_shape, input.dtype(), input.device());
     Tensor grad_weight({norm_size}, input.dtype(), input.device());
+    // F-085 pattern: double-precision scratch accumulator, atomicAdd'd into by
+    // every batch-row block, then narrowed to input.dtype() in a single pass
+    // (narrow_rms_norm_grad_accum_kernel_hip) once the main kernel completes.
+    Tensor grad_weight_accum({norm_size}, DType::Float64, input.device());
 
-    // Zero-initialize
-    HIP_CHECK(hipMemset(grad_input.data_ptr(), 0,
-        grad_input.numel() * dtype_size(input.dtype())));
-    HIP_CHECK(hipMemset(grad_weight.data_ptr(), 0,
-        norm_size * dtype_size(input.dtype())));
+    // Zero-initialize on the caller's stream (not the default stream), so
+    // this doesn't silently serialize with the rest of a multi-stream
+    // pipeline or a HIP-graph capture, matching the sibling LayerNormBackward/
+    // GroupNormBackward/InstanceNormBackward kernels.
+    HIP_CHECK(hipMemsetAsync(grad_input.data_ptr(), 0,
+        grad_input.numel() * dtype_size(input.dtype()), stream));
+    HIP_CHECK(hipMemsetAsync(grad_weight_accum.data<double>(), 0,
+        norm_size * sizeof(double), stream));
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
+    int narrow_blocks = static_cast<int>((norm_size + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(
             (fused_rms_norm_backward_kernel_hip<float, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
             grad_output.data<float>(),
             input.data<float>(),
             weight.data<float>(),
             rrms.data<float>(),
             grad_input.data<float>(),
-            grad_weight.data<float>(),
+            grad_weight_accum.data<double>(),
             batch_size,
             norm_size
+        );
+        HIP_CHECK(hipGetLastError());
+        hipLaunchKernelGGL(
+            (narrow_rms_norm_grad_accum_kernel_hip<float>),
+            dim3(narrow_blocks), dim3(BLOCK_SIZE), 0, stream,
+            grad_weight_accum.data<double>(), grad_weight.data<float>(), norm_size
         );
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(
             (fused_rms_norm_backward_kernel_hip<double, BLOCK_SIZE>),
-            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
             grad_output.data<double>(),
             input.data<double>(),
             weight.data<double>(),
             rrms.data<double>(),
             grad_input.data<double>(),
-            grad_weight.data<double>(),
+            grad_weight_accum.data<double>(),
             batch_size,
             norm_size
+        );
+        HIP_CHECK(hipGetLastError());
+        hipLaunchKernelGGL(
+            (narrow_rms_norm_grad_accum_kernel_hip<double>),
+            dim3(narrow_blocks), dim3(BLOCK_SIZE), 0, stream,
+            grad_weight_accum.data<double>(), grad_weight.data<double>(), norm_size
         );
     } else {
         throw std::runtime_error("fused_rms_norm_backward_hip: Only Float32 and Float64 supported");
@@ -3234,8 +3457,13 @@ auto fused_layer_norm_backward_hip(
     const Tensor& inv_std,
     const std::vector<int64_t>& normalized_shape
 ) -> std::tuple<Tensor, Tensor, Tensor> {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back. Float16 was
+    // previously NOT handled at all (fell through to the "Only Float32 and
+    // Float64 supported" throw below), unlike every other activation/fused
+    // kernel in this backend (GELU, Sigmoid, Softmax, FusedAddReLU, FusedGelu,
+    // FusedRMSNorm all support Float16 via widen-narrow).
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        DType orig = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
@@ -3243,7 +3471,7 @@ auto fused_layer_norm_backward_hip(
         auto is_f32 = inv_std.to(DType::Float32);
         auto [gi, gw, gb] = fused_layer_norm_backward_hip(go_f32, input_f32, w_f32,
                                                             mean_f32, is_f32, normalized_shape);
-        return {gi.to(DType::BFloat16), gw.to(DType::BFloat16), gb.to(DType::BFloat16)};
+        return {gi.to(orig), gw.to(orig), gb.to(orig)};
     }
 
     int64_t norm_size = 1;
@@ -3266,6 +3494,14 @@ auto fused_layer_norm_backward_hip(
         norm_size * dtype_size(input.dtype())));
     HIP_CHECK(hipMemset(grad_bias.data_ptr(), 0,
         norm_size * dtype_size(input.dtype())));
+
+    // Empty batch: skip the launch. A zero-element grid (blocks==0) is
+    // rejected by HIP with hipErrorInvalidConfiguration, matching
+    // activations.hip.cpp's established zero-guard pattern. grad_input/
+    // grad_weight/grad_bias are already zero-initialized above.
+    if (batch_size == 0) {
+        return std::make_tuple(grad_input, grad_weight, grad_bias);
+    }
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;

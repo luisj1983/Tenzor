@@ -125,28 +125,37 @@ public:
         // We reuse the NestedSum dispatch to get [B, D] sums, then scatter back.
         auto dot_sums = nested_sum_forward_impl(grad_times_out, offsets_);  // [B, D]
 
-        // Expand dot_sums back to [total_len, D]
+        // Expand dot_sums back to [total_len, ...trailing dims]. For rank>=3
+        // values (e.g. [total_len,H,W]), dot_sums/seg_sum keep the FULL
+        // trailing shape [1,H,W] (nested_sum does not flatten), so the expand
+        // target must match that rank -- a hardcoded 2D {len, shape[1]}
+        // target both dropped W from the "D" identity-fill contract AND threw
+        // "Expanded shape must have at least as many dimensions as input"
+        // for rank>=3 (2D target vs 3D seg_sum).
         auto values_shape = grad.shape();
         int64_t total_len = values_shape[0];
-        int64_t D = (values_shape.size() > 1) ? values_shape[1] : 1;
+        std::vector<int64_t> full_shape(values_shape.begin(), values_shape.end());
 
-        // Build the "expanded" [total_len, D] tensor by concatenating each
-        // per-segment expanded row block. This is correct on every backend;
-        // the previous implementation used std::memcpy on data pointers,
-        // which is undefined behavior when the tensors live on GPU memory.
+        // Build the "expanded" [total_len, ...trailing] tensor by concatenating
+        // each per-segment expanded row block. This is correct on every
+        // backend; the previous implementation used std::memcpy on data
+        // pointers, which is undefined behavior when the tensors live on GPU
+        // memory.
         std::vector<Tensor> parts;
         parts.reserve(B);
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t end = off[b + 1];
             if (start >= end) continue;
-            auto seg_sum = dot_sums.slice(0, b, b + 1);          // [1, D]
-            auto seg_expanded = seg_sum.expand({end - start, D}); // view
+            auto seg_sum = dot_sums.slice(0, b, b + 1);          // [1, ...trailing]
+            std::vector<int64_t> expand_shape = full_shape;
+            expand_shape[0] = end - start;
+            auto seg_expanded = seg_sum.expand(expand_shape); // view
             parts.push_back(seg_expanded.contiguous());
         }
         Tensor expanded;
         if (parts.empty()) {
-            expanded = tenzor::zeros({total_len, D}, grad.dtype(), grad.device());
+            expanded = tenzor::zeros(full_shape, grad.dtype(), grad.device());
         } else if (parts.size() == 1 && parts[0].shape()[0] == total_len) {
             expanded = std::move(parts[0]);
         } else {
@@ -454,11 +463,15 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad = grad_outputs[0];  // [B, D]
+        auto& grad = grad_outputs[0];  // [B, ...trailing dims]
         auto offsets_cpu = offsets_.device().type == Device::Type::CPU ? offsets_ : offsets_.to(Device::cpu());
         const int64_t* off = offsets_cpu.data<int64_t>();
         int64_t B = offsets_cpu.numel() - 1;
-        int64_t D = (grad.shape().size() > 1) ? grad.shape()[1] : 1;
+        // Expand target must match grad's full rank (not a hardcoded 2D
+        // {len, shape[1]}): for rank>=3 values, grad is [B,H,W,...], and
+        // expanding a [1,H,W] slice to a 2D target both drops trailing dims
+        // from the identity fill and throws (target rank < input rank).
+        std::vector<int64_t> full_shape(grad.shape().begin(), grad.shape().end());
 
         // Scatter grad[b] to every position in segment b via concatenation
         // (device-safe; the previous std::memcpy approach was undefined
@@ -469,12 +482,15 @@ public:
             int64_t start = off[b];
             int64_t end = off[b + 1];
             if (start >= end) continue;
+            std::vector<int64_t> expand_shape = full_shape;
+            expand_shape[0] = end - start;
             parts.push_back(
-                grad.slice(0, b, b + 1).expand({end - start, D}).contiguous());
+                grad.slice(0, b, b + 1).expand(expand_shape).contiguous());
         }
         Tensor grad_input;
         if (parts.empty()) {
-            grad_input = tenzor::zeros({total_len_, D}, grad.dtype(), grad.device());
+            full_shape[0] = total_len_;
+            grad_input = tenzor::zeros(full_shape, grad.dtype(), grad.device());
         } else if (parts.size() == 1 && parts[0].shape()[0] == total_len_) {
             grad_input = std::move(parts[0]);
         } else {
@@ -499,11 +515,13 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad = grad_outputs[0];  // [B, D]
+        auto& grad = grad_outputs[0];  // [B, ...trailing dims]
         auto offsets_cpu = offsets_.device().type == Device::Type::CPU ? offsets_ : offsets_.to(Device::cpu());
         const int64_t* off = offsets_cpu.data<int64_t>();
         int64_t B = offsets_cpu.numel() - 1;
-        int64_t D = (grad.shape().size() > 1) ? grad.shape()[1] : 1;
+        // See NestedSumBackward: the expand target must match grad's full
+        // rank, not a hardcoded 2D {len, shape[1]}.
+        std::vector<int64_t> full_shape(grad.shape().begin(), grad.shape().end());
 
         std::vector<Tensor> parts;
         parts.reserve(B);
@@ -513,12 +531,15 @@ public:
             int64_t L = end - start;
             if (L <= 0) continue;
             auto scale = tenzor::full({1}, 1.0 / static_cast<double>(L), grad.dtype(), grad.device());
+            std::vector<int64_t> expand_shape = full_shape;
+            expand_shape[0] = L;
             parts.push_back(
-                tenzor::mul(grad.slice(0, b, b + 1), scale).expand({L, D}).contiguous());
+                tenzor::mul(grad.slice(0, b, b + 1), scale).expand(expand_shape).contiguous());
         }
         Tensor grad_input;
         if (parts.empty()) {
-            grad_input = tenzor::zeros({total_len_, D}, grad.dtype(), grad.device());
+            full_shape[0] = total_len_;
+            grad_input = tenzor::zeros(full_shape, grad.dtype(), grad.device());
         } else if (parts.size() == 1 && parts[0].shape()[0] == total_len_) {
             grad_input = std::move(parts[0]);
         } else {

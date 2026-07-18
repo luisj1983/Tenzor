@@ -23,7 +23,7 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
     // dead and declares 32-bit `float` buffers, so it cannot read/write packed
     // 2-byte bf16 storage). Routing BFloat16 through the base float32 shader
     // would also misread the 2-byte buffer. Use the established widen→compute→
-    // narrow pattern (see dispatchTranspose): cast the table to Float32, run
+    // narrow pattern: cast the table to Float32, run
     // the op, then cast the gathered output back to BFloat16. This matches the
     // dedicated BFloat16 path the CPU/OneAPI backends provide for this op.
     if (table.dtype() == DType::BFloat16) {
@@ -201,13 +201,13 @@ auto VulkanBackend::dispatchReshape(const Tensor& input, const std::vector<int64
 }
 
 /**
- * @brief Transpose two dimensions using compute shader
+ * @brief Transpose two dimensions (zero-copy view)
  *
- * Swaps two dimensions of the tensor, reordering data in memory according
- * to the transposed layout.
+ * Swaps two dimensions' shape/stride entries and returns a tensor sharing
+ * storage with `input` (metadata-only), matching CPU/CUDA/ROCm and the
+ * documented View vs Copy contract.
  */
 auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
-    auto input_shape = input.shape();
     int32_t ndim = input.ndim();
 
     // Normalize negative dimensions
@@ -218,251 +218,78 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
         throw std::invalid_argument("Transpose: dimension out of range");
     }
 
-    // Create output shape
-    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
-    std::swap(out_shape[dim0], out_shape[dim1]);
-
-    // Calculate output strides
-    std::vector<int64_t> out_strides(ndim);
-    out_strides[ndim - 1] = 1;
-    for (int i = ndim - 2; i >= 0; i--) {
-        out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
-    }
-
-    int32_t device_id = input.device().index;
-
-    // For simple 2D transpose or contiguous case, use optimized path.
-    // Complex128 has 16 bytes per element — delegate to dispatchPermute which
-    // knows how to pick permute_c128. Otherwise route 8-byte types (Float64,
-    // Complex64) through the transform_f64 shader (treats each element as
-    // one 8-byte slot), and everything else through the 4-byte transform
-    // shader.
-    if (ndim == 2 && input.is_contiguous() && input.dtype() != DType::Complex128) {
-        // Use simplified transform shader for 2D case
-        // For Float16/BFloat16, convert to Float32, transpose, convert back
-        DType orig_dtype = input.dtype();
-        Tensor transpose_input = input;
-        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
-            transpose_input = input.to(DType::Float32);
-        }
-        std::string shader_name;
-        if (transpose_input.dtype() == DType::Float64
-            || transpose_input.dtype() == DType::Int64
-            || transpose_input.dtype() == DType::Complex64) {
-            // All 8-byte-per-element dtypes share the f64 transform shader.
-            shader_name = "transform_f64";
-        } else {
-            shader_name = "transform";
-        }
-        auto* pipeline = getPipeline(shader_name, device_id);
-        Tensor output(out_shape, transpose_input.dtype(), transpose_input.device());
-
-        const void* buffer_in = transpose_input.data_ptr();
-        const void* buffer_out = output.data_ptr();
-
-        size_t buffer_size_in = transpose_input.numel() * transpose_input.dtype_size();
-        size_t buffer_size_out = output.numel() * output.dtype_size();
-
-        std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, buffer_in},
-            {1, buffer_out}
-        };
-        std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
-
-        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
-            device_id, pipeline, bindings, sizes);
-
-        struct PushConstants {
-            uint32_t n;
-            uint32_t ndim;
-            uint32_t transform;
-            uint32_t rows;
-            uint32_t cols;
-        } push_constants;
-
-        push_constants.n = static_cast<uint32_t>(transpose_input.numel());
-        push_constants.ndim = static_cast<uint32_t>(ndim);
-        push_constants.transform = 1; // transpose
-        push_constants.rows = static_cast<uint32_t>(input_shape[0]);
-        push_constants.cols = static_cast<uint32_t>(input_shape[1]);
-
-        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
-
-        // Insert pre-read barrier to ensure input data from previous ops is ready
-        insertComputeOnlyBarrier(cmdBuffer);
-
-        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                          VK_SHADER_STAGE_COMPUTE_BIT,
-                          0, sizeof(PushConstants), &push_constants);
-
-        uint32_t workgroups = div_wg_checked(transpose_input.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
-        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
-
-        // Add memory barrier
-        insertComputeOnlyBarrier(cmdBuffer);
-
-        endSingleTimeCommands(cmdBuffer, device_id);
-
-        // Convert back to original dtype if we converted F16/BF16 to F32
-        if (orig_dtype != output.dtype()) {
-            return output.to(orig_dtype);
-        }
-        return output;
-    }
-
-    // For general N-D transpose, delegate to dispatchPermute with appropriate
-    // permutation vector. Transpose(dim0, dim1) is equivalent to permute where
-    // the permutation swaps dim0 and dim1 and leaves all other dims in place.
-    std::vector<int64_t> perm(ndim);
-    for (int32_t i = 0; i < ndim; ++i) perm[i] = i;
-    std::swap(perm[dim0], perm[dim1]);
-    return dispatchPermute(input, perm);
+    // Transpose is a pure stride-permutation and must be a zero-copy view
+    // sharing storage with `input`, exactly like this file's own
+    // dispatchReshape/dispatchSqueeze/dispatchUnsqueeze and matching
+    // CPU/CUDA/ROCm's transpose_kernel (and the documented View vs Copy
+    // contract in include/tenzor/core/tensor.hpp). Previously this dispatched
+    // a copy shader and returned an independent buffer, so `y = x.transpose(...)
+    // ; y.fill_(5)` failed to mutate `x` on Vulkan while it does on every other
+    // backend. Materializing a contiguous buffer (when a consumer actually
+    // needs one) is the job of dispatchContiguous, called at the point of
+    // consumption — not here.
+    Tensor result;
+    result.impl_ = make_intrusive<TensorImpl>(*input.impl_);
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    std::swap(r_shape[dim0], r_shape[dim1]);
+    std::swap(r_strides[dim0], r_strides[dim1]);
+    return result;
 }
 
 /**
- * @brief Permute dimensions using compute shader
+ * @brief Permute dimensions (zero-copy view)
  *
- * Reorders dimensions according to the specified permutation.
+ * Reorders shape/stride entries according to the specified permutation and
+ * returns a tensor sharing storage with `input` (metadata-only), matching
+ * CPU/CUDA/ROCm and the documented View vs Copy contract.
  */
 auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor {
     auto input_shape = input.shape();
     auto input_strides = input.strides();
     int32_t ndim = input.ndim();
-    int32_t device_id = input.device().index;
 
-    // Validate permutation
+    // Validate permutation, normalizing negative dims first. The public
+    // Tensor::permute() normalizes before reaching here, but the OpId::Permute
+    // dispatch path (lazy/JIT/jvp graphs) forwards AttrKey::Dims verbatim, so a
+    // negative dim must be normalized here too (matches CPU/CUDA permute_kernel).
     if (static_cast<int64_t>(dims.size()) != ndim) {
         throw std::invalid_argument("Permute: number of dimensions doesn't match");
     }
 
+    std::vector<int64_t> norm_dims(ndim);
     std::vector<bool> seen(ndim, false);
-    for (int64_t dim : dims) {
+    for (int32_t i = 0; i < ndim; ++i) {
+        int64_t dim = dims[i];
+        if (dim < 0) dim += ndim;
         if (dim < 0 || dim >= ndim || seen[dim]) {
             throw std::invalid_argument("Permute: invalid permutation");
         }
         seen[dim] = true;
+        norm_dims[i] = dim;
     }
 
-    // Create output shape by permuting input shape
-    std::vector<int64_t> out_shape;
-    for (int64_t dim : dims) {
-        out_shape.push_back(input_shape[dim]);
-    }
-
-    // Create output tensor
-    Tensor output(out_shape, input.dtype(), input.device());
-
-    // Get pipeline - select dtype-specific shader variant
-    std::string permute_shader;
-    if (input.dtype() == DType::Complex128) {
-        // 16-byte-per-element shader — each output slot copies two float64 halves.
-        permute_shader = "permute_c128";
-    }
-    else if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64 ||
-        input.dtype() == DType::Complex64) {
-        // 8-byte types share the f64 shader (uvec2/uint64 layout)
-        permute_shader = "permute_f64";
-    }
-    else if (input.dtype() == DType::Float16) permute_shader = "permute_f16";
-    else if (input.dtype() == DType::BFloat16) permute_shader = "permute_bf16";
-    else permute_shader = "permute";
-    auto* pipeline = getPipeline(permute_shader, device_id);
-
-    // Get Vulkan buffers for input and output
-    const void* buffer_input = input.data_ptr();
-    const void* buffer_output = output.data_ptr();
-
-    size_t buffer_size_input = input.numel() * input.dtype_size();
-    size_t buffer_size_output = output.numel() * output.dtype_size();
-
-    // Convert int64_t to int32_t for shader compatibility.
-    std::vector<int32_t> shape_i32(ndim);
-    std::vector<int32_t> strides_i32(ndim);
-    std::vector<int32_t> dims_i32(ndim);
+    // Permute is a pure stride-permutation and must be a zero-copy view
+    // sharing storage with `input`, exactly like this file's own
+    // dispatchReshape/dispatchSqueeze/dispatchUnsqueeze and matching
+    // CPU/CUDA/ROCm's permute_kernel (and the documented View vs Copy
+    // contract in include/tenzor/core/tensor.hpp). Previously this dispatched
+    // a copy shader and returned an independent buffer, breaking storage
+    // aliasing with `input` that every other backend preserves. Materializing
+    // a contiguous buffer (when a consumer actually needs one) is the job of
+    // dispatchContiguous, called at the point of consumption — not here.
+    std::vector<int64_t> out_shape(ndim);
+    std::vector<int64_t> out_strides(ndim);
     for (int32_t i = 0; i < ndim; ++i) {
-        shape_i32[i] = static_cast<int32_t>(input_shape[i]);
-        strides_i32[i] = static_cast<int32_t>(input_strides[i]);
-        dims_i32[i] = static_cast<int32_t>(dims[i]);
+        out_shape[i] = input_shape[norm_dims[i]];
+        out_strides[i] = input_strides[norm_dims[i]];
     }
 
-    size_t metadata_size = ndim * sizeof(int32_t);
-
-    // Allocate metadata buffers through the main allocator so their pointers
-    // are tracked — the previous standalone VulkanBuffer path returned raw
-    // VkBuffer handles that allocateAndWriteDescriptorSet's lookup couldn't
-    // resolve, producing "Invalid buffer pointer: buffer not tracked" when
-    // dispatchPermute was invoked from higher-level ops like fft2.
-    void* ptr_shape   = allocate(metadata_size, device_id);
-    void* ptr_strides = allocate(metadata_size, device_id);
-    void* ptr_perm    = allocate(metadata_size, device_id);
-
-    copy(ptr_shape,   shape_i32.data(),   metadata_size, CopyKind::HostToDevice);
-    copy(ptr_strides, strides_i32.data(), metadata_size, CopyKind::HostToDevice);
-    copy(ptr_perm,    dims_i32.data(),    metadata_size, CopyKind::HostToDevice);
-
-    // Set up descriptor set with all buffers
-    std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, buffer_input},
-        {1, buffer_output},
-        {2, ptr_shape},
-        {3, ptr_strides},
-        {4, ptr_perm}
-    };
-    std::vector<size_t> sizes = {
-        buffer_size_input,
-        buffer_size_output,
-        metadata_size,
-        metadata_size,
-        metadata_size
-    };
-
-    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
-        device_id, pipeline, bindings, sizes);
-
-    // Push constants
-    struct PushConstants {
-        uint32_t n;
-        uint32_t ndim;
-    } push_constants;
-
-    push_constants.n = static_cast<uint32_t>(output.numel());
-    push_constants.ndim = static_cast<uint32_t>(ndim);
-
-    // Execute compute shader
-    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
-
-    // Insert pre-read barrier to ensure input data from previous ops is ready
-    insertComputeOnlyBarrier(cmdBuffer);
-
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                      VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
-
-    uint32_t workgroups = div_wg_checked(output.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
-    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
-
-    // Add memory barrier
-    insertComputeOnlyBarrier(cmdBuffer);
-
-    endSingleTimeCommands(cmdBuffer, device_id);
-
-    // Ensure the compute dispatch is done before freeing metadata buffers.
-    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
-        submitBatchIfNeeded(device_id, true);
-        ensurePendingWorkComplete(device_id);
-    }
-
-    deallocate(ptr_shape);
-    deallocate(ptr_strides);
-    deallocate(ptr_perm);
-
-    return output;
+    Tensor result;
+    result.impl_ = make_intrusive<TensorImpl>(*input.impl_);
+    result.mutable_shape() = std::move(out_shape);
+    result.mutable_strides() = std::move(out_strides);
+    return result;
 }
 
 /**

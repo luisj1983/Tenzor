@@ -1,0 +1,59 @@
+#version 450
+
+// SpMV (Int32): y = A * x where A is CSR sparse, x and y are dense vectors.
+// One workgroup per row, threads reduce products within row via shared-memory
+// tree reduction (mirrors sparse_spmv.comp). No atomics needed.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { int values[];     };
+layout(set = 0, binding = 3) readonly buffer VecX       { int x[];          };
+layout(set = 0, binding = 4) buffer VecY                { int y[];          };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+// Sized to the maximum supported workgroup size (optimalWorkgroupSize caps at
+// 1024). The actual workgroup size is the runtime spec constant gl_WorkGroupSize.x.
+shared int partial_sums[1024];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+    uint row_nnz = row_end - row_start;
+
+    // Each thread accumulates partial products, striding by the actual
+    // workgroup size (not a hardcoded 256) so every lane gets distinct work.
+    int sum = 0;
+    for (uint i = tid; i < row_nnz; i += gl_WorkGroupSize.x) {
+        uint idx = row_start + i;
+        sum += values[idx] * x[col_indices[idx]];
+    }
+
+    partial_sums[tid] = sum;
+    barrier();
+
+    // Parallel reduction over all active lanes. Start at the largest power of
+    // two >= workgroup size so lanes >= the first power-of-two boundary are
+    // folded in; entries at/above gl_WorkGroupSize.x are treated as 0.
+    uint stride = 1u;
+    while (stride < gl_WorkGroupSize.x) stride <<= 1;
+    stride >>= 1;
+    for (; stride > 0u; stride >>= 1) {
+        if (tid < stride && (tid + stride) < gl_WorkGroupSize.x) {
+            partial_sums[tid] += partial_sums[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        y[row] = partial_sums[0];
+    }
+}

@@ -311,7 +311,15 @@ auto nested_sum_cuda(const Tensor& values, const Tensor& offsets,
     int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
-    auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
+    // Output shape must be rank-preserving [B, ...trailing dims], matching
+    // CPU, not flattened [B, D]: a flattened shape here is a different
+    // *tensor shape* than what NestedSumBackward expects when broadcasting
+    // the gradient back to [total_len, ...trailing dims] for rank>=3 values.
+    // D itself (the flat per-row stride the kernel below uses) is unaffected.
+    std::vector<int64_t> out_shape;
+    out_shape.push_back(B);
+    for (size_t i = 1; i < shape.size(); ++i) out_shape.push_back(shape[i]);
+    auto output = tenzor::zeros(out_shape, values.dtype(), values.device());
     // An empty batch (B <= 0) would launch a 0-block grid, which CUDA rejects;
     // the zero-filled output is already correct (mirrors nested_attention_cuda).
     if (B <= 0) return output;
@@ -384,7 +392,11 @@ auto nested_mean_cuda(const Tensor& values, const Tensor& offsets,
     int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
     int64_t B = offsets.numel() - 1;
 
-    auto output = tenzor::zeros({B, D}, values.dtype(), values.device());
+    // See nested_sum_cuda: output shape must be rank-preserving, matching CPU.
+    std::vector<int64_t> out_shape;
+    out_shape.push_back(B);
+    for (size_t i = 1; i < shape.size(); ++i) out_shape.push_back(shape[i]);
+    auto output = tenzor::zeros(out_shape, values.dtype(), values.device());
     // An empty batch (B <= 0) would launch a 0-block grid, which CUDA rejects;
     // the zero-filled output is already correct (mirrors nested_attention_cuda).
     if (B <= 0) return output;
@@ -906,18 +918,21 @@ __device__ inline double nested_rsqrt<double>(double x) { return rsqrt(x); }
 
 template <typename T>
 __global__ void nested_layer_norm_kernel_t(
-    const T* __restrict__ values,        // [total_len, D]
-    T* __restrict__ output,              // [total_len, D]
+    const T* __restrict__ values,        // [total_len, ...mid, D] flattened to rows of width D
+    T* __restrict__ output,
     const T* __restrict__ weight,        // [D]
     const T* __restrict__ bias,          // [D]
-    const int64_t* __restrict__ offsets, // [B+1]
-    int64_t D, int64_t B, T eps)
+    const int64_t* __restrict__ offsets, // [B+1], in units of dim-0 positions
+    int64_t D, int64_t inner_stride, int64_t B, T eps)
 {
     int64_t b = blockIdx.x;
     if (b >= B) return;
 
-    int64_t start = offsets[b];
-    int64_t end = offsets[b + 1];
+    // offsets are in units of dim-0 positions; scale to row-space (each dim-0
+    // position spans `inner_stride` rows of width D, matching CPU's
+    // total_rows = numel()/D convention for rank>=3 values).
+    int64_t start = offsets[b] * inner_stride;
+    int64_t end = offsets[b + 1] * inner_stride;
     int64_t len = end - start;
     if (len <= 0) return;
 
@@ -985,8 +1000,17 @@ auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets,
         throw std::runtime_error("nested_layer_norm_cuda: values must be contiguous (packed [total_len, inner] layout)");
     }
     auto shape = values.shape();
-    int64_t total_len = shape.empty() ? 0 : shape[0];
-    int64_t D = (total_len > 0) ? values.numel() / total_len : 1;
+    // Normalize over the LAST dim only (weight/bias sized [D]), matching CPU
+    // exactly -- not the full trailing volume (numel()/total_len), which
+    // requires weight/bias sized to the whole trailing volume instead of the
+    // documented [D] contract (see NestedLayerNorm3DMatchesRegularLayerNorm).
+    int64_t D = shape.empty() ? 1 : shape.back();
+    // Product of all MIDDLE dims (between dim 0 and the last dim): for rank-2
+    // values this is 1 (no behavior change); for rank>=3 (e.g. [total_len,H,D])
+    // this is H, so each dim-0 position contributes H rows in the flattened
+    // [total_len*H, D] row space that offsets must be scaled into.
+    int64_t inner_stride = 1;
+    for (size_t i = 1; i + 1 < shape.size(); ++i) inner_stride *= shape[i];
     int64_t B = offsets.numel() - 1;
 
     auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
@@ -997,13 +1021,13 @@ auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets,
         nested_layer_norm_kernel_t<float><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             values.data<float>(), output.data<float>(),
             weight.data<float>(), bias.data<float>(),
-            offsets.data<int64_t>(), D, B, eps);
+            offsets.data<int64_t>(), D, inner_stride, B, eps);
     } else if (values.dtype() == DType::Float64) {
         // F4 followup: native Float64 path with double-precision accumulators.
         nested_layer_norm_kernel_t<double><<<static_cast<unsigned>(B), threads, 0, stream>>>(
             values.data<double>(), output.data<double>(),
             weight.data<double>(), bias.data<double>(),
-            offsets.data<int64_t>(), D, B, static_cast<double>(eps));
+            offsets.data<int64_t>(), D, inner_stride, B, static_cast<double>(eps));
     } else {
         throw std::runtime_error("nested_layer_norm_cuda: only Float32 and Float64 currently supported");
     }

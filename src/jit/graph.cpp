@@ -79,6 +79,19 @@ auto attr_vec_or_scalar(const Node& node, const char* name, size_t rank,
         if (values.size() == 1 && rank > 1) {
             values.resize(rank, values[0]);
         }
+        if (values.size() != rank) {
+            // Malformed graph attribute: neither empty, a single broadcastable
+            // scalar, nor exactly one entry per spatial dim. Returning it
+            // as-is would let set_conv_attrs_from_node index it out of bounds
+            // (e.g. a 2-element "stride" for a 3D conv) further down the call
+            // chain. Fail loudly here instead, matching this file's general
+            // standard of throwing on malformed attributes.
+            throw std::runtime_error(
+                "JIT graph attribute '" + std::string(name) + "' has " +
+                std::to_string(values.size()) +
+                " element(s); expected 0, 1, or " + std::to_string(rank) +
+                " (spatial rank) entries");
+        }
         return values;
     }
     if (node.has_int_attr(name)) {
@@ -3220,6 +3233,8 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
                     std::vector<Variable>* out_all_values) -> std::vector<Variable> {
     // JIT-R116: reset per-call; see the member's doc comment.
     capture_scratch_tensors_.clear();
+    // JIT-R203: reset per-call; see the member's doc comment.
+    side_effect_fired_this_call_ = false;
 
     // Map values to runtime variables
     std::unordered_map<std::string, Variable> value_map;
@@ -3336,6 +3351,36 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
     // "value", fused weights/bias) can be placed on it (JIT-050).
     exec_target_device_ = target_device;
 
+    // JIT-R203: does `n` ITSELF (not any branch) constitute a genuine,
+    // already-materialized side effect once execute_node(n, ...) has
+    // returned without throwing? A recorded in-place mutation always does.
+    // A stateful op (is_stateful_op()) only does when the traced `training`
+    // attr is actually set -- mirrors has_side_effecting_node()'s own test.
+    auto node_is_own_side_effect = [](const std::shared_ptr<Node>& n) -> bool {
+        if (n->has_int_attr("jit_was_inplace") &&
+            n->get_int_attr("jit_was_inplace") != 0) {
+            return true;
+        }
+        return is_stateful_op(n->op_type()) &&
+               n->has_bool_attr("training") && n->get_bool_attr("training");
+    };
+    // Fold a completed (or partially-completed-then-failed) If/Loop node's
+    // branch/body subgraph's own side_effect_fired_this_call_ into this
+    // graph's -- each branch is executed via its own nested forward() call
+    // (see the OpType::If/Loop cases in execute_node), which independently
+    // resets and tracks the same flag for its own node list.
+    auto merge_branch_side_effects = [this](const std::shared_ptr<Node>& n) {
+        if (const auto& then_g = n->then_branch()) {
+            if (then_g->side_effect_fired_this_call()) side_effect_fired_this_call_ = true;
+        }
+        if (const auto& else_g = n->else_branch()) {
+            if (else_g->side_effect_fired_this_call()) side_effect_fired_this_call_ = true;
+        }
+        if (const auto& body_g = n->body()) {
+            if (body_g->side_effect_fired_this_call()) side_effect_fired_this_call_ = true;
+        }
+    };
+
     // Execute nodes in topological order. JIT-R015: a ShapeGuard/GuardNode
     // mismatch only ever SET needs_retrace_ (execute_node's OpType::ShapeGuard/
     // GuardNode cases) without aborting -- every remaining node still ran to
@@ -3346,8 +3391,36 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs,
     // them twice per external call. Stop as soon as a guard trips: everything
     // strictly after it in topological order is about to be thrown away anyway.
     for (const auto& node : nodes_) {
-        execute_node(node, value_map, grad_mode, out_all_values);
-        if (needs_retrace_) break;
+        try {
+            execute_node(node, value_map, grad_mode, out_all_values);
+        } catch (...) {
+            // JIT-R203: the node that just threw did NOT complete -- every
+            // current is_stateful_op() interpreter case (Dropout/BatchNorm2d/
+            // RReLU in training mode) throws unconditionally before
+            // dispatching any real work, so the throw itself fired nothing.
+            // An in-place-tagged node is the one genuinely ambiguous case (its
+            // dispatch call could have mutated its target before raising), so
+            // conservatively still count that. If this was an If/Loop node,
+            // its branch may have executed real side-effecting nodes before
+            // failing internally -- that branch's own forward() call already
+            // recorded it in the branch's own side_effect_fired_this_call_.
+            if (node->has_int_attr("jit_was_inplace") &&
+                node->get_int_attr("jit_was_inplace") != 0) {
+                side_effect_fired_this_call_ = true;
+            }
+            merge_branch_side_effects(node);
+            throw;
+        }
+        if (needs_retrace_) {
+            // JIT-R015: this node ran to completion for real (only the break
+            // below stops further nodes), so account for its own side effect
+            // (and any branch's) before stopping.
+            if (node_is_own_side_effect(node)) side_effect_fired_this_call_ = true;
+            merge_branch_side_effects(node);
+            break;
+        }
+        if (node_is_own_side_effect(node)) side_effect_fired_this_call_ = true;
+        merge_branch_side_effects(node);
     }
 
     // Gather outputs. A guard trip mid-loop means some (or all) outputs_ were
@@ -5208,8 +5281,13 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 OpAttributes bag_attrs;
                 static const char* kModes[] = {"sum", "mean", "max"};
                 int64_t mode_idx = node->get_int_attr("embedding_bag_mode");
-                bag_attrs.set(AttrKey::Mode,
-                    std::string(kModes[mode_idx >= 0 && mode_idx <= 2 ? mode_idx : 0]));
+                if (mode_idx < 0 || mode_idx > 2) {
+                    throw std::runtime_error(
+                        "JIT graph EmbeddingBag node has out-of-range "
+                        "embedding_bag_mode " + std::to_string(mode_idx) +
+                        " (expected 0=sum, 1=mean, 2=max)");
+                }
+                bag_attrs.set(AttrKey::Mode, std::string(kModes[mode_idx]));
                 bag_attrs.set(AttrKey::EmbeddingDim, node->get_int_attr("embedding_dim"));
                 bag_attrs.set(AttrKey::IncludeLastOffset,
                     node->has_bool_attr("include_last_offset") &&
@@ -6026,6 +6104,10 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                                                ? node->get_int_attr("stride") : 1);
                 attrs.set(AttrKey::Padding, node->has_int_attr("padding")
                                                 ? node->get_int_attr("padding") : 0);
+                attrs.set(AttrKey::Dilation, node->has_int_attr("dilation")
+                                                 ? node->get_int_attr("dilation") : 1);
+                attrs.set(AttrKey::Groups, node->has_int_attr("groups")
+                                               ? node->get_int_attr("groups") : 1);
                 attrs.set(AttrKey::Momentum, node->has_float_attr("momentum")
                                                   ? node->get_attr("momentum") : 0.1);
                 attrs.set(AttrKey::Eps, node->has_float_attr("eps")

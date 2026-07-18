@@ -257,6 +257,17 @@ __global__ void grid_sample_bicubic_kernel(
             if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
             return input[((n * C + c) * H_in + y) * W_in + x];
         }
+        if (H_in == 0 || W_in == 0) return T(0);
+        if (padding_mode == 2) {
+            // reflection: true-reflect this out-of-range 4x4 neighbour back
+            // into [0, size-1] (PyTorch reflection semantics), matching
+            // CPU's safe_get instead of edge-clamping.
+            int ry = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(y), H_in, align_corners));
+            int rx = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(x), W_in, align_corners));
+            ry = max(0, min(ry, H_in - 1));
+            rx = max(0, min(rx, W_in - 1));
+            return input[((n * C + c) * H_in + ry) * W_in + rx];
+        }
         y = max(0, min(y, H_in - 1));
         x = max(0, min(x, W_in - 1));
         return input[((n * C + c) * H_in + y) * W_in + x];
@@ -277,9 +288,10 @@ __global__ void grid_sample_bicubic_kernel(
 // Affine grid kernel (Float32 only — unchanged)
 // =========================================================================
 
+template <typename T>
 __global__ void affine_grid_kernel(
-    const float* __restrict__ theta,
-    float* __restrict__ grid,
+    const T* __restrict__ theta,
+    T* __restrict__ grid,
     int N, int H, int W, bool align_corners
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -290,18 +302,18 @@ __global__ void affine_grid_kernel(
     int h = (idx / W) % H;
     int n = idx / (H * W);
 
-    float x_norm, y_norm;
+    T x_norm, y_norm;
     if (align_corners) {
-        x_norm = (W > 1) ? (2.0f * static_cast<float>(w) / static_cast<float>(W - 1) - 1.0f) : 0.0f;
-        y_norm = (H > 1) ? (2.0f * static_cast<float>(h) / static_cast<float>(H - 1) - 1.0f) : 0.0f;
+        x_norm = (W > 1) ? (T(2) * static_cast<T>(w) / static_cast<T>(W - 1) - T(1)) : T(0);
+        y_norm = (H > 1) ? (T(2) * static_cast<T>(h) / static_cast<T>(H - 1) - T(1)) : T(0);
     } else {
-        x_norm = (2.0f * static_cast<float>(w) + 1.0f) / static_cast<float>(W) - 1.0f;
-        y_norm = (2.0f * static_cast<float>(h) + 1.0f) / static_cast<float>(H) - 1.0f;
+        x_norm = (T(2) * static_cast<T>(w) + T(1)) / static_cast<T>(W) - T(1);
+        y_norm = (T(2) * static_cast<T>(h) + T(1)) / static_cast<T>(H) - T(1);
     }
 
-    const float* t = theta + n * 6;
-    float x_out = t[0] * x_norm + t[1] * y_norm + t[2];
-    float y_out = t[3] * x_norm + t[4] * y_norm + t[5];
+    const T* t = theta + n * 6;
+    T x_out = t[0] * x_norm + t[1] * y_norm + t[2];
+    T y_out = t[3] * x_norm + t[4] * y_norm + t[5];
 
     int out_idx = ((n * H + h) * W + w) * 2;
     grid[out_idx] = x_out;
@@ -389,26 +401,44 @@ auto affine_grid_kernel_host(const Tensor& theta, const std::vector<int64_t>& si
     int H = static_cast<int>(size[2]);
     int W = static_cast<int>(size[3]);
 
+    // Native double compute for Float64 theta (matches CUDA/OneAPI/CPU and this
+    // file's OWN affine_grid_backward_kernel_dev<T>, which already computes
+    // natively in double) -- the previous unconditional .to(Float32) computed
+    // in single precision and only restored the OUTPUT dtype label afterward,
+    // silently losing precision instead of preserving it end-to-end. Float16/
+    // BFloat16 widen to Float32, compute, narrow back (the kernel has no
+    // half-precision instantiation).
+    if (theta.dtype() == DType::Float16 || theta.dtype() == DType::BFloat16) {
+        DType orig = theta.dtype();
+        Tensor grid_f32 = affine_grid_kernel_host(theta.to(DType::Float32), size, align_corners, stream);
+        return grid_f32.to(orig);
+    }
+
     // .contiguous(): the kernel reads theta with dense strides, so a non-contiguous
     // theta view would be read at the wrong offsets (matches grid_sample_kernel).
-    Tensor theta_f32 = theta.to(DType::Float32).contiguous();
-    Tensor grid({N, H, W, 2}, DType::Float32, theta.device());
+    Tensor theta_c = theta.is_contiguous() ? theta : theta.contiguous();
+    Tensor grid({N, H, W, 2}, theta.dtype(), theta.device());
 
     int total = N * H * W;
     int block_size = 256;
     int grid_size = (total + block_size - 1) / block_size;
 
-    hipLaunchKernelGGL(affine_grid_kernel,
-        dim3(grid_size), dim3(block_size), 0, stream,
-        theta_f32.data<float>(), grid.data<float>(),
-        N, H, W, align_corners);
+    if (theta.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(affine_grid_kernel<double>),
+            dim3(grid_size), dim3(block_size), 0, stream,
+            theta_c.data<double>(), grid.data<double>(),
+            N, H, W, align_corners);
+    } else if (theta.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(affine_grid_kernel<float>),
+            dim3(grid_size), dim3(block_size), 0, stream,
+            theta_c.data<float>(), grid.data<float>(),
+            N, H, W, align_corners);
+    } else {
+        throw std::runtime_error("affine_grid (ROCm): unsupported dtype");
+    }
 
     HIP_CHECK(hipGetLastError());
-    // M9: restore theta's original dtype (same fix as the CUDA sibling's M8
-    // and this file's own grid_sample_kernel_host above, which already does
-    // `return output_f32.to(input.dtype());`). Returning a hardcoded
-    // Float32 grid silently dropped a Float64 theta's precision.
-    return grid.to(theta.dtype());
+    return grid;
 }
 
 // =========================================================================
@@ -640,6 +670,13 @@ __global__ void grid_sample_bicubic_backward_kernel(
                 bool valid_s = true;
                 if (padding_mode == 0) {
                     if (yy < 0 || yy >= H_in || xx < 0 || xx >= W_in) valid_s = false;
+                } else if (padding_mode == 2) {
+                    // reflection: true-reflect (matches CPU backward
+                    // scatter), not edge-clamp.
+                    yy_s = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(yy), H_in, align_corners));
+                    xx_s = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(xx), W_in, align_corners));
+                    yy_s = max(0, min(yy_s, H_in - 1));
+                    xx_s = max(0, min(xx_s, W_in - 1));
                 } else {
                     yy_s = max(0, min(yy, H_in - 1));
                     xx_s = max(0, min(xx, W_in - 1));
@@ -653,6 +690,12 @@ __global__ void grid_sample_bicubic_backward_kernel(
                     if (yy >= 0 && yy < H_in && xx >= 0 && xx < W_in) {
                         v = input[((n * C + c) * H_in + yy) * W_in + xx];
                     }
+                } else if (padding_mode == 2) {
+                    int yy_f = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(yy), H_in, align_corners));
+                    int xx_f = static_cast<int>(gs_reflect_coord<T>(static_cast<T>(xx), W_in, align_corners));
+                    yy_f = max(0, min(yy_f, H_in - 1));
+                    xx_f = max(0, min(xx_f, W_in - 1));
+                    v = input[((n * C + c) * H_in + yy_f) * W_in + xx_f];
                 } else {
                     int yy_f = max(0, min(yy, H_in - 1));
                     int xx_f = max(0, min(xx, W_in - 1));

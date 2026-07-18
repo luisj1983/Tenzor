@@ -15,6 +15,14 @@ layout(push_constant) uniform PushConstants {
     float e;
 } p;
 
+// Round-half-away-from-zero to match std::round / CUDA/ROCm/OneAPI round
+// semantics. GLSL's round() has implementation-defined 0.5 tie-breaking;
+// every other backend rounds ties away from zero, which matters here since
+// e.g. pow(2,-1) == 0.5 exactly. Mirrors pow_int32.comp.
+float round_half_away_f32(float x) {
+    return sign(x) * floor(abs(x) + 0.5);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= p.n_elements) return;
@@ -29,7 +37,7 @@ void main() {
         // Non-integer exponent on an integer tensor is a PyTorch error case;
         // compute it approximately in float (GLSL pow is float-only).
         float b = (p.is_signed != 0u) ? float(v) : float(uint64_t(v));
-        float res = round(pow(b, p.e));
+        float res = round_half_away_f32(pow(b, p.e));
         output_data[idx] = (p.is_signed != 0u) ? int64_t(res) : int64_t(uint64_t(res));
     }
 }

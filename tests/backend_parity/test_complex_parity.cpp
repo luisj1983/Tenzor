@@ -160,6 +160,59 @@ TEST_P(ComplexParity, Complex_Cos) {
     }, {a}, device, 1e-4f, 1e-5f, "Complex_Cos");
 }
 
+// ============================================================================
+// Real <-> Complex cast cross product
+// ============================================================================
+
+// Regression: ROCm's cast_kernel only special-cased 6 direct complex dtype
+// pairs (Float32<->Complex64, Float64<->Complex128, Complex64<->Complex128);
+// every other real dtype into/out of a complex dtype threw
+// "cast: unsupported target dtype", while CPU/CUDA/OneAPI/Vulkan all support
+// the full real<->complex cross product (drop imaginary on complex->real,
+// zero-fill imaginary on real->complex).
+TEST_P(ComplexParity, RealToComplex64_FullDtypeCoverage) {
+    for (DType dt : {DType::Int8, DType::UInt8, DType::Int16, DType::UInt16,
+                      DType::Int32, DType::Int64, DType::UInt32, DType::UInt64,
+                      DType::Bool, DType::Float16, DType::BFloat16, DType::Float64}) {
+        auto a = ones({4, 4}, dt, device);
+        Tensor out;
+        EXPECT_NO_THROW({
+            out = a.to(DType::Complex64);
+            device.synchronize();
+        }) << "Failed on " << device.to_string() << " src dtype " << dtype_name(dt);
+        EXPECT_EQ(out.dtype(), DType::Complex64);
+    }
+}
+
+TEST_P(ComplexParity, Complex64ToReal_FullDtypeCoverage) {
+    for (DType dt : {DType::Int8, DType::UInt8, DType::Int16, DType::UInt16,
+                      DType::Int32, DType::Int64, DType::UInt32, DType::UInt64,
+                      DType::Bool, DType::Float16, DType::BFloat16, DType::Float64}) {
+        auto a = ones({4, 4}, DType::Complex64, device);
+        Tensor out;
+        EXPECT_NO_THROW({
+            out = a.to(dt);
+            device.synchronize();
+        }) << "Failed on " << device.to_string() << " target dtype " << dtype_name(dt);
+        EXPECT_EQ(out.dtype(), dt);
+    }
+}
+
+TEST_P(ComplexParity, RealToComplex128_RoundTrip) {
+    auto a = full({4}, 3.0, DType::Float32, Device::cpu());
+    auto a_dev = a.to(device);
+
+    Tensor c;
+    EXPECT_NO_THROW({
+        c = a_dev.to(DType::Complex128);
+        device.synchronize();
+    }) << "Failed on " << device.to_string();
+    EXPECT_EQ(c.dtype(), DType::Complex128);
+
+    auto back = c.to(DType::Float32).to(Device::cpu());
+    expectTensorNear(back, a, 1e-5f);
+}
+
 INSTANTIATE_BACKEND_TESTS(ComplexParity);
 
 

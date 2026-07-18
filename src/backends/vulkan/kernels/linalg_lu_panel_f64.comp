@@ -2,6 +2,9 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Blocked LU Panel Factorization (Float64)
+// One workgroup per batch element; the whole batch is folded into a single
+// dispatch (dispatch = {batch_size, 1, 1}), batch index from gl_WorkGroupID.x
+// — see linalg_lu_panel.comp / runBlockedLU.
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { float64_t A[]; };
@@ -11,7 +14,6 @@ layout(push_constant) uniform PushConstants {
     uint n;
     uint col_start;
     uint panel_cols;
-    uint batch_idx;
 };
 
 shared float64_t panel[256][32];
@@ -21,6 +23,7 @@ shared int pivot_idx;
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
     uint base = batch_idx * n * n;
 
     uint panel_rows = n - col_start;
@@ -46,8 +49,9 @@ void main() {
         }
         barrier();
 
+        // Must include the batch offset — see linalg_lu_panel.comp.
         if (tid == 0) {
-            pivots[col_start + k] = pivot_idx;
+            pivots[batch_idx * n + col_start + k] = pivot_idx;
         }
 
         if (max_row != k) {

@@ -8,7 +8,8 @@ layout(binding = 0) buffer Output { double output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
-    uint seed;
+    uint seed_lo;        // Low 32 bits of the 64-bit global seed
+    uint seed_hi;        // High 32 bits of the 64-bit global seed
     uint offset;
     uint distribution;   // 0 = uniform, 1 = normal
 } params;
@@ -75,9 +76,10 @@ void main() {
         return;
     }
 
+    // Counter/key layout matches CPU's philox.hpp exactly — see random.comp.
     uint element_idx = idx + params.offset;
-    uvec4 ctr = uvec4(element_idx, element_idx >> 16, 0, 0);
-    uvec2 key = uvec2(params.seed, params.seed ^ 0xDEADBEEFu);
+    uvec4 ctr = uvec4(element_idx, 0u, 0u, 0u);
+    uvec2 key = uvec2(params.seed_lo, params.seed_hi);
 
     uvec4 rand_vals = philox4x32(ctr, key);
 

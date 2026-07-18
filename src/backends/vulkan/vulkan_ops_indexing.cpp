@@ -195,6 +195,11 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
         throw std::invalid_argument("Gather: dimension out of range");
     }
 
+    // The gather shader silently no-ops on an out-of-range index instead of
+    // throwing (no error-reporting path back to the host); validate host-side
+    // first, matching CPU/CUDA/ROCm/OneAPI.
+    vulkan_validate_index_bounds(indices, input_shape[dim], "gather");
+
     std::vector<int64_t> out_shape(indices_shape.begin(), indices_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
 
@@ -408,6 +413,11 @@ auto VulkanBackend::dispatchScatter(const Tensor& input_raw, int64_t dim, const 
         throw std::invalid_argument("Scatter: dimension out of range");
     }
 
+    // The scatter shader bounds-checks but silently skips the write on an
+    // out-of-range index instead of throwing (no error-reporting path back to
+    // the host); validate host-side first, matching CPU/CUDA/ROCm/OneAPI.
+    vulkan_validate_index_bounds(indices, input_shape[dim], "scatter");
+
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
 
@@ -579,6 +589,11 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     if (output.numel() == 0 || indices.numel() == 0) {
         return output;
     }
+
+    // The index_select shader silently no-ops on an out-of-range index instead
+    // of throwing (no error-reporting path back to the host); validate
+    // host-side first, matching CPU/CUDA/ROCm/OneAPI.
+    vulkan_validate_index_bounds(indices, input_shape[dim], "index_select");
 
     // Select correct shader based on dtype
     std::string shader_name;

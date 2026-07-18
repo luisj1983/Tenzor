@@ -1145,6 +1145,21 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, cudaStream_t
     if (dim < 0) dim += static_cast<int64_t>(shape.size());
     int64_t dim_size = shape[dim];
     int64_t split_size = (dim_size + chunks - 1) / chunks;
+    // For a zero-size chunk dim, split_size collapses to 0, which would make
+    // split_kernel's num_splits = (0 + 0 - 1) / 0 an integer division by
+    // zero (UB / SIGFPE). PyTorch's chunk() on an empty dim returns `chunks`
+    // empty tensors instead, so build them directly here — matches CPU's
+    // chunk_kernel (transform.cpp, F075).
+    if (split_size == 0) {
+        std::vector<Tensor> result;
+        result.reserve(static_cast<size_t>(chunks));
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[dim] = 0;
+        for (int64_t c = 0; c < chunks; ++c) {
+            result.emplace_back(out_shape, input.dtype(), input.device());
+        }
+        return result;
+    }
     return split_kernel(input, split_size, dim, stream);
 }
 

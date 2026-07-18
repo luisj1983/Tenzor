@@ -32,8 +32,11 @@ float compute_trig(float val) {
         case 0: return sin(val);
         case 1: return cos(val);
         case 2: return tan(val);
-        case 3: return asin(val);
-        case 4: return acos(val);
+        // asin/acos — GLSL asin()/acos() are spec-undefined for |x|>1;
+        // std::asin/std::acos deterministically return NaN there (matches
+        // trigonometric.comp's Float32 case 3/4).
+        case 3: return (abs(val) > 1.0) ? uintBitsToFloat(0x7fc00000u) : asin(val);
+        case 4: return (abs(val) > 1.0) ? uintBitsToFloat(0x7fc00000u) : acos(val);
         case 5: return atan(val);
         default: return 0.0;
     }

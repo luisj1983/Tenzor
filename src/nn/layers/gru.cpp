@@ -330,8 +330,8 @@ public:
         auto grads = dispatch<OpId::GRUCudnnBackward>(ins);
         // grads: [grad_input,grad_hx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
         // Order must mirror the forward wiring of next_functions/input_variables:
-        // [input, W_ih, W_hh, (b_ih if present), (b_hh if present)].
-        std::vector<Tensor> result = {grads[0], grads[2], grads[3]};
+        // [input, h0, W_ih, W_hh, (b_ih if present), (b_hh if present)].
+        std::vector<Tensor> result = {grads[0], grads[1], grads[2], grads[3]};
         if (has_bias_ih_) result.push_back(grads[4]);
         if (has_bias_hh_) result.push_back(grads[5]);
         return result;
@@ -439,12 +439,21 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // bidirectional GRU would silently run forward-only and produce the wrong
     // output/h_final shapes. Bidirectional must fall through to the per-timestep
     // autograd path that also runs backward_cells_.
+    // The fused kernel below processes every batch row for the full seq_len,
+    // silently ignoring `lengths` (a variable-length-sequence padding mask)
+    // entirely -- unlike the per-timestep autograd loop this path bypasses,
+    // which is lengths-aware. Gate the fast path on no lengths being
+    // supplied so a padded-batch caller correctly falls through to the slow
+    // path instead of getting corrupted output/h_n for every row shorter
+    // than the batch's max length.
+    const bool have_lengths_fused_check = lengths.is_valid() && lengths.numel() > 0;
     const bool can_use_fused =
         is_op_supported(OpId::GRUForward, input.device().type) &&
         input.dtype() == DType::Float32 &&
         linear_before_reset_ &&
         !bidirectional_ &&
-        !x.requires_grad() && !tenzor::is_grad_enabled();
+        !x.requires_grad() && !tenzor::is_grad_enabled() &&
+        !have_lengths_fused_check;
 
     if (can_use_fused) {
         // JIT-R102 (non-JIT, same review pass): this fused-kernel path reads
@@ -561,12 +570,16 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // h_n is an autograd-aware slice of each layer's output. Mirrors the LSTM
     // fused training path; GRU has no cell state.
     // =========================================================================
+    // Same lengths gap as the inference fast path above: this fused cuDNN
+    // training path also processes the full seq_len for every batch row,
+    // silently ignoring `lengths`.
     if (std::getenv("TENZOR_DISABLE_FUSED_GRU_TRAIN") == nullptr &&
         linear_before_reset_ &&
         is_op_supported(OpId::GRUCudnnTrainForward, input.device().type) &&
         input.dtype() == DType::Float32 &&
         !bidirectional_ &&
-        tenzor::is_grad_enabled()) {
+        tenzor::is_grad_enabled() &&
+        !(lengths.is_valid() && lengths.numel() > 0)) {
 
         const int64_t kb = x.shape()[1];
         std::vector<Variable> h_n_layers;
@@ -613,9 +626,15 @@ auto GRU::forward(const Variable& input, const Variable& hx,
             }
 
             Tensor x_t = layer_in.tensor().contiguous();  // (seq, batch, in)
-            Tensor h0_t = traced_reshape(
-                traced_slice(h.tensor(), 0, layer, layer + 1),
-                {kb, hidden_size_}).contiguous();
+            // Autograd-aware slice+reshape (not traced_slice/traced_reshape on
+            // raw .tensor()) so h0_v carries a real grad_fn back to the
+            // caller's h0 Variable -- required for grad_hx (added to
+            // next_funcs/in_vars and backward()'s result below) to actually
+            // reach a learnable initial hidden state instead of being
+            // silently discarded.
+            Variable h0_v = tenzor::reshape(
+                tenzor::slice(h, 0, layer, layer + 1), {kb, hidden_size_});
+            Tensor h0_t = h0_v.tensor().contiguous();
 
             std::vector<Tensor> fwd_in = {x_t, h0_t,
                                           W_ih_v.tensor(), W_hh_v.tensor(),
@@ -630,8 +649,8 @@ auto GRU::forward(const Variable& input, const Variable& hx,
                                          b_ih_t, b_hh_t, output_t, wspace, reserve};
 
             std::vector<std::shared_ptr<Function>> next_funcs = {
-                layer_in.grad_fn(), W_ih_v.grad_fn(), W_hh_v.grad_fn()};
-            std::vector<Variable> in_vars = {layer_in, W_ih_v, W_hh_v};
+                layer_in.grad_fn(), h0_v.grad_fn(), W_ih_v.grad_fn(), W_hh_v.grad_fn()};
+            std::vector<Variable> in_vars = {layer_in, h0_v, W_ih_v, W_hh_v};
             if (has_bias_ih) {
                 next_funcs.push_back(b_ih_v.grad_fn());
                 in_vars.push_back(b_ih_v);

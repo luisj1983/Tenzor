@@ -1910,13 +1910,15 @@ __global__ void embedding_kernel_impl(
     int* error_flag) {
 
     // Row-oriented gather: one block per index row, threads stride over
-    // embedding_dim. Negative ids wrap (idx += num_embeddings) to match CPU; an
-    // id equal to padding_idx yields a zero row (PyTorch padding semantics);
-    // still-OOB ids set the device error flag and write a zero row (memory-safe),
-    // with the catchable throw raised at the next device sync.
+    // embedding_dim. Negative ids are OUT OF RANGE, not wrapped: CPU throws
+    // std::out_of_range for idx<0 (embedding.cpp), so silently wrapping here
+    // would return weight[num_embeddings-1] for idx=-1 instead of matching
+    // CPU's throw. An id equal to padding_idx yields a zero row (PyTorch
+    // padding semantics); OOB ids (including negative) set the device error
+    // flag and write a zero row (memory-safe), with the catchable throw
+    // raised at the next device sync.
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
-        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives (matches CPU)
         const bool ok = (token_idx >= 0 && token_idx < num_embeddings);
         if (!ok && threadIdx.x == 0) {
             atomicExch(error_flag, 1);
@@ -2076,7 +2078,7 @@ __global__ void embedding_backward_kernel_impl(
 
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
-        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives, matching CPU
+        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
         const T* go = grad_output + i * embedding_dim;
         T* gw = grad_weight + token_idx * embedding_dim;
@@ -2098,7 +2100,7 @@ __global__ void embedding_backward_fp16_kernel_impl(
 
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
-        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives, matching CPU
+        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
         const __half* go = grad_output + i * embedding_dim;
         for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
@@ -2144,7 +2146,7 @@ __global__ void embedding_backward_bf16_kernel_impl(
 
     for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
-        if (token_idx < 0) token_idx += num_embeddings;  // wrap negatives, matching CPU
+        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
         const __nv_bfloat16* go = grad_output + i * embedding_dim;
         for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
@@ -2534,7 +2536,11 @@ auto take_kernel(const Tensor& input_orig, const Tensor& indices_orig, cudaStrea
         : indices_orig;
     int64_t indices_size = indices.numel();
 
-    Tensor output({indices_size}, input.dtype(), input.device());
+    // take() output must preserve the index tensor's shape (matches CPU/OneAPI/
+    // Vulkan / PyTorch semantics), not flatten to 1D. A 2D index of shape [2,3]
+    // must produce a [2,3] output, not [6].
+    std::vector<int64_t> out_shape(indices_orig.shape().begin(), indices_orig.shape().end());
+    Tensor output(out_shape, input.dtype(), input.device());
 
     if (indices_size == 0) return output;
 
@@ -2607,6 +2613,38 @@ auto take_kernel(const Tensor& input_orig, const Tensor& indices_orig, cudaStrea
 // ============================================================================
 // Put kernel — scatter into flattened output
 // ============================================================================
+
+// Plain-old-data 16-byte mover for Complex128 (2x double). No arithmetic
+// meaning; put(accumulate=false) is a pure element copy independent of the
+// numeric interpretation, same convention as ROCm's Bytes16 in indexing.hip.cpp.
+struct alignas(16) PutBytes16 { uint64_t lo; uint64_t hi; };
+
+// Overwrite-only mover for dtypes with no atomicAdd support and (matching
+// CPU's own put_kernel accumulate allowlist: Float32/64, Int8/UInt8, Int32/64,
+// Float16/BFloat16) no accumulate semantics either: UInt32/UInt64, Int16/
+// UInt16, Complex64/128. accumulate=true is rejected host-side before this
+// ever launches, so there's no atomicAdd call to instantiate here at all.
+template<typename T>
+__global__ void put_kernel_overwrite_impl(
+    T* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const T* __restrict__ source,
+    int64_t num_indices,
+    int64_t total_size,
+    int* error_flag
+) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_indices) {
+        int64_t target_idx = indices[idx];
+        if (target_idx < 0) {
+            target_idx += total_size;
+        }
+        if (target_idx >= 0 && target_idx < total_size) {
+            output[target_idx] = source[idx];
+        } else {
+            atomicExch(error_flag, 1);
+        }
+    }
+}
 
 template<typename T>
 __global__ void put_kernel_impl(
@@ -2961,6 +2999,71 @@ auto put_kernel(Tensor& input, const Tensor& indices_orig, const Tensor& source_
                 num_indices, total_size, accumulate, error_flag);
             CUDA_CHECK(cudaGetLastError());
             break;
+        case DType::Bool:
+            // Bool accumulate has no defined semantics and CPU explicitly
+            // throws for it too; only the overwrite path is meaningful here.
+            // Route through the uint8_t byte-mover (Bool is 1 byte storage).
+            if (accumulate) {
+                throw std::runtime_error("put_kernel: accumulate not supported for Bool dtype");
+            }
+            put_kernel_impl<uint8_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<uint8_t*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const uint8_t*>(source.data_ptr()),
+                num_indices, total_size, accumulate, error_flag);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::Int16:
+        case DType::UInt16:
+            // Matches CPU: accumulate is not implemented for 16-bit integer
+            // dtypes (no native atomicAdd; CPU itself doesn't support this
+            // combination either), so only overwrite is meaningful.
+            if (accumulate) {
+                throw std::runtime_error("put_kernel: accumulate not supported for 16-bit integer dtype");
+            }
+            put_kernel_overwrite_impl<uint16_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<uint16_t*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const uint16_t*>(source.data_ptr()),
+                num_indices, total_size, error_flag);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::UInt32:
+            // Matches CPU: accumulate is not implemented for UInt32 either.
+            if (accumulate) {
+                throw std::runtime_error("put_kernel: accumulate not supported for UInt32 dtype");
+            }
+            put_kernel_overwrite_impl<uint32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<uint32_t*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const uint32_t*>(source.data_ptr()),
+                num_indices, total_size, error_flag);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::UInt64:
+        case DType::Complex64:
+            // Matches CPU: accumulate is not implemented for UInt64/Complex64
+            // either. Complex64 (2x float = 8 bytes) is a pure bit-preserving
+            // copy on overwrite, so the 8-byte mover serves both.
+            if (accumulate) {
+                throw std::runtime_error("put_kernel: accumulate not supported for this 8-byte dtype");
+            }
+            put_kernel_overwrite_impl<uint64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const uint64_t*>(source.data_ptr()),
+                num_indices, total_size, error_flag);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::Complex128:
+            // Matches CPU: accumulate is not implemented for Complex128.
+            // Complex128 (2x double = 16 bytes) is a pure bit-preserving copy
+            // on overwrite.
+            if (accumulate) {
+                throw std::runtime_error("put_kernel: accumulate not supported for Complex128 dtype");
+            }
+            put_kernel_overwrite_impl<PutBytes16><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<PutBytes16*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const PutBytes16*>(source.data_ptr()),
+                num_indices, total_size, error_flag);
+            CUDA_CHECK(cudaGetLastError());
+            break;
         case DType::Float16:
             put_kernel_impl<__half><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<__half*>(output.data_ptr()),
@@ -3066,6 +3169,33 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     int64_t total_elements = embeddings.shape()[0];
     int64_t offsets_size = offsets.numel();
     int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
+
+    // Pre-validate offsets host-side before any kernel dispatch. Per-bag
+    // [start, end) bounds are derived from offsets and indexed directly into
+    // the embeddings buffer with no on-device bounds checking (embedding_bag_
+    // sum_kernel/embedding_bag_max_kernel trust the offsets); a malformed
+    // offset (negative, non-monotonic, or exceeding the embedding table
+    // length) would cause an out-of-bounds device read (and an OOB write of
+    // the argmax buffer in max mode). Mirrors the CPU reference
+    // (nn_kernels.cpp) and OneAPI's embedding_bag_forward_kernel.
+    if (num_bags > 0) {
+        Tensor offsets_host = offsets.to(Device::cpu());
+        const int64_t* host_offsets = offsets_host.data<int64_t>();
+        int64_t prev = 0;
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            int64_t start = host_offsets[bag];
+            int64_t end = (bag + 1 < offsets_size) ? host_offsets[bag + 1] : total_elements;
+            if (start < prev || start > total_elements ||
+                end < start || end > total_elements) {
+                throw std::out_of_range(
+                    "embedding_bag_forward: offset out of range or non-monotonic "
+                    "at bag " + std::to_string(bag) + " ([" +
+                    std::to_string(start) + ", " + std::to_string(end) +
+                    ") not within [0, " + std::to_string(total_elements) + "])");
+            }
+            prev = start;
+        }
+    }
 
     bool is_mean = (mode == "mean");
     bool is_max = (mode == "max");

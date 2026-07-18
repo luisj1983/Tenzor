@@ -3,8 +3,14 @@
 
 // CDist (pairwise Lp distance), Float64 variant — see cdist.comp. Routing
 // Float64 inputs through the Float32 cdist shader silently downcast them; this
-// variant keeps full double precision. The generic-p path uses exp/log instead
-// of pow() since GLSL has no float64 pow overload.
+// variant keeps full double precision. GLSL has no float64 pow/exp/log
+// builtin overload, so the generic-p (p!=1,2) path uses a manual
+// double-precision exp_d/log_d pair (ported from logsumexp_f64.comp) to
+// compute pow(x,y) = exp(y*log(x)) without ever narrowing to float32 — the
+// old `float diff = float(abs(...))` + `pow(float(sum), 1.0/p)` narrowed
+// twice, once per-element before the pairwise sum and once again on the
+// final double-precision accumulator, discarding the full Lp reduction's
+// double precision either way.
 //   x1: (B, P, M), x2: (B, R, M)  ->  out: (B, P, R)
 
 layout(local_size_x_id = 0) in;
@@ -21,6 +27,79 @@ layout(push_constant) uniform PushConstants {
     uint total;  // B*P*R
     float p;     // Lp norm exponent; p=1 Manhattan, p=2 Euclidean
 } params;
+
+// Double-precision exp via range reduction + Horner polynomial (ported from
+// logsumexp_f64.comp's exp_d — keeps the Float64 generic-p path actually
+// double-precision).
+float64_t exp_d(float64_t x) {
+    if (x != x) return x;  // NaN
+    if (x > 709.0LF) return 1.0e308LF;
+    if (x < -745.0LF) return 0.0LF;
+    float64_t ln2 = 0.6931471805599453LF;
+    float64_t k_dbl = floor(x / ln2 + 0.5LF);
+    float64_t r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0LF, 1100.0LF));
+    float64_t exp_r = 1.0LF + r * (1.0LF + r * (0.5LF + r * (1.0LF/6.0LF + r * (1.0LF/24.0LF + r * (1.0LF/120.0LF +
+        r * (1.0LF/720.0LF + r * (1.0LF/5040.0LF + r * (1.0LF/40320.0LF + r * (1.0LF/362880.0LF +
+        r * (1.0LF/3628800.0LF + r * (1.0LF/39916800.0LF + r * (1.0LF/479001600.0LF +
+        r * (1.0LF/6227020800.0LF)))))))))))));
+    float64_t pow2 = 1.0LF;
+    int abs_k = (k >= 0) ? k : -k;
+    float64_t base2 = 2.0LF;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base2;
+        base2 *= base2;
+        abs_k >>= 1;
+    }
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+// Double-precision log via IEEE 754 bit extraction + atanh series (ported
+// from logsumexp_f64.comp's log_d).
+float64_t log_d(float64_t x) {
+    if (x != x) return x;
+    if (x < 0.0LF) return 0.0LF / 0.0LF;
+    if (x == 0.0LF) return -1.0LF / 0.0LF;
+    if (x == 1.0LF) return 0.0LF;
+    uvec2 bits = unpackDouble2x32(x);
+    uint hi = bits.y;
+    uint lo = bits.x;
+    int biased_exp = int((hi >> 20u) & 0x7FFu);
+    int exp_val = biased_exp - 1023;
+    uint hi_normalized = (hi & 0x000FFFFFu) | 0x3FF00000u;
+    float64_t m = packDouble2x32(uvec2(lo, hi_normalized));
+    if (m > 1.4142135623730950488LF) { m *= 0.5LF; exp_val += 1; }
+    float64_t f = m - 1.0LF;
+    float64_t s = f / (2.0LF + f);
+    float64_t s2 = s * s;
+    float64_t c1 = 0.6666666666666735130LF;
+    float64_t c2 = 0.3999999999940941908LF;
+    float64_t c3 = 0.2857142874366239149LF;
+    float64_t c4 = 0.2222219843214978396LF;
+    float64_t c5 = 0.1818357216161805012LF;
+    float64_t c6 = 0.1531383769920937332LF;
+    float64_t c7 = 0.1479819860511658591LF;
+    float64_t s4 = s2 * s2;
+    float64_t t1 = c1 + c2 * s2 + c3 * s4;
+    float64_t s6 = s4 * s2;
+    float64_t t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
+    float64_t R = t1 + t2 * s6;
+    float64_t log_m = 2.0LF * s + s * s2 * R;
+    float64_t ln2_hi = 0.69314718055994530942LF;
+    float64_t ln2_lo = 2.3190468138462995584e-17LF;
+    float64_t exp_dbl = float64_t(exp_val);
+    return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
+}
+
+// pow(x,y) = exp(y*log(x)), specialized for cdist's domain: base = abs(diff)
+// is always >= 0, and the exponent (p or 1/p) is always > 0. base==0 is
+// handled explicitly since log_d(0) = -inf and exp_d(y * -inf) would need
+// y's sign to resolve correctly (0^positive == 0).
+float64_t pow_d_nonneg(float64_t base, float64_t exp_val) {
+    if (exp_val == 1.0LF) return base;
+    if (base == 0.0LF) return 0.0LF;
+    return exp_d(exp_val * log_d(base));
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -46,13 +125,15 @@ void main() {
         }
         out_data[idx] = sum;
     } else {
-        // GLSL has no float64 pow/exp/log overloads; the generic-p terms use
-        // float pow (the common p=1 and p=2 paths above stay full double). The
-        // distance accumulation itself is still double.
+        // Generic p: accumulate |diff|^p in genuine double precision (no
+        // narrowing to float on the per-element term), then take the
+        // double-precision p-th root of the fully-accumulated double sum.
+        float64_t p64 = float64_t(params.p);
+        float64_t inv_p64 = 1.0LF / p64;
         for (uint m = 0; m < params.M; ++m) {
-            float diff = float(abs(x1[a_off + m] - x2[b_off + m]));
-            sum += float64_t(pow(diff, params.p));
+            float64_t diff = abs(x1[a_off + m] - x2[b_off + m]);
+            sum += pow_d_nonneg(diff, p64);
         }
-        out_data[idx] = float64_t(pow(float(sum), 1.0 / params.p));
+        out_data[idx] = pow_d_nonneg(sum, inv_p64);
     }
 }

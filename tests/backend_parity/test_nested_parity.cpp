@@ -60,7 +60,7 @@ TEST_P(NestedParity, NestedSoftmax_FwdBwd) {
     Tensor ref_out, ref_grad;
     {
         auto v = Variable(values_cpu.clone(), true);
-        auto out = nested_softmax(v, offsets_cpu, /*dim=*/1);
+        auto out = nested_softmax(v, offsets_cpu, /*dim=*/0);
         auto seed = ones_like(out.tensor());
         out.backward(seed);
         ref_out = out.tensor();
@@ -72,7 +72,7 @@ TEST_P(NestedParity, NestedSoftmax_FwdBwd) {
             auto values_dev = values_cpu.to(backends[i]);
             auto offsets_dev = offsets_cpu.to(backends[i]);
             auto v = Variable(values_dev, true);
-            auto out = nested_softmax(v, offsets_dev, /*dim=*/1);
+            auto out = nested_softmax(v, offsets_dev, /*dim=*/0);
             auto seed = ones_like(out.tensor());
             out.backward(seed);
             backends[i].synchronize();
@@ -84,6 +84,54 @@ TEST_P(NestedParity, NestedSoftmax_FwdBwd) {
                                  1e-3f, 1e-5f);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "NestedSoftmax failed on " << backend_name(backends[i])
+                      << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+// Regression test: ROCm/OneAPI/Vulkan's per-row feature width was computed
+// as shape[1] only (H), not the product of all trailing dims (H*W), so for
+// rank>=3 values only H of the H*W elements per row were touched and every
+// row after the first was misindexed (data corruption, not a crash).
+TEST_P(NestedParity, NestedSoftmax_RankThreeValues_FwdBwd) {
+    // B=2 sequences of lengths 3 and 5, feature shape (H=4, W=3) -> D=H*W=12
+    const int64_t H = 4, W = 3;
+    auto offsets_cpu = make_offsets_cpu({3, 5});
+    const int64_t total_len = 3 + 5;
+    auto values_cpu = randn({total_len, H, W}, DType::Float32, Device::cpu());
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
+
+    // Reference on CPU. CPU is ground truth — a throw here is a real bug, so let
+    // the exception propagate as a failure instead of masking it as a skip.
+    Tensor ref_out, ref_grad;
+    {
+        auto v = Variable(values_cpu.clone(), true);
+        auto out = nested_softmax(v, offsets_cpu, /*dim=*/0);
+        auto seed = ones_like(out.tensor());
+        out.backward(seed);
+        ref_out = out.tensor();
+        ref_grad = v.grad().value();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto values_dev = values_cpu.to(backends[i]);
+            auto offsets_dev = offsets_cpu.to(backends[i]);
+            auto v = Variable(values_dev, true);
+            auto out = nested_softmax(v, offsets_dev, /*dim=*/0);
+            auto seed = ones_like(out.tensor());
+            out.backward(seed);
+            backends[i].synchronize();
+
+            SCOPED_TRACE(std::string("NestedSoftmax(rank3) on ") + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref_out, out.tensor().to(Device::cpu()),
+                                 1e-4f, 1e-6f);
+            EXPECT_TENSORS_CLOSE(ref_grad, v.grad().value().to(Device::cpu()),
+                                 1e-3f, 1e-5f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "NestedSoftmax(rank3) failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }

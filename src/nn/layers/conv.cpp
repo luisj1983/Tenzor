@@ -593,10 +593,11 @@ auto Conv2d::reset_parameters() -> void {
 // points). d(Loss)/d(grad_out) = conv1d(input, G, ...); d(Loss)/d(input) =
 // conv_transpose1d(grad_out, G, ...). Uses the ORIGINAL (unpadded) input_var
 // and the real padding_ attribute via the native functional::conv1d /
-// conv_transpose1d entry points, rather than replaying the manual
-// pad_1d+unsqueeze-to-4D shoehorn the tensor-level kernel dispatch uses for
-// computing grad_weight's forward VALUE — that shoehorn exists only because
-// the raw backend kernel needs a 4D shape, not because the math needs it.
+// conv_transpose1d entry points. AUTOGRAD-R056 follow-up: grad_weight's
+// forward VALUE is now also computed via the native OpId::Conv1dBackwardWeight
+// dispatch (3-D operands, no unsqueeze-to-4D) in Conv1dBackward below, so
+// both the value and this third-order-gradient path agree on using the
+// real, unpadded 3-D tensors throughout.
 // ============================================================================
 class Conv1dGradWeightBackward : public Function {
 public:
@@ -666,65 +667,32 @@ public:
         const Tensor& input = saved_tensors_[0];
         const Tensor& weight = saved_tensors_[1];
 
-        // Manually pad the input in the length dimension (same as forward)
-        Tensor input_padded = input;
-        if (padding_ > 0) {
-            input_padded = pad_1d(input, padding_);
-        }
-
-        // Add height dimension of 1 to convert to 4D for Conv2d operations
-        auto grad_4d = grad_output.unsqueeze(2);
-        auto input_4d = input_padded.unsqueeze(2);
-        auto weight_4d = weight.unsqueeze(2);
-
         bool has_bias = saved_tensors_.size() > 2;
 
+        // AUTOGRAD-R056 follow-up: dispatch the native 1-D backward OpIds
+        // directly instead of manually padding + unsqueezing to 4-D and
+        // routing through Conv2dBackwardInput/Weight/Bias. Every backend's
+        // Conv1dBackwardInput/Weight/Bias kernel takes 3-D operands
+        // {grad_output, input, weight} with the REAL (unpadded) input and
+        // the real padding_ attr -- mirroring Conv1dForward's own
+        // "native 1-D conv" contract above (see forward_impl) -- and
+        // internally pads only the length axis, so no manual pad_1d/slice
+        // dance is needed here: grad_input comes back already at the
+        // original (unpadded) input shape.
         OpAttributes backward_attrs;
         backward_attrs.set(AttrKey::Stride, stride_);
-        backward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
+        backward_attrs.set(AttrKey::Padding, padding_);
         backward_attrs.set(AttrKey::Dilation, dilation_);
         backward_attrs.set(AttrKey::Groups, groups_);
 
-        // Set 4D shape strings required by backward kernels
-        {
-            auto is = input_4d.shape();
-            std::string is_str;
-            for (size_t i = 0; i < is.size(); ++i) {
-                if (i > 0) is_str += ',';
-                is_str += std::to_string(is[i]);
-            }
-            backward_attrs.set(AttrKey::InputShape, is_str);
+        std::vector<Tensor> backward_inputs = {grad_output, input, weight};
 
-            auto ws = weight_4d.shape();
-            std::string ws_str;
-            for (size_t i = 0; i < ws.size(); ++i) {
-                if (i > 0) ws_str += ',';
-                ws_str += std::to_string(ws[i]);
-            }
-            backward_attrs.set(AttrKey::WeightShape, ws_str);
-        }
-
-        std::vector<Tensor> backward_inputs = {grad_4d, input_4d, weight_4d};
-
-        // Use OpId-based dispatch for each gradient component
-        auto grad_input_result = dispatch(OpId::Conv2dBackwardInput, backward_inputs, backward_attrs);
-        auto grad_weight_result = dispatch(OpId::Conv2dBackwardWeight, backward_inputs, backward_attrs);
-
-        // Squeeze height dimension: [N,C,1,L] -> [N,C,L]
-        Tensor grad_input_padded = grad_input_result[0].squeeze(2);
-        Tensor grad_weight = grad_weight_result[0].squeeze(2);
-
-        // Remove padding from grad_input to match original input shape
-        Tensor grad_input = grad_input_padded;
-        if (padding_ > 0) {
-            int64_t length = input.shape()[2];
-            // Slice to remove padding: [N, C, L + 2*padding] -> [N, C, L]
-            grad_input = grad_input_padded.slice(2, padding_, padding_ + length);
-        }
+        Tensor grad_input = dispatch(OpId::Conv1dBackwardInput, backward_inputs, backward_attrs)[0];
+        Tensor grad_weight = dispatch(OpId::Conv1dBackwardWeight, backward_inputs, backward_attrs)[0];
 
         if (has_bias) {
-            auto grad_bias_result = dispatch(OpId::Conv2dBackwardBias, backward_inputs, backward_attrs);
-            return {grad_input, grad_weight, grad_bias_result[0]};
+            Tensor grad_bias = dispatch(OpId::Conv1dBackwardBias, backward_inputs, backward_attrs)[0];
+            return {grad_input, grad_weight, grad_bias};
         }
         return {grad_input, grad_weight};
     }
@@ -777,47 +745,18 @@ public:
             std::nullopt,
             {stride_}, {padding_}, {out_pad}, groups_, {dilation_});
 
-        // grad_weight via dispatch (unsqueeze to 4D, use Conv2dBackwardWeight)
-        Tensor grad_4d = grad_out_var.tensor().unsqueeze(2);
-        Tensor input_padded = input_var.tensor();
-        if (padding_ > 0) {
-            input_padded = pad_1d(input_padded, padding_);
-        }
-        Tensor input_4d = input_padded.unsqueeze(2);
-        Tensor weight_4d = weight_var.tensor().unsqueeze(2);
-
+        // grad_weight via native OpId::Conv1dBackwardWeight dispatch (3-D
+        // operands, real unpadded input + real padding_ attr) -- mirrors
+        // this class's own backward() above. AUTOGRAD-R056 follow-up: no
+        // more manual pad_1d/unsqueeze-to-4D/shape-string plumbing.
         OpAttributes backward_attrs;
         backward_attrs.set(AttrKey::Stride, stride_);
-        backward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
+        backward_attrs.set(AttrKey::Padding, padding_);
         backward_attrs.set(AttrKey::Dilation, dilation_);
         backward_attrs.set(AttrKey::Groups, groups_);
 
-        // Set 4D shape strings required by conv2d_backward_weight_kernel
-        // (mirrors this class's own backward() above, and the equivalent
-        // Conv2dBackward::backward_with_variables setup) -- without these,
-        // the kernel reads an empty weight_shape/input_shape and crashes
-        // via an out-of-bounds vector access. This path was previously
-        // unexercised (no create_graph=true test existed for nn::Conv1d).
-        {
-            auto is = input_4d.shape();
-            std::string is_str;
-            for (size_t i = 0; i < is.size(); ++i) {
-                if (i > 0) is_str += ',';
-                is_str += std::to_string(is[i]);
-            }
-            backward_attrs.set(AttrKey::InputShape, is_str);
-
-            auto ws = weight_4d.shape();
-            std::string ws_str;
-            for (size_t i = 0; i < ws.size(); ++i) {
-                if (i > 0) ws_str += ',';
-                ws_str += std::to_string(ws[i]);
-            }
-            backward_attrs.set(AttrKey::WeightShape, ws_str);
-        }
-
-        std::vector<Tensor> gw_inputs = {grad_4d, input_4d, weight_4d};
-        auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight, gw_inputs, backward_attrs)[0];
+        std::vector<Tensor> gw_inputs = {grad_out_var.tensor(), input_var.tensor(), weight_var.tensor()};
+        auto grad_weight_t = dispatch(OpId::Conv1dBackwardWeight, gw_inputs, backward_attrs)[0];
 
         // JIT-R067: attach a differentiable grad_fn (Conv1dGradWeightBackward,
         // defined above) — see Conv2dGradWeightBackward's comment for the
@@ -825,7 +764,7 @@ public:
         // weight-gradient path.
         bool gw_requires_grad = ::tenzor::is_grad_enabled() &&
             (grad_out_var.requires_grad() || input_var.requires_grad());
-        Variable grad_weight(grad_weight_t.squeeze(2), gw_requires_grad);
+        Variable grad_weight(grad_weight_t, gw_requires_grad);
         if (gw_requires_grad) {
             auto gw_fn = std::make_shared<Conv1dGradWeightBackward>(
                 stride_, padding_, dilation_, groups_,

@@ -1,0 +1,36 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Float64 counterpart to histogram_pack_range.comp: reads min, max scalars
+// (1-element Float64 tensors from an aminmax-style reduction) and packs them
+// along with bin_width = (max-min)/num_bins (with degenerate-case fixup)
+// into a 3-double device buffer for histc_dyn_f64. Single-thread dispatch.
+// Keeping this in double precision (rather than packing into the existing
+// float32 histogram_pack_range.comp) avoids rounding the range/bin_width
+// before histc_dyn_f64 even starts binning.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer MinBuf   { float64_t min_in[]; };
+layout(binding = 1) buffer MaxBuf   { float64_t max_in[]; };
+layout(binding = 2) buffer RangeBuf { float64_t range_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_bins;
+} params;
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+
+    float64_t mn = min_in[0];
+    float64_t mx = max_in[0];
+    if (!(mx > mn)) {
+        // Degenerate range: widen by 1 to match dispatchHistc() host fixup.
+        mx = mn + 1.0LF;
+    }
+    float64_t bin_width = (mx - mn) / float64_t(params.num_bins);
+
+    range_out[0] = mn;
+    range_out[1] = mx;
+    range_out[2] = bin_width;
+}

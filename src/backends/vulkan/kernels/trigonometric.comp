@@ -161,11 +161,14 @@ void main() {
         case 2: // tan
             output_data[idx] = fast_tan(val);
             break;
-        case 3: // asin
-            output_data[idx] = asin(val);
+        case 3: // asin — GLSL asin() is spec-undefined for |x|>1;
+                // std::asin/asinf/device asin deterministically return NaN
+                // there. Domain [-1, 1] is otherwise well-defined.
+            output_data[idx] = (abs(val) > 1.0) ? uintBitsToFloat(0x7fc00000u) : asin(val);
             break;
-        case 4: // acos
-            output_data[idx] = acos(val);
+        case 4: // acos — same domain guard as asin (GLSL acos() is
+                // spec-undefined for |x|>1).
+            output_data[idx] = (abs(val) > 1.0) ? uintBitsToFloat(0x7fc00000u) : acos(val);
             break;
         case 5: // atan
             output_data[idx] = atan(val);

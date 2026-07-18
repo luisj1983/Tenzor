@@ -3761,8 +3761,12 @@ inline int64_t frac_pool_start_oneapi(int64_t i, int64_t in_size, int64_t out_si
         start = static_cast<int64_t>((static_cast<float>(i) + sample) * alpha) -
                 static_cast<int64_t>(sample * alpha);
     }
-    if (start < 0) start = 0;
+    // Upper bound MUST be applied before the lower bound: when pool > in_size,
+    // in_size - pool is negative, so clamping to it last would drive start
+    // negative again -- an out-of-bounds input read. Matches the CPU
+    // reference's frac_pool_start (src/backends/cpu/kernels/pooling.cpp).
     if (start > in_size - pool) start = in_size - pool;
+    if (start < 0) start = 0;
     return start;
 }
 

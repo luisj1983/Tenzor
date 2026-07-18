@@ -169,6 +169,21 @@ int cufft_checked_int(int64_t value, const char* what) {
     return static_cast<int>(value);
 }
 
+/// Defense-in-depth: the op-layer (src/ops/fft.cpp) already rejects n<=0 in
+/// the normal call path, but neither the cuFFT-plan path nor the native
+/// (non-cuFFT) fallback independently re-validate it at the kernel level.
+/// A direct/JIT kernel-level caller that bypasses the op layer would
+/// otherwise get a silent degenerate result (0-block no-op launches, or
+/// cufft_checked_int accepting n==0 since it only rejects <0 or >INT_MAX)
+/// instead of a clear error. Matches the op-layer's exception type/message
+/// style ("<op>: n must be positive, got <n>").
+void validate_fft_transform_size(int64_t n, const char* op_name) {
+    if (n <= 0) {
+        throw std::runtime_error(
+            std::string(op_name) + ": n must be positive, got " + std::to_string(n));
+    }
+}
+
 /// Apply scaling to a complex tensor (in-place).
 void apply_normalization_complex(Tensor& output, double scale, bool is_float32, cudaStream_t stream) {
     if (scale == 1.0) return;
@@ -232,6 +247,7 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("FFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "FFT");
     // C2C transform: a real input must first be promoted to complex (the op-layer
     // fft() pre-widens; a direct OpId::FFT dispatch with a real tensor would
     // otherwise be reinterpreted as complex). Matches the CPU fft_kernel.
@@ -402,6 +418,7 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IFFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "IFFT");
     // C2C inverse transform: promote a real input to complex first (matches CPU
     // ifft_kernel; op-layer ifft() pre-widens, direct dispatch would not).
     if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
@@ -559,6 +576,7 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("RFFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "RFFT");
 
     // F-082 fix: cuFFT's simple plan interface requires the FFT dimension to
     // be innermost. Rather than relying solely on the op-layer's
@@ -665,6 +683,7 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IRFFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "IRFFT");
 
     // F-082 fix: cuFFT's simple plan interface requires the FFT dimension to
     // be innermost. Rather than relying solely on the op-layer's
@@ -1545,8 +1564,13 @@ __global__ void bluestein_extract_real_kernel(T* d_out, const T* a_buf, const T*
     int64_t a_base = s * 2 * M;
     T a_re = a_buf[a_base + 2 * k];
     T a_im = a_buf[a_base + 2 * k + 1];
+    // Bluestein: X[k] = chirp[k] * (a conv b)[k] -- the extraction multiply
+    // uses the plain chirp, not its conjugate. b_buf was already built from
+    // conj(chirp) (build_b_kernel/build_b_wrap_kernel above), so conjugating
+    // here too cancelled that and left a spurious exp(i*2*pi*k^2/N) phase on
+    // every output bin.
     T c_re = chirp[2 * k];
-    T c_im = -chirp[2 * k + 1]; // conj
+    T c_im = chirp[2 * k + 1];
     int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
     d_out[out_idx]     = a_re * c_re - a_im * c_im;
     d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
@@ -1568,8 +1592,13 @@ __global__ void bluestein_extract_complex_kernel(T* d_out, const T* a_buf, const
     int64_t a_base = s * 2 * M;
     T a_re = a_buf[a_base + 2 * k];
     T a_im = a_buf[a_base + 2 * k + 1];
+    // Bluestein: X[k] = chirp[k] * (a conv b)[k] -- the extraction multiply
+    // uses the plain chirp, not its conjugate. b_buf was already built from
+    // conj(chirp) (build_b_kernel/build_b_wrap_kernel above), so conjugating
+    // here too cancelled that and left a spurious exp(i*2*pi*k^2/N) phase on
+    // every output bin.
     T c_re = chirp[2 * k];
-    T c_im = -chirp[2 * k + 1]; // conj
+    T c_im = chirp[2 * k + 1];
     int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
     d_out[out_idx]     = a_re * c_re - a_im * c_im;
     d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
@@ -1905,6 +1934,7 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("FFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "FFT");
     // C2C transform: a real input must first be promoted to complex (the op-layer
     // fft() pre-widens; a direct OpId::FFT dispatch with a real tensor would
     // otherwise be reinterpreted as complex). Matches the CPU fft_kernel.
@@ -2030,6 +2060,7 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IFFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "IFFT");
     // C2C inverse transform: promote a real input to complex first (matches CPU
     // ifft_kernel; op-layer ifft() pre-widens, direct dispatch would not).
     if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
@@ -2159,6 +2190,7 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("RFFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "RFFT");
 
     // F-082 fix: honor arbitrary axes directly (transpose target axis to
     // last, recurse, transpose back) instead of relying solely on the
@@ -2346,6 +2378,7 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("IRFFT: dimension out of range");
     }
+    validate_fft_transform_size(n, "IRFFT");
 
     // F-082 fix: honor arbitrary axes directly (transpose target axis to
     // last, recurse, transpose back) instead of relying solely on the

@@ -79,6 +79,11 @@ PreparedMeta prepare_meta(const Tensor& src, const std::vector<Tensor>& indices,
                 auto s = indices[i].shape();
                 broadcast_shape.assign(s.begin(), s.end());
             }
+            // The advanced_index_gather/put shaders have no error-reporting path
+            // back to the host, so an out-of-range index previously silently
+            // no-op'd (gather: uninitialized output slot; put: skipped write)
+            // instead of throwing like CPU/OneAPI. Validate host-side first.
+            vulkan_validate_index_bounds(indices[i], src_shape[i], "AdvancedIndex");
         } else {
             prep.is_indexed[i] = 0;
             prep.meta[53 + i] = 0;
@@ -143,7 +148,10 @@ const char* select_gather_shader(DType dt) {
         case DType::Float32: case DType::Int32: case DType::UInt32:
             return "advanced_index_gather";       // 4-byte
         case DType::Float64: case DType::Int64: case DType::UInt64:
+        case DType::Complex64:  // 2x float = 8 bytes; pure byte-move shader
             return "advanced_index_gather_f64";   // 8-byte
+        case DType::Complex128:  // 2x double = 16 bytes; pure byte-move shader
+            return "advanced_index_gather_c128";  // 16-byte
         default: break;
     }
     throw std::runtime_error("Vulkan AdvancedIndex: unsupported dtype");
@@ -159,7 +167,10 @@ const char* select_put_shader(DType dt) {
         case DType::Float32: case DType::Int32: case DType::UInt32:
             return "advanced_index_put";          // 4-byte
         case DType::Float64: case DType::Int64: case DType::UInt64:
+        case DType::Complex64:  // 2x float = 8 bytes; pure byte-move shader
             return "advanced_index_put_f64";      // 8-byte
+        case DType::Complex128:  // 2x double = 16 bytes; pure byte-move shader
+            return "advanced_index_put_c128";     // 16-byte
         default: break;
     }
     throw std::runtime_error("Vulkan AdvancedIndexPut: unsupported dtype");

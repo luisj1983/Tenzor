@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <type_traits>
 
 namespace tenzor {
 namespace rocm {
@@ -515,10 +516,18 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, hipStream_t 
     // output tensors and returned uninitialised device memory.)
     int64_t chunk_size = (dim_size + chunks - 1) / chunks;
     if (chunk_size <= 0) {
-        // dim_size == 0: return a single empty chunk matching the input shape.
+        // dim_size == 0: split_kernel rejects a zero split_size with a throw.
+        // PyTorch's chunk() on an empty dim returns `chunks` empty tensors
+        // (each carrying a 0 in the chunk dim), not a single one — matches
+        // CPU's chunk_kernel (src/backends/cpu/kernels/transform.cpp).
         std::vector<int64_t> empty_shape(input_shape.begin(), input_shape.end());
-        Tensor empty(empty_shape, input.dtype(), input.device());
-        return std::vector<Tensor>{empty};
+        empty_shape[dim] = 0;
+        std::vector<Tensor> result;
+        result.reserve(static_cast<size_t>(chunks));
+        for (int64_t c = 0; c < chunks; ++c) {
+            result.emplace_back(empty_shape, input.dtype(), input.device());
+        }
+        return result;
     }
     return split_kernel(input, chunk_size, dim, stream);
 }
@@ -1842,9 +1851,31 @@ __global__ void cast_to_fp8_e5m2fnuz_kernel(const From* input, uint8_t* output, 
 // ============================================================================
 
 template<typename SrcT, typename DstT>
+__device__ __forceinline__ DstT cast_saturating(SrcT val) {
+    if constexpr (std::is_floating_point_v<SrcT> && std::is_integral_v<DstT> &&
+                  !std::is_same_v<DstT, bool>) {
+        // Saturating conversion (NaN->0, +Inf/overflow->max, -Inf/-overflow->
+        // min), matching CPU/CUDA/OneAPI/Vulkan's convention instead of a
+        // bare static_cast (UB for out-of-range/NaN input; previously
+        // produced 32-bit-wraparound garbage for f32->i64 on this backend
+        // and an imprecise upper bound for f64->i64).
+        if (isnan(val)) return DstT{0};
+        if (val >= static_cast<SrcT>(std::numeric_limits<DstT>::max())) {
+            return std::numeric_limits<DstT>::max();
+        }
+        if (val <= static_cast<SrcT>(std::numeric_limits<DstT>::min())) {
+            return std::numeric_limits<DstT>::min();
+        }
+        return static_cast<DstT>(val);
+    } else {
+        return static_cast<DstT>(val);
+    }
+}
+
+template<typename SrcT, typename DstT>
 __global__ void cast_kernel_impl(const SrcT* input, DstT* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        output[idx] = static_cast<DstT>(input[idx]);
+        output[idx] = cast_saturating<SrcT, DstT>(input[idx]);
     }
 }
 
@@ -2038,6 +2069,32 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 
     DType src_dtype = input.dtype();
+
+    // Generic real<->complex cross product. The direct-pair block below only
+    // special-cases Float32<->Complex64, Float64<->Complex128, and
+    // Complex64<->Complex128 -- every other real dtype (Int8/16/32/64,
+    // UInt8/16/32/64, Bool, Float16) into/out of a complex dtype previously
+    // fell through to the generic per-type dispatch and threw, unlike
+    // CPU/CUDA/OneAPI/Vulkan which all support the full cross product (drop
+    // imaginary part on complex->real, zero-fill imaginary on real->complex).
+    // Route through Float32/Float64 as a pivot -- matches the BFloat16
+    // two-hop pattern already used elsewhere in this function -- so the
+    // recursive call lands on one of the direct pairs below.
+    {
+        bool src_is_complex = (src_dtype == DType::Complex64 || src_dtype == DType::Complex128);
+        bool tgt_is_complex = (target_dtype == DType::Complex64 || target_dtype == DType::Complex128);
+        if (!src_is_complex && tgt_is_complex) {
+            DType via = (target_dtype == DType::Complex64) ? DType::Float32 : DType::Float64;
+            if (src_dtype != via) {
+                return cast_kernel(cast_kernel(input, via, stream), target_dtype, stream);
+            }
+        } else if (src_is_complex && !tgt_is_complex) {
+            DType via = (src_dtype == DType::Complex64) ? DType::Float32 : DType::Float64;
+            if (target_dtype != via) {
+                return cast_kernel(cast_kernel(input, via, stream), target_dtype, stream);
+            }
+        }
+    }
 
     // Complex conversions: short-circuit before the generic per-type
     // dispatch. Complex64/128 storage is interleaved pairs of the

@@ -530,6 +530,12 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
             return compare_int(a_cpu.data<int64_t>(), b_cpu.data<int64_t>());
         case DType::UInt8:
             return compare_int(a_cpu.data<uint8_t>(), b_cpu.data<uint8_t>());
+        case DType::UInt16:
+            return compare_int(a_cpu.data<uint16_t>(), b_cpu.data<uint16_t>());
+        case DType::UInt32:
+            return compare_int(a_cpu.data<uint32_t>(), b_cpu.data<uint32_t>());
+        case DType::UInt64:
+            return compare_int(a_cpu.data<uint64_t>(), b_cpu.data<uint64_t>());
         case DType::Bool:
             return compare_int(a_cpu.data<uint8_t>(), b_cpu.data<uint8_t>());
         case DType::Complex64:

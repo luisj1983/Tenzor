@@ -43,8 +43,17 @@ class ScatterKernelBFloat16;
 class IndexSelectKernelBFloat16;
 class MaskedFillKernelBFloat16;
 class IndexAddKernelF32;
+class IndexAddKernelF64;
+class IndexAddKernelI32;
+class IndexAddKernelI64;
 class IndexCopyKernelF32;
+class IndexCopyKernelF64;
+class IndexCopyKernelI32;
+class IndexCopyKernelI64;
 class IndexFillKernelF32;
+class IndexFillKernelF64;
+class IndexFillKernelI32;
+class IndexFillKernelI64;
 class ScatterReduceSumKernelF32;
 class ScatterReduceProdKernelF32;
 class ScatterReduceAmaxKernelF32;
@@ -1164,6 +1173,37 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes, DType output_dty
 // Argsort
 // ============================================================================
 
+// NaN-aware comparators for ArgSort (equivalent of CPU reduction.cpp's
+// as_nan_lt/as_nan_gt and Vulkan bitonic_sort.comp's F138 fix, and mirrors
+// reduction.cpp's OneapiNanLess/OneapiNanGreater used by the plain Sort op).
+// Plain `<`/`std::greater<T>` order NaN by raw bit pattern under oneDPL's
+// radix-sort path (a negative-sign NaN can sort before -inf), whereas
+// CPU/CUDA/ROCm/Vulkan all put every NaN last regardless of ascending vs.
+// descending. sycl::isnan is reliable in this backend (no fast-math), and the
+// check compiles out for integer T. These are paired with stable_sort_by_key
+// below (rather than plain sort_by_key, whose stability isn't documented) so
+// that value ties break by the lowest original index, matching CPU/Vulkan.
+namespace {
+template <typename T> struct ArgsortNanLess {
+    bool operator()(const T& a, const T& b) const {
+        if constexpr (std::is_floating_point_v<T>) {
+            bool an = sycl::isnan(a), bn = sycl::isnan(b);
+            if (an || bn) return !an && bn;   // finite < NaN; NaN < nothing
+        }
+        return a < b;
+    }
+};
+template <typename T> struct ArgsortNanGreater {
+    bool operator()(const T& a, const T& b) const {
+        if constexpr (std::is_floating_point_v<T>) {
+            bool an = sycl::isnan(a), bn = sycl::isnan(b);
+            if (an || bn) return an && !bn;   // NaN > finite; nothing > NaN
+        }
+        return a > b;
+    }
+};
+}  // namespace
+
 /**
  * @brief Returns indices that would sort a tensor along a given dimension.
  *
@@ -1225,16 +1265,21 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
                 idx_ptr[gid] = static_cast<int64_t>(gid[0]) % dim_size;
             }).wait();
 
-            // Sort each contiguous slice using oneDPL sort_by_key
+            // Sort each contiguous slice with a NaN-aware, index-tiebreak-stable
+            // comparator (see ArgsortNanLess/ArgsortNanGreater above). Using
+            // stable_sort_by_key instead of plain sort_by_key means the tiebreak
+            // falls out for free: slice_idx starts as 0..dim_size-1 in original
+            // order, and a stable sort preserves that relative order for equal
+            // keys, so ties resolve to the lowest original index.
             for (int64_t o = 0; o < outer_size; ++o) {
                 T* slice_vals = tmp_vals + o * dim_size;
                 int64_t* slice_idx = idx_ptr + o * dim_size;
                 if (descending) {
-                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
-                                              slice_idx, std::greater<T>());
+                    ::oneapi::dpl::stable_sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                                              slice_idx, ArgsortNanGreater<T>());
                 } else {
-                    ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size,
-                                              slice_idx);
+                    ::oneapi::dpl::stable_sort_by_key(policy, slice_vals, slice_vals + dim_size,
+                                              slice_idx, ArgsortNanLess<T>());
                 }
             }
 
@@ -1640,6 +1685,17 @@ class PutKernelFloat32Acc;
 class PutKernelFloat64Acc;
 class PutKernelInt32Acc;
 class PutKernelInt64Acc;
+// Generic byte-width overwrite movers for the non-accumulate path, covering
+// every dtype the accumulate-mode fast paths above don't (Int8/UInt8/Bool,
+// Int16/UInt16, Float16/BFloat16, UInt32, UInt64/Complex64, Complex128) --
+// put(accumulate=false) is a pure element copy independent of numeric
+// interpretation, so one mover per element byte-width suffices, matching
+// CPU's dtype-agnostic memcpy contract.
+class PutKernelByte1;
+class PutKernelByte2;
+class PutKernelByte4;
+class PutKernelByte8;
+class PutKernelByte16;
 
 auto put_kernel(
     const Tensor& input,
@@ -1796,7 +1852,69 @@ auto put_kernel(
                 }
             });
         } else {
-            throw std::runtime_error("put_kernel: unsupported dtype");
+            // Generic fallback for every remaining dtype (Int8/UInt8/Bool,
+            // Int16/UInt16, Float16/BFloat16, UInt32, UInt64/Complex64,
+            // Complex128): put(accumulate=false) is a pure element copy
+            // independent of numeric interpretation, so dispatch by element
+            // byte-size using an unsigned integer of matching width (matches
+            // CPU's dtype-agnostic memcpy and the analogous fallback in this
+            // file's where_kernel).
+            struct alignas(16) PutBytes16 { uint64_t lo, hi; };
+            const size_t esz = dtype_size(input.dtype());
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+            const uint8_t* src_bytes = static_cast<const uint8_t*>(source.data_ptr());
+            uint8_t* out_bytes = static_cast<uint8_t*>(output.data_ptr());
+            if (esz == 1) {
+                queue.parallel_for<PutKernelByte1>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                    int64_t target_idx = idx_ptr[i];
+                    if (target_idx < 0) target_idx += total_size;
+                    if (target_idx >= 0 && target_idx < total_size) {
+                        out_bytes[target_idx] = src_bytes[i];
+                    }
+                });
+            } else if (esz == 2) {
+                const uint16_t* sp = reinterpret_cast<const uint16_t*>(src_bytes);
+                uint16_t* op = reinterpret_cast<uint16_t*>(out_bytes);
+                queue.parallel_for<PutKernelByte2>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                    int64_t target_idx = idx_ptr[i];
+                    if (target_idx < 0) target_idx += total_size;
+                    if (target_idx >= 0 && target_idx < total_size) {
+                        op[target_idx] = sp[i];
+                    }
+                });
+            } else if (esz == 4) {
+                const uint32_t* sp = reinterpret_cast<const uint32_t*>(src_bytes);
+                uint32_t* op = reinterpret_cast<uint32_t*>(out_bytes);
+                queue.parallel_for<PutKernelByte4>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                    int64_t target_idx = idx_ptr[i];
+                    if (target_idx < 0) target_idx += total_size;
+                    if (target_idx >= 0 && target_idx < total_size) {
+                        op[target_idx] = sp[i];
+                    }
+                });
+            } else if (esz == 8) {
+                const uint64_t* sp = reinterpret_cast<const uint64_t*>(src_bytes);
+                uint64_t* op = reinterpret_cast<uint64_t*>(out_bytes);
+                queue.parallel_for<PutKernelByte8>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                    int64_t target_idx = idx_ptr[i];
+                    if (target_idx < 0) target_idx += total_size;
+                    if (target_idx >= 0 && target_idx < total_size) {
+                        op[target_idx] = sp[i];
+                    }
+                });
+            } else if (esz == 16) {
+                const PutBytes16* sp = reinterpret_cast<const PutBytes16*>(src_bytes);
+                PutBytes16* op = reinterpret_cast<PutBytes16*>(out_bytes);
+                queue.parallel_for<PutKernelByte16>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                    int64_t target_idx = idx_ptr[i];
+                    if (target_idx < 0) target_idx += total_size;
+                    if (target_idx >= 0 && target_idx < total_size) {
+                        op[target_idx] = sp[i];
+                    }
+                });
+            } else {
+                throw std::runtime_error("put_kernel: unsupported dtype");
+            }
         }
     }
 
@@ -1897,8 +2015,11 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index_orig
     // guards the same way.
     const Tensor index = index_orig.is_contiguous() ? index_orig : index_orig.contiguous();
     const Tensor source = source_orig.is_contiguous() ? source_orig : source_orig.contiguous();
-    // Non-Float32: convert to Float32 and recurse
-    if (input.dtype() != DType::Float32) {
+    // Native fast paths cover Float32/Float64/Int32/Int64 below. Everything else
+    // (Float16/BFloat16/Bool/8-16 bit ints/etc.) round-trips through Float32 —
+    // atomic_ref isn't portably available for those narrower types.
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
+        input.dtype() != DType::Int32 && input.dtype() != DType::Int64) {
         auto f32_in = input.to(DType::Float32);
         auto f32_src = source.to(DType::Float32);
         auto r = index_add_kernel(f32_in, dim, index, f32_src, queue);
@@ -1919,8 +2040,6 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index_orig
     int64_t total = outer * idx_n * inner;
     if (total == 0) return output;
 
-    float* out_ptr = get_data_ptr<float>(output);
-    const float* src_ptr = get_data_ptr<const float>(source);
     const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
     // Validate indices host-side (normalize negatives, throw on out-of-range)
@@ -1939,20 +2058,32 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index_orig
         }
     }
 
-    queue.parallel_for<IndexAddKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-        int64_t id = static_cast<int64_t>(tid);
-        int64_t o = id / (idx_n * inner);
-        int64_t k = (id / inner) % idx_n;
-        int64_t j = id % inner;
-        int64_t di = idx_ptr[k];
-        if (di < 0) di += dim_size;
-        int64_t dst_offset = (o * dim_size + di) * inner + j;
-        int64_t src_offset = (o * idx_n + k) * inner + j;
-        sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                         sycl::memory_scope::device,
-                         sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
-        ref.fetch_add(src_ptr[src_offset]);
-    }).wait();
+    auto launch = [&]<typename T, typename Tag>() {
+        T* out_ptr = get_data_ptr<T>(output);
+        const T* src_ptr = get_data_ptr<const T>(source);
+        queue.parallel_for<Tag>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t di = idx_ptr[k];
+            if (di < 0) di += dim_size;
+            int64_t dst_offset = (o * dim_size + di) * inner + j;
+            int64_t src_offset = (o * idx_n + k) * inner + j;
+            sycl::atomic_ref<T, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
+            ref.fetch_add(src_ptr[src_offset]);
+        }).wait();
+    };
+
+    switch (output.dtype()) {
+        case DType::Float32: launch.template operator()<float, IndexAddKernelF32>(); break;
+        case DType::Float64: launch.template operator()<double, IndexAddKernelF64>(); break;
+        case DType::Int32:   launch.template operator()<int32_t, IndexAddKernelI32>(); break;
+        case DType::Int64:   launch.template operator()<int64_t, IndexAddKernelI64>(); break;
+        default: throw std::runtime_error("index_add OneAPI: unsupported dtype");
+    }
 
     return output;
 }
@@ -1965,8 +2096,10 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index_ori
     // Contiguify source/index (read flat below; matches scatter_add's guard).
     const Tensor index = index_orig.is_contiguous() ? index_orig : index_orig.contiguous();
     const Tensor source = source_orig.is_contiguous() ? source_orig : source_orig.contiguous();
-    // Non-Float32: convert to Float32 and recurse
-    if (input.dtype() != DType::Float32) {
+    // Native fast paths cover Float32/Float64/Int32/Int64 below; everything else
+    // round-trips through Float32.
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
+        input.dtype() != DType::Int32 && input.dtype() != DType::Int64) {
         auto f32_in = input.to(DType::Float32);
         auto f32_src = source.to(DType::Float32);
         auto r = index_copy_kernel(f32_in, dim, index, f32_src, queue);
@@ -1987,8 +2120,6 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index_ori
     int64_t total = outer * idx_n * inner;
     if (total == 0) return output;
 
-    float* out_ptr = get_data_ptr<float>(output);
-    const float* src_ptr = get_data_ptr<const float>(source);
     const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
     // Validate indices host-side (normalize negatives, throw on out-of-range)
@@ -2007,16 +2138,28 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index_ori
         }
     }
 
-    queue.parallel_for<IndexCopyKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-        int64_t id = static_cast<int64_t>(tid);
-        int64_t o = id / (idx_n * inner);
-        int64_t k = (id / inner) % idx_n;
-        int64_t j = id % inner;
-        int64_t di = idx_ptr[k];
-        if (di < 0) di += dim_size;
-        out_ptr[(o * dim_size + di) * inner + j] =
-            src_ptr[(o * idx_n + k) * inner + j];
-    }).wait();
+    auto launch = [&]<typename T, typename Tag>() {
+        T* out_ptr = get_data_ptr<T>(output);
+        const T* src_ptr = get_data_ptr<const T>(source);
+        queue.parallel_for<Tag>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t di = idx_ptr[k];
+            if (di < 0) di += dim_size;
+            out_ptr[(o * dim_size + di) * inner + j] =
+                src_ptr[(o * idx_n + k) * inner + j];
+        }).wait();
+    };
+
+    switch (output.dtype()) {
+        case DType::Float32: launch.template operator()<float, IndexCopyKernelF32>(); break;
+        case DType::Float64: launch.template operator()<double, IndexCopyKernelF64>(); break;
+        case DType::Int32:   launch.template operator()<int32_t, IndexCopyKernelI32>(); break;
+        case DType::Int64:   launch.template operator()<int64_t, IndexCopyKernelI64>(); break;
+        default: throw std::runtime_error("index_copy OneAPI: unsupported dtype");
+    }
 
     return output;
 }
@@ -2025,11 +2168,25 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index_ori
 // IndexFill - fills output at indexed positions with a scalar value
 // ============================================================================
 auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index_orig,
-                       float value, sycl::queue& queue) -> Tensor {
+                       double value, sycl::queue& queue) -> Tensor {
     // Contiguify index (read flat below; matches scatter_add's guard).
     const Tensor index = index_orig.is_contiguous() ? index_orig : index_orig.contiguous();
-    // Non-Float32: convert to Float32 and recurse
-    if (input.dtype() != DType::Float32) {
+    // Native fast paths cover Float32/Float64/Int32/Int64/UInt32/UInt64 below;
+    // everything else (Float16/BFloat16, narrow ints, Bool) round-trips through
+    // Float32 -- always exact for those widths, since no magnitude can exceed
+    // Float32's 24-bit mantissa. UInt32/UInt64 must NOT take that fallback:
+    // index_fill is a pure scalar write with no signedness-dependent
+    // arithmetic, so they reuse the Int32/Int64 kernels below via a raw
+    // bit-pattern reinterpret (get_data_ptr<T> is a plain static_cast, no
+    // dtype-tag check) instead of rounding the WHOLE tensor through Float32,
+    // which would silently corrupt UInt32/UInt64 values above 2^24 even at
+    // positions the fill never touches. `value` is kept as double the whole
+    // way down (only narrowed to the destination scalar type at the point of
+    // the write) so Float64 fills and large integer fills don't lose
+    // precision before they ever reach the kernel.
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
+        input.dtype() != DType::Int32 && input.dtype() != DType::Int64 &&
+        input.dtype() != DType::UInt32 && input.dtype() != DType::UInt64) {
         auto f32_in = input.to(DType::Float32);
         auto r = index_fill_kernel(f32_in, dim, index, value, queue);
         return r.to(input.dtype());
@@ -2049,9 +2206,7 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index_ori
     int64_t total = outer * idx_n * inner;
     if (total == 0) return output;
 
-    float* out_ptr = get_data_ptr<float>(output);
     const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
-    float fill_val = value;
 
     // Validate indices host-side (normalize negatives, throw on out-of-range)
     // matching the CPU reference, then normalize again inside the kernel.
@@ -2069,15 +2224,47 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index_ori
         }
     }
 
-    queue.parallel_for<IndexFillKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-        int64_t id = static_cast<int64_t>(tid);
-        int64_t o = id / (idx_n * inner);
-        int64_t k = (id / inner) % idx_n;
-        int64_t j = id % inner;
-        int64_t di = idx_ptr[k];
-        if (di < 0) di += dim_size;
-        out_ptr[(o * dim_size + di) * inner + j] = fill_val;
-    }).wait();
+    // `bit_value` lets UInt32/UInt64 supply a value already narrowed through
+    // the correctly-SIGNED intermediate (see call sites below): a plain
+    // static_cast<int32_t>(value) from a double >= 2^31 (a legal UInt32
+    // magnitude) is UB/implementation-defined, whereas routing through
+    // uint32_t first and reinterpreting its bit pattern as int32_t is exact.
+    auto launch = [&]<typename T, typename Tag>(T bit_value) {
+        T* out_ptr = get_data_ptr<T>(output);
+        queue.parallel_for<Tag>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t di = idx_ptr[k];
+            if (di < 0) di += dim_size;
+            out_ptr[(o * dim_size + di) * inner + j] = bit_value;
+        }).wait();
+    };
+
+    switch (output.dtype()) {
+        case DType::Float32:
+            launch.template operator()<float, IndexFillKernelF32>(static_cast<float>(value));
+            break;
+        case DType::Float64:
+            launch.template operator()<double, IndexFillKernelF64>(value);
+            break;
+        case DType::Int32:
+            launch.template operator()<int32_t, IndexFillKernelI32>(static_cast<int32_t>(value));
+            break;
+        case DType::Int64:
+            launch.template operator()<int64_t, IndexFillKernelI64>(static_cast<int64_t>(value));
+            break;
+        case DType::UInt32:
+            launch.template operator()<int32_t, IndexFillKernelI32>(
+                static_cast<int32_t>(static_cast<uint32_t>(value)));
+            break;
+        case DType::UInt64:
+            launch.template operator()<int64_t, IndexFillKernelI64>(
+                static_cast<int64_t>(static_cast<uint64_t>(value)));
+            break;
+        default: throw std::runtime_error("index_fill OneAPI: unsupported dtype");
+    }
 
     return output;
 }
@@ -2571,9 +2758,35 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask_in,
             }
         }).wait();
     } else {
-        sycl::free(mask_int, queue);
-        sycl::free(prefix_sum, queue);
-        throw std::runtime_error("masked_scatter OneAPI: unsupported dtype");
+        // Generic byte-width scatter for every other fixed-width dtype (Float16,
+        // BFloat16, Bool, Int8/16, UInt8/16/32/64). masked_scatter is a pure copy
+        // with no arithmetic, so reinterpreting each element as an equally-sized
+        // unsigned integer and copying is bit-exact — no lossy widen-through-
+        // Float32 round trip needed, unlike ops that actually compute on the value.
+        const size_t dsize = input.dtype_size();
+        if (dsize != 1 && dsize != 2 && dsize != 4 && dsize != 8) {
+            sycl::free(mask_int, queue);
+            sycl::free(prefix_sum, queue);
+            throw std::runtime_error("masked_scatter OneAPI: unsupported dtype");
+        }
+        auto gen = [&]<typename U>() {
+            U* out_ptr = get_data_ptr<U>(output);
+            const U* src_ptr = get_data_ptr<const U>(source);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                if (mask_ptr[i]) {
+                    int32_t src_idx = prefix_sum[i];
+                    if (src_idx < src_numel) {
+                        out_ptr[i] = src_ptr[src_idx];
+                    }
+                }
+            }).wait();
+        };
+        switch (dsize) {
+            case 1: gen.template operator()<uint8_t>();  break;
+            case 2: gen.template operator()<uint16_t>(); break;
+            case 4: gen.template operator()<uint32_t>(); break;
+            case 8: gen.template operator()<uint64_t>(); break;
+        }
     }
 
     sycl::free(mask_int, queue);

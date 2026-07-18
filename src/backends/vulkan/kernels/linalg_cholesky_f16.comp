@@ -8,6 +8,9 @@ layout(local_size_x = 32) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };
+// See linalg_cholesky.comp — set to 1 when the input is not positive
+// definite; the host reads this back after dispatch and throws.
+layout(set = 0, binding = 2) buffer ErrorFlag { uint error_flag[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;
@@ -67,7 +70,10 @@ void main() {
             for (uint k = 0; k < j; k++) {
                 sum -= L[j][k] * L[j][k];
             }
-            L[j][j] = (sum > 0.0) ? sqrt(sum) : 0.0;
+            if (sum <= 0.0) {
+                atomicOr(error_flag[0], 1u);
+            }
+            L[j][j] = sqrt(max(sum, 1e-30));
         }
         barrier();
 

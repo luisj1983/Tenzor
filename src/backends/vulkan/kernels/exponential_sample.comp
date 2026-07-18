@@ -3,6 +3,12 @@
 // Exponential sampling: out[i] = -log(1 - u) / rate[i], where u ~ Uniform(0,1)
 // Inverse CDF method with per-invocation LCG PRNG.
 // Float32 only — host promotes other dtypes via dispatchCast.
+//
+// The Exponential distribution requires rate > 0; that invariant is
+// validated host-side in VulkanBackend::dispatchExponentialSample (which
+// throws std::invalid_argument for any non-positive rate) before this shader
+// is ever dispatched, so `rate` here is guaranteed > 0 and no in-shader
+// guard is needed.
 
 layout(local_size_x_id = 0) in;
 
@@ -29,9 +35,8 @@ void main() {
     float u = float(state) / 4294967295.0;
     u = min(u, 1.0 - 1.0e-7);  // Clamp away from 1.0 for log safety
 
-    // Inverse CDF: -log(1 - u) / rate. The Exponential distribution requires
-    // rate > 0; guard the divisor so non-positive rates produce 0 rather than
-    // +Inf/NaN that would silently poison downstream reductions.
+    // Inverse CDF: -log(1 - u) / rate. rate > 0 is guaranteed by the host-side
+    // validation in dispatchExponentialSample (see file header comment).
     float rate = rate_data[idx];
-    out_data[idx] = (rate > 0.0) ? (-log(1.0 - u) / rate) : 0.0;
+    out_data[idx] = -log(1.0 - u) / rate;
 }

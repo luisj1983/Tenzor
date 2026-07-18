@@ -154,7 +154,17 @@ std::vector<Tensor> ctc_loss_forward_impl(
             int64_t base = targets_2d ? (n * S_max) : concat_off;
             for (int64_t s = 0; s < len; ++s) {
                 int64_t off = base + s;
-                if (off < 0 || off >= tgt_numel) continue;
+                if (off < 0 || off >= tgt_numel) {
+                    // Matches CPU/CUDA/ROCm/Vulkan: silently `continue`-ing past
+                    // an out-of-range offset let a malformed target_lengths sum
+                    // slip through undetected instead of raising a clean,
+                    // catchable error (and risked an OOB read below if some
+                    // caller ever reached this branch with off still in-range
+                    // for host_tgt but not for the logical target layout).
+                    throw std::invalid_argument(
+                        "ctc_loss_forward (OneAPI): sum(target_lengths) exceeds the "
+                        "flattened targets length");
+                }
                 int32_t lbl = host_tgt[off];
                 if (lbl < 0 || lbl >= C) {
                     throw std::out_of_range("ctc_loss: target label " + std::to_string(lbl) +

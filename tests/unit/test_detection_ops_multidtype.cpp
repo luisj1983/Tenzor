@@ -253,6 +253,51 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxIOUComputation) {
     expectFiniteNonZero(ious);
 }
 
+// Regression: CPU/CUDA guard union_area<=0 (degenerate/inverted boxes, or
+// two coincident zero-area boxes) with a defined IoU of 0; ROCm/OneAPI/
+// Vulkan previously used an unguarded inter_area/(union_area+eps), which can
+// return a negative or blown-up IoU for exactly this case.
+TEST_P(DetectionOpsMultiDTypeTest, BoxIOUDegenerateBoxesReturnsZero) {
+    Tensor boxes1({2, 4}, dtype(), Device::cpu());
+    Tensor boxes2({2, 4}, dtype(), Device::cpu());
+
+    auto fill = [&](Tensor& t, std::initializer_list<double> vals) {
+        if (dtype() == DType::Float32) {
+            float* p = t.data<float>();
+            size_t i = 0;
+            for (double v : vals) p[i++] = static_cast<float>(v);
+        } else {
+            double* p = t.data<double>();
+            size_t i = 0;
+            for (double v : vals) p[i++] = v;
+        }
+    };
+
+    // Row 0: an inverted box (x2<x1, y2<y1 -> negative area) vs a normal box.
+    // Row 1: two coincident zero-area boxes (a point, not a rectangle).
+    fill(boxes1, {10.0, 10.0, 5.0, 5.0,   3.0, 3.0, 3.0, 3.0});
+    fill(boxes2, {0.0, 0.0, 20.0, 20.0,   3.0, 3.0, 3.0, 3.0});
+
+    auto b1 = boxes1.to(device());
+    auto b2 = boxes2.to(device());
+    auto ious = box_iou(b1, b2);
+
+    expectShape(ious, {2, 2});
+    auto ious_cpu = ious.to(Device::cpu()).to(DType::Float64);
+    const double* p = ious_cpu.data<double>();
+    for (int64_t i = 0; i < ious_cpu.numel(); ++i) {
+        EXPECT_GE(p[i], 0.0) << "IoU must never be negative for degenerate boxes, index " << i
+                             << " on " << device().to_string();
+        EXPECT_LE(p[i], 1.0) << "IoU must never exceed 1 for degenerate boxes, index " << i
+                             << " on " << device().to_string();
+    }
+    // The diagonal (box vs itself) for the coincident zero-area boxes must be
+    // exactly 0 (union_area == 0), not a blown-up value from a near-zero
+    // denominator.
+    EXPECT_NEAR(p[1 * 2 + 1], 0.0, 1e-5) << "coincident zero-area box IoU should be 0 on "
+                                          << device().to_string();
+}
+
 TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingDecoding) {
     Tensor boxes({10, 4}, dtype(), device());
     Tensor anchors({10, 4}, dtype(), device());

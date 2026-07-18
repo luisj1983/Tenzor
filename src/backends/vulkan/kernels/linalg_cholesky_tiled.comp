@@ -7,6 +7,11 @@
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { float A[]; };
+// Set to 1 (via atomicOr) when a non-positive diagonal residual is seen,
+// i.e. the input is not positive definite. The host reads this back after
+// all panel dispatches complete and throws — mirrors linalg_cholesky.comp
+// (small path) so both Cholesky paths behave identically on non-PD input.
+layout(set = 0, binding = 1) buffer ErrorFlag { uint error_flag[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;
@@ -37,6 +42,9 @@ void main() {
             float sum = panel[k][k];
             for (uint j = 0; j < k; j++) {
                 sum -= panel[k][j] * panel[k][j];
+            }
+            if (sum <= 0.0) {
+                atomicOr(error_flag[0], 1u);
             }
             panel[k][k] = sqrt(max(sum, 1e-30));
         }

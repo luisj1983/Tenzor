@@ -85,6 +85,13 @@ public:
         return attrs;
     }
 
+    // Unlike LayerNormBackward, BatchNorm2d's forward call site always
+    // pushes `input` first UNCONDITIONALLY (`input_vars = {input}; if
+    // (affine_ && cached_weight_ && cached_bias_) { push weight; push
+    // bias; }` — see BatchNorm2d::forward below), so walker_primals[1]/[2]
+    // (when present) are ALWAYS weight/bias in that fixed order — no
+    // data_ptr matching needed to disambiguate, unlike LayerNorm's
+    // conditional-per-Variable construction.
     auto jvp_pack_inputs_for_walker(
             const std::vector<Tensor>& walker_primals,
             const std::vector<Tensor>& walker_tangents) const
@@ -103,15 +110,37 @@ public:
         auto var = tenzor::sub(tenzor::div(one, invstd_sq), eps_);
 
         std::vector<int64_t> g_shape(gamma.shape().begin(), gamma.shape().end());
+        // Default (affine_ false, or weight/bias didn't require_grad, so
+        // walker_primals has fewer than 3 entries): no real gamma/beta
+        // Variable was resolvable, so dgamma/dbeta are correctly zero and
+        // beta itself defaults to the implicit "no bias" value.
+        Tensor gamma_primal = gamma;
         Tensor beta = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
 
         auto zero_like = [](const Tensor& t) {
             std::vector<int64_t> sh(t.shape().begin(), t.shape().end());
             return tenzor::zeros(sh, t.dtype(), t.device());
         };
+        Tensor dgamma = zero_like(gamma);
+        Tensor dbeta  = zero_like(beta);
 
-        std::vector<Tensor> primals  = { walker_primals[0],  mean,            var,            gamma,            beta };
-        std::vector<Tensor> tangents = { walker_tangents[0], zero_like(mean), zero_like(var), zero_like(gamma), zero_like(beta) };
+        // walker_primals[1]/[2] are the walker's own already-resolved
+        // (data_ptr-matched-against-seed, producer-chased, or
+        // zero-if-unrelated-constant) tangents for weight/bias — use them
+        // instead of unconditionally discarding them as zero. This is what
+        // makes `autograd::jvp(func, gamma_or_beta, tangent)` actually see
+        // the seeded dgamma/dbeta contribution.
+        if (walker_primals.size() > 1) {
+            gamma_primal = walker_primals[1];
+            dgamma = walker_tangents[1];
+        }
+        if (walker_primals.size() > 2) {
+            beta = walker_primals[2];
+            dbeta = walker_tangents[2];
+        }
+
+        std::vector<Tensor> primals  = { walker_primals[0],  mean,            var,            gamma_primal, beta  };
+        std::vector<Tensor> tangents = { walker_tangents[0], zero_like(mean), zero_like(var), dgamma,       dbeta };
         return std::make_pair(std::move(primals), std::move(tangents));
     }
 

@@ -4351,7 +4351,11 @@ static void launch_dim_count_nonzero(
     for (int64_t i = 0; i < ndim; i++) {
         if (i != dim) output_size *= input_shape[i];
     }
-    if (output_size == 0 || dim_size == 0) return;
+    // dim_size == 0 is NOT bailed out here: count_nonzero_along_dim_kernel
+    // already writes the correct identity (0) for every output element even
+    // when the reduced dimension is empty, matching CPU. Returning early
+    // would leave the freshly-allocated output as uninitialized device memory.
+    if (output_size == 0) return;
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     count_nonzero_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
@@ -4417,7 +4421,11 @@ static void launch_dim_nansum(
     for (int64_t i = 0; i < ndim; i++) {
         if (i != dim) output_size *= input_shape[i];
     }
-    if (output_size == 0 || dim_size == 0) return;
+    // dim_size == 0 is NOT bailed out here: nansum_along_dim_kernel already
+    // writes the correct identity (0) even when the reduced dimension is
+    // empty, matching CPU. Returning early would leave the freshly-allocated
+    // output as uninitialized device memory.
+    if (output_size == 0) return;
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     nansum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
@@ -4436,7 +4444,9 @@ Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes
         // dim-specific branch below.
         Tensor input = inputs[0];
         int64_t n = input.numel();
-        Tensor result({1}, DType::Int64, input.device());
+        // Full reduction (no dim) collapses to a true 0-dim scalar, matching
+        // CPU/OneAPI's convention -- not a forced rank-1 {1} shape.
+        Tensor result({}, DType::Int64, input.device());
         switch (input.dtype()) {
             case DType::Float64:
                 count_nonzero_all_native<double><<<1, 256, 0, stream>>>(
@@ -4476,7 +4486,8 @@ Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes
     for (int64_t d = 0; d < ndim; d++) {
         if (d != normalized_dim) output_shape.push_back(input_shape[d]);
     }
-    if (output_shape.empty()) output_shape.push_back(1);
+    // Empty output_shape (1-D input, dim reduced) is a true 0-dim scalar,
+    // matching CPU/OneAPI's convention -- do not force a size-1 dim.
 
     Tensor result(output_shape, DType::Int64, input.device());
 
@@ -4674,7 +4685,11 @@ static void launch_dim_nanmean(
     for (int64_t i = 0; i < ndim; i++) {
         if (i != dim) output_size *= input_shape[i];
     }
-    if (output_size == 0 || dim_size == 0) return;
+    // dim_size == 0 is NOT bailed out here: nanmean_along_dim_kernel already
+    // writes the correct identity (NaN, count==0) even when the reduced
+    // dimension is empty, matching CPU. Returning early would leave the
+    // freshly-allocated output as uninitialized device memory.
+    if (output_size == 0) return;
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     nanmean_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
@@ -4842,7 +4857,13 @@ static void launch_dim_aminmax(
     for (int64_t i = 0; i < ndim; i++) {
         if (i != dim) output_size *= input_shape[i];
     }
-    if (output_size == 0 || dim_size == 0) return;
+    if (output_size == 0) return;
+    if (dim_size == 0) {
+        // aminmax has no identity element: matches CPU, which throws instead
+        // of reading input[offset_at(0)] out-of-bounds on a zero-size
+        // allocation (mirrors max/min's own zero-size-dim guard).
+        throw std::invalid_argument("aminmax: cannot reduce over a zero-size dimension");
+    }
     DimMeta meta = make_dim_meta(input_shape, input_strides);
     int num_blocks = compute_grid_size(output_size, REDUCTION_BLOCK_SIZE);
     aminmax_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
@@ -4866,6 +4887,14 @@ std::vector<Tensor> aminmax_dispatch(std::span<const Tensor> inputs, const OpAtt
             input = input.to(compute);
         }
         int64_t n = input.numel();
+        if (n == 0) {
+            // Matches CPU's aminmax_kernel (src/backends/cpu/kernels/math.cpp),
+            // which throws instead of reducing over an empty tensor: aminmax
+            // has no identity element, so aminmax_all below would otherwise
+            // silently emit [+Inf, -Inf] (its local_min/local_max seed values)
+            // for a totally empty tensor.
+            throw std::runtime_error("aminmax(): cannot compute aminmax over an empty tensor");
+        }
         Tensor min_result({1}, compute, input.device());
         Tensor max_result({1}, compute, input.device());
         if (compute == DType::Float64) {
@@ -4969,10 +4998,10 @@ __global__ void index_fill_f32(float* output, const int64_t* index, float value,
     output[(o * dim_size + ix) * inner + j] = value;
 }
 
-// Native integer index_add/index_copy. Routing Int32/Int64 through a Float32
-// round-trip (as the fallback below does) loses precision for large Int64
-// magnitudes (>2^24), diverging from the exact CPU integer path. These typed
-// kernels keep integer arithmetic exact.
+// Native integer/Float64 index_add/index_copy. Routing Int32/Int64/Float64
+// through a Float32 round-trip (as the fallback below does) loses precision
+// for large Int64 magnitudes (>2^24) or Float64 mantissa bits, diverging
+// from the exact CPU path. These typed kernels keep the arithmetic exact.
 __device__ __forceinline__ void index_add_atomic(int32_t* addr, int32_t val) {
     atomicAdd(addr, val);
 }
@@ -4981,6 +5010,17 @@ __device__ __forceinline__ void index_add_atomic(int64_t* addr, int64_t val) {
     // yields the correct signed sum.
     atomicAdd(reinterpret_cast<unsigned long long*>(addr),
               static_cast<unsigned long long>(val));
+}
+__device__ __forceinline__ void index_add_atomic(double* addr, double val) {
+    // Native atomicAdd(double*) is not available on all supported archs;
+    // portable CAS-loop double add (mirrors conv2d.cu's atomicAdd_double).
+    unsigned long long int* addr_ull = reinterpret_cast<unsigned long long int*>(addr);
+    unsigned long long int old = *addr_ull, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(addr_ull, assumed,
+            __double_as_longlong(val + __longlong_as_double(assumed)));
+    } while (assumed != old);
 }
 
 template<typename T>
@@ -5016,6 +5056,24 @@ __global__ void index_copy_typed(T* output, const T* source, const int64_t* inde
     output[(o * dim_size + ix) * inner + j] = source[(o * idx_n + k) * inner + j];
 }
 
+// Native typed index_fill (Float64/Int32/Int64), avoiding the Float32
+// round-trip the generic fallback below uses for every non-Float32 dtype.
+template<typename T>
+__global__ void index_fill_typed(T* output, const int64_t* index, T value,
+                                  int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                  int* error_flag) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    int64_t ix = index[k];
+    if (ix < 0) ix += dim_size;
+    if (ix < 0 || ix >= dim_size) { atomicExch(error_flag, 1); return; }
+    output[(o * dim_size + ix) * inner + j] = value;
+}
+
 Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
     int64_t dim = attrs.get_int(AttrKey::Dim, 0);
@@ -5044,8 +5102,20 @@ Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& at
             throw std::out_of_range("index_add: index out of range for dim of size " +
                                     std::to_string(dim_size));
         }
-    } else if (total > 0 && (output.dtype() == DType::Int32 || output.dtype() == DType::Int64)) {
-        // Exact native integer path (avoids Float32 round-trip precision loss).
+    } else if (total > 0 && (output.dtype() == DType::Int32 || output.dtype() == DType::Int64 ||
+                             output.dtype() == DType::Float64 || output.dtype() == DType::UInt32 ||
+                             output.dtype() == DType::UInt64)) {
+        // Exact native integer/Float64 path (avoids Float32 round-trip
+        // precision loss -- for Float64 specifically this preserves mantissa
+        // bits a Float32 round-trip would truncate; for Int32/Int64 this
+        // avoids losing precision above 2^24 at EVERY untouched element, not
+        // just the ones being added into). UInt32/UInt64 reuse the Int32/Int64
+        // shaders via a raw bit-pattern reinterpret (matches index_fill's
+        // UInt32/UInt64 path above and put_kernel's overwrite path in
+        // indexing.cu): atomicAdd performs modular 2^32/2^64 addition on the
+        // bit pattern, which is identical for the signed and unsigned
+        // interpretations, so reinterpreting both output and source as the
+        // signed type is bit-exact.
         CudaBuffer error_buf(sizeof(int));
         CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
         dim3 grid((total + 255) / 256), block(256);
@@ -5053,9 +5123,23 @@ Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& at
             index_add_typed<int32_t><<<grid, block, 0, stream>>>(
                 output.data<int32_t>(), inputs[2].data<int32_t>(), inputs[1].data<int64_t>(),
                 outer, dim_size, idx_n, inner, error_buf.as<int>());
-        } else {
+        } else if (output.dtype() == DType::UInt32) {
+            index_add_typed<int32_t><<<grid, block, 0, stream>>>(
+                reinterpret_cast<int32_t*>(output.data_ptr()),
+                reinterpret_cast<const int32_t*>(inputs[2].data_ptr()), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else if (output.dtype() == DType::Int64) {
             index_add_typed<int64_t><<<grid, block, 0, stream>>>(
                 output.data<int64_t>(), inputs[2].data<int64_t>(), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else if (output.dtype() == DType::UInt64) {
+            index_add_typed<int64_t><<<grid, block, 0, stream>>>(
+                reinterpret_cast<int64_t*>(output.data_ptr()),
+                reinterpret_cast<const int64_t*>(inputs[2].data_ptr()), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else {
+            index_add_typed<double><<<grid, block, 0, stream>>>(
+                output.data<double>(), inputs[2].data<double>(), inputs[1].data<int64_t>(),
                 outer, dim_size, idx_n, inner, error_buf.as<int>());
         }
         CUDA_CHECK(cudaGetLastError());
@@ -5304,8 +5388,15 @@ Tensor index_copy_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
             throw std::out_of_range("index_copy: index out of range for dim of size " +
                                     std::to_string(dim_size));
         }
-    } else if (total > 0 && (output.dtype() == DType::Int32 || output.dtype() == DType::Int64)) {
-        // Exact native integer path (avoids Float32 round-trip precision loss).
+    } else if (total > 0 && (output.dtype() == DType::Int32 || output.dtype() == DType::Int64 ||
+                             output.dtype() == DType::Float64 || output.dtype() == DType::UInt32 ||
+                             output.dtype() == DType::UInt64)) {
+        // Exact native integer/Float64 path (avoids Float32 round-trip
+        // precision loss). UInt32/UInt64 reuse the Int32/Int64 shaders via a
+        // raw bit-pattern reinterpret (matches index_fill's UInt32/UInt64
+        // path above and put_kernel's overwrite path in indexing.cu): a
+        // plain scalar copy has no signedness-dependent arithmetic, so the
+        // int32_t/int64_t shader is bit-identical for the unsigned types.
         CudaBuffer error_buf(sizeof(int));
         CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
         dim3 grid((total + 255) / 256), block(256);
@@ -5313,9 +5404,23 @@ Tensor index_copy_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
             index_copy_typed<int32_t><<<grid, block, 0, stream>>>(
                 output.data<int32_t>(), inputs[2].data<int32_t>(), inputs[1].data<int64_t>(),
                 outer, dim_size, idx_n, inner, error_buf.as<int>());
-        } else {
+        } else if (output.dtype() == DType::UInt32) {
+            index_copy_typed<int32_t><<<grid, block, 0, stream>>>(
+                reinterpret_cast<int32_t*>(output.data_ptr()),
+                reinterpret_cast<const int32_t*>(inputs[2].data_ptr()), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else if (output.dtype() == DType::Int64) {
             index_copy_typed<int64_t><<<grid, block, 0, stream>>>(
                 output.data<int64_t>(), inputs[2].data<int64_t>(), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else if (output.dtype() == DType::UInt64) {
+            index_copy_typed<int64_t><<<grid, block, 0, stream>>>(
+                reinterpret_cast<int64_t*>(output.data_ptr()),
+                reinterpret_cast<const int64_t*>(inputs[2].data_ptr()), inputs[1].data<int64_t>(),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else {
+            index_copy_typed<double><<<grid, block, 0, stream>>>(
+                output.data<double>(), inputs[2].data<double>(), inputs[1].data<int64_t>(),
                 outer, dim_size, idx_n, inner, error_buf.as<int>());
         }
         CUDA_CHECK(cudaGetLastError());
@@ -5362,6 +5467,54 @@ Tensor index_fill_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
                                    cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaStreamSynchronize(stream));
         if (host_error) {
+            throw std::out_of_range("index_fill: index out of range for dim of size " +
+                                    std::to_string(dim_size));
+        }
+    } else if (total > 0 && (output.dtype() == DType::Float64 || output.dtype() == DType::Int32 ||
+                             output.dtype() == DType::Int64 || output.dtype() == DType::UInt32 ||
+                             output.dtype() == DType::UInt64)) {
+        // Native typed path (avoids forcing every non-Float32 dtype through a
+        // Float32 round-trip, which truncates Float64 mantissa bits and loses
+        // precision for large Int32/Int64/UInt32/UInt64 magnitudes -- not just
+        // at the fill positions, but at every OTHER untouched element too,
+        // since the fallback below round-trips the whole tensor). UInt32/
+        // UInt64 reuse the Int32/Int64 shaders via a raw bit-pattern
+        // reinterpret (matches put_kernel's UInt32/UInt64 overwrite path in
+        // indexing.cu): a plain scalar write has no signedness-dependent
+        // arithmetic, so the int32_t/int64_t shader is bit-identical for the
+        // unsigned types.
+        CudaBuffer error_buf(sizeof(int));
+        CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+        dim3 grid((total + 255) / 256), block(256);
+        if (output.dtype() == DType::Float64) {
+            index_fill_typed<double><<<grid, block, 0, stream>>>(
+                output.data<double>(), inputs[1].data<int64_t>(), value,
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else if (output.dtype() == DType::Int32) {
+            index_fill_typed<int32_t><<<grid, block, 0, stream>>>(
+                output.data<int32_t>(), inputs[1].data<int64_t>(), static_cast<int32_t>(value),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else if (output.dtype() == DType::UInt32) {
+            index_fill_typed<int32_t><<<grid, block, 0, stream>>>(
+                reinterpret_cast<int32_t*>(output.data_ptr()), inputs[1].data<int64_t>(),
+                static_cast<int32_t>(static_cast<uint32_t>(value)),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else if (output.dtype() == DType::UInt64) {
+            index_fill_typed<int64_t><<<grid, block, 0, stream>>>(
+                reinterpret_cast<int64_t*>(output.data_ptr()), inputs[1].data<int64_t>(),
+                static_cast<int64_t>(static_cast<uint64_t>(value)),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        } else {
+            index_fill_typed<int64_t><<<grid, block, 0, stream>>>(
+                output.data<int64_t>(), inputs[1].data<int64_t>(), static_cast<int64_t>(value),
+                outer, dim_size, idx_n, inner, error_buf.as<int>());
+        }
+        CUDA_CHECK(cudaGetLastError());
+        int host_error2 = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&host_error2, error_buf.as<int>(), sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (host_error2) {
             throw std::out_of_range("index_fill: index out of range for dim of size " +
                                     std::to_string(dim_size));
         }

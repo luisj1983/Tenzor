@@ -232,12 +232,14 @@ TEST_P(SparseGPUTest, SpGEMM_LargerRandom_GPUvsCPU) {
 }
 
 // ============================================================================
-// Sparse triangular solve — cuSPARSE SpSV path
+// Sparse triangular solve — GPU SpSV path (CUDA/ROCm/Vulkan/OneAPI)
 // ============================================================================
 //
 // Builds a lower triangular 4×4 matrix and solves L*x = b against the
-// CPU path. The GPU route exercises cusparseSpSV_analysis +
-// cusparseSpSV_solve end-to-end.
+// CPU path. On CUDA this exercises cusparseSpSV_analysis + cusparseSpSV_solve
+// end-to-end; on ROCm/Vulkan/OneAPI it exercises those backends' own
+// SparseTrsv/SparseTrsm kernels (hand-rolled sequential substitution on
+// Vulkan/ROCm, oneMKL/CPU-fallback on OneAPI).
 
 static SparseTensor make_lower_triangular(Device device) {
     // L =
@@ -269,8 +271,10 @@ static SparseTensor make_lower_triangular(Device device) {
 }
 
 TEST_P(SparseGPUTest, SparseTrsv_GPUvsCPU) {
-    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm) {
-        GTEST_SKIP() << "Sparse TRSV GPU path currently only wired for CUDA/ROCm";
+    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm &&
+        device_.type != Device::Type::Vulkan && device_.type != Device::Type::OneAPI) {
+        GTEST_SKIP() << "Sparse TRSV GPU path currently only wired for "
+                        "CUDA/ROCm/Vulkan/OneAPI";
     }
     auto L_cpu = make_lower_triangular(Device::cpu());
     auto L_gpu = make_lower_triangular(device_);
@@ -286,8 +290,10 @@ TEST_P(SparseGPUTest, SparseTrsv_GPUvsCPU) {
 }
 
 TEST_P(SparseGPUTest, SparseTrsm_GPUvsCPU) {
-    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm) {
-        GTEST_SKIP() << "Sparse TRSM GPU path currently only wired for CUDA/ROCm";
+    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm &&
+        device_.type != Device::Type::Vulkan && device_.type != Device::Type::OneAPI) {
+        GTEST_SKIP() << "Sparse TRSM GPU path currently only wired for "
+                        "CUDA/ROCm/Vulkan/OneAPI";
     }
     auto L_cpu = make_lower_triangular(Device::cpu());
     auto L_gpu = make_lower_triangular(device_);
@@ -318,4 +324,22 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     ROCm, SparseGPUTest,
     ::testing::Values(std::string("rocm")),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
+
+// Vulkan and OneAPI now have genuine SparseTrsv/SparseTrsm kernels (see
+// vulkan_ops_linalg.cpp and oneapi_kernel_registry.cpp), and SpMM/SpMV/
+// SparseAdd/ToDenseRoundtrip already worked on both — but this suite never
+// instantiated either parametrization, so none of it actually ran on those
+// backends despite SetUp() above already knowing how to select their
+// devices. SpGEMM_GPUvsCPU/SpGEMM_LargerRandom_GPUvsCPU still correctly
+// self-skip on these two (their own CUDA/ROCm-only guard is unrelated to
+// this gap and is left as-is).
+INSTANTIATE_TEST_SUITE_P(
+    OneAPI, SparseGPUTest,
+    ::testing::Values(std::string("oneapi")),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
+
+INSTANTIATE_TEST_SUITE_P(
+    Vulkan, SparseGPUTest,
+    ::testing::Values(std::string("vulkan")),
     [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });

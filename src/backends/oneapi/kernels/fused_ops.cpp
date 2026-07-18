@@ -2,6 +2,7 @@
 #include "oneapi_kernel_utils.hpp"
 #include "tenzor/core/shape.hpp"            // F16: broadcast_shapes
 #include "tenzor/ops/transform.hpp"         // F16: broadcast_to
+#include "fp16_saturate.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <limits>
@@ -246,7 +247,13 @@ auto fused_layer_norm_kernel(
         wg_pow2 = std::min(wg_pow2, static_cast<int64_t>(256));
 
         queue.submit([&](sycl::handler& cgh) {
-            sycl::local_accessor<float, 1> local_sum(sycl::range<1>(wg_pow2), cgh);
+            // Local accessor is double: the tree reduction below combines
+            // per-thread partial sums, and CPU/CUDA/ROCm all accumulate this
+            // reduction in double for Float32 inputs (see nn_kernels.cpp's
+            // layer_norm_simd_sum_f64 / layer_norm_simd_sumsq_f64) — a float
+            // accumulator here silently loses precision for large norm_size
+            // and corrupts gradcheck relative to the other backends.
+            sycl::local_accessor<double, 1> local_sum(sycl::range<1>(wg_pow2), cgh);
             cgh.parallel_for<class LayerNormFwdF32>(
                 sycl::nd_range<1>(batch_size * wg_pow2, wg_pow2),
                 [=](sycl::nd_item<1> item) {
@@ -256,10 +263,10 @@ auto fused_layer_norm_kernel(
                 const float* batch_in = in_ptr + b * norm_size;
                 float* batch_out = out_ptr + b * norm_size;
 
-                // Step 1: Compute mean
-                float thread_sum = 0.0f;
+                // Step 1: Compute mean (double accumulation)
+                double thread_sum = 0.0;
                 for (int64_t i = lid; i < norm_size; i += lsize) {
-                    thread_sum += batch_in[i];
+                    thread_sum += static_cast<double>(batch_in[i]);
                 }
                 local_sum[lid] = thread_sum;
                 item.barrier(sycl::access::fence_space::local_space);
@@ -270,13 +277,15 @@ auto fused_layer_norm_kernel(
                     }
                     item.barrier(sycl::access::fence_space::local_space);
                 }
-                float batch_mean = local_sum[0] / static_cast<float>(norm_size);
+                double batch_mean_d = local_sum[0] / static_cast<double>(norm_size);
+                float batch_mean = static_cast<float>(batch_mean_d);
                 item.barrier(sycl::access::fence_space::local_space);
 
-                // Step 2: Compute variance
-                float thread_var = 0.0f;
+                // Step 2: Compute variance (double accumulation, using the
+                // double-precision mean to avoid re-introducing rounding)
+                double thread_var = 0.0;
                 for (int64_t i = lid; i < norm_size; i += lsize) {
-                    float diff = batch_in[i] - batch_mean;
+                    double diff = static_cast<double>(batch_in[i]) - batch_mean_d;
                     thread_var += diff * diff;
                 }
                 local_sum[lid] = thread_var;
@@ -288,8 +297,9 @@ auto fused_layer_norm_kernel(
                     }
                     item.barrier(sycl::access::fence_space::local_space);
                 }
-                float variance = local_sum[0] / static_cast<float>(norm_size);
-                float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+                double variance_d = local_sum[0] / static_cast<double>(norm_size);
+                float batch_inv_std = static_cast<float>(
+                    1.0 / sycl::sqrt(variance_d + static_cast<double>(epsilon)));
 
                 // Store stats
                 if (lid == 0) {
@@ -538,6 +548,13 @@ auto fused_layer_norm_kernel(
     else {
         throw std::runtime_error("fused_layer_norm: unsupported dtype");
     }
+
+    // OpId::LayerNorm's registry entry applies this saturation after calling
+    // this same kernel via layer_norm_kernel(); OpId::FusedLayerNorm invokes
+    // this kernel directly and previously skipped it. Doing it here means both
+    // call paths get the clamp regardless of which registry entry is used
+    // (no-op for non-Float16 outputs).
+    fp16_saturate_if_needed(output, queue);
 
     return {output, mean, inv_std};
 }
@@ -1229,6 +1246,25 @@ auto fused_softmax_cross_entropy_kernel(
     int64_t num_classes = logits.shape().back();
     int64_t batch_size = (num_classes > 0) ? logits.numel() / num_classes : 0;
 
+    // Pre-validate target labels host-side before any device dispatch. SYCL
+    // kernels cannot throw, so the device-side checks below can only emit a
+    // NaN loss for an out-of-range target — that silently diverges from the
+    // CPU/CUDA/ROCm contract, which throws a clean, catchable error. Mirrors
+    // CPU's fused_softmax_cross_entropy_kernel validation pre-pass.
+    if (batch_size > 0) {
+        Tensor t_host = targets.is_contiguous() ? targets : targets.contiguous();
+        t_host = t_host.to(Device::cpu());
+        const int64_t* tp = get_data_ptr<const int64_t>(t_host);
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (tp[i] < 0 || tp[i] >= num_classes) {
+                throw std::runtime_error(
+                    "fused_softmax_cross_entropy: target index " + std::to_string(tp[i]) +
+                    " at row " + std::to_string(i) + " out of range [0, " +
+                    std::to_string(num_classes) + ")");
+            }
+        }
+    }
+
     Tensor losses({batch_size}, logits.dtype(), logits.device());
 
     // Device-side softmax cross-entropy: one work-item per batch element computes
@@ -1427,16 +1463,44 @@ auto fused_softmax_cross_entropy_grad_kernel(
     Tensor grad(shape, logits.dtype(), logits.device());
     if (batch_size == 0) return grad;
 
+    auto targets_i64 = (targets.dtype() == DType::Int64) ? targets : targets.to(DType::Int64);
+    const int64_t* tgt_ptr = get_data_ptr<const int64_t>(targets_i64);
+    const int64_t nc = num_classes;
+
+    // Native Float64 compute path (audit finding #9): the previous code
+    // unconditionally narrowed any non-Float32 dtype — including Float64 — to
+    // Float32 via `logits.to(DType::Float32)`, silently dropping double
+    // precision for Float64 callers. Compute directly in double instead.
+    if (logits.dtype() == DType::Float64) {
+        Tensor lp = logits.is_contiguous() ? logits : logits.contiguous();
+        const double* in_ptr = get_data_ptr<const double>(lp);
+        double* out_ptr = get_data_ptr<double>(grad);
+        const double scale = (reduction == "mean") ? 1.0 / static_cast<double>(batch_size) : 1.0;
+
+        queue.parallel_for(sycl::range<1>(batch_size), [=](sycl::id<1> idx) {
+            int64_t b = static_cast<int64_t>(idx[0]);
+            const double* row = in_ptr + b * nc;
+            int64_t t = tgt_ptr[b];
+            double mx = row[0];
+            for (int64_t i = 1; i < nc; ++i) mx = sycl::fmax(mx, row[i]);
+            double se = 0.0;
+            for (int64_t i = 0; i < nc; ++i) se += sycl::exp(row[i] - mx);
+            for (int64_t c = 0; c < nc; ++c) {
+                double sm = sycl::exp(row[c] - mx) / se;
+                out_ptr[b * nc + c] = (sm - ((c == t) ? 1.0 : 0.0)) * scale;
+            }
+        }).wait();
+
+        return grad;
+    }
+
     const bool is_f32 = (logits.dtype() == DType::Float32);
     Tensor lp = is_f32 ? logits.contiguous() : logits.to(DType::Float32);
     Tensor gp = is_f32 ? grad : Tensor(shape, DType::Float32, logits.device());
 
     const float* in_ptr  = get_data_ptr<const float>(lp);
     float*       out_ptr = get_data_ptr<float>(gp);
-    auto targets_i64 = (targets.dtype() == DType::Int64) ? targets : targets.to(DType::Int64);
-    const int64_t* tgt_ptr = get_data_ptr<const int64_t>(targets_i64);
 
-    const int64_t nc = num_classes;
     const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
 
     queue.parallel_for(sycl::range<1>(batch_size), [=](sycl::id<1> idx) {
@@ -1640,7 +1704,11 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
         float* gi_ptr = get_data_ptr<float>(grad_input);
         float* gw_ptr = get_data_ptr<float>(grad_weight);
 
-        // Compute grad_input per batch element
+        // Compute grad_input per batch element. Accumulate the dot-product
+        // reduction in double, matching the CPU rms_norm_backward_kernel's
+        // Float32 branch (F035: "match the forward's double accumulation") —
+        // a float accumulator here drifts from CPU/CUDA/ROCm for large
+        // norm_size and corrupts gradcheck.
         queue.parallel_for<FusedRMSNormBackwardKernelFloat32>(
             sycl::range<1>(batch_size),
             [=](sycl::id<1> idx) {
@@ -1648,30 +1716,36 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 const float* go_row = go_ptr + b * norm_size;
                 const float* in_row = in_ptr + b * norm_size;
                 float* gi_row = gi_ptr + b * norm_size;
-                float rr = rrms_ptr[b];
+                double rr = static_cast<double>(rrms_ptr[b]);
 
                 // Compute dot product: sum(grad_output * weight * input)
-                float dot = 0.0f;
+                double dot = 0.0;
                 for (int64_t i = 0; i < norm_size; ++i) {
-                    dot += go_row[i] * w_ptr[i] * in_row[i];
+                    dot += static_cast<double>(go_row[i]) * static_cast<double>(w_ptr[i]) *
+                           static_cast<double>(in_row[i]);
                 }
-                dot *= rr * rr / static_cast<float>(norm_size);
+                double coeff = dot * rr * rr / static_cast<double>(norm_size);
 
                 // grad_input = rrms * (grad_output * weight - input * dot)
                 for (int64_t i = 0; i < norm_size; ++i) {
-                    gi_row[i] = rr * (go_row[i] * w_ptr[i] - in_row[i] * dot);
+                    gi_row[i] = static_cast<float>(
+                        rr * (static_cast<double>(go_row[i]) * static_cast<double>(w_ptr[i]) -
+                              static_cast<double>(in_row[i]) * coeff));
                 }
             }
         );
 
-        // Compute grad_weight on device: each work-item accumulates one feature over the batch
+        // Compute grad_weight on device: each work-item accumulates one feature
+        // over the batch in double (matches CPU's gw_acc double accumulator).
         queue.parallel_for(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
             int64_t i = static_cast<int64_t>(idx[0]);
-            float sum = 0.0f;
+            double sum = 0.0;
             for (int64_t b = 0; b < batch_size; ++b) {
-                sum += go_ptr[b * norm_size + i] * in_ptr[b * norm_size + i] * rrms_ptr[b];
+                sum += static_cast<double>(go_ptr[b * norm_size + i]) *
+                       static_cast<double>(in_ptr[b * norm_size + i]) *
+                       static_cast<double>(rrms_ptr[b]);
             }
-            gw_ptr[i] = sum;
+            gw_ptr[i] = static_cast<float>(sum);
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {
@@ -1717,7 +1791,10 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
         const sycl::half* go_ptr = get_data_ptr<const sycl::half>(grad_output);
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         const sycl::half* w_ptr = get_data_ptr<const sycl::half>(weight);
-        const sycl::half* rrms_ptr = get_data_ptr<const sycl::half>(rrms);
+        // Forward stores rrms as Float32 for Float16 inputs (reciprocal-sqrt can
+        // overflow to Inf in half range), so read it through const float* here —
+        // reinterpreting the same buffer as sycl::half would read garbage bits.
+        const float* rrms_ptr = get_data_ptr<const float>(rrms);
         sycl::half* gi_ptr = get_data_ptr<sycl::half>(grad_input);
         sycl::half* gw_ptr = get_data_ptr<sycl::half>(grad_weight);
 
@@ -1729,7 +1806,7 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 const sycl::half* go_row = go_ptr + b * norm_size;
                 const sycl::half* in_row = in_ptr + b * norm_size;
                 sycl::half* gi_row = gi_ptr + b * norm_size;
-                float rr = static_cast<float>(rrms_ptr[b]);
+                float rr = rrms_ptr[b];
 
                 float dot = 0.0f;
                 for (int64_t i = 0; i < norm_size; ++i) {
@@ -1750,7 +1827,7 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             for (int64_t b = 0; b < batch_size; ++b) {
                 sum += static_cast<float>(go_ptr[b * norm_size + i]) *
                        static_cast<float>(in_ptr[b * norm_size + i]) *
-                       static_cast<float>(rrms_ptr[b]);
+                       rrms_ptr[b];
             }
             gw_ptr[i] = sycl::half(sum);
         }).wait();
@@ -1759,7 +1836,10 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
         const uint16_t* go_ptr = get_data_ptr<const uint16_t>(grad_output);
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         const uint16_t* w_ptr = get_data_ptr<const uint16_t>(weight);
-        const uint16_t* rrms_ptr = get_data_ptr<const uint16_t>(rrms);
+        // Forward stores rrms as Float32 for BFloat16 inputs (reciprocal-sqrt can
+        // overflow to Inf in bf16 range), so read it through const float* here —
+        // reinterpreting the same buffer as uint16_t would read garbage bits.
+        const float* rrms_ptr = get_data_ptr<const float>(rrms);
         uint16_t* gi_ptr = get_data_ptr<uint16_t>(grad_input);
         uint16_t* gw_ptr = get_data_ptr<uint16_t>(grad_weight);
 
@@ -1770,7 +1850,7 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
                 const uint16_t* go_row = go_ptr + b * norm_size;
                 const uint16_t* in_row = in_ptr + b * norm_size;
                 uint16_t* gi_row = gi_ptr + b * norm_size;
-                float rr = bf16_to_f32(rrms_ptr[b]);
+                float rr = rrms_ptr[b];
 
                 float dot = 0.0f;
                 for (int64_t i = 0; i < norm_size; ++i) {
@@ -1791,7 +1871,7 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             for (int64_t b = 0; b < batch_size; ++b) {
                 sum += bf16_to_f32(go_ptr[b * norm_size + i]) *
                        bf16_to_f32(in_ptr[b * norm_size + i]) *
-                       bf16_to_f32(rrms_ptr[b]);
+                       rrms_ptr[b];
             }
             gw_ptr[i] = f32_to_bf16(sum);
         }).wait();
@@ -2076,14 +2156,16 @@ auto fused_rmsprop_step_kernel(
             sq = alpha * sq + (1.0f - alpha) * g * g;
             sq_ptr[idx] = sq;
 
+            // eps OUTSIDE the sqrt (PyTorch convention) — matches
+            // CPU/CUDA/Vulkan (audit finding #14).
             float avg;
             if (centered && ga_ptr) {
                 float ga = ga_ptr[idx];
                 ga = alpha * ga + (1.0f - alpha) * g;
                 ga_ptr[idx] = ga;
-                avg = sycl::sqrt(sq - ga * ga + eps);
+                avg = sycl::sqrt(sq - ga * ga) + eps;
             } else {
-                avg = sycl::sqrt(sq + eps);
+                avg = sycl::sqrt(sq) + eps;
             }
 
             if (momentum > 0.0f && mom_ptr) {
@@ -2119,14 +2201,16 @@ auto fused_rmsprop_step_kernel(
             sq = d_alpha * sq + (1.0 - d_alpha) * g * g;
             sq_ptr[idx] = sq;
 
+            // eps OUTSIDE the sqrt (PyTorch convention) — matches
+            // CPU/CUDA/Vulkan (audit finding #14).
             double avg;
             if (centered && ga_ptr) {
                 double ga = ga_ptr[idx];
                 ga = d_alpha * ga + (1.0 - d_alpha) * g;
                 ga_ptr[idx] = ga;
-                avg = sycl::sqrt(sq - ga * ga + d_eps);
+                avg = sycl::sqrt(sq - ga * ga) + d_eps;
             } else {
-                avg = sycl::sqrt(sq + d_eps);
+                avg = sycl::sqrt(sq) + d_eps;
             }
 
             if (d_momentum > 0.0 && mom_ptr) {

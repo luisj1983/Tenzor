@@ -148,6 +148,17 @@ double lgamma_lanczos(double x) {
 }
 
 double lgamma_impl(double x) {
+    // Pole at every non-positive integer: the reflection formula below
+    // divides by sin64(PI*x), which floating-point PI never lands on
+    // exactly zero for. Return the real IEEE +inf directly, bypassing the
+    // reflection formula entirely at poles (independent copy of the same
+    // fix applied to the other special_math_*.comp shaders -- each is
+    // compiled standalone). betainc_impl below uses this via lbeta =
+    // lgamma(a)+lgamma(b)-lgamma(a+b), so a pole in a, b, or a+b now
+    // correctly propagates instead of returning finite garbage.
+    if (x <= 0.0 && x == floor(x)) {
+        return 1.0 / 0.0;  // +inf
+    }
     if (x < 0.5) {
         return log64(PI / abs64(sin64(PI * x))) - lgamma_lanczos(1.0 - x);
     }

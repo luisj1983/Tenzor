@@ -68,10 +68,13 @@ TEST_P(Conv1dMultiDTypeTest, MultipleKernelSizes) {
     }
 }
 
-// Backward — exercises Conv1d's autograd path, which composes via
-// Conv2dBackwardInput/Weight/Bias after unsqueezing to 4D (the
-// Conv1dBackwardInput/Weight/Bias OpIds are registered on every backend but
-// are dead code — nn::Conv1d never dispatches them; AUTOGRAD-R056). The
+// Backward — exercises Conv1d's autograd path, which dispatches
+// OpId::Conv1dBackwardInput/Weight/Bias directly on 3-D operands (no
+// unsqueeze-to-4D detour through Conv2dBackward*; see AUTOGRAD-R056). Every
+// backend's Conv1dBackwardInput/Weight/Bias kernel is exercised here for
+// real, including the weight/bias gradient VALUES (not just has_grad()),
+// which is what actually catches a backend-specific wiring bug in these
+// OpIds now that nn::Conv1d dispatches them in production. The
 // optimizer-style sum().backward() pattern populates .grad() on the input
 // tensor and the conv's parameters.
 TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
@@ -104,12 +107,25 @@ TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
 
     // Forward output equals CPU reference (weights identical via per-test seed)
     expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
-    // Input gradient matches CPU reference
+    // Input gradient matches CPU reference (exercises Conv1dBackwardInput)
     expectTensorNear(g, in_ref.grad().value(), std::max(atol_, 5e-2f));
 
-    // Both weight and bias parameters should see gradients
-    for (const auto& [name, p] : conv.named_parameters()) {
+    // Weight and bias gradients must both be populated AND numerically match
+    // the CPU reference — exercises Conv1dBackwardWeight/Bias directly.
+    // named_parameters() is insertion-ordered ("weight" then "bias" per the
+    // Conv1d ctor), so conv/conv_ref line up positionally.
+    auto ref_params = conv_ref.named_parameters();
+    auto params = conv.named_parameters();
+    ASSERT_EQ(params.size(), ref_params.size());
+    for (size_t i = 0; i < params.size(); ++i) {
+        const auto& [name, p] = params[i];
+        const auto& [ref_name, ref_p] = ref_params[i];
+        ASSERT_EQ(name, ref_name);
         ASSERT_TRUE(p->has_grad()) << "parameter " << name << " missing grad";
+        ASSERT_TRUE(ref_p->has_grad()) << "reference parameter " << name << " missing grad";
+        SCOPED_TRACE("parameter " + name);
+        expectTensorNear(p->grad().value(), ref_p->grad().value(),
+                         std::max(atol_, 5e-2f));
     }
 }
 
@@ -136,6 +152,116 @@ TEST_P(Conv1dMultiDTypeTest, BackwardWithStridePadding) {
     expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
     expectTensorNear(input.grad().value(), in_ref.grad().value(),
                      std::max(atol_, 5e-2f));
+
+    // Weight gradient (Conv1dBackwardWeight) with real stride/padding — this
+    // is exactly the shape/padding combination that previously required the
+    // nn-layer to manually pad + unsqueeze to 4D before dispatch.
+    auto ref_params = conv_ref.named_parameters();
+    auto params = conv.named_parameters();
+    ASSERT_EQ(params.size(), ref_params.size());
+    for (size_t i = 0; i < params.size(); ++i) {
+        const auto& [name, p] = params[i];
+        const auto& [ref_name, ref_p] = ref_params[i];
+        ASSERT_EQ(name, ref_name);
+        ASSERT_TRUE(p->has_grad()) << "parameter " << name << " missing grad";
+        SCOPED_TRACE("parameter " + name);
+        expectTensorNear(p->grad().value(), ref_p->grad().value(),
+                         std::max(atol_, 5e-2f));
+    }
+}
+
+// Grouped convolution backward — Groups is threaded through
+// OpId::Conv1dBackwardInput/Weight via AttrKey::Groups. groups=2 (with
+// in_channels=4, out_channels=8) keeps forward on the "native 1-D conv"
+// path (groups_ != in_channels_, so the CC.5 depthwise fast-path below is
+// not eligible) and specifically stresses the multi-input-channel-per-group
+// case of the native backward OpIds.
+TEST_P(Conv1dMultiDTypeTest, BackwardGrouped) {
+    tenzor::manual_seed(44);
+    auto conv_ref = nn::Conv1d(4, 8, 3, 1, 1, 1, /*groups=*/2, /*bias=*/true);
+    auto input_cpu = tenzor::randn({2, 4, 10}, DType::Float32, Device::cpu());
+    auto in_ref = Variable(input_cpu, /*requires_grad=*/true);
+    auto out_ref = conv_ref.forward(in_ref);
+    tenzor::sum(out_ref).backward();
+
+    tenzor::manual_seed(44);
+    auto conv = nn::Conv1d(4, 8, 3, 1, 1, 1, /*groups=*/2, /*bias=*/true);
+    convert_model(conv);
+    auto input = Variable(input_cpu.to(dtype_).to(device_), /*requires_grad=*/true);
+    auto output = conv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward();
+
+    ASSERT_TRUE(input.has_grad());
+    auto g = input.grad().value();
+    EXPECT_EQ(g.shape()[0], 2);
+    EXPECT_EQ(g.shape()[1], 4);
+    EXPECT_EQ(g.shape()[2], 10);
+    expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
+    expectTensorNear(g, in_ref.grad().value(), std::max(atol_, 5e-2f));
+
+    auto ref_params = conv_ref.named_parameters();
+    auto params = conv.named_parameters();
+    ASSERT_EQ(params.size(), ref_params.size());
+    for (size_t i = 0; i < params.size(); ++i) {
+        const auto& [name, p] = params[i];
+        const auto& [ref_name, ref_p] = ref_params[i];
+        ASSERT_EQ(name, ref_name);
+        ASSERT_TRUE(p->has_grad()) << "parameter " << name << " missing grad";
+        SCOPED_TRACE("parameter " + name);
+        expectTensorNear(p->grad().value(), ref_p->grad().value(),
+                         std::max(atol_, 5e-2f));
+    }
+}
+
+// Depthwise (groups == in_channels == out_channels, multiplier 1) backward —
+// covers the CC.5 forward fast-path's interaction with the now-native
+// backward: forward takes the OpId::DepthwiseConv1d fast path (when
+// registered for the backend) while backward always goes through
+// Conv1dBackward -> OpId::Conv1dBackwardInput/Weight/Bias regardless of
+// which forward path produced the output. NOTE: does not use a channel
+// multiplier != 1 (e.g. out_channels = 2 * in_channels with groups =
+// in_channels) — cpu::depthwise_conv1d_kernel (src/backends/cpu/kernels/
+// depthwise_conv1d.cpp) hard-assumes out_channels == in_channels == groups
+// and silently produces a wrong-shaped/wrong-valued output otherwise; that
+// is a pre-existing bug in the OpId::DepthwiseConv1d forward fast path
+// (unrelated to OpId::Conv1dBackwardInput/Weight/Bias) and out of scope here.
+TEST_P(Conv1dMultiDTypeTest, BackwardDepthwise) {
+    tenzor::manual_seed(45);
+    auto conv_ref = nn::Conv1d(4, 4, 3, 1, 1, 1, /*groups=*/4, /*bias=*/true);
+    auto input_cpu = tenzor::randn({2, 4, 10}, DType::Float32, Device::cpu());
+    auto in_ref = Variable(input_cpu, /*requires_grad=*/true);
+    auto out_ref = conv_ref.forward(in_ref);
+    tenzor::sum(out_ref).backward();
+
+    tenzor::manual_seed(45);
+    auto conv = nn::Conv1d(4, 4, 3, 1, 1, 1, /*groups=*/4, /*bias=*/true);
+    convert_model(conv);
+    auto input = Variable(input_cpu.to(dtype_).to(device_), /*requires_grad=*/true);
+    auto output = conv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward();
+
+    ASSERT_TRUE(input.has_grad());
+    auto g = input.grad().value();
+    EXPECT_EQ(g.shape()[0], 2);
+    EXPECT_EQ(g.shape()[1], 4);
+    EXPECT_EQ(g.shape()[2], 10);
+    expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
+    expectTensorNear(g, in_ref.grad().value(), std::max(atol_, 5e-2f));
+
+    auto ref_params = conv_ref.named_parameters();
+    auto params = conv.named_parameters();
+    ASSERT_EQ(params.size(), ref_params.size());
+    for (size_t i = 0; i < params.size(); ++i) {
+        const auto& [name, p] = params[i];
+        const auto& [ref_name, ref_p] = ref_params[i];
+        ASSERT_EQ(name, ref_name);
+        ASSERT_TRUE(p->has_grad()) << "parameter " << name << " missing grad";
+        SCOPED_TRACE("parameter " + name);
+        expectTensorNear(p->grad().value(), ref_p->grad().value(),
+                         std::max(atol_, 5e-2f));
+    }
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(Conv1dMultiDTypeTest);

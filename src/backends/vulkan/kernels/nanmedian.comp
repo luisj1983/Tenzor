@@ -1,0 +1,64 @@
+#version 450
+
+// Nanmedian — NaN-ignoring LOWER median (no interpolation) along a dimension.
+// Each invocation handles one slice: compacts non-NaN values, sorts them,
+// then picks the element at index (count-1)/2 directly. This must NOT
+// linearly interpolate between the two middle values the way nanquantile.comp
+// (q=0.5) does -- PyTorch/CPU/CUDA nanmedian semantics pick the exact lower
+// median (nanmedian([1,2,3,4]) -> 2, not 2.5). Mirrors CPU's nanmedian_impl
+// (src/backends/cpu/kernels/advanced.cpp) and CUDA's nanmedian_kernel_impl
+// (src/backends/cuda/kernels/advanced.cu).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { float input_data[]; };
+layout(binding = 1) writeonly buffer Output { float output_data[]; };
+layout(binding = 2)          buffer Scratch { float scratch_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_slices;
+    uint dim_size;
+    uint inner_size;
+} params;
+
+void main() {
+    uint slice_idx = gl_GlobalInvocationID.x;
+    if (slice_idx >= params.total_slices) return;
+
+    uint outer_idx = slice_idx / params.inner_size;
+    uint inner_idx = slice_idx % params.inner_size;
+    uint base = outer_idx * params.dim_size * params.inner_size + inner_idx;
+
+    // Copy non-NaN values into scratch. `val != val` is used instead of the
+    // GLSL isnan() builtin: isnan() is driver-flaky on some Vulkan
+    // implementations (see histc.comp / histogram_pack_range.comp), and this
+    // NaN test is the entire point of "nan"median.
+    uint scratch_base = slice_idx * params.dim_size;
+    uint count = 0;
+    for (uint i = 0; i < params.dim_size; i++) {
+        float val = input_data[base + i * params.inner_size];
+        if (val == val) {
+            scratch_data[scratch_base + count] = val;
+            count++;
+        }
+    }
+
+    if (count == 0) {
+        output_data[slice_idx] = 0.0 / 0.0; // NaN
+        return;
+    }
+
+    // Insertion sort on compacted values
+    for (uint i = 1; i < count; i++) {
+        float key = scratch_data[scratch_base + i];
+        int j = int(i) - 1;
+        while (j >= 0 && scratch_data[scratch_base + uint(j)] > key) {
+            scratch_data[scratch_base + uint(j) + 1] = scratch_data[scratch_base + uint(j)];
+            j--;
+        }
+        scratch_data[scratch_base + uint(j) + 1] = key;
+    }
+
+    // Lower median, no interpolation: index (count-1)/2 of the NaN-filtered,
+    // sorted values (matches CPU nanmedian_impl / CUDA nanmedian_kernel_impl).
+    output_data[slice_idx] = scratch_data[scratch_base + (count - 1) / 2];
+}

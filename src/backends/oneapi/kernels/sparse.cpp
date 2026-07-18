@@ -10,6 +10,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "../sycl_prefix_sum.hpp"
@@ -140,6 +141,23 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         return y;
     }
 
+    // No native complex SYCL sparse SpMV kernel (unlike the F16/BF16 paths
+    // above, complex accumulation isn't a trivial widen-narrow). Relocate to
+    // CPU — sparse::spmv already has complex<float>/complex<double>
+    // instantiations (src/sparse/sparse_ops.cpp) — compute there, and move
+    // the result back. Mirrors Vulkan's F104 CPU-offload-for-complex
+    // convention for sparse ops (GLSL/SYCL device code has no native complex
+    // arithmetic support, so this is the accepted pattern for GPU sparse
+    // backends here, not a general GPU->CPU fallback).
+    if (A.values().dtype() == DType::Complex64 || A.values().dtype() == DType::Complex128) {
+        Device orig_dev = A.values().device();
+        auto A_cpu = SparseTensor::sparse_csr(A.crow_indices().to(Device::cpu()),
+                                              A.col_indices().to(Device::cpu()),
+                                              A.values().to(Device::cpu()), A.shape());
+        Tensor result = sparse::spmv(A_cpu, x.to(Device::cpu()));
+        return result.to(orig_dev);
+    }
+
     const auto& shape = A.shape();
     int64_t m = shape[0];
 
@@ -211,6 +229,19 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
         auto B_f32 = B.to(DType::Float32);
         auto C_f32 = spmm_kernel(A_f32, B_f32, queue);
         return C_f32.to(orig);
+    }
+
+    // No native complex SYCL sparse SpMM kernel; relocate to CPU (sparse::spmm
+    // already has complex instantiations) and move the result back. See
+    // spmv_kernel above for the full rationale (matches Vulkan's F104
+    // CPU-offload-for-complex convention).
+    if (A.values().dtype() == DType::Complex64 || A.values().dtype() == DType::Complex128) {
+        Device orig_dev = A.values().device();
+        auto A_cpu = SparseTensor::sparse_csr(A.crow_indices().to(Device::cpu()),
+                                              A.col_indices().to(Device::cpu()),
+                                              A.values().to(Device::cpu()), A.shape());
+        Tensor result = sparse::spmm(A_cpu, B.to(Device::cpu()));
+        return result.to(orig_dev);
     }
 
     const auto& shape = A.shape();
@@ -303,6 +334,17 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
         return sparse_to_dense_kernel(A_f32, queue).to(orig);
     }
 
+    // No native complex SYCL to-dense scatter kernel; relocate to CPU
+    // (SparseTensor::to_dense() already handles complex generically) and
+    // move the result back. See spmv_kernel above for the full rationale.
+    if (A.values().dtype() == DType::Complex64 || A.values().dtype() == DType::Complex128) {
+        Device orig_dev = A.values().device();
+        auto A_cpu = SparseTensor::sparse_csr(A.crow_indices().to(Device::cpu()),
+                                              A.col_indices().to(Device::cpu()),
+                                              A.values().to(Device::cpu()), A.shape());
+        return A_cpu.to_dense().to(orig_dev);
+    }
+
     const auto& shape = A.shape();
     int64_t m = shape[0];
     int64_t n = shape[1];
@@ -340,7 +382,15 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
                 }
                 int64_t row = lo;
                 int64_t c = col_ptr[i];
-                dense_ptr[row * n + c] = val_ptr[i];
+                // Accumulate rather than overwrite: duplicate column entries
+                // within a CSR row must sum (matches CPU/CUDA/ROCm's
+                // SparseTensor::to_dense() scatter_add semantics). Different
+                // work-items can race on the same (row,c) slot for such
+                // duplicates, so the write must be atomic.
+                sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                  sycl::memory_scope::device>
+                    atomic_val(dense_ptr[row * n + c]);
+                atomic_val.fetch_add(val_ptr[i]);
             }).wait();
     } else if (vals.dtype() == DType::Float64) {
         auto* dense_ptr = dense.data<double>();
@@ -365,7 +415,13 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
                 }
                 int64_t row = lo;
                 int64_t c = col_ptr[i];
-                dense_ptr[row * n + c] = val_ptr[i];
+                // See the Float32 branch above: accumulate, not overwrite,
+                // since duplicate columns within a row must sum and this is
+                // a genuine cross-work-item race otherwise.
+                sycl::atomic_ref<double, sycl::memory_order::relaxed,
+                                  sycl::memory_scope::device>
+                    atomic_val(dense_ptr[row * n + c]);
+                atomic_val.fetch_add(val_ptr[i]);
             }).wait();
     } else {
         throw std::runtime_error("oneapi sparse_to_dense_kernel: unsupported dtype");
@@ -392,6 +448,18 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
                                               vals_f32, A.shape());
         auto B_f32 = B.to(DType::Float32);
         return sparse_add_kernel(A_f32, B_f32, queue).to(orig);
+    }
+
+    // No native complex SYCL sparse-add kernel; relocate to CPU (sparse::add
+    // already has complex instantiations) and move the result back. See
+    // spmv_kernel above for the full rationale.
+    if (A.values().dtype() == DType::Complex64 || A.values().dtype() == DType::Complex128) {
+        Device orig_dev = A.values().device();
+        auto A_cpu = SparseTensor::sparse_csr(A.crow_indices().to(Device::cpu()),
+                                              A.col_indices().to(Device::cpu()),
+                                              A.values().to(Device::cpu()), A.shape());
+        Tensor result = sparse::add(A_cpu, B.to(Device::cpu()));
+        return result.to(orig_dev);
     }
 
     const auto& shape = A.shape();
@@ -428,6 +496,10 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
                 }
                 int64_t row = lo;
                 int64_t c = col_ptr[i];
+                // Guard against malformed/untrusted CSR col indices: an
+                // out-of-range column would be an out-of-bounds device write
+                // into out_ptr. Mirrors ROCm's csr_sparse_add_kernel guard.
+                if (c < 0 || c >= n) return;
                 out_ptr[row * n + c] += val_ptr[i];
             }).wait();
     } else if (vals.dtype() == DType::Float64) {
@@ -450,6 +522,9 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
                 }
                 int64_t row = lo;
                 int64_t c = col_ptr[i];
+                // See the Float32 branch above: guard against an
+                // out-of-range CSR column index before writing.
+                if (c < 0 || c >= n) return;
                 out_ptr[row * n + c] += val_ptr[i];
             }).wait();
     } else {
@@ -481,6 +556,25 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         return SparseTensor::sparse_csr(C_f32.crow_indices(),
                                         C_f32.col_indices(),
                                         C_vals_orig, C_f32.shape());
+    }
+
+    // No native complex SYCL SpGEMM kernel; relocate both operands to CPU
+    // (sparse::spgemm already has complex instantiations) and move the
+    // result's components back. See spmv_kernel above for the full
+    // rationale.
+    if (A.values().dtype() == DType::Complex64 || A.values().dtype() == DType::Complex128) {
+        Device orig_dev = A.values().device();
+        auto A_cpu = SparseTensor::sparse_csr(A.crow_indices().to(Device::cpu()),
+                                              A.col_indices().to(Device::cpu()),
+                                              A.values().to(Device::cpu()), A.shape());
+        auto B_cpu = SparseTensor::sparse_csr(B.crow_indices().to(Device::cpu()),
+                                              B.col_indices().to(Device::cpu()),
+                                              B.values().to(Device::cpu()), B.shape());
+        auto C_cpu = sparse::spgemm(A_cpu, B_cpu);
+        return SparseTensor::sparse_csr(C_cpu.crow_indices().to(orig_dev),
+                                        C_cpu.col_indices().to(orig_dev),
+                                        C_cpu.values().to(orig_dev),
+                                        C_cpu.shape());
     }
 #if defined(TENZOR_HAS_ONEMKL) && 0
     // Historical oneMKL path: dense-intermediate approach using `spmm_kernel`
@@ -835,6 +929,20 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
         auto b_f32 = b.to(DType::Float32);
         return sparse_trsv_kernel(L_f32, b_f32, upper, queue).to(orig);
     }
+
+    // No native complex SYCL triangular-solve kernel; relocate to CPU
+    // (sparse::sparse_triangular_solve already has complex instantiations)
+    // and move the result back. See spmv_kernel above for the full
+    // rationale — applied here so OneAPI's sparse Trsv is consistent with
+    // its own SpMV/SpMM/ToDense/Add/SpGEMM complex handling above.
+    if (L.values().dtype() == DType::Complex64 || L.values().dtype() == DType::Complex128) {
+        Device orig_dev = L.values().device();
+        auto L_cpu = SparseTensor::sparse_csr(L.crow_indices().to(Device::cpu()),
+                                              L.col_indices().to(Device::cpu()),
+                                              L.values().to(Device::cpu()), L.shape());
+        Tensor result = sparse::sparse_triangular_solve(L_cpu, b.to(Device::cpu()), upper);
+        return result.to(orig_dev);
+    }
 #if defined(TENZOR_HAS_ONEMKL) && 0
     // Historical oneMKL path: disabled because oneMKL's sparse::trsv here
     // is wired for Int32 CSR indices, while Tenzor's SparseTensor API uses
@@ -1013,6 +1121,19 @@ auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
                                               vals_f32, L.shape());
         auto B_f32 = B.to(DType::Float32);
         return sparse_trsm_kernel(L_f32, B_f32, upper, queue).to(orig);
+    }
+
+    // No native complex SYCL triangular-solve kernel; relocate to CPU and
+    // move the result back. sparse::sparse_triangular_solve handles the 2D
+    // (multi-RHS / trsm) case via b.ndim()==2 internally. See
+    // sparse_trsv_kernel above for the full rationale.
+    if (L.values().dtype() == DType::Complex64 || L.values().dtype() == DType::Complex128) {
+        Device orig_dev = L.values().device();
+        auto L_cpu = SparseTensor::sparse_csr(L.crow_indices().to(Device::cpu()),
+                                              L.col_indices().to(Device::cpu()),
+                                              L.values().to(Device::cpu()), L.shape());
+        Tensor result = sparse::sparse_triangular_solve(L_cpu, B.to(Device::cpu()), upper);
+        return result.to(orig_dev);
     }
 #if defined(TENZOR_HAS_ONEMKL) && 0
     // Historical oneMKL path: disabled because oneMKL's sparse::trsm here

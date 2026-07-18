@@ -214,10 +214,22 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input_orig, int64_t dim) ->
 }
 
 auto VulkanBackend::dispatchNestedLogSoftmax(const Tensor& values, const Tensor& offsets,
-                                              int64_t /*dim*/) -> Tensor {
+                                              int64_t dim) -> Tensor {
+    if (values.dtype() != DType::Float32) {
+        // nested shaders are Float32-only; non-Float32 inputs were reinterpreted
+        // as Float32 (garbage). Widen, compute, narrow back.
+        const DType orig = values.dtype();
+        return dispatchNestedLogSoftmax(values.to(DType::Float32), offsets, dim).to(orig);
+    }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
-    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    // D must be the product of ALL trailing dims (shape[1:]), not just
+    // shape[1]: for rank>=3 values (e.g. [total_len,H,W]), using shape[1]
+    // alone (H) only touches H of the H*W elements per row and misindexes
+    // every row after the first. Matches CPU (product of all trailing dims)
+    // and CUDA (numel()/total_len).
+    uint32_t D = 1;
+    for (size_t _d = 1; _d < shape.size(); ++_d) D *= static_cast<uint32_t>(shape[_d]);
     uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
 
     auto* pipeline = getPipeline("nested_log_softmax", device_id);
@@ -275,7 +287,13 @@ auto VulkanBackend::dispatchNestedSoftmax(const Tensor& values, const Tensor& of
     }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
-    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    // D must be the product of ALL trailing dims (shape[1:]), not just
+    // shape[1]: for rank>=3 values (e.g. [total_len,H,W]), using shape[1]
+    // alone (H) only touches H of the H*W elements per row and misindexes
+    // every row after the first. Matches CPU (product of all trailing dims)
+    // and CUDA (numel()/total_len).
+    uint32_t D = 1;
+    for (size_t _d = 1; _d < shape.size(); ++_d) D *= static_cast<uint32_t>(shape[_d]);
     uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
 
     auto* pipeline = getPipeline("nested_softmax", device_id);
@@ -322,13 +340,25 @@ auto VulkanBackend::dispatchNestedSum(const Tensor& values, const Tensor& offset
     }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
-    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    // D must be the product of ALL trailing dims (shape[1:]), not just
+    // shape[1]: for rank>=3 values (e.g. [total_len,H,W]), using shape[1]
+    // alone (H) only touches H of the H*W elements per row and misindexes
+    // every row after the first. Matches CPU (product of all trailing dims)
+    // and CUDA (numel()/total_len).
+    uint32_t D = 1;
+    for (size_t _d = 1; _d < shape.size(); ++_d) D *= static_cast<uint32_t>(shape[_d]);
     uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
 
     auto* pipeline = getPipeline("nested_sum", device_id);
 
-    // Output is [B, D] (one row per segment, keepdim=true style)
-    Tensor output({static_cast<int64_t>(B), static_cast<int64_t>(D)}, values.dtype(), values.device());
+    // Output shape must be rank-preserving [B, ...trailing dims], matching
+    // CPU, not flattened [B, D]: NestedSumBackward broadcasts the gradient
+    // back to [total_len, ...trailing dims] using this tensor's own shape.
+    // D (the flat per-row stride the shader below uses) is unaffected.
+    std::vector<int64_t> out_shape;
+    out_shape.push_back(static_cast<int64_t>(B));
+    for (size_t _d = 1; _d < shape.size(); ++_d) out_shape.push_back(shape[_d]);
+    Tensor output(out_shape, values.dtype(), values.device());
 
     Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
                          ? offsets : offsets.to(DType::Int32);
@@ -370,12 +400,22 @@ auto VulkanBackend::dispatchNestedMean(const Tensor& values, const Tensor& offse
     }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
-    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    // D must be the product of ALL trailing dims (shape[1:]), not just
+    // shape[1]: for rank>=3 values (e.g. [total_len,H,W]), using shape[1]
+    // alone (H) only touches H of the H*W elements per row and misindexes
+    // every row after the first. Matches CPU (product of all trailing dims)
+    // and CUDA (numel()/total_len).
+    uint32_t D = 1;
+    for (size_t _d = 1; _d < shape.size(); ++_d) D *= static_cast<uint32_t>(shape[_d]);
     uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
 
     auto* pipeline = getPipeline("nested_mean", device_id);
 
-    Tensor output({static_cast<int64_t>(B), static_cast<int64_t>(D)}, values.dtype(), values.device());
+    // See dispatchNestedSum: output shape must be rank-preserving, matching CPU.
+    std::vector<int64_t> out_shape;
+    out_shape.push_back(static_cast<int64_t>(B));
+    for (size_t _d = 1; _d < shape.size(); ++_d) out_shape.push_back(shape[_d]);
+    Tensor output(out_shape, values.dtype(), values.device());
 
     Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
                          ? offsets : offsets.to(DType::Int32);
@@ -418,7 +458,13 @@ auto VulkanBackend::dispatchNestedToPadded(const Tensor& values, const Tensor& o
     }
     int32_t device_id = values.device().index;
     auto shape = values.shape();
-    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    // D must be the product of ALL trailing dims (shape[1:]), not just
+    // shape[1]: for rank>=3 values (e.g. [total_len,H,W]), using shape[1]
+    // alone (H) only touches H of the H*W elements per row and misindexes
+    // every row after the first. Matches CPU (product of all trailing dims)
+    // and CUDA (numel()/total_len).
+    uint32_t D = 1;
+    for (size_t _d = 1; _d < shape.size(); ++_d) D *= static_cast<uint32_t>(shape[_d]);
     uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
 
     auto* pipeline = getPipeline("nested_to_padded", device_id);
@@ -542,6 +588,25 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
     int64_t num_classes = log_probs_shape.back();
     int64_t batch_size = 1;
     for (size_t i = 0; i + 1 < log_probs_shape.size(); ++i) batch_size *= log_probs_shape[i];
+
+    // Pre-validate target labels host-side before shader dispatch. The
+    // cross_entropy*.comp shaders' sample_loss() silently returns 0.0 for an
+    // out-of-range target instead of erroring — that diverges from the
+    // CPU/CUDA/ROCm/OneAPI contract, which throws a clean, catchable error.
+    // Mirrors CPU's fused_softmax_cross_entropy_kernel validation pre-pass.
+    if (batch_size > 0) {
+        Tensor t_host = targets.is_contiguous() ? targets : targets.contiguous();
+        t_host = t_host.to(Device::cpu());
+        const int32_t* tp = t_host.data<int32_t>();
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (tp[i] < 0 || tp[i] >= num_classes) {
+                throw std::out_of_range(
+                    "fused_softmax_cross_entropy: target index " + std::to_string(tp[i]) +
+                    " at row " + std::to_string(i) + " out of range [0, " +
+                    std::to_string(num_classes) + ")");
+            }
+        }
+    }
 
     std::vector<int64_t> out_shape;
     if (reduction == 0) { // none: one loss per sample, keeping the leading dims

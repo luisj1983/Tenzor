@@ -5,7 +5,10 @@
 // this kernel updates the trailing submatrix:
 //   1. Solve L * U_right = A_right (triangular solve for U rows)
 //   2. A_trailing -= L_below * U_right (GEMM update)
-// Each workgroup handles one 32x32 tile of the trailing matrix.
+// Each workgroup handles one 32x32 tile of the trailing matrix for one batch
+// element; the whole batch is folded into a single dispatch
+// (dispatch = {tile_count, tile_count, batch_size}), batch index from
+// gl_WorkGroupID.z — see runBlockedLU.
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0) buffer Matrix { float A[]; };
@@ -14,7 +17,6 @@ layout(push_constant) uniform PushConstants {
     uint n;          // matrix dimension
     uint col_start;  // starting column of factored panel
     uint block_size; // panel width (usually 32)
-    uint batch_idx;  // batch element
 };
 
 shared float L_tile[32][32];  // L below diagonal
@@ -27,6 +29,7 @@ void main() {
     // This workgroup updates tile at (tile_row, tile_col) in the trailing matrix
     uint tile_row = gl_WorkGroupID.x;  // row tile index
     uint tile_col = gl_WorkGroupID.y;  // col tile index
+    uint batch_idx = gl_WorkGroupID.z; // batch element
 
     uint trail_start = col_start + block_size;
     uint trail_rows = n - trail_start;

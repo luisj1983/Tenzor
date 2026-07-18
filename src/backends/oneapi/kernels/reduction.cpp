@@ -1018,6 +1018,12 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue&
         const int64_t dim_size = shape[dim];
         const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
 
+        // max has no identity element: matches CPU/CUDA/ROCm, which throw
+        // instead of silently returning -infinity for every output element.
+        if (dim_size == 0 && outer_size * inner_size > 0) {
+            throw std::invalid_argument("max: cannot reduce over a zero-size dimension");
+        }
+
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
             float* out_ptr = get_data_ptr<float>(output);
@@ -1251,6 +1257,12 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue&
         const int64_t outer_size = std::accumulate(shape.begin(), shape.begin() + dim, 1LL, std::multiplies<>());
         const int64_t dim_size = shape[dim];
         const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
+
+        // min has no identity element: matches CPU/CUDA/ROCm, which throw
+        // instead of silently returning +infinity for every output element.
+        if (dim_size == 0 && outer_size * inner_size > 0) {
+            throw std::invalid_argument("min: cannot reduce over a zero-size dimension");
+        }
 
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
@@ -1670,6 +1682,13 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
         inner_size *= shape[i];
     }
 
+    // argmax has no identity element: matches CPU/CUDA/ROCm, which throw
+    // instead of silently returning index 0 (never a valid index into an
+    // empty slice) for every output element.
+    if (dim_size == 0 && outer_size * inner_size > 0) {
+        throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+    }
+
     int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
     if (input.dtype() == DType::Float32) {
@@ -1863,6 +1882,13 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
         inner_size *= shape[i];
+    }
+
+    // argmin has no identity element: matches CPU/CUDA/ROCm, which throw
+    // instead of silently returning index 0 (never a valid index into an
+    // empty slice) for every output element.
+    if (dim_size == 0 && outer_size * inner_size > 0) {
+        throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
     }
 
     int64_t* out_ptr = get_data_ptr<int64_t>(output);
@@ -3032,19 +3058,35 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queu
     auto shape = in_cont.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     int64_t ndim = static_cast<int64_t>(shape.size());
-    if (dim < 0) dim += ndim;
-    if (dim < 0 || dim >= ndim) {
-        throw std::runtime_error("Dimension " + std::to_string(dim) +
-            " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+
+    // INT64_MIN indicates full reduction (reduce over every element, no dim
+    // specified) -- same sentinel convention as sum_kernel above. Treat the
+    // flattened, contiguous buffer as a single virtual dimension of size
+    // numel() so the existing per-dtype loops below (already generic over
+    // outer/inner/dim_size, and already correct for dim_size==0 since the
+    // max-accumulator starts at -infinity) handle both the general full-
+    // reduction case and the empty-tensor case (logsumexp of empty set is
+    // -inf) without any new kernels, matching CPU/Vulkan's behavior instead
+    // of throwing "Dimension out of range".
+    bool is_full_reduction = (dim == INT64_MIN);
+    int64_t dim_size = 0;
+    int64_t outer = 1, inner = 1;
+    if (is_full_reduction) {
+        dim_size = in_cont.numel();
+    } else {
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+        }
+
+        dim_size = shape[dim];
+        for (int64_t i = 0; i < dim; ++i) outer *= shape[i];
+        for (int64_t i = dim + 1; i < ndim; ++i) inner *= shape[i];
     }
 
-    int64_t dim_size = shape[dim];
-    int64_t outer = 1, inner = 1;
-    for (int64_t i = 0; i < dim; ++i) outer *= shape[i];
-    for (int64_t i = dim + 1; i < ndim; ++i) inner *= shape[i];
-
     // Output shape with reduced dimension
-    auto out_shape = compute_reduction_shape(shape_vec, dim, keepdim);
+    auto out_shape = compute_reduction_shape(shape_vec, is_full_reduction ? -1 : dim, keepdim);
     int64_t out_numel = outer * inner;
     Tensor output(out_shape, in_cont.dtype(), in_cont.device());
 
@@ -3198,13 +3240,12 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
     const auto& input_shape = input.shape();
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    if (input.numel() == 0) {
-        throw std::runtime_error("median: cannot compute median of empty tensor");
-    }
-
     // Handle full reduction
     int64_t normalized_dim = dim;
     if (normalized_dim == INT64_MIN) {
+        if (input.numel() == 0) {
+            throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
+        }
         Tensor flat = input.contiguous().reshape({input.numel()});
         auto result = median_kernel(flat, 0, false, queue);
         if (keepdim) {
@@ -3223,6 +3264,13 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
     auto output_shape = compute_reduction_shape(shape_vec, normalized_dim, keepdim);
 
     int64_t dim_size = input_shape[normalized_dim];
+    // Matches CPU's guard exactly (std::invalid_argument, same message) --
+    // check the REDUCED dimension specifically, not input.numel()==0 (which
+    // is also true when some OTHER dimension is empty and would wrongly
+    // reject an otherwise-valid reduction).
+    if (dim_size == 0) {
+        throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
+    }
     int64_t mid = (dim_size - 1) / 2;
 
     int64_t outer_size = 1;
@@ -3345,12 +3393,11 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
     const auto& input_shape = input.shape();
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    if (input.numel() == 0) {
-        throw std::runtime_error("mode: cannot compute mode of empty tensor");
-    }
-
     int64_t normalized_dim = dim;
     if (normalized_dim == INT64_MIN) {
+        if (input.numel() == 0) {
+            throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
+        }
         Tensor flat = input.contiguous().reshape({input.numel()});
         auto result = mode_kernel(flat, 0, false, queue);
         if (keepdim) {
@@ -3369,6 +3416,13 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
     auto output_shape = compute_reduction_shape(shape_vec, normalized_dim, keepdim);
 
     int64_t dim_size = input_shape[normalized_dim];
+    // Matches CPU's guard exactly (std::invalid_argument, same message) --
+    // check the REDUCED dimension specifically, not input.numel()==0 (which
+    // is also true when some OTHER dimension is empty and would wrongly
+    // reject an otherwise-valid reduction).
+    if (dim_size == 0) {
+        throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
+    }
     int64_t outer_size = 1;
     for (int64_t d = 0; d < ndim; ++d) {
         if (d != normalized_dim) outer_size *= input_shape[d];
@@ -3431,14 +3485,28 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             for (int64_t i = 0; i < dim_size; ++i) {
                 T val_i = in_ptr[base_offset + i * d_strides[normalized_dim]];
                 int64_t count = 0;
+                // NaN-aware equality: plain `==` is always false for NaN,
+                // even against itself, so a NaN candidate would count 0
+                // occurrences of its own value instead of being counted
+                // like any other repeated value.
+                bool val_i_nan = (val_i != val_i);
                 for (int64_t j = 0; j < dim_size; ++j) {
-                    if (in_ptr[base_offset + j * d_strides[normalized_dim]] == val_i) {
+                    T val_j = in_ptr[base_offset + j * d_strides[normalized_dim]];
+                    bool eq = val_i_nan ? (val_j != val_j) : (val_j == val_i);
+                    if (eq) {
                         count++;
                     }
                 }
+                // NaN-aware equality for the tie-break too: plain `==` is
+                // always false for NaN==NaN, so two same-count NaN runs would
+                // never be recognized as "the same modal value", leaving
+                // best_idx stuck at the FIRST NaN's index instead of
+                // advancing to the correct highest/run-end index.
+                bool best_val_nan = (best_val != best_val);
+                bool val_i_eq_best = val_i_nan ? best_val_nan : (val_i == best_val);
                 bool better = (count > best_count)
                     || (count == best_count && val_i < best_val)
-                    || (count == best_count && val_i == best_val && i > best_idx);
+                    || (count == best_count && val_i_eq_best && i > best_idx);
                 if (better) {
                     best_count = count;
                     best_val = val_i;
@@ -3473,12 +3541,18 @@ class CountNonzeroKernelFloat32;
 class CountNonzeroKernelFloat64;
 class CountNonzeroKernelFloat16;
 class CountNonzeroKernelBFloat16;
+class CountNonzeroKernelInt8;
+class CountNonzeroKernelInt16;
+class CountNonzeroKernelUInt8;
 class CountNonzeroKernelInt32;
 class CountNonzeroKernelInt64;
 class CountNonzeroDimFloat32;
 class CountNonzeroDimFloat64;
 class CountNonzeroDimFloat16;
 class CountNonzeroDimBFloat16;
+class CountNonzeroDimInt8;
+class CountNonzeroDimInt16;
+class CountNonzeroDimUInt8;
 class CountNonzeroDimInt32;
 class CountNonzeroDimInt64;
 
@@ -3527,10 +3601,15 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) 
             case DType::BFloat16: launch_full_bf16(); break;
             case DType::Int32: launch_full.template operator()<int32_t, CountNonzeroKernelInt32>(); break;
             case DType::Int64: launch_full.template operator()<int64_t, CountNonzeroKernelInt64>(); break;
+            case DType::Int8:  launch_full.template operator()<int8_t, CountNonzeroKernelInt8>(); break;
+            case DType::Int16: launch_full.template operator()<int16_t, CountNonzeroKernelInt16>(); break;
+            case DType::UInt8: launch_full.template operator()<uint8_t, CountNonzeroKernelUInt8>(); break;
             default: throw std::runtime_error("count_nonzero_kernel: unsupported dtype");
         }
 
-        Tensor result({1}, DType::Int64, in_cont.device());
+        // Full reduction collapses to a true 0-dim scalar, matching CPU's
+        // convention -- not a forced rank-1 {1} shape.
+        Tensor result({}, DType::Int64, in_cont.device());
         int64_t* out_ptr = get_data_ptr<int64_t>(result);
         queue.single_task([=]() { out_ptr[0] = count_buf[0]; }).wait();
         sycl::free(count_buf, queue);
@@ -3553,7 +3632,12 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) 
     for (int64_t d = 0; d < ndim; d++) {
         if (d != norm_dim) out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, dim reduced) is a true 0-dim scalar,
+    // matching this project's general reduction-shape convention (CPU's
+    // count_nonzero_kernel dim branch, math.cpp) -- do not force a size-1
+    // dim. NOTE: CUDA's count_nonzero_dispatch (activations.cu) and ROCm's
+    // dim-specific count_nonzero (reduction.hip.cpp) have the identical
+    // push_back(1) bug but are outside this audit's file scope.
 
     Tensor result(out_shape, DType::Int64, in_cont.device());
     int64_t* out_ptr = get_data_ptr<int64_t>(result);
@@ -3613,6 +3697,9 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) 
         case DType::BFloat16: launch_dim_bf16(); break;
         case DType::Int32: launch_dim.template operator()<int32_t, CountNonzeroDimInt32>(); break;
         case DType::Int64: launch_dim.template operator()<int64_t, CountNonzeroDimInt64>(); break;
+        case DType::Int8:  launch_dim.template operator()<int8_t, CountNonzeroDimInt8>(); break;
+        case DType::Int16: launch_dim.template operator()<int16_t, CountNonzeroDimInt16>(); break;
+        case DType::UInt8: launch_dim.template operator()<uint8_t, CountNonzeroDimUInt8>(); break;
         default: throw std::runtime_error("count_nonzero_kernel: unsupported dtype");
     }
 
@@ -3912,6 +3999,14 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
     bool is_full = (dim < 0);
 
     if (is_full) {
+        if (total == 0) {
+            // Matches CPU's aminmax_kernel guard (src/backends/cpu/kernels/math.cpp)
+            // and Vulkan's (vulkan_ops_reduction.cpp): aminmax has no identity
+            // element, so reducing a totally empty tensor is an error rather than
+            // silently returning [+Inf, -Inf] (which is what the loop below would
+            // produce if allowed to run with total==0).
+            throw std::runtime_error("aminmax(): cannot compute aminmax over an empty tensor");
+        }
         Tensor min_out({1}, in_cont.dtype(), in_cont.device());
         Tensor max_out({1}, in_cont.dtype(), in_cont.device());
 
@@ -3974,6 +4069,14 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
     Tensor min_out(out_shape, in_cont.dtype(), in_cont.device());
     Tensor max_out(out_shape, in_cont.dtype(), in_cont.device());
     int64_t out_n = outer * inner;
+
+    // aminmax has no identity element, same as max/min: matches CPU/CUDA,
+    // which throw instead of reading in_ptr[base] out-of-bounds on a
+    // zero-byte allocation (numel==0 when reduce_size==0, even though out_n
+    // can still be > 0).
+    if (reduce_size == 0 && out_n > 0) {
+        throw std::invalid_argument("aminmax: cannot reduce over a zero-size dimension");
+    }
 
     if (in_cont.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(in_cont);

@@ -716,9 +716,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto dilation    = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const bool ceil_mode   = attrs.get_int(AttrKey::CeilMode, 0) != 0;
         auto [output, indices] = get_vulkan_backend()->dispatchMaxPool2d(
             inputs[0], kernel_size[0], kernel_size[1], stride[0], stride[1], padding[0], padding[1],
-            dilation[0], dilation[1]);
+            dilation[0], dilation[1], ceil_mode);
         return std::vector<Tensor>{output, indices};
     });
 
@@ -745,15 +746,22 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 0);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 0);
+        // Default of 1 (not 0) when OutputSizeH/W is truly absent, matching
+        // CPU/CUDA/ROCm/OneAPI's AdaptiveMaxPool2d registration (all default
+        // to 1). A 0 default here previously diverged: it either fed a
+        // divide-by-zero into the adaptive-window index math or silently
+        // produced a degenerate 0-sized output instead of the 1x1 global-pool
+        // result every other backend returns for an unset output size.
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         auto [output, indices] = get_vulkan_backend()->dispatchAdaptiveMaxPool2d(inputs[0], out_h, out_w);
         return std::vector<Tensor>{output, indices};
     });
 
     table.register_kernel(OpId::AdaptiveAvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 0);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 0);
+        // See AdaptiveMaxPool2d above: default 1, matching every other backend.
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchAdaptiveAvgPool2d(inputs[0], out_h, out_w)};
     });
 
@@ -789,13 +797,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_size = attrs.get_int(AttrKey::OutputSize, 0);
+        // Default 1 when OutputSize is absent, matching CPU/CUDA/ROCm/OneAPI
+        // (see AdaptiveMaxPool2d above for why a 0 default is wrong).
+        int64_t out_size = attrs.get_int(AttrKey::OutputSize, 1);
         auto [output, indices] = get_vulkan_backend()->dispatchAdaptiveMaxPool1d(inputs[0], out_size);
         return std::vector<Tensor>{output, indices};
     });
 
     table.register_kernel(OpId::AdaptiveAvgPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_size = attrs.get_int(AttrKey::OutputSize, 0);
+        // Default 1 when OutputSize is absent, matching CPU/CUDA/ROCm/OneAPI.
+        int64_t out_size = attrs.get_int(AttrKey::OutputSize, 1);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchAdaptiveAvgPool1d(inputs[0], out_size)};
     });
 
@@ -843,17 +854,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 0);
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 0);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 0);
+        // Default 1 when OutputSizeD/H/W is absent, matching CPU/CUDA/ROCm/OneAPI.
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         auto [output, indices] = get_vulkan_backend()->dispatchAdaptiveMaxPool3d(inputs[0], out_d, out_h, out_w);
         return std::vector<Tensor>{output, indices};
     });
 
     table.register_kernel(OpId::AdaptiveAvgPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 0);
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 0);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 0);
+        // Default 1 when OutputSizeD/H/W is absent, matching CPU/CUDA/ROCm/OneAPI.
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchAdaptiveAvgPool3d(inputs[0], out_d, out_h, out_w)};
     });
 
@@ -931,7 +944,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto input_4d = inputs[1].unsqueeze(2);
         auto weight_4d = inputs[2].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        // Conv2dBackwardInput never sees the actual input tensor -- it reads
+        // its target shape from AttrKey::InputShape. conv1d_to_conv2d_attrs()
+        // only projects Stride/Padding/Dilation and leaves InputShape
+        // untouched, so a 1-D caller's (3-D, or absent) InputShape is not
+        // valid here; without setting the real 4-D shape the nested kernel
+        // reads an empty/garbage list. Previously unreachable (nn::Conv1d
+        // never dispatched this OpId) -- derive the 4-D shape locally from
+        // the already-unsqueezed input tensor, mirroring what CPU's
+        // Conv1dBackwardInput kernel already does via inputs[1].shape().
+        conv2d_attrs.set(AttrKey::InputShape,
+            ::tenzor::backend::attrs::shape_to_attr_string(input_4d.shape()));
         auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, conv2d_attrs);
         return {result[0].squeeze(2)};
     });
@@ -941,7 +965,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto input_4d = inputs[1].unsqueeze(2);
         auto weight_4d = inputs[2].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        // Same fix as Conv1dBackwardInput above, for WeightShape.
+        conv2d_attrs.set(AttrKey::WeightShape,
+            ::tenzor::backend::attrs::shape_to_attr_string(weight_4d.shape()));
         auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, conv2d_attrs);
         return {result[0].squeeze(2)};
     });
@@ -1987,16 +2014,61 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{vk->dispatchBinaryOp("mul", erfc_val, half_val)};
     });
 
-    // LogNdtr: log(Phi(x)) -- composite from Ndtr + log
+    // LogNdtr: log(Phi(x)) -- composite from Ndtr + log, with a stable
+    // asymptotic-expansion branch for x < -5 (matching CPU's log_ndtr_kernel
+    // in src/backends/cpu/kernels/math.cpp). For x < -5, Phi(x) itself is
+    // tiny and log(0.5*erfc(-x/sqrt2)) suffers catastrophic cancellation /
+    // underflows outright to -inf (verified: at x=-15 Float32, the plain
+    // composite underflows to exactly -inf while CPU's asymptotic branch
+    // gives -116.13; at x=-20/-30 it's -inf vs CPU's -203.9/-454.3). The
+    // asymptotic series
+    //   log(Phi(x)) ~= -x^2/2 - log(-x) - 0.5*log(2*pi)
+    //                  + log(1 - 1/x^2 + 3/x^4 - 15/x^6)
+    // stays accurate deep into the tail. Both branches are computed
+    // unconditionally (branch-free, GPU-friendly) and blended per-element
+    // with a `where` on the x < -5 mask -- evaluating log(-x) for x >= 0
+    // just yields NaN in the discarded lane, which `where` drops.
     table.register_kernel(OpId::LogNdtr, [](std::span<const Tensor> inputs, const OpAttributes&) {
         auto* vk = get_vulkan_backend();
-        Tensor neg_x = vk->dispatchUnaryOp("neg", inputs[0]);
-        Tensor sqrt1_2 = vk->dispatchFull({1}, 0.7071067811865476f, inputs[0].dtype());
+        const Tensor& x = inputs[0];
+        DType dt = x.dtype();
+
+        // Normal-region branch: log(0.5 * erfc(-x/sqrt(2))).
+        Tensor neg_x = vk->dispatchUnaryOp("neg", x);
+        Tensor sqrt1_2 = vk->dispatchFull({1}, 0.7071067811865476, dt);
         Tensor scaled = vk->dispatchBinaryOp("mul", neg_x, sqrt1_2);
         Tensor erfc_val = vk->dispatchUnaryOp("erfc", scaled);
-        Tensor half_val = vk->dispatchFull({1}, 0.5f, inputs[0].dtype());
+        Tensor half_val = vk->dispatchFull({1}, 0.5, dt);
         Tensor ndtr_val = vk->dispatchBinaryOp("mul", erfc_val, half_val);
-        return std::vector<Tensor>{vk->dispatchUnaryOp("log", ndtr_val)};
+        Tensor normal_log = vk->dispatchUnaryOp("log", ndtr_val);
+
+        // Asymptotic branch: -x^2/2 - log(-x) - 0.5*log(2*pi) + log(series),
+        // series = 1 - 1/x^2 + 3/x^4 - 15/x^6.
+        Tensor x2 = vk->dispatchBinaryOp("mul", x, x);
+        Tensor inv_x2 = vk->dispatchUnaryOp("reciprocal", x2);
+        Tensor c1 = vk->dispatchFull({1}, 1.0, dt);
+        Tensor c3 = vk->dispatchFull({1}, 3.0, dt);
+        Tensor c15 = vk->dispatchFull({1}, 15.0, dt);
+        Tensor t1 = vk->dispatchBinaryOp("mul", inv_x2, c15);   // 15/x^2
+        Tensor t2 = vk->dispatchBinaryOp("sub", c3, t1);        // 3 - 15/x^2
+        Tensor t3 = vk->dispatchBinaryOp("mul", inv_x2, t2);    // (3 - 15/x^2)/x^2
+        Tensor t4 = vk->dispatchBinaryOp("sub", c1, t3);        // 1 - (...)
+        Tensor t5 = vk->dispatchBinaryOp("mul", inv_x2, t4);    // (1 - (...))/x^2
+        Tensor series = vk->dispatchBinaryOp("sub", c1, t5);    // 1 - (...)
+        Tensor log_series = vk->dispatchUnaryOp("log", series);
+
+        Tensor neg_half = vk->dispatchFull({1}, -0.5, dt);
+        Tensor neg_half_x2 = vk->dispatchBinaryOp("mul", x2, neg_half);  // -x^2/2
+        Tensor log_neg_x = vk->dispatchUnaryOp("log", neg_x);            // log(-x)
+        Tensor half_log2pi = vk->dispatchFull({1}, 0.9189385332046727, dt);
+        Tensor a1 = vk->dispatchBinaryOp("sub", neg_half_x2, log_neg_x);
+        Tensor a2 = vk->dispatchBinaryOp("sub", a1, half_log2pi);
+        Tensor asymptotic = vk->dispatchBinaryOp("add", a2, log_series);
+
+        // Blend: x < -5 selects the asymptotic branch.
+        Tensor neg_five = vk->dispatchFull({1}, -5.0, dt);
+        Tensor mask = vk->dispatchComparisonOp("lt", x, neg_five);
+        return std::vector<Tensor>{vk->dispatchWhere(mask, asymptotic, normal_log)};
     });
 
     // Multigammaln: sum_{j=0}^{d-1} lgamma(x - j/2) + d*(d-1)/4 * log(pi) -- composite
@@ -2235,13 +2307,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Boolean Reduction Operations
     // ========================================================================
     table.register_kernel(OpId::Any, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        // dispatchBooleanReduction treats ONLY dim==INT64_MIN as "reduce all"
+        // (any negative-but-not-INT64_MIN value is a real "count from the end"
+        // dim index). The op layer never sets AttrKey::Dim when the user calls
+        // any(t) with no dim, so the default here MUST be INT64_MIN, not -1 --
+        // a -1 default silently turned "reduce everything" into "reduce only
+        // the last dimension" (shape (2,3) any() returned shape (2,), not a
+        // scalar).
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchBooleanReduction("any", inputs[0], dim, keepdim)};
     });
 
     table.register_kernel(OpId::All, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        // See OpId::Any above: must default to INT64_MIN, not -1.
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{get_vulkan_backend()->dispatchBooleanReduction("all", inputs[0], dim, keepdim)};
     });
@@ -2360,24 +2440,46 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         // d/dlogits of softmax-CE = softmax(logits) - one_hot(target), scaled
         // by 1/N for mean reduction. Previously only {loss} was returned, so
         // any consumer expecting {loss, grad_logits} broke.
-        if (attrs.get_bool(AttrKey::ComputeGrad, false)) {
+        //
+        // Default is `true`: docs/internals/attention-contract.md:158 and
+        // CPU/CUDA/ROCm all default ComputeGrad to true, so an unset attr
+        // must return {loss, grad_logits} here too (output-arity parity),
+        // not {loss} alone.
+        if (attrs.get_bool(AttrKey::ComputeGrad, true)) {
             const DType in_dt = inputs[0].dtype();
-            Tensor lp32 = (log_probs.dtype() == DType::Float32)
-                              ? log_probs : vk->dispatchCast(log_probs, DType::Float32);
-            Tensor probs = vk->dispatchUnaryOp("exp", lp32);           // softmax, Float32
+            // Compute at a precision-preserving dtype instead of
+            // unconditionally narrowing to Float32 (the reported bug): a
+            // Float64 `logits` input previously had its gradient silently
+            // computed -- and rounded -- at Float32 precision. Float64 now
+            // gets a genuine native path: dispatchUnaryOp/dispatchBinaryOp/
+            // dispatchFull all already have Float64 shader variants
+            // (math_f64.comp) used elsewhere in this file. Float16/BFloat16
+            // keep the existing Float32-accumulation behavior (not part of
+            // this finding, and consistent with the widen-narrow pattern
+            // used for those dtypes throughout the codebase).
+            DType compute_dt = (in_dt == DType::Float64) ? DType::Float64 : DType::Float32;
+            Tensor lp = (log_probs.dtype() == compute_dt)
+                            ? log_probs : vk->dispatchCast(log_probs, compute_dt);
+            Tensor probs = vk->dispatchUnaryOp("exp", lp);              // softmax
             int64_t C = inputs[0].shape().back();
-            Tensor oh = vk->dispatchOneHot(inputs[1], C);              // [numel, C] Float32
+            // `dispatchOneHot` is hardcoded to emit Float32 (there is no
+            // dtype-propagating one_hot variant -- see
+            // vulkan_ops_vision.cpp:dispatchOneHot), but that is harmless: a
+            // one-hot tensor only ever holds exact 0.0/1.0 values, which
+            // widen to Float64 losslessly.
+            Tensor oh = vk->dispatchOneHot(inputs[1], C);               // [numel, C] Float32 (exact 0/1)
             std::vector<int64_t> logit_shape(inputs[0].shape().begin(), inputs[0].shape().end());
-            oh = vk->dispatchReshape(oh, logit_shape);                 // match logits rank
+            oh = vk->dispatchReshape(oh, logit_shape);                  // match logits rank
+            if (oh.dtype() != compute_dt) oh = vk->dispatchCast(oh, compute_dt);
             Tensor grad = vk->dispatchBinaryOp("sub", probs, oh);
             if (reduction == 1) {  // mean: average over the target entries
                 double n = static_cast<double>(inputs[1].numel());
                 if (n > 0.0) {
-                    Tensor scale = vk->dispatchFull({1}, 1.0 / n, DType::Float32);
+                    Tensor scale = vk->dispatchFull({1}, 1.0 / n, compute_dt);
                     grad = vk->dispatchBinaryOp("mul", grad, scale);
                 }
             }
-            if (in_dt != DType::Float32) grad = vk->dispatchCast(grad, in_dt);
+            if (grad.dtype() != in_dt) grad = vk->dispatchCast(grad, in_dt);
             return std::vector<Tensor>{loss, grad};
         }
         return std::vector<Tensor>{loss};
@@ -2512,10 +2614,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto output = vk->dispatchBatchNorm2dForward(inputs[0], batch_mean, batch_var,
                                                       &inputs[3], &inputs[4], epsilon);
 
-        // Update running stats: running = (1 - momentum) * running + momentum * batch
+        // Update running stats: running = (1 - momentum) * running + momentum * batch.
+        // Running variance uses the UNBIASED (Bessel-corrected) estimate to
+        // match PyTorch / the nn-layer path and every other backend (CPU,
+        // CUDA, ROCm, OneAPI all apply this same N/(N-1) correction here);
+        // normalization above uses the biased batch_var directly, unaffected.
+        auto in_shape = inputs[0].shape();
+        int64_t bn_count = in_shape[0] * in_shape[2] * in_shape[3];
+        Tensor running_var_in = batch_var;
+        if (bn_count >= 2) {
+            running_var_in = tenzor::mul(
+                batch_var, static_cast<double>(bn_count) / static_cast<double>(bn_count - 1));
+        }
         OpAttributes update_attrs;
         update_attrs.set(AttrKey::Momentum, static_cast<double>(momentum));
-        std::vector<Tensor> update_inputs = {inputs[1], inputs[2], batch_mean, batch_var};
+        std::vector<Tensor> update_inputs = {inputs[1], inputs[2], batch_mean, running_var_in};
         auto updated = vk->dispatchBatchNorm2dUpdateRunningStats(update_inputs, update_attrs);
 
         // Return: [output, updated_running_mean, updated_running_var, batch_mean, batch_var]
@@ -2908,7 +3021,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             // softmax → Philox-mask → matmul path, which still keeps every
             // operation on-device via the `philox_dropout_mask.comp`
             // shader. The fused fast path is dropout-free.
-            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            // Default scale is 1/sqrt(head_dim) (the standard scaled-dot-
+            // product-attention normalization), not a hardcoded 1.0 --
+            // mirrors OneAPI's dispatch (oneapi_kernel_registry.cpp), which
+            // infers head_dim from Q's trailing dimension. A caller-supplied
+            // Scale attribute still wins.
+            int64_t head_dim = Q_pre.shape().back();
+            double default_scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, default_scale));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
             float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
             bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
@@ -3411,6 +3531,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     // Sparse tensor operations (OpIds 460-464)
     table.register_kernel(OpId::SparseSpMM, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // M and K are required; default-0 silently produced wrong shapes.
+        // Matches CPU's identical guard (cpu_kernel_registry.cpp).
+        if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+            throw std::runtime_error(
+                "SparseSpMM: required attributes M and K not provided. "
+                "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                "in the OpAttributes before dispatching.");
+        }
         int64_t M = attrs.get_int(AttrKey::M, 0);
         int64_t K = attrs.get_int(AttrKey::K, 0);
         // Infer N from the dense operand's trailing dim if the caller did not
@@ -3424,12 +3552,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::SparseSpMV, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // M and K are required; default-0 silently produced wrong shapes.
+        if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+            throw std::runtime_error(
+                "SparseSpMV: required attributes M and K not provided. "
+                "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                "in the OpAttributes before dispatching.");
+        }
         int64_t M = attrs.get_int(AttrKey::M, 0);
         int64_t K = attrs.get_int(AttrKey::K, 0);
         return {get_vulkan_backend()->dispatchSparseSpMV(inputs[0], inputs[1], inputs[2], inputs[3], M, K)};
     });
 
     table.register_kernel(OpId::SparseToDense, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // M and K are required; default-0 silently produced wrong shapes.
+        if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+            throw std::runtime_error(
+                "SparseToDense: required attributes M and K not provided.");
+        }
         int64_t M = attrs.get_int(AttrKey::M, 0);
         int64_t K = attrs.get_int(AttrKey::K, 0);
         DType dtype = inputs[2].dtype();  // values tensor dtype
@@ -3437,6 +3577,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::SparseAdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // M and K are required; default-0 silently produced wrong shapes.
+        if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+            throw std::runtime_error(
+                "SparseAdd: required attributes M and K not provided. "
+                "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                "in the OpAttributes before dispatching.");
+        }
         int64_t M = attrs.get_int(AttrKey::M, 0);
         int64_t K = attrs.get_int(AttrKey::K, 0);
         return {get_vulkan_backend()->dispatchSparseAdd(inputs[0], inputs[1], inputs[2], inputs[3], M, K)};
@@ -3807,27 +3954,32 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchNanToNum(inputs[0], nan_val, posinf_val, neginf_val)};
     });
 
-    // Bitwise ops on Vulkan: SPIR-V shaders are int32-only (AND/OR/XOR/NOT/
-    // shifts). For Int8/Int16/Int64 inputs we promote to Int32 around the
-    // shader call. Bit-preservation guarantees:
+    // Bitwise ops on Vulkan: SPIR-V shaders are int32-only for AND/OR/XOR/NOT/
+    // shifts on Int8/Int16 inputs, which we promote to Int32 around the
+    // shader call. Int64 inputs instead use dedicated native int64 shaders
+    // (bitwise_and_i64.comp / bitwise_or_i64.comp / bitwise_xor_i64.comp /
+    // bitwise_left_shift_i64.comp / bitwise_right_shift_i64.comp /
+    // bitwise_broadcast_i64.comp, selected inside dispatchBitwiseBinaryOp),
+    // so the high 32 bits are never lost. Bit-preservation guarantees for the
+    // remaining Int32-promote path:
     //   - AND/OR/XOR/NOT: bit patterns are preserved through sign-extension
     //     and narrowing for any width whose values fit in Int32.
     //   - Shifts: C++ promotes narrow integer operands to int before shifting
     //     anyway, so the cast-promote-cast pattern matches native semantics
     //     when the shift count is < 32 and the value fits in Int32.
-    //   - Int64 values outside [-2^31, 2^31) would lose information through
-    //     this path; until a dedicated int64 shader is added, callers passing
-    //     such values will get truncated bits in the high word.
     //
-    // The narrow-back step (Int32 → original dtype) goes through CPU because
-    // Vulkan's cast_f32_i8 / cast_f32_i16 shaders saturate to the target
-    // range while PyTorch/numpy/CPU semantics is modular truncation. The
-    // narrow-back goes through `dispatchCastTruncateInt32`, which uses
-    // dedicated truncating shaders (cast_i32_i8_truncate / cast_i32_i16 /
-    // cast_i32_bool / cast_i32_i64) — entirely on-device, no CPU roundtrip.
+    // The narrow-back step (Int32 → original dtype) goes explicitly through
+    // `dispatchCastTruncateInt32`, which uses dedicated truncating shaders
+    // (cast_i32_i8_truncate / cast_i32_i16 / cast_i32_bool / cast_i32_i64) —
+    // entirely on-device, no CPU roundtrip and no Float32 intermediate (which
+    // would lose precision for |value| > 2^24 even now that cast_f32_i8 /
+    // cast_f32_u8 wrap instead of saturating). dispatchCast's generic
+    // OpId::Cast path now also routes plain integer-to-integer narrowing
+    // casts through this same truncation, so this explicit call is
+    // belt-and-suspenders rather than strictly required.
     table.register_kernel(OpId::BitwiseAnd, [](std::span<const Tensor> inputs, const OpAttributes&) {
         DType d = inputs[0].dtype();
-        if (d == DType::Int32) {
+        if (d == DType::Int32 || d == DType::Int64) {
             return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_and", inputs[0], inputs[1])};
         }
         Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
@@ -3836,7 +3988,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::BitwiseOr, [](std::span<const Tensor> inputs, const OpAttributes&) {
         DType d = inputs[0].dtype();
-        if (d == DType::Int32) {
+        if (d == DType::Int32 || d == DType::Int64) {
             return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_or", inputs[0], inputs[1])};
         }
         Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
@@ -3845,7 +3997,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes&) {
         DType d = inputs[0].dtype();
-        if (d == DType::Int32) {
+        if (d == DType::Int32 || d == DType::Int64) {
             return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_xor", inputs[0], inputs[1])};
         }
         Tensor a32 = inputs[0].to(DType::Int32), b32 = inputs[1].to(DType::Int32);
@@ -3854,7 +4006,20 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::BitwiseNot, [](std::span<const Tensor> inputs, const OpAttributes&) {
         const Tensor& in = inputs[0];
-        if (in.dtype() == DType::Int32) {
+        if (in.dtype() == DType::Bool) {
+            // Bool must be a genuine logical negation, NOT the Int32-promote
+            // path below: true/false promote to Int32 1/0, bitwise_not.comp
+            // computes ~1=-2 / ~0=-1 (both nonzero), and cast_i32_bool's
+            // `(x != 0)` test then maps BOTH back to `true` -- every Bool
+            // input silently became `true`. dispatchLogicalOp's "logical"
+            // shader does a real `!val_a`, matching CPU's `!i_d[i]`.
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchLogicalOp("logical_not", in, in)};
+        }
+        if (in.dtype() == DType::Int32 || in.dtype() == DType::Int64) {
+            // Int64 has a genuine native shader path (math_i64.comp op 52
+            // does `~val_a` on a real int64_t buffer via the
+            // GL_EXT_shader_explicit_arithmetic_types_int64 extension) --
+            // route directly instead of lossily narrowing through Int32.
             return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("bitwise_not", in)};
         }
         Tensor in32 = in.to(DType::Int32);
@@ -3883,9 +4048,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchLogSigmoidBackward(inputs[0], inputs[1])};
     });
 
-    // Native Vulkan CountNonzero
-    table.register_single_output_kernel(OpId::CountNonzero, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-        return get_vulkan_backend()->dispatchCountNonzero(inputs[0]);
+    // Native Vulkan CountNonzero. AttrKey::Dim was previously ignored entirely
+    // -- count_nonzero(t, dim=...) silently did a full reduction on Vulkan
+    // instead of a per-dim one, unlike CPU/CUDA/ROCm/OneAPI.
+    table.register_single_output_kernel(OpId::CountNonzero, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        if (dim == INT64_MIN) {
+            return get_vulkan_backend()->dispatchCountNonzero(inputs[0]);
+        }
+        return get_vulkan_backend()->dispatchCountNonzero(inputs[0], dim, /*keepdim=*/false);
     });
 
     // Native Vulkan Nansum / Nanmean.
@@ -3972,7 +4143,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Native Vulkan IndexFill
     table.register_single_output_kernel(OpId::IndexFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        // Keep the fill value as double at the registry boundary, matching
+        // CPU/ROCm's extraction (they narrow only at the point the target
+        // dtype's precision actually requires it). `dispatchIndexFill` takes
+        // `double value` and only narrows to float for the Float32 shader
+        // path; Float64 self tensors dispatch the native index_fill_f64.comp
+        // shader instead, so no precision is lost at this boundary.
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         return get_vulkan_backend()->dispatchIndexFill(inputs[0], dim, inputs[1], value);
     });
 
@@ -4141,14 +4318,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                                                  static_cast<int64_t>(indices.size()));
         });
 
-    // Bitwise shift ops: native Vulkan dispatch via standalone int32 shaders.
-    // Same Int32-promote pattern as the AND/OR/XOR registrations above; the
-    // narrow-back uses dispatchCastTruncateInt32 to preserve the bit pattern
-    // (cast_f32_iX would saturate). All compute stays on-device.
+    // Bitwise shift ops: native Vulkan dispatch via standalone int32 shaders,
+    // plus dedicated int64 shaders (bitwise_left_shift_i64.comp /
+    // bitwise_right_shift_i64.comp) for Int64 so the high 32 bits survive.
+    // Same Int32-promote pattern as the AND/OR/XOR registrations above for
+    // Int8/Int16/Bool; the narrow-back uses dispatchCastTruncateInt32 to
+    // preserve the bit pattern (cast_f32_iX would saturate). All compute
+    // stays on-device.
     table.register_kernel(OpId::BitwiseLeftShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
         const Tensor& a = inputs[0];
         const Tensor& b = inputs[1];
-        if (a.dtype() == DType::Int32) {
+        if (a.dtype() == DType::Int32 || a.dtype() == DType::Int64) {
             return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_left_shift", a, b)};
         }
         Tensor a32 = a.to(DType::Int32), b32 = b.to(DType::Int32);
@@ -4158,7 +4338,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::BitwiseRightShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
         const Tensor& a = inputs[0];
         const Tensor& b = inputs[1];
-        if (a.dtype() == DType::Int32) {
+        if (a.dtype() == DType::Int32 || a.dtype() == DType::Int64) {
             return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_right_shift", a, b)};
         }
         Tensor a32 = a.to(DType::Int32), b32 = b.to(DType::Int32);
@@ -4320,6 +4500,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         });
 
     table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Only the flattened form is implemented (matches CPU/CUDA); a
+        // dim-scoped request would silently flatten and give a shape/result
+        // contradicting the dim-scoped API, so reject it loudly instead.
+        if (attrs.has(AttrKey::Dim)) {
+            throw std::runtime_error(
+                "unique_consecutive: dim argument is not supported on the Vulkan "
+                "backend (only the flattened form is implemented); omit dim to flatten.");
+        }
         bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);
         auto [unique_vals, inverse, counts] = get_vulkan_backend()->dispatchUniqueConsecutive(
             inputs[0], return_inverse);

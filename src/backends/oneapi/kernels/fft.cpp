@@ -936,11 +936,27 @@ auto irfft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
 
-    // Accept real (Float32/Float64) input by promoting to the matching
-    // complex dtype with zero imaginary part — matches the CPU irfft kernel
-    // contract. The top-level `tenzor::fft::irfft` does not promote, so the
-    // backend has to.
-    if (input.dtype() == DType::Float32) {
+    // Accept real (Float32/Float64/Float16/BFloat16) input by promoting to
+    // the matching complex dtype with zero imaginary part — matches the CPU
+    // irfft kernel contract (fft.cpp audit item F.10) and this same file's
+    // own non-oneMKL native-SYCL fallback (see the other irfft_kernel below,
+    // guarded by !TENZOR_HAS_ONEMKL). Float16/BFloat16 have no native oneMKL
+    // DFT precision, so widen on-device to Float32 first, exactly like the
+    // fallback does. Without this branch, a half-precision real tensor fell
+    // through to the dtype-check below and threw "expected real or complex
+    // input" only when built with oneMKL — a build-configuration-dependent
+    // behavioral divergence for the same op/dtype. The top-level
+    // `tenzor::fft::irfft` does not promote, so the backend has to.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        int64_t numel = input.numel();
+        DType orig_dtype = input.dtype();
+        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                         DType::Float32, input.device());
+        device_upcast_to_f32(input.data_ptr(),
+                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
+                             numel, orig_dtype, queue);
+        return irfft_kernel(f32_input.to(DType::Complex64), dim, n, norm, queue);
+    } else if (input.dtype() == DType::Float32) {
         return irfft_kernel(input.to(DType::Complex64), dim, n, norm, queue);
     } else if (input.dtype() == DType::Float64) {
         return irfft_kernel(input.to(DType::Complex128), dim, n, norm, queue);
@@ -1448,7 +1464,12 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
         a_buf[idx[0]] *= inv_M;
     }).wait();
 
-    // Step 8: result[b,k,inner] = a[s][k] * conj(chirp[k]) for all slices
+    // Step 8: result[b,k,inner] = a[s][k] * chirp[k] for all slices.
+    // Bluestein: X[k] = chirp[k] * (a conv b)[k] -- the extraction multiply
+    // uses the plain chirp, not its conjugate. b_buf was already built from
+    // conj(chirp) (Step 2 above), so conjugating here too cancelled that and
+    // left a spurious exp(i*2*pi*k^2/N) phase on every output bin. Matches
+    // the CUDA fix (cuda/kernels/fft.cu).
     queue.parallel_for(sycl::range<1>(N * total_slices), [=](sycl::id<1> idx) {
         int64_t global_id = idx[0];
         int64_t s = global_id / N;
@@ -1459,7 +1480,7 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
         T a_re = a_buf[a_base + 2 * k];
         T a_im = a_buf[a_base + 2 * k + 1];
         T c_re = chirp[2 * k];
-        T c_im = -chirp[2 * k + 1]; // conj
+        T c_im = chirp[2 * k + 1];
         int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
         d_out[out_idx]     = a_re * c_re - a_im * c_im;
         d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
@@ -1570,7 +1591,12 @@ void bluestein_fft_complex_sycl(const T* d_in, T* d_out,
         a_buf[idx[0]] *= inv_M;
     }).wait();
 
-    // Step 8: result[b,k,inner] = a[s][k] * conj(chirp[k]) for all slices
+    // Step 8: result[b,k,inner] = a[s][k] * chirp[k] for all slices.
+    // Bluestein: X[k] = chirp[k] * (a conv b)[k] -- the extraction multiply
+    // uses the plain chirp, not its conjugate. b_buf was already built from
+    // conj(chirp) (Step 2 above), so conjugating here too cancelled that and
+    // left a spurious exp(i*2*pi*k^2/N) phase on every output bin. Matches
+    // the CUDA fix (cuda/kernels/fft.cu).
     queue.parallel_for(sycl::range<1>(N * total_slices), [=](sycl::id<1> idx) {
         int64_t global_id = idx[0];
         int64_t s = global_id / N;
@@ -1581,7 +1607,7 @@ void bluestein_fft_complex_sycl(const T* d_in, T* d_out,
         T a_re = a_buf[a_base + 2 * k];
         T a_im = a_buf[a_base + 2 * k + 1];
         T c_re = chirp[2 * k];
-        T c_im = -chirp[2 * k + 1]; // conj
+        T c_im = chirp[2 * k + 1];
         int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
         d_out[out_idx]     = a_re * c_re - a_im * c_im;
         d_out[out_idx + 1] = a_re * c_im + a_im * c_re;

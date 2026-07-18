@@ -1,0 +1,76 @@
+#version 450
+
+// Sparse triangular solve: L*X = B (lower) or U*X = B (upper) -- Complex64
+// L/U is a CSR sparse matrix (N x N), B and X are dense matrices (N x K_rhs).
+// Same single-workgroup strategy as sparse_trsm.comp: threads parallel across
+// RHS columns, rows processed in strict dependency order with a barrier()
+// between rows (see sparse_trsm.comp for why the old N-workgroup spin-wait
+// design was replaced). The host dispatches a single (1,1,1) workgroup.
+//
+// Complex64 values are stored as interleaved [re0, im0, re1, im1, ...] float
+// pairs, row-major over (N, K_rhs): element (row, c) occupies
+// B[2*(row*k_rhs+c)] / B[2*(row*k_rhs+c)+1]. Same layout as sparse_trsv_c64.
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float values[];     };  // 2*nnz
+layout(set = 0, binding = 3) readonly buffer RHS        { float B[];          };  // 2*n*k_rhs
+layout(set = 0, binding = 4) buffer Output              { float X[];          };  // 2*n*k_rhs
+// Retained for descriptor-set compatibility with the host (now unused).
+layout(set = 0, binding = 5) buffer SolvedCounter        { int solved[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint n;       // matrix dimension (N x N)
+    uint k_rhs;   // number of RHS columns
+    uint upper;   // 0 = lower triangular, 1 = upper triangular
+};
+
+void solve_row(uint row, uint tid) {
+    uint rs = uint(row_offsets[row]);
+    uint re = uint(row_offsets[row + 1u]);
+
+    // Threads partition the RHS columns. Every dependency X[col,*] was written
+    // by a previous solve_row() call and made visible by the barrier() between
+    // rows in main(), so no inter-row synchronization is needed here.
+    for (uint c = tid; c < k_rhs; c += gl_WorkGroupSize.x) {
+        float rhs_re = B[2u * (row * k_rhs + c)];
+        float rhs_im = B[2u * (row * k_rhs + c) + 1u];
+        float diag_re = 1.0;
+        float diag_im = 0.0;
+        for (uint i = rs; i < re; i++) {
+            uint col = uint(col_indices[i]);
+            float val_re = values[2u * i];
+            float val_im = values[2u * i + 1u];
+            if (col == row) {
+                diag_re = val_re;
+                diag_im = val_im;
+            } else {
+                float xc_re = X[2u * (col * k_rhs + c)];
+                float xc_im = X[2u * (col * k_rhs + c) + 1u];
+                rhs_re -= (val_re * xc_re - val_im * xc_im);
+                rhs_im -= (val_re * xc_im + val_im * xc_re);
+            }
+        }
+        float denom = diag_re * diag_re + diag_im * diag_im;
+        X[2u * (row * k_rhs + c)]      = (rhs_re * diag_re + rhs_im * diag_im) / denom;
+        X[2u * (row * k_rhs + c) + 1u] = (rhs_im * diag_re - rhs_re * diag_im) / denom;
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    if (upper == 0u) {
+        for (uint row = 0u; row < n; row++) {
+            solve_row(row, tid);
+            barrier();  // publish X[row,*] before any later row consumes it
+        }
+    } else {
+        for (uint t = 0u; t < n; t++) {
+            solve_row(n - 1u - t, tid);
+            barrier();
+        }
+    }
+}

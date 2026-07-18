@@ -9,7 +9,8 @@ namespace tenzor {
 auto VulkanBackend::dispatchMaxPool2d(const Tensor& input_orig, int64_t kernel_h, int64_t kernel_w,
                                       int64_t stride_h, int64_t stride_w,
                                       int64_t padding_h, int64_t padding_w,
-                                      int64_t dilation_h, int64_t dilation_w) -> std::pair<Tensor, Tensor> {
+                                      int64_t dilation_h, int64_t dilation_w,
+                                      bool ceil_mode) -> std::pair<Tensor, Tensor> {
     // The shader gathers input via logical N/C/H/W offsets assuming a contiguous
     // offset-0 layout; materialize first so a permuted/sliced view reads the
     // right elements (mirrors the adaptive-pool entry points).
@@ -20,8 +21,24 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input_orig, int64_t kernel_h
     int64_t in_height = input_shape[2];
     int64_t in_width = input_shape[3];
 
-    int64_t out_height = (in_height + 2*padding_h - dilation_h*(kernel_h - 1) - 1) / stride_h + 1;
-    int64_t out_width = (in_width + 2*padding_w - dilation_w*(kernel_w - 1) - 1) / stride_w + 1;
+    // Output size: floor formula matches CPU/CUDA/ROCm/OneAPI; ceil_mode
+    // (Vulkan/MPS only) rounds up but must not let the last window start
+    // entirely inside the right/bottom padding — ported from
+    // dispatchMaxPool3dForward's compute_out lambda / PyTorch's pooling
+    // output-size rule. The forward shader bounds-checks every window read
+    // itself, so it needs no changes: correctness here is entirely a
+    // function of out_height/out_width.
+    auto compute_out = [&](int64_t in, int64_t pad, int64_t dil, int64_t k, int64_t s) -> int64_t {
+        int64_t num = in + 2 * pad - dil * (k - 1) - 1;
+        if (ceil_mode) {
+            int64_t out = (num + s - 1) / s + 1;
+            if ((out - 1) * s >= in + pad) out -= 1;
+            return out;
+        }
+        return num / s + 1;
+    };
+    int64_t out_height = compute_out(in_height, padding_h, dilation_h, kernel_h, stride_h);
+    int64_t out_width = compute_out(in_width, padding_w, dilation_w, kernel_w, stride_w);
 
     int32_t device_id = input.device().index;
     // Select shader based on dtype
@@ -898,6 +915,7 @@ auto VulkanBackend::dispatchMaxPool1dForward(const Tensor& input, const OpAttrib
     int64_t stride = attrs.has(AttrKey::Stride) ? attrs.get_int(AttrKey::Stride) : kernel_size;
     int64_t padding = attrs.get_int(AttrKey::Padding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    bool ceil_mode = attrs.get_int(AttrKey::CeilMode, 0) != 0;
 
     // PyTorch-style validation. Reject configurations that could otherwise
     // produce an all-padding pooling window (shader writes -inf and index 0).
@@ -912,8 +930,21 @@ auto VulkanBackend::dispatchMaxPool1dForward(const Tensor& input, const OpAttrib
     int64_t channels = input_shape[1];
     int64_t in_length = input_shape[2];
 
+    // Output length: floor formula matches CPU/CUDA/ROCm/OneAPI; ceil_mode
+    // (Vulkan/MPS only) rounds up but must not let the last window start
+    // entirely inside the right padding — mirrors dispatchMaxPool3dForward's
+    // compute_out lambda / PyTorch's pooling output-size rule. The forward
+    // shader itself bounds-checks every window read, so it needs no changes:
+    // correctness here is entirely a function of out_length.
     int64_t effective_kernel = (kernel_size - 1) * dilation + 1;
-    int64_t out_length = (in_length + 2 * padding - effective_kernel) / stride + 1;
+    int64_t out_length;
+    if (ceil_mode) {
+        int64_t num = in_length + 2 * padding - effective_kernel;
+        out_length = (num + stride - 1) / stride + 1;
+        if ((out_length - 1) * stride >= in_length + padding) out_length -= 1;
+    } else {
+        out_length = (in_length + 2 * padding - effective_kernel) / stride + 1;
+    }
 
     int32_t device_id = input.device().index;
 

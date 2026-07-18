@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// MaskedScatter, 16-byte (Complex128 = 2x float64) variant — see masked_scatter.comp.
+// Pure data movement (no arithmetic): each element occupies 2 consecutive
+// float64_t lanes (re, im). Binds the raw storage directly so both lanes copy
+// bit-exact, mirroring masked_scatter_f64.comp's approach for Int64/UInt64
+// (which established that this shader never does arithmetic on the bound
+// values, only output[i] = input[i] or output[i] = source[i]).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input     { float64_t input_data[]; };
+layout(binding = 1) readonly buffer Mask      { uint8_t   mask_data[]; };
+layout(binding = 2) readonly buffer Source    { float64_t source_data[]; };
+layout(binding = 3) readonly buffer PrefixSum { uint      prefix_data[]; };
+layout(binding = 4) writeonly buffer Output   { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint source_len;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    if (mask_data[idx] != uint8_t(0)) {
+        uint prefix = prefix_data[idx];
+        if (prefix >= 1u && (prefix - 1u) < params.source_len) {
+            uint s = prefix - 1u;
+            output_data[2u * idx]      = source_data[2u * s];
+            output_data[2u * idx + 1u] = source_data[2u * s + 1u];
+        } else {
+            output_data[2u * idx]      = input_data[2u * idx];
+            output_data[2u * idx + 1u] = input_data[2u * idx + 1u];
+        }
+    } else {
+        output_data[2u * idx]      = input_data[2u * idx];
+        output_data[2u * idx + 1u] = input_data[2u * idx + 1u];
+    }
+}

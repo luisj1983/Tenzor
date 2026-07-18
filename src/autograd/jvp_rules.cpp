@@ -1097,6 +1097,42 @@ auto jvp_det(const DualTensor& a) -> DualTensor {
     return DualTensor(std::move(y), std::move(tangent));
 }
 
+// (sign, logabsdet) = slogdet(A). d(logabsdet) = trace(A^{-1} @ dA) — the
+// det(A)-scale-free sibling of jvp_det's dy = det(A) * trace(A^{-1} @ dA)
+// just above: SlogdetBackward::backward() (function_linalg.cpp) exploits
+// exactly this simplification (dividing the det(A) factor back out of
+// DetBackward's formula), and this reuses tenzor::linalg::inv(A) the same
+// way that backward() (and jvp_det above) already do. sign is piecewise-
+// constant almost everywhere; its tangent is structurally zero (the
+// measure-zero non-differentiable points where sign flips are not
+// specially handled, matching backward()'s own treatment).
+auto jvp_slogdet(const DualTensor& a) -> std::pair<DualTensor, DualTensor> {
+    auto [sign, logabsdet] = tenzor::linalg::slogdet(a.primal());
+    auto Ainv = tenzor::linalg::inv(a.primal());
+    auto tangent_logabsdet = tenzor::trace(tenzor::matmul(Ainv, a.tangent()));
+    auto tangent_sign = tenzor::zeros_like(sign);
+    return {DualTensor(std::move(sign), std::move(tangent_sign)),
+            DualTensor(std::move(logabsdet), std::move(tangent_logabsdet))};
+}
+
+// y = ||A||_F (Frobenius norm of the WHOLE tensor flattened to a scalar,
+// batch-agnostic — see linalg::norm() in ops/linalg.cpp; the string-ord
+// "fro" case only, per NormBackward_Linalg's class comment in
+// function.hpp). dy = <A, dA> / ||A||_F = sum(A * dA) / y. Mirrors
+// NormBackward_Linalg::backward()'s "fro" branch exactly
+// (function_linalg.cpp), including its norm==0 zero-subgradient
+// convention (matches PyTorch's zero-at-origin convention rather than the
+// unguarded Inf/NaN a raw /0 would produce).
+auto jvp_norm_fro(const DualTensor& a) -> DualTensor {
+    auto y = tenzor::linalg::norm(a.primal(), "fro");
+    auto inner = tenzor::sum(tenzor::mul(a.primal(), a.tangent()));
+    auto y_shape = std::vector<int64_t>(y.shape().begin(), y.shape().end());
+    auto eps = tenzor::full(y_shape, detail::dtype_epsilon(y.dtype()), y.dtype(), y.device());
+    auto safe_y = tenzor::where(tenzor::eq(y, tenzor::zeros_like(y)), eps, y);
+    auto tangent = tenzor::div(inner, safe_y);
+    return DualTensor(std::move(y), std::move(tangent));
+}
+
 // ---- Convolution forward (Conv{1,2,3}d / ConvTranspose{2,3}d) -------------
 
 auto jvp_conv_forward(OpId op,
@@ -1973,30 +2009,42 @@ auto jvp_fused_softmax_cross_entropy(const DualTensor& logits,
     Tensor X  = widen ? logits.primal().to(DType::Float32) : logits.primal();
     Tensor dX = widen ? logits.tangent().to(DType::Float32) : logits.tangent();
 
-    // Stable softmax across the last dim (class dim).
+    // Stable softmax across the last dim (class dim). Mirrors the primal op's
+    // rank>2 contract (fused_ops.cpp:213-293): logits is (D1,...,Dk,C) and
+    // targets is (D1,...,Dk) — the class dim is ALWAYS the last logits dim,
+    // for both the legacy rank-2 (N,C) case (k=1) and the seq2seq-style
+    // rank>2 case. Gather accordingly along the last dim instead of assuming
+    // dim=1 / a fixed (B,C) shape.
     int64_t last_dim = -1;
     auto x_max  = tenzor::max(X, last_dim, /*keepdim=*/true);
     auto shift  = tenzor::sub(X, x_max);
     auto exp_s  = tenzor::exp(shift);
     auto sum_e  = tenzor::sum(exp_s, last_dim, /*keepdim=*/true);
     auto P      = tenzor::div(exp_s, sum_e);                // softmax
-    auto lse    = tenzor::add(tenzor::log(sum_e), x_max);   // [B,1]
+    auto lse    = tenzor::add(tenzor::log(sum_e), x_max);   // (D1,...,Dk,1)
 
-    // Per-sample primal loss: logsumexp - gather(logits, target).
-    // Reshape targets to a keepdim-style [B,1] index tensor for gather.
-    int64_t B = X.shape()[0];
-    Tensor tgt_2d = tenzor::reshape(targets, std::vector<int64_t>{B, 1});
-    auto x_at_tgt = tenzor::gather(X, /*dim=*/1, tgt_2d);   // [B,1]
-    auto per_loss = tenzor::sub(lse, x_at_tgt);             // [B,1]
-    per_loss = tenzor::reshape(per_loss, std::vector<int64_t>{B});
+    // Per-sample primal loss: logsumexp - gather(logits, target) along the
+    // last (class) dim. Reshape targets (D1,...,Dk) to (D1,...,Dk,1) — the
+    // keepdim-style index shape gather() needs — instead of the old
+    // rank-2-only {B,1} reshape (which threw for rank>2 targets since
+    // targets.numel() == D1*...*Dk doesn't fit {B,1} unless k==1).
+    int64_t logit_ndim = X.ndim();
+    std::vector<int64_t> tgt_shape(targets.shape().begin(), targets.shape().end());
+    tgt_shape.push_back(1);
+    Tensor tgt_nd = tenzor::reshape(targets, tgt_shape);
+    auto x_at_tgt = tenzor::gather(X, /*dim=*/logit_ndim - 1, tgt_nd);   // (D1,...,Dk,1)
+    auto per_loss = tenzor::sub(lse, x_at_tgt);             // (D1,...,Dk,1)
+    std::vector<int64_t> sample_shape(targets.shape().begin(), targets.shape().end());
+    per_loss = tenzor::reshape(per_loss, sample_shape);
 
     // Per-sample tangent.
-    // sum_j p[j] * dx[j] over class dim → [B,1]; gather(dX, tgt) → [B,1].
+    // sum_j p[j] * dx[j] over class dim → (D1,...,Dk,1); gather(dX, tgt)
+    // along the same last dim → (D1,...,Dk,1).
     auto P_dx = tenzor::mul(P, dX);
-    auto sum_P_dx = tenzor::sum(P_dx, last_dim, /*keepdim=*/true);  // [B,1]
-    auto dx_at_tgt = tenzor::gather(dX, /*dim=*/1, tgt_2d);          // [B,1]
-    auto per_tan = tenzor::sub(sum_P_dx, dx_at_tgt);                  // [B,1]
-    per_tan = tenzor::reshape(per_tan, std::vector<int64_t>{B});
+    auto sum_P_dx = tenzor::sum(P_dx, last_dim, /*keepdim=*/true);  // (D1,...,Dk,1)
+    auto dx_at_tgt = tenzor::gather(dX, /*dim=*/logit_ndim - 1, tgt_nd);  // (D1,...,Dk,1)
+    auto per_tan = tenzor::sub(sum_P_dx, dx_at_tgt);                  // (D1,...,Dk,1)
+    per_tan = tenzor::reshape(per_tan, sample_shape);
 
     // Apply reduction.
     Tensor primal_out;
@@ -2580,6 +2628,31 @@ JvpResult jvp_adapter_cast(std::span<const Tensor> primals,
     return dual_to_result(jvp_cast(x, target));
 }
 
+// DeviceTransfer: Tensor::to(Device) is the identity on values — only
+// residency changes. There is no dispatch()-backed kernel for this
+// registry-only OpId (see its comment in op_id.hpp), so unlike
+// linear_unary_jvp() below (which re-dispatches the SAME OpId on the
+// tangent via tenzor::dispatch() — wrong here even setting aside the
+// missing kernel, since re-dispatching a per-device kernel-table entry
+// would run a same-device kernel, not a transfer) this adapter calls
+// Tensor::to() directly for both primal and tangent, landing the tangent
+// on the same target device as the (recomputed) primal output.
+JvpResult jvp_adapter_device_transfer(std::span<const Tensor> primals,
+                                      std::span<const Tensor> tangents,
+                                      const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_device_transfer: expected 1 input");
+    }
+    Device target{
+        static_cast<Device::Type>(attrs.get_int(AttrKey::DeviceType,
+                                                  static_cast<int64_t>(Device::Type::CPU))),
+        static_cast<int32_t>(attrs.get_int(AttrKey::DeviceIndex, 0))
+    };
+    auto primal_out  = primals[0].to(target);
+    auto tangent_out = tangents[0].to(target);
+    return JvpResult{std::move(primal_out), std::move(tangent_out)};
+}
+
 // ---- Audit A.4 batch 3 adapters: linalg / conv / view long-tail ----
 
 // Bmm: (a, b) -> a @ b batched. Same signature as MatMul.
@@ -2644,6 +2717,50 @@ JvpResult jvp_adapter_det(std::span<const Tensor> primals,
     }
     auto a = make_dual(primals[0], tangents[0]);
     return dual_to_result(jvp_det(a));
+}
+
+// LinalgSlogdet: forward is (sign, logabsdet) = slogdet(A), a 2-output op
+// (see OpId::LinalgSlogdet's comment in op_id.hpp for why this is NOT
+// OpId::LinalgDet). Output-slot order: {d_logabsdet, d_sign} — see the
+// long comment on SlogdetBackward::op_id() in function.hpp for why
+// logabsdet (not sign) must be index 0: SlogdetBackward's saved_tensors_
+// holds only A^{-1} (not the forward outputs), so the JVP walker's
+// data_ptr root-matching can never resolve an output slot for this node
+// and always falls through to index 0 of this result — which in practice
+// is the only output ever queried, since slogdet(Variable) (ops.cpp)
+// gives `sign` no grad_fn at all.
+JvpMultiResult jvp_adapter_slogdet(std::span<const Tensor> primals,
+                                   std::span<const Tensor> tangents,
+                                   const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_slogdet: expected 1 input (A)");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    auto [sign_dual, logabsdet_dual] = jvp_slogdet(a);
+    JvpMultiResult result;
+    result.primals  = { logabsdet_dual.primal(),  sign_dual.primal()  };
+    result.tangents = { logabsdet_dual.tangent(), sign_dual.tangent() };
+    return result;
+}
+
+// LinalgNorm, "fro" case only: see NormBackward_Linalg's class comment in
+// function.hpp for why the other 7 string-ord values ('nuc','1','-1','2',
+// '-2','inf','-inf') stay on the finite-difference fallback. Reading
+// AttrKey::NormOrd and throwing for anything but "fro" is what makes that
+// fallback happen correctly (caught by the JVP walker in functional.cpp)
+// instead of silently reusing the "fro" formula for an unsupported ord.
+JvpResult jvp_adapter_linalg_norm_fro(std::span<const Tensor> primals,
+                                      std::span<const Tensor> tangents,
+                                      const OpAttributes& attrs) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_linalg_norm_fro: expected 1 input (A)");
+    }
+    if (attrs.get_string(AttrKey::NormOrd, "fro") != "fro") {
+        throw std::runtime_error(
+            "jvp_adapter_linalg_norm_fro: only ord=='fro' is supported by this JVP rule");
+    }
+    auto a = make_dual(primals[0], tangents[0]);
+    return dual_to_result(jvp_norm_fro(a));
 }
 
 // Convolution adapters. The Tensor-level dispatch table accepts inputs of
@@ -4404,13 +4521,21 @@ JvpResult jvp_adapter_nested_log_softmax(std::span<const Tensor> primals,
     } else {
         // softmax_per_segment = exp(logP) (no recomputation through the
         // values needed; logP is the kernel's exact output).
+        // dy = dvalues - sum_per_segment(P * dvalues) — weight dvalues by P
+        // FIRST, then sum (matches jvp_log_softmax's dense sibling
+        // `sum_s_dt=sum(s*dt); tangent=dt-sum_s_dt` and the correct
+        // jvp_adapter_nested_softmax above, which weights before summing).
+        // The previous `dvalues - P*NestedSum(dvalues)` summed the
+        // UNWEIGHTED dvalues, then applied P afterward — a different (wrong)
+        // computation whenever P varies across positions within a segment.
         Tensor P = tenzor::exp(logP);
         OpAttributes rattrs;
         rattrs.set(AttrKey::Dim, dim);
         rattrs.set(AttrKey::Keepdim, true);
-        Tensor seg_sum_dv = tenzor::dispatch(OpId::NestedSum,
-            std::vector<Tensor>{dvalues, offsets}, rattrs)[0];
-        tangent = tenzor::sub(dvalues, tenzor::mul(P, seg_sum_dv));
+        Tensor P_dv = tenzor::mul(P, dvalues);
+        Tensor seg_sum = tenzor::dispatch(OpId::NestedSum,
+            std::vector<Tensor>{P_dv, offsets}, rattrs)[0];
+        tangent = tenzor::sub(dvalues, seg_sum);
     }
     return JvpResult{std::move(logP), std::move(tangent)};
 }
@@ -4509,6 +4634,35 @@ JvpResult jvp_adapter_real(std::span<const Tensor> p, std::span<const Tensor> t,
                            const OpAttributes& a) { return linear_unary_jvp(OpId::Real, p, t, a); }
 JvpResult jvp_adapter_imag(std::span<const Tensor> p, std::span<const Tensor> t,
                            const OpAttributes& a) { return linear_unary_jvp(OpId::Imag, p, t, a); }
+
+// view_as_real/view_as_complex are pure metadata reinterpretation (zero
+// dispatch() calls — see ViewAsRealBackward/ViewAsComplexBackward's class
+// comments in function.hpp) and R-linear, so the tangent gets the
+// identical reinterpretation. Unlike Conj/Real/Imag just above, these
+// can't go through linear_unary_jvp (which calls tenzor::dispatch(), and
+// there is no kernel registered anywhere for these registry-only OpIds —
+// see their comment in op_id.hpp) — call the ops-layer functions directly
+// instead.
+JvpResult jvp_adapter_view_as_real(std::span<const Tensor> primals,
+                                   std::span<const Tensor> tangents,
+                                   const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_view_as_real: expected 1 input");
+    }
+    auto primal_out  = tenzor::view_as_real(primals[0]);
+    auto tangent_out = tenzor::view_as_real(tangents[0]);
+    return JvpResult{std::move(primal_out), std::move(tangent_out)};
+}
+JvpResult jvp_adapter_view_as_complex(std::span<const Tensor> primals,
+                                      std::span<const Tensor> tangents,
+                                      const OpAttributes&) {
+    if (primals.size() != 1 || tangents.size() != 1) {
+        throw std::runtime_error("jvp_adapter_view_as_complex: expected 1 input");
+    }
+    auto primal_out  = tenzor::view_as_complex(primals[0]);
+    auto tangent_out = tenzor::view_as_complex(tangents[0]);
+    return JvpResult{std::move(primal_out), std::move(tangent_out)};
+}
 
 // Identity-up-to-memory layout ops: contiguous / clone / to_memory_format /
 // as_strided. The forward is a pure copy or stride-relabel; tangent is the
@@ -7201,12 +7355,21 @@ JvpResult jvp_adapter_renorm_s15(std::span<const Tensor> primals,
     // We approximate using: c = min(1, maxnorm/norm).
     auto ratio = tenzor::div(maxnorm_t, norm_plus);
     auto ones  = tenzor::full({}, 1.0, x.dtype(), x.device());
-    // exceeds == 1.0 where norm > maxnorm, 0 otherwise. Use sign of (norm - maxnorm).
+    // exceeds == 1.0 where norm > maxnorm, 0 otherwise (STRICT boundary,
+    // matching renorm_kernel's `if (norm_val > maxnorm)` check in
+    // src/backends/cpu/kernels/math.cpp and RenormBackward's
+    // pass-through-at-equality convention in
+    // src/autograd/function_new_ops.cpp). The previous
+    // `0.5*sign(delta)+0.5` blend evaluated to exactly 0.5 at norm==maxnorm
+    // — half of the "scaled" branch's derivative bleeding into a point both
+    // the kernel and reverse-mode treat as pure identity. clamp(sign(delta),
+    // 0, 1) instead gives a strict step: sign(delta) in {-1,0,1} maps to
+    // {0,0,1} — 0 (pass-through) at delta<=0 INCLUDING exactly delta==0,
+    // 1 (scaled) only strictly above. Mirrors jvp_clamp's own boundary
+    // technique (an inclusive sign-based mask resolving to the
+    // actually-executed branch, not a smooth blend) above.
     auto delta = tenzor::sub(norm_per_slice, maxnorm_t);
-    auto half  = tenzor::full({}, 0.5, x.dtype(), x.device());
-    auto exceeds = tenzor::add(
-        tenzor::mul(tenzor::sign(delta), half),
-        half);  // 0 if neg, 1 if pos, 0.5 at zero (boundary)
+    auto exceeds = tenzor::clamp(tenzor::sign(delta), 0.0, 1.0);
     auto c_when_exceeds = ratio;
     auto c_when_not = ones;
     // c = exceeds * ratio + (1-exceeds) * 1
@@ -7581,13 +7744,35 @@ JvpMultiResult jvp_adapter_batchnorm2d_fused_training_s15(
         dy = dy.to(orig_dtype);
     }
 
-    // outs may be {y, save_mean, save_invstd} (or other ordering); we
-    // build matching-shape tangent zeros for the auxiliary outputs.
+    // outs is {y, save_mean, save_invstd, ...}. save_mean's and
+    // save_invstd's tangents are NOT zero — they were already computed above
+    // as mean_dx (d(mean_x)) and d_rstd (d(rstd)) for the dy_norm chain rule
+    // and simply discarded here previously. Reshape them to match the
+    // kernel's actual save_mean/save_invstd shape (computed above with
+    // keepdim=true as [1,C,1,1]; the dispatched outputs may be [C]) and
+    // narrow back from the widened Float32 compute dtype, mirroring dy's own
+    // narrowing just above. Any FURTHER outputs (e.g. updated running
+    // mean/var, which need momentum-aware EMA differentiation not
+    // implemented here) remain zero.
     std::vector<Tensor> primal_outs = outs;
     std::vector<Tensor> tangent_outs;
     tangent_outs.reserve(primal_outs.size());
     tangent_outs.push_back(std::move(dy));
-    for (size_t i = 1; i < primal_outs.size(); ++i) {
+    if (primal_outs.size() > 1) {
+        std::vector<int64_t> mean_shape(primal_outs[1].shape().begin(),
+                                        primal_outs[1].shape().end());
+        Tensor d_mean = tenzor::reshape(mean_dx, mean_shape);
+        if (widen) d_mean = d_mean.to(orig_dtype);
+        tangent_outs.push_back(std::move(d_mean));
+    }
+    if (primal_outs.size() > 2) {
+        std::vector<int64_t> invstd_shape(primal_outs[2].shape().begin(),
+                                          primal_outs[2].shape().end());
+        Tensor d_invstd = tenzor::reshape(d_rstd, invstd_shape);
+        if (widen) d_invstd = d_invstd.to(orig_dtype);
+        tangent_outs.push_back(std::move(d_invstd));
+    }
+    for (size_t i = 3; i < primal_outs.size(); ++i) {
         tangent_outs.push_back(zeros_like_tensor(primal_outs[i]));
     }
     return JvpMultiResult{std::move(primal_outs), std::move(tangent_outs)};
@@ -7888,79 +8073,6 @@ JvpMultiResult jvp_adapter_sort_s15(std::span<const Tensor> primals,
     JvpMultiResult result;
     result.primals  = { values,  indices  };
     result.tangents = { std::move(dvalues), std::move(dindices) };
-    return result;
-}
-
-// ============================================================================
-// Wave-4 JVP: BatchNorm2dForward (non-affine). Inputs (x, running_mean,
-// running_var); attrs Eps, Training; outputs {y, save_mean, save_rstd}.
-//   - Inference (training=false): running_mean/var are constants, so
-//       y = (x - mean)*rstd, dy = dx*rstd, and the saved-stat tangents are 0.
-//   - Training (training=true): mean/var are batch statistics derived from x
-//       (per-channel over N,H,W), so the JVP follows the LayerNorm/BN-train
-//       form. We reuse the kernel's authoritative primal outputs and compute
-//       the tangents analytically.
-// ============================================================================
-JvpMultiResult jvp_adapter_batch_norm2d_forward_s15(std::span<const Tensor> primals,
-                                                    std::span<const Tensor> tangents,
-                                                    const OpAttributes& attrs) {
-    if (primals.size() < 3) {
-        throw std::runtime_error(
-            "jvp_adapter_batch_norm2d_forward_s15: expected 3 inputs "
-            "(x, running_mean, running_var)");
-    }
-    const Tensor& x = primals[0];
-    Tensor dx = jvp_zeros_like_or(x, tangents.empty() ? Tensor() : tangents[0]);
-
-    const auto xshape = x.shape();
-    if (xshape.size() != 4) {
-        throw std::runtime_error(
-            "jvp_adapter_batch_norm2d_forward_s15: expected NCHW (rank-4) input");
-    }
-    const int64_t C = xshape[1];
-    const std::vector<int64_t> c_shape = {1, C, 1, 1};
-    bool training = attrs.get_bool(AttrKey::Training, false);
-
-    // Authoritative primal outputs straight from the kernel.
-    auto outs = tenzor::dispatch(OpId::BatchNorm2dForward,
-        std::vector<Tensor>{primals[0], primals[1], primals[2]}, attrs);
-    const Tensor& y     = outs[0];
-    const Tensor& s_mean = outs[1];  // (C,)
-    const Tensor& s_rstd = outs[2];  // (C,)
-
-    auto rstd_b = tenzor::reshape(s_rstd, c_shape);
-    auto mean_b = tenzor::reshape(s_mean, c_shape);
-
-    Tensor dy, dmean_out, drstd_out;
-    if (!training) {
-        // Inference: stats constant -> only dx flows through the normaliser.
-        dy = tenzor::mul(dx, rstd_b);
-        dmean_out = tenzor::zeros(
-            std::vector<int64_t>(s_mean.shape().begin(), s_mean.shape().end()),
-            s_mean.dtype(), s_mean.device());
-        drstd_out = tenzor::zeros(
-            std::vector<int64_t>(s_rstd.shape().begin(), s_rstd.shape().end()),
-            s_rstd.dtype(), s_rstd.device());
-    } else {
-        // Training: mean/var are batch stats over (N, H, W) per channel.
-        auto x_minus_mean = tenzor::sub(x, mean_b);
-        auto dmean_b = tenzor::mean(tenzor::mean(tenzor::mean(dx, 3, true), 2, true), 0, true);
-        auto two_xmm = tenzor::mul(x_minus_mean, 2.0);
-        auto dvar_b  = tenzor::mean(tenzor::mean(tenzor::mean(
-            tenzor::mul(two_xmm, tenzor::sub(dx, dmean_b)), 3, true), 2, true), 0, true);
-        auto drstd_b = tenzor::mul(tenzor::mul(tenzor::mul(rstd_b, rstd_b), rstd_b),
-                                   tenzor::mul(dvar_b, -0.5));
-        dy = tenzor::add(tenzor::mul(tenzor::sub(dx, dmean_b), rstd_b),
-                         tenzor::mul(x_minus_mean, drstd_b));
-        // Saved-stat tangents (shape (C,)).
-        std::vector<int64_t> c_vec(s_mean.shape().begin(), s_mean.shape().end());
-        dmean_out = tenzor::reshape(dmean_b, c_vec);
-        drstd_out = tenzor::reshape(drstd_b, c_vec);
-    }
-
-    JvpMultiResult result;
-    result.primals  = { y, s_mean, s_rstd };
-    result.tangents = { std::move(dy), std::move(dmean_out), std::move(drstd_out) };
     return result;
 }
 
@@ -9186,6 +9298,7 @@ void register_builtin_jvp_rules() {
 
     // Cast
     register_jvp_rule(OpId::Cast,       &jvp_adapter_cast);
+    register_jvp_rule(OpId::DeviceTransfer, &jvp_adapter_device_transfer);
 
     // ---------------- Audit A.4 batch 3 ------------------
 
@@ -9196,6 +9309,8 @@ void register_builtin_jvp_rules() {
     register_jvp_rule(OpId::LinalgCholesky,  &jvp_adapter_cholesky);
     register_jvp_rule(OpId::Trace,           &jvp_adapter_trace);
     register_jvp_rule(OpId::LinalgDet,       &jvp_adapter_det);
+    register_jvp_rule_multi(OpId::LinalgSlogdet, &jvp_adapter_slogdet);
+    register_jvp_rule(OpId::LinalgNorm,      &jvp_adapter_linalg_norm_fro);
 
     // Convolution forward (no BN/LN; multi-output ops handled separately)
     register_jvp_rule(OpId::Conv1dForward,            &jvp_adapter_conv1d);
@@ -9366,6 +9481,8 @@ void register_builtin_jvp_rules() {
     register_jvp_rule(OpId::Conj,             &jvp_adapter_conj);
     register_jvp_rule(OpId::Real,             &jvp_adapter_real);
     register_jvp_rule(OpId::Imag,             &jvp_adapter_imag);
+    register_jvp_rule(OpId::ViewAsReal,       &jvp_adapter_view_as_real);
+    register_jvp_rule(OpId::ViewAsComplex,    &jvp_adapter_view_as_complex);
     register_jvp_rule(OpId::Contiguous,       &jvp_adapter_contiguous);
     register_jvp_rule(OpId::Clone,            &jvp_adapter_clone);
     register_jvp_rule(OpId::ToMemoryFormat,   &jvp_adapter_to_memory_format);

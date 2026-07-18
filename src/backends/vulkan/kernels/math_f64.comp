@@ -259,6 +259,69 @@ double erf_double(double x) {
     return sign * (1.0 - erfc_val);
 }
 
+// Double-precision erfc, computed directly per range rather than via
+// 1 - erf_double(x). For |x| large enough that erfc(x) is tiny, that
+// subtraction cancels almost all of erf_double's precision (verified:
+// erfc(5.0) via 1-erf was off by 1.5e-5 relative, erfc(5.9) by 54%) and,
+// worse, erf_double saturates to exactly sign*1.0 for |x| >= 6.0, so
+// 1.0 - 1.0 = 0.0 exactly even though erfc(6.0)~=2.15e-17 and
+// erfc(10.0)~=2.09e-45 are both still representable Float64 magnitudes.
+// Mirrors erf_double's range structure/coefficients above but returns each
+// range's erfc value directly, with no upper saturation cutoff -- it decays
+// naturally as exp_double(-x*x) underflows toward 0.
+double erfc_double(double x) {
+    if (x != x) return x;
+    double sign = (x < 0.0) ? -1.0 : 1.0;
+    double ax = (x < 0.0) ? -x : x;
+
+    // No cancellation problem for |x| < 1.25 (erfc isn't tiny there).
+    if (ax < 1.25) {
+        return 1.0 - erf_double(x);
+    }
+
+    // Range 1.25 <= |x| < 2.857142857142857 -- same R/S rational as
+    // erf_double's Range 3a above, but returning erfc_val directly instead
+    // of 1 - erfc_val.
+    if (ax < 2.857142857142857) {
+        double s_ = 1.0 / (ax * ax);
+        double ra0 = -9.86494403484714822705e-03;
+        double ra1 = -6.93858572707181764372e-01;
+        double ra2 = -1.05586262253232909814e+01;
+        double ra3 = -6.23753324503260060396e+01;
+        double ra4 = -1.62396669462573470355e+02;
+        double ra5 = -1.84605092906711035994e+02;
+        double ra6 = -8.12874355063065934246e+01;
+        double ra7 = -9.81432934416256659757e+00;
+        double sa1 =  1.96512716674392571292e+01;
+        double sa2 =  1.37657754143519042600e+02;
+        double sa3 =  4.34565877475229228821e+02;
+        double sa4 =  6.45387271733267880336e+02;
+        double sa5 =  4.29008140027567833386e+02;
+        double sa6 =  1.08635005541779435134e+02;
+        double sa7 =  6.57024977031928170135e+00;
+        double sa8 = -6.04244152148580987438e-02;
+        double R = ra0 + s_ * (ra1 + s_ * (ra2 + s_ * (ra3 + s_ * (ra4 + s_ * (ra5 + s_ * (ra6 + s_ * ra7))))));
+        double S = 1.0 + s_ * (sa1 + s_ * (sa2 + s_ * (sa3 + s_ * (sa4 + s_ * (sa5 + s_ * (sa6 + s_ * (sa7 + s_ * sa8)))))));
+        double erfc_val = exp_double(-ax * ax - 0.5625 + R / S) / ax;
+        return (x < 0.0) ? (2.0 - erfc_val) : erfc_val;
+    }
+
+    // Range |x| >= 2.857142857142857: Lentz continued fraction for erfc
+    // (same technique/coefficients as erf_double's Range 3b above, verified
+    // to ~1e-15 relative error vs mpmath), used directly with no upper
+    // cutoff so the result stays accurate (and needs no 1-erf cancellation)
+    // all the way out to where exp_double(-x*x) itself underflows below
+    // Float64's representable range.
+    double cf = 0.0;
+    for (int k = 30; k >= 1; --k) {
+        cf = (double(k) * 0.5) / (ax + cf);
+    }
+    cf = 1.0 / (ax + cf);
+    const double INV_SQRT_PI = 0.5641895835477562869480794515607726;
+    double erfc_val = exp_double(-ax * ax) * INV_SQRT_PI * cf;
+    return (x < 0.0) ? (2.0 - erfc_val) : erfc_val;
+}
+
 // Double-precision atan via range-reduction + Maclaurin polynomial.
 // See kernels/trigonometric_f64.comp for derivation. Needed locally because
 // GLSL atan is single-precision.
@@ -384,6 +447,16 @@ double pow_double(double base, double exp_val) {
     return exp_double(exp_val * log_double(base));
 }
 
+// Round-half-away-from-zero (double) to match std::round / CUDA/ROCm/OneAPI
+// round semantics; GLSL's round() has implementation-defined 0.5 tie-break
+// (unlike this file's other double helpers, this deliberately avoids the
+// double-overload of sign() to sidestep any driver gaps in that overload).
+double round_half_away_f64(double x) {
+    if (x != x) return x;  // NaN
+    if (x < 0.0) return -floor(-x + 0.5);
+    return floor(x + 0.5);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -440,8 +513,10 @@ void main() {
         case 12: // ceil (unary)
             result[idx] = ceil(val_a);
             break;
-        case 13: // round (unary)
-            result[idx] = round(val_a);
+        case 13: // round (unary) — round-half-away-from-zero (matches
+                 // std::round / CUDA/ROCm/OneAPI), not GLSL round()'s
+                 // implementation-defined tie-break.
+            result[idx] = round_half_away_f64(val_a);
             break;
         case 14: // trunc (unary)
             result[idx] = trunc(val_a);
@@ -467,8 +542,8 @@ void main() {
         case 21: // erf (unary) — fdlibm double-precision rational
             result[idx] = erf_double(val_a);
             break;
-        case 22: // erfc (unary)
-            result[idx] = 1.0 - erf_double(val_a);
+        case 22: // erfc (unary) — direct computation, avoids 1-erf cancellation
+            result[idx] = erfc_double(val_a);
             break;
         case 23: // atan2 (binary)
             result[idx] = atan2_double(val_a, val_b);
@@ -476,10 +551,12 @@ void main() {
         case 24: // fmod (binary)
             result[idx] = val_a - trunc(val_a / val_b) * val_b;
             break;
-        case 25: { // remainder (binary) - IEEE remainder
-            double quot = val_a / val_b;
-            double rounded = round(quot);
-            result[idx] = val_a - rounded * val_b;
+        case 25: { // remainder (binary) - divisor-sign convention (matches
+                   // CPU/CUDA/ROCm/OneAPI/Python/NumPy/PyTorch `%`/`remainder`:
+                   // a - floor(a/b)*b), NOT IEEE round-to-nearest-even.
+            double r = val_a - trunc(val_a / val_b) * val_b;
+            if (r != 0.0 && ((r < 0.0) != (val_b < 0.0))) r += val_b;
+            result[idx] = r;
             break;
         }
         case 26: // minimum (binary) — NaN-propagating (torch.minimum): NaN in
@@ -501,8 +578,15 @@ void main() {
         case 30: // asinh (unary) - log(x + sqrt(x*x + 1))
             result[idx] = log_double(val_a + sqrt(val_a * val_a + 1.0));
             break;
-        case 31: // acosh (unary) - log(x + sqrt(x*x - 1))
-            result[idx] = log_double(val_a + sqrt(val_a * val_a - 1.0));
+        case 31: // acosh (unary) - log(x + sqrt(x*x - 1)). Explicit domain
+                 // guard: for x<1, x*x-1 is negative and GLSL sqrt() is
+                 // spec-undefined there (unlike the log_double/NaN-check
+                 // pattern this file otherwise relies on); std::acosh
+                 // deterministically returns NaN for x<1, so check up front
+                 // instead of depending on sqrt(negative)'s driver behavior.
+            result[idx] = (val_a != val_a) ? val_a
+                : (val_a < 1.0) ? (0.0 / 0.0)
+                : log_double(val_a + sqrt(val_a * val_a - 1.0));
             break;
         case 32: // atanh (unary) - 0.5 * log((1+x)/(1-x))
             result[idx] = 0.5 * log_double((1.0 + val_a) / (1.0 - val_a));

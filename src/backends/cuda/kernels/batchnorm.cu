@@ -669,10 +669,14 @@ __global__ void batchnorm_backward_input_kernel(const T* grad_output,
 // ============================================================================
 
 // Compute mean and variance for a batch
-auto batchnorm2d_mean_var(const Tensor& input,
+auto batchnorm2d_mean_var(const Tensor& input_orig,
                           Tensor& mean,
                           Tensor& variance,
                           cudaStream_t stream) -> void {
+    // The mean/variance kernels index the raw NCHW buffer via linear offsets
+    // derived from N/C/H/W alone, so the input must be contiguous (mirrors
+    // the CPU batchnorm2d_mean_var_kernel contiguity guard).
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -816,11 +820,17 @@ auto batchnorm2d_mean_var(const Tensor& input,
 }
 
 // Forward pass (normalization only, no affine)
-auto batchnorm2d_forward(const Tensor& input,
-                         const Tensor& mean,
-                         const Tensor& variance,
+auto batchnorm2d_forward(const Tensor& input_orig,
+                         const Tensor& mean_orig,
+                         const Tensor& variance_orig,
                          float epsilon,
                          cudaStream_t stream) -> Tensor {
+    // The normalize kernels index the raw NCHW buffer via linear offsets
+    // derived from N/C/H/W alone, so all operands must be contiguous (mirrors
+    // the CPU batchnorm2d_forward_kernel contiguity guard).
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
     // BFloat16 has no dedicated normalize kernel; widen to Float32 on-device,
     // reuse the Float32 path, and narrow back (GPU widen-narrow, not a CPU
     // fallback). Previously BFloat16 fell through to a runtime_error.
@@ -872,13 +882,21 @@ auto batchnorm2d_forward(const Tensor& input,
 }
 
 // Forward pass with affine transform
-auto batchnorm2d_forward_affine(const Tensor& input,
-                                const Tensor& mean,
-                                const Tensor& variance,
-                                const Tensor& gamma,
-                                const Tensor& beta,
+auto batchnorm2d_forward_affine(const Tensor& input_orig,
+                                const Tensor& mean_orig,
+                                const Tensor& variance_orig,
+                                const Tensor& gamma_orig,
+                                const Tensor& beta_orig,
                                 float epsilon,
                                 cudaStream_t stream) -> Tensor {
+    // The affine kernels index the raw NCHW buffer via linear offsets derived
+    // from N/C/H/W alone, so all operands must be contiguous (mirrors the CPU
+    // batchnorm2d_forward_affine_kernel contiguity guard).
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
+    Tensor gamma = gamma_orig.is_contiguous() ? gamma_orig : gamma_orig.contiguous();
+    Tensor beta = beta_orig.is_contiguous() ? beta_orig : beta_orig.contiguous();
     // BFloat16: widen to Float32, reuse the Float32 path, narrow back (GPU
     // widen-narrow, not a CPU fallback).
     if (input.dtype() == DType::BFloat16) {
@@ -933,13 +951,22 @@ auto batchnorm2d_forward_affine(const Tensor& input,
 
 // Optimized forward pass with affine transform (single kernel, vectorized for large tensors)
 // Uses inline computation to avoid kernel launch overhead
-auto batchnorm2d_forward_affine_optimized(const Tensor& input,
-                                          const Tensor& mean,
-                                          const Tensor& variance,
-                                          const Tensor& gamma,
-                                          const Tensor& beta,
+auto batchnorm2d_forward_affine_optimized(const Tensor& input_orig,
+                                          const Tensor& mean_orig,
+                                          const Tensor& variance_orig,
+                                          const Tensor& gamma_orig,
+                                          const Tensor& beta_orig,
                                           float epsilon,
                                           cudaStream_t stream) -> Tensor {
+    // The vectorized/parallel kernels below index the raw NCHW buffer via
+    // linear offsets (and the vec4 path additionally assumes packed float4
+    // alignment), so all operands must be contiguous (mirrors the CPU
+    // batchnorm2d_forward_affine_kernel contiguity guard).
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
+    Tensor gamma = gamma_orig.is_contiguous() ? gamma_orig : gamma_orig.contiguous();
+    Tensor beta = beta_orig.is_contiguous() ? beta_orig : beta_orig.contiguous();
     // BFloat16: widen to Float32, reuse the Float32 path, narrow back.
     if (input.dtype() == DType::BFloat16) {
         Tensor out32 = batchnorm2d_forward_affine_optimized(
@@ -1065,13 +1092,21 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean,
 }
 
 // Backward pass - compute gradients
-auto batchnorm2d_backward(const Tensor& grad_output,
-                         const Tensor& input,
-                         const Tensor& mean,
-                         const Tensor& variance,
-                         const Tensor& gamma,
+auto batchnorm2d_backward(const Tensor& grad_output_orig,
+                         const Tensor& input_orig,
+                         const Tensor& mean_orig,
+                         const Tensor& variance_orig,
+                         const Tensor& gamma_orig,
                          float epsilon,
                          cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Backward indexes grad_output/input as linear NCHW buffers and reads the
+    // per-channel stats by [c], so all operands must be contiguous (mirrors
+    // the CPU batchnorm2d_backward_kernel contiguity guard).
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
+    Tensor gamma = gamma_orig.is_contiguous() ? gamma_orig : gamma_orig.contiguous();
     // BFloat16: widen to Float32, reuse the Float32 path, narrow the three grads
     // back (GPU widen-narrow, not a CPU fallback).
     if (input.dtype() == DType::BFloat16) {
@@ -1426,8 +1461,13 @@ __global__ void group_norm_backward_kernel(
     const T* __restrict__ mean_saved,
     const T* __restrict__ inv_std_saved,
     T* __restrict__ grad_input,
-    T* __restrict__ grad_weight,
-    T* __restrict__ grad_bias,
+    // F-085 pattern: double-precision scratch accumulators, atomicAdd'd into
+    // by every contributing (n, group) block, then narrowed to T once by
+    // narrow_group_norm_grad_accum_kernel after this kernel completes. A
+    // plain-T atomicAdd accumulator (previous behavior) loses precision for
+    // Float32 across large N, unlike CPU's double accumulation.
+    double* __restrict__ grad_weight_accum,
+    double* __restrict__ grad_bias_accum,
     int64_t N, int64_t C, int64_t HW,
     int64_t num_groups, int64_t channels_per_group) {
 
@@ -1508,17 +1548,35 @@ __global__ void group_norm_backward_kernel(
         grad_input[idx] = inv_std * (dy - inv_group_size * (sum_dy + xhat * sum_dy_xhat));
     }
 
-    // Accumulate grad_weight and grad_bias (atomic since multiple samples contribute)
-    if (weight && grad_weight && grad_bias) {
+    // Accumulate grad_weight and grad_bias (atomic since multiple samples contribute).
+    // Accumulate in double precision regardless of T (F-085 pattern).
+    if (weight && grad_weight_accum && grad_bias_accum) {
         for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
             int64_t c_offset = i / HW;
             int64_t hw = i % HW;
             int64_t c = c_start + c_offset;
             int64_t idx = (n * C + c) * HW + hw;
             T xhat = (input[idx] - mean) * inv_std;
-            atomicAdd(&grad_weight[c], grad_output[idx] * xhat);
-            atomicAdd(&grad_bias[c], grad_output[idx]);
+            atomicAdd(&grad_weight_accum[c], static_cast<double>(grad_output[idx]) * static_cast<double>(xhat));
+            atomicAdd(&grad_bias_accum[c], static_cast<double>(grad_output[idx]));
         }
+    }
+}
+
+// Narrows the double-precision grad_weight/grad_bias scratch accumulators
+// (populated via atomicAdd across every (n, group) block in
+// group_norm_backward_kernel) down to the output dtype T, once per channel.
+template<typename T>
+__global__ void narrow_group_norm_grad_accum_kernel(
+    const double* __restrict__ grad_weight_accum,
+    const double* __restrict__ grad_bias_accum,
+    T* __restrict__ grad_weight,
+    T* __restrict__ grad_bias,
+    int64_t C) {
+    int64_t c = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (c < C) {
+        grad_weight[c] = static_cast<T>(grad_weight_accum[c]);
+        grad_bias[c] = static_cast<T>(grad_bias_accum[c]);
     }
 }
 
@@ -1641,26 +1699,41 @@ auto group_norm_backward_kernel(
     Tensor grad_weight({C}, input.dtype(), input.device());
     Tensor grad_bias({C}, input.dtype(), input.device());
 
-    // Zero-initialize grad_weight and grad_bias (atomicAdd accumulation)
-    cudaMemsetAsync(grad_weight.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
-    cudaMemsetAsync(grad_bias.data_ptr(), 0, C * dtype_size(input.dtype()), stream);
+    // F-085 pattern: double-precision scratch accumulators, atomicAdd'd into
+    // by every (n, group) block in group_norm_backward_kernel, then narrowed
+    // to input.dtype() in a single pass (narrow_group_norm_grad_accum_kernel)
+    // once the main kernel completes. Matches CPU's double accumulation and
+    // avoids the float32 atomicAdd rounding error compounding over large N.
+    Tensor grad_weight_accum({C}, DType::Float64, input.device());
+    Tensor grad_bias_accum({C}, DType::Float64, input.device());
+    cudaMemsetAsync(grad_weight_accum.data<double>(), 0, C * sizeof(double), stream);
+    cudaMemsetAsync(grad_bias_accum.data<double>(), 0, C * sizeof(double), stream);
 
     int64_t num_group_instances = N * num_groups;
     int block_size = 256;
+    int narrow_blocks = static_cast<int>((C + block_size - 1) / block_size);
 
     if (input.dtype() == DType::Float32) {
         group_norm_backward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
             grad_output.data<float>(), input.data<float>(), weight.data<float>(),
             mean_saved.data<float>(), inv_std_saved.data<float>(),
-            grad_input.data<float>(), grad_weight.data<float>(), grad_bias.data<float>(),
+            grad_input.data<float>(), grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
             N, C, HW, num_groups, channels_per_group);
+            CUDA_CHECK(cudaGetLastError());
+        narrow_group_norm_grad_accum_kernel<float><<<narrow_blocks, block_size, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
+            grad_weight.data<float>(), grad_bias.data<float>(), C);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         group_norm_backward_kernel<double><<<num_group_instances, block_size, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), weight.data<double>(),
             mean_saved.data<double>(), inv_std_saved.data<double>(),
-            grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
+            grad_input.data<double>(), grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
             N, C, HW, num_groups, channels_per_group);
+            CUDA_CHECK(cudaGetLastError());
+        narrow_group_norm_grad_accum_kernel<double><<<narrow_blocks, block_size, 0, stream>>>(
+            grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
+            grad_weight.data<double>(), grad_bias.data<double>(), C);
             CUDA_CHECK(cudaGetLastError());
     } else {
         // FP16/BF16 handled above via widen-recurse-narrow.

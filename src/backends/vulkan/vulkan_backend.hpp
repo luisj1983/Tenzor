@@ -466,7 +466,8 @@ public:
     auto dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                           int64_t stride_h, int64_t stride_w,
                           int64_t padding_h, int64_t padding_w,
-                          int64_t dilation_h = 1, int64_t dilation_w = 1) -> std::pair<Tensor, Tensor>;
+                          int64_t dilation_h = 1, int64_t dilation_w = 1,
+                          bool ceil_mode = false) -> std::pair<Tensor, Tensor>;
     auto dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> std::pair<Tensor, Tensor>;
     auto dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> Tensor;
     auto dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output, int64_t H_in, int64_t W_in) -> Tensor;
@@ -559,8 +560,10 @@ public:
     auto dispatchNestedFromPadded(const Tensor& padded, const Tensor& offsets) -> Tensor;
     auto dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
                              int64_t reduction) -> Tensor;
-    // AA.11: CTC forward-backward DP. Returns {loss_per_sample (N,) Float32,
-    // raw_grad (T_max, N, C) Float32}.
+    // AA.11: CTC forward-backward DP. Returns {loss_per_sample (N,),
+    // raw_grad (T_max, N, C)}, matching log_probs' dtype -- Float64 inputs
+    // get a genuine double-precision DP recursion (ctc_forward_f64.comp);
+    // everything else computes in Float32.
     auto dispatchCTCLossForward(const Tensor& log_probs,
                                 const Tensor& targets,
                                 const Tensor& input_lengths,
@@ -591,6 +594,7 @@ public:
     auto dispatchRoll(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
     auto dispatchTrace(const Tensor& input) -> Tensor;
     auto dispatchCountNonzero(const Tensor& input) -> Tensor;
+    auto dispatchCountNonzero(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchNansum(const Tensor& input) -> Tensor;
     auto dispatchNanmean(const Tensor& input) -> Tensor;
     auto dispatchNanVar(const Tensor& input, int64_t correction) -> Tensor;
@@ -616,7 +620,7 @@ public:
     auto dispatchIndexCopy(const Tensor& self, int64_t dim,
                            const Tensor& index, const Tensor& src) -> Tensor;
     auto dispatchIndexFill(const Tensor& self, int64_t dim,
-                           const Tensor& index, float value) -> Tensor;
+                           const Tensor& index, double value) -> Tensor;
     auto dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
     auto dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor;
     auto dispatchMaskedFill(const Tensor& input, const Tensor& mask, float value) -> Tensor;
@@ -707,11 +711,13 @@ public:
     // Type cast operations
     auto dispatchCast(const Tensor& input, DType target_dtype) -> Tensor;
 
-    // Modular-truncating Int32 -> {Int8, Int16, Int64, Bool} cast.
-    // Used by bitwise ops where the high bits of an Int32 result are
-    // semantically meaningful and must NOT be saturated. Standard
-    // dispatchCast routes through `cast_f32_i8` / `cast_f32_i16` which clamp
-    // to the destination range; this helper preserves the bit pattern.
+    // Modular-truncating Int32 -> {Int8, UInt8, Int16, UInt16, Int64, UInt64,
+    // UInt32, Bool} cast. Used by bitwise ops where the high bits of an
+    // Int32 result are semantically meaningful and must NOT be lost through
+    // a Float32 intermediate, and by dispatchCast's generic integer-to-
+    // integer narrowing path (any pair not already given a dedicated
+    // shader) so those also get exact low-bit truncation/wraparound instead
+    // of a lossy Float32 round-trip.
     auto dispatchCastTruncateInt32(const Tensor& input, DType target_dtype) -> Tensor;
 
     // RNN operations (Phase 11.3)
@@ -949,8 +955,22 @@ public:
     // Tiled blocked linalg helpers for medium matrices (33-256)
     void runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
                       int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
-    void runBlockedCholesky(Tensor& A, int64_t n,
-                            int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
+    // error_flag is a [1]-element Int32 device tensor, zero-initialized by the
+    // caller; runBlockedCholesky's panel-factorization dispatches OR a 1 into
+    // it (via atomicOr in the shader) when a non-positive diagonal residual
+    // is seen (non-PD input). The caller must synchronize and read it back
+    // after this returns and throw if set — this function does not throw.
+    void runBlockedCholesky(Tensor& A, int64_t n, int64_t batch_size, int32_t device_id,
+                            bool is_f64, bool is_f16, Tensor& error_flag);
+
+    // Host-side singularity check for LU factors consumed by the linalg_trsm
+    // shader (dispatchLinalgInv / dispatchLinalgSolve tiled paths and
+    // dispatchLinalgLUSolve). linalg_trsm.comp divides by the LU diagonal
+    // with no epsilon guard and no error-reporting path back to the host, so
+    // this must run before the shader is ever dispatched. Matches the
+    // CPU/LAPACK convention (getrf/getrs info != 0 for a zero pivot).
+    void checkLuNonSingular(const Tensor& lu_cont, int64_t n, int64_t batch_size,
+                            bool is_f64, const std::string& op_name);
     void runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
                       int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
     void runBlockedBidiag(Tensor& A, Tensor& tau_l, Tensor& tau_r, int64_t n,

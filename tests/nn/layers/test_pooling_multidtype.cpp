@@ -89,6 +89,57 @@ TEST_P(PoolingMultiDTypeTest, MaxPool2dGradientFlow) {
     EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
+// MaxPool2dBackward on CUDA (cuDNN build) used to call cudnnPoolingBackward,
+// which re-derives the argmax internally instead of replaying forward's
+// saved indices -- it can disagree with forward's own first-occurrence tie
+// break on an exactly-tied pooling window, silently scattering the upstream
+// gradient to a different position than every other backend. Forward's
+// first window here (flat indices 0,1,4,5) has two exactly-tied max values
+// (6.0 at index 0 and index 5); backward's chosen scatter position on this
+// backend must match CPU's exactly.
+TEST_P(PoolingMultiDTypeTest, MaxPool2dBackwardTieBreakMatchesCPU) {
+    auto pool = nn::MaxPool2d(2, 2, 0);
+
+    auto input_f32 = tenzor::zeros({1, 1, 4, 4}, DType::Float32, Device::cpu());
+    float vals[16] = {
+        6.0f, 2.0f,  3.0f,  4.0f,
+        5.0f, 6.0f,  7.0f,  8.0f,
+        9.0f, 10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f, 16.0f,
+    };
+    {
+        float* data = input_f32.data<float>();
+        for (int i = 0; i < 16; ++i) data[i] = vals[i];
+    }
+
+    // CPU reference gradient.
+    Variable input_cpu(input_f32, true);
+    auto out_cpu = pool.forward(input_cpu);
+    auto grad_out_cpu = tenzor::ones({1, 1, 2, 2}, DType::Float32, Device::cpu());
+    out_cpu.backward(grad_out_cpu);
+    ASSERT_TRUE(input_cpu.grad().has_value());
+    auto ref_grad = input_cpu.grad()->to(Device::cpu()).to(DType::Float32).contiguous();
+
+    // Same input on this backend/dtype.
+    auto input_dev_t = input_f32;
+    if (dtype() != DType::Float32) input_dev_t = input_dev_t.to(dtype());
+    input_dev_t = input_dev_t.to(device());
+    Variable input_dev(input_dev_t, true);
+    auto out_dev = pool.forward(input_dev);
+    auto grad_out_dev = tenzor::ones({1, 1, 2, 2}, dtype(), device());
+    out_dev.backward(grad_out_dev);
+    ASSERT_TRUE(input_dev.grad().has_value());
+    auto got_grad = input_dev.grad()->to(Device::cpu()).to(DType::Float32).contiguous();
+
+    const float* rp = ref_grad.data<float>();
+    const float* gp = got_grad.data<float>();
+    for (int64_t i = 0; i < ref_grad.numel(); ++i) {
+        EXPECT_NEAR(gp[i], rp[i], atol())
+            << "grad_input[" << i << "] mismatch vs CPU (tie-break scatter position "
+            << "diverged) on " << device().to_string();
+    }
+}
+
 // ============================================================================
 // AvgPool2d Tests
 // ============================================================================

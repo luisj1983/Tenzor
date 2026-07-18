@@ -64,8 +64,14 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
     for (int64_t col_start = 0; col_start < n; col_start += TILED_BLOCK_SIZE) {
         int64_t panel_cols = std::min(TILED_BLOCK_SIZE, n - col_start);
 
-        // --- Panel factorization (one workgroup per batch element) ---
-        for (int64_t b = 0; b < batch_size; ++b) {
+        // --- Panel factorization ---
+        // One workgroup (256 threads) per batch element, folded into a
+        // single dispatch with the batch as the X grid dimension (batch
+        // index read from gl_WorkGroupID.x in the shader) instead of one
+        // host-side command-buffer submission per batch element per
+        // column-panel. That previously made this O(batch_size * n/32)
+        // separate submissions; now it is O(n/32).
+        {
             std::string shader = is_f64 ? "linalg_lu_panel_f64" : is_f16 ? "linalg_lu_panel_f16" : "linalg_lu_panel";
             auto* pipeline = getPipeline(shader, device_id);
 
@@ -73,12 +79,10 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
                 uint32_t n;
                 uint32_t col_start;
                 uint32_t panel_cols;
-                uint32_t batch_idx;
             } pc;
             pc.n = static_cast<uint32_t>(n);
             pc.col_start = static_cast<uint32_t>(col_start);
             pc.panel_cols = static_cast<uint32_t>(panel_cols);
-            pc.batch_idx = static_cast<uint32_t>(b);
 
             std::vector<std::pair<uint32_t, const void*>> bindings = {
                 {0, A.data_ptr()}, {1, pivots.data_ptr()}
@@ -92,48 +96,47 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
                                    pipeline->layout(), 0, 1, &ds, 0, nullptr);
             vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                               0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, 1, 1, 1);  // 1 workgroup (256 threads)
+            vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);  // batch_size workgroups (256 threads each)
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
         }
 
         // --- Trailing matrix update ---
+        // Fold the batch dimension into the Z grid axis (batch index read
+        // from gl_WorkGroupID.z in the shader) — one dispatch instead of one
+        // submission per batch element per column-panel.
         int64_t trail_start = col_start + panel_cols;
         if (trail_start < n) {
             int64_t trail_size = n - trail_start;
             uint32_t tile_count = static_cast<uint32_t>((trail_size + 31) / 32);
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                std::string shader = is_f64 ? "linalg_lu_update_f64" : is_f16 ? "linalg_lu_update_f16" : "linalg_lu_update";
-                auto* pipeline = getPipeline(shader, device_id);
+            std::string shader = is_f64 ? "linalg_lu_update_f64" : is_f16 ? "linalg_lu_update_f16" : "linalg_lu_update";
+            auto* pipeline = getPipeline(shader, device_id);
 
-                struct PushConstants {
-                    uint32_t n;
-                    uint32_t col_start;
-                    uint32_t block_size;
-                    uint32_t batch_idx;
-                } pc;
-                pc.n = static_cast<uint32_t>(n);
-                pc.col_start = static_cast<uint32_t>(col_start);
-                pc.block_size = static_cast<uint32_t>(panel_cols);
-                pc.batch_idx = static_cast<uint32_t>(b);
+            struct PushConstants {
+                uint32_t n;
+                uint32_t col_start;
+                uint32_t block_size;
+            } pc;
+            pc.n = static_cast<uint32_t>(n);
+            pc.col_start = static_cast<uint32_t>(col_start);
+            pc.block_size = static_cast<uint32_t>(panel_cols);
 
-                std::vector<std::pair<uint32_t, const void*>> bindings = {
-                    {0, A.data_ptr()}
-                };
-                std::vector<size_t> sizes = {mat_size};
-                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, A.data_ptr()}
+            };
+            std::vector<size_t> sizes = {mat_size};
+            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
-                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                                  0, sizeof(pc), &pc);
-                vkCmdDispatch(cmd, tile_count, tile_count, 1);  // 16x16 threads per tile
-                insertComputeOnlyBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
+            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, tile_count, tile_count, static_cast<uint32_t>(batch_size));  // 16x16 threads per tile
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, device_id);
         }
     }
 }
@@ -142,8 +145,8 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
 // Blocked Cholesky: panel factorization + trailing SYRK update
 // Modifies A in-place to contain L (lower triangle).
 // ---------------------------------------------------------------------------
-void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
-                                        int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16) {
+void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n, int64_t batch_size, int32_t device_id,
+                                        bool is_f64, bool is_f16, Tensor& error_flag) {
     if (n > MAX_BLOCKED_LINALG_SIZE) {
         throw std::runtime_error(
             "Vulkan blocked Cholesky: matrix dimension " + std::to_string(n) +
@@ -154,6 +157,7 @@ void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
     size_t mat_numel = static_cast<size_t>(batch_size) * n * n;
     size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
+    size_t flag_size = sizeof(uint32_t);
 
     for (int64_t col_start = 0; col_start < n; col_start += TILED_BLOCK_SIZE) {
         int64_t panel_cols = std::min(TILED_BLOCK_SIZE, n - col_start);
@@ -175,9 +179,9 @@ void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
             pc.batch_idx = static_cast<uint32_t>(b);
 
             std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, A.data_ptr()}
+                {0, A.data_ptr()}, {1, error_flag.data_ptr()}
             };
-            std::vector<size_t> sizes = {mat_size};
+            std::vector<size_t> sizes = {mat_size, flag_size};
             VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
             VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -425,7 +429,40 @@ void VulkanBackend::runBlockedBidiag(Tensor& A, Tensor& tau_l, Tensor& tau_r, in
     }
 }
 
+// ---------------------------------------------------------------------------
+// Host-side singularity check for already-factorized LU factors consumed by
+// the linalg_trsm shader (dispatchLinalgInv / dispatchLinalgSolve tiled
+// paths and dispatchLinalgLUSolve). linalg_trsm.comp (kernels/linalg_trsm.comp)
+// divides by the LU diagonal with no epsilon guard and no error-reporting
+// path back to the host, so a singular matrix would otherwise silently
+// produce Inf/NaN instead of throwing. Matches the CPU/LAPACK convention
+// (getrf/getrs info != 0 for an exactly-zero pivot). `lu_cont` must already
+// be a contiguous [batch_size, n, n] buffer on-device.
+// ---------------------------------------------------------------------------
+void VulkanBackend::checkLuNonSingular(const Tensor& lu_cont, int64_t n, int64_t batch_size,
+                                        bool is_f64, const std::string& op_name) {
+    synchronize(lu_cont.device().index);
+    Tensor lu_host = lu_cont.to(Device::cpu());
+    auto check_batch = [&](auto* lu_data) {
+        for (int64_t b = 0; b < batch_size; ++b) {
+            auto* mat = lu_data + b * n * n;
+            for (int64_t i = 0; i < n; ++i) {
+                if (mat[i * n + i] == 0) {
+                    throw std::runtime_error(
+                        "linalg::" + op_name + ": singular matrix (zero pivot in LU factorization)");
+                }
+            }
+        }
+    };
+    if (is_f64) {
+        check_batch(lu_host.data<double>());
+    } else {
+        check_batch(lu_host.data<float>());
+    }
+}
+
 auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
+    validate_linalg_dtype(input, "det");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -540,6 +577,7 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
+    validate_linalg_dtype(input, "inv");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -604,6 +642,7 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
     Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
     runBlockedLU(A, pivots, n, batch_size, device_id, is_f64, is_f16);
+    checkLuNonSingular(A, n, batch_size, is_f64, "inv");
 
     // Create identity matrix as RHS: solve LU * X = P * I => X = A^{-1}
     // dispatchEye creates a single n x n identity on GPU; expand for batches
@@ -664,6 +703,7 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor {
+    validate_linalg_dtype(a, "solve");
     auto a_shape = a.shape();
     auto b_shape = b.shape();
     int64_t a_ndim = static_cast<int64_t>(a_shape.size());
@@ -742,6 +782,7 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     Tensor pivots({batch_size, n}, DType::Int32, a.device());
 
     runBlockedLU(A, pivots, n, batch_size, device_id, is_f64, is_f16);
+    checkLuNonSingular(A, n, batch_size, is_f64, "solve");
 
     // Determine nrhs from b shape. Mirror the small-matrix path's
     // disambiguation: a 2D-or-higher RHS is treated as a matrix (..., N, nrhs)
@@ -821,6 +862,12 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
 
+    // Set to 1 (via atomicOr in the shader) when the input is not positive
+    // definite. Both the small and tiled paths below wire into this same
+    // flag/throw mechanism so they behave identically on non-PD input,
+    // matching CPU/CUDA/ROCm's LAPACK/rocSOLVER info-code check.
+    Tensor error_flag = dispatchZeros({1}, DType::Int32, input.device());
+
     if (n <= MAX_SMALL_LINALG_SIZE) {
         // Small matrix path: single-workgroup shader
         Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
@@ -838,11 +885,12 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
         auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
         size_t mat_numel = batch_size * n * n;
         size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
+        size_t flag_size = sizeof(uint32_t);
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, cont.data_ptr()}, {1, output.data_ptr()}
+            {0, cont.data_ptr()}, {1, output.data_ptr()}, {2, error_flag.data_ptr()}
         };
-        std::vector<size_t> sizes = {mat_size, mat_size};
+        std::vector<size_t> sizes = {mat_size, mat_size, flag_size};
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -854,13 +902,23 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
 
+        synchronize(device_id);
+        if (error_flag.to(Device::cpu()).data<int32_t>()[0] != 0) {
+            throw std::runtime_error("linalg::cholesky: factorization failed (not positive definite)");
+        }
+
         return output;
     }
 
     // Tiled path (n > MAX_SMALL_LINALG_SIZE, i.e. n > 32): blocked Cholesky factorization
     Tensor A = dispatchClone(input.contiguous());
 
-    runBlockedCholesky(A, n, batch_size, device_id, is_f64, is_f16);
+    runBlockedCholesky(A, n, batch_size, device_id, is_f64, is_f16, error_flag);
+
+    synchronize(device_id);
+    if (error_flag.to(Device::cpu()).data<int32_t>()[0] != 0) {
+        throw std::runtime_error("linalg::cholesky: factorization failed (not positive definite)");
+    }
 
     // Zero the upper triangle (Cholesky produces L in lower triangle)
     // Use dispatchTriuTril to extract lower triangle
@@ -977,6 +1035,32 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
                  dispatchCast(res[2], DType::Float16) };
     }
 
+    // Wide matrices (m < n) above the small single-workgroup limit: the
+    // global-memory one-sided Jacobi shader (linalg_svd_global, used below)
+    // only handles m >= n (tall/square) — it orthonormally completes columns
+    // of U past n, which only makes sense when U is the "wide" factor.
+    // Rather than special-casing a second shader variant, use the standard
+    // SVD(A^T) transform: if A^T = U' S' V'^T (A^T is n x m, and n >= m so
+    // the tall path applies directly), then A = (A^T)^T = V' S' U'^T, i.e.
+    //   U_A = V'  (= transpose of Vt'),  S_A = S',  Vt_A = U'^T.
+    // This recursive call operates on a tall/square matrix (rows = n > m =
+    // cols, since m < n here), so it lands in the m >= n branch (either the
+    // small path or the global shader) and can never re-enter this branch —
+    // no infinite recursion. full_matrices carries straight through: for a
+    // tall matrix, full_matrices only affects U' shape (m x m vs n x n) not
+    // Vt' (always m x m since k' = m = cols(A^T)); transposing swaps that
+    // onto Vt_A, so U_A is always (m x m) and Vt_A is (k x n) reduced / (n x
+    // n) full — exactly the contract linalg.svd promises for a wide input.
+    // The recursive call already sorts singular values descending and
+    // permutes U'/Vt' to match, so no further sort is needed here.
+    if (m < n && (m > MAX_SMALL_LINALG_SIZE || n > MAX_SMALL_LINALG_SIZE)) {
+        Tensor At = dispatchTranspose(input.contiguous(), ndim - 2, ndim - 1).contiguous();
+        auto res = dispatchLinalgSVD(At, full_matrices);
+        Tensor U_a  = dispatchTranspose(res[2], ndim - 2, ndim - 1).contiguous();  // Vt'^T
+        Tensor Vt_a = dispatchTranspose(res[0], ndim - 2, ndim - 1).contiguous();  // U'^T
+        return {U_a, res[1], Vt_a};
+    }
+
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     // S shape is identical in both paths (batch, k).
@@ -1052,14 +1136,7 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
         endSingleTimeCommands(cmd, device_id);
     } else {
         // Larger matrices: one-sided Jacobi SVD (global-memory, correct for any size).
-        // Handles m >= n (square + tall). Large m < n is not yet supported and throws
-        // loudly rather than returning garbage — the old bidiagonal tiled path required
-        // m == n and produced NaNs above the 32x32 single-workgroup limit.
-        if (m < n) {
-            throw std::runtime_error(std::format(
-                "Vulkan linalg.svd: SVD above the small-matrix limit requires m >= n "
-                "(got {}x{}). Wide matrices (m < n) at this size are not yet supported.", m, n));
-        }
+        // Handles m >= n (square + tall); the m < n case is transformed away above.
         auto cont = input.contiguous();
         std::string shader = is_f64 ? "linalg_svd_global_f64" : "linalg_svd_global";
         auto* pipeline = getPipeline(shader, device_id);
@@ -1809,6 +1886,36 @@ auto VulkanBackend::dispatchQuantizedLinear(
     int64_t K = input_shape[1];   // in_features
     int64_t N = weight_shape[0];  // out_features
 
+    // F031/F072: QInt4x2 (packed INT4) weight. The int8 shader indexes each
+    // weight row with stride K (one byte per input feature), but a QInt4x2
+    // row is only ceil(K/2) packed bytes (two 4-bit values per byte) — every
+    // row past the first would silently be read from the wrong offset, and
+    // the last channels would read past the buffer end. Route to the
+    // dedicated INT4-unpacking shader instead (mirrors CPU's
+    // fused_qlinear_dequant / CUDA's quantized_linear_int4_cuda_kernel:
+    // symmetric-only, K must be even since each packed byte holds a whole
+    // pair of input columns).
+    const bool weight_is_int4 = (weight.dtype() == DType::QInt4x2);
+    if (weight_is_int4 && (K % 2 != 0)) {
+        throw std::runtime_error(
+            "Vulkan QuantizedLinear (INT4): in_features (K=" + std::to_string(K) +
+            ") must be even for INT4 packing");
+    }
+    // Validate the weight dtype before binding it into either shader. CPU/CUDA
+    // get this check "for free" via the typed `weight.data<int8_t>()` accessor
+    // (which throws on a dtype mismatch); Vulkan instead binds the raw
+    // `data_ptr()` with no dtype check at all, so a weight tensor of any other
+    // dtype (Float32, Int32, QInt8-if-added-later, ...) would silently have its
+    // bit pattern reinterpreted as packed-INT4 or plain INT8 by the shader --
+    // wrong output with no diagnostic. Only QInt4x2 (routes to the INT4 shader)
+    // and Int8 (routes to the plain INT8 shader) are valid.
+    if (!weight_is_int4 && weight.dtype() != DType::Int8) {
+        throw std::invalid_argument(
+            "Vulkan QuantizedLinear: unsupported weight dtype '" +
+            std::string(dtype_name(weight.dtype())) +
+            "' -- expected Int8 (per-tensor/per-channel INT8) or QInt4x2 (packed INT4)");
+    }
+
     int32_t device_id = input.device().index;
 
     auto input_contig = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
@@ -1817,7 +1924,7 @@ auto VulkanBackend::dispatchQuantizedLinear(
 
     Tensor output({M, N}, DType::Float32, input.device());
 
-    auto* pipeline = getPipeline("quantized_linear", device_id);
+    auto* pipeline = getPipeline(weight_is_int4 ? "quantized_linear_int4" : "quantized_linear", device_id);
 
     // Per-channel (F045): bindings 4/5 must ALWAYS be bound (Vulkan descriptor
     // set completeness), so use placeholder 1-element buffers in the per-tensor
@@ -2454,13 +2561,22 @@ auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor&
         Tensor result = sparse::spmm(sp_cpu, dense.to(Device::cpu()));
         return result.to(values.device());
     }
-    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
-        throw std::runtime_error("Vulkan SpMM only supports F32/F64/F16/BF16, got " +
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64 &&
+        values.dtype() != DType::Int32 && values.dtype() != DType::Int64) {
+        throw std::runtime_error("Vulkan SpMM only supports F32/F64/F16/BF16/Int32/Int64, got " +
             std::string(dtype_name(values.dtype())));
     }
     int32_t device_id = values.device().index;
-    bool is_f64 = (values.dtype() == DType::Float64);
-    std::string shader_name = is_f64 ? "sparse_spmm_f64" : "sparse_spmm";
+    // Native shader per dtype (Int32/Int64 use plain integer arithmetic, no
+    // atomics needed since each thread owns a distinct output column).
+    bool is_wide = (values.dtype() == DType::Float64 || values.dtype() == DType::Int64);
+    std::string shader_name;
+    switch (values.dtype()) {
+        case DType::Float64: shader_name = "sparse_spmm_f64"; break;
+        case DType::Int32:   shader_name = "sparse_spmm_i32"; break;
+        case DType::Int64:   shader_name = "sparse_spmm_i64"; break;
+        default:              shader_name = "sparse_spmm";    break;
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // M31: guard the narrowing cast below against silent Int64->Int32
@@ -2491,7 +2607,7 @@ auto VulkanBackend::dispatchSparseSpMM(const Tensor& crow_indices, const Tensor&
     // Output: C of shape [M, N]
     Tensor output = dispatchZeros({M, N}, values.dtype(), values.device());
 
-    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t elem_size = is_wide ? 8 : 4;
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
     size_t values_size = values_c.numel() * elem_size;
@@ -2546,13 +2662,22 @@ auto VulkanBackend::dispatchSparseSpMV(const Tensor& crow_indices, const Tensor&
         Tensor result = sparse::spmv(sp_cpu, vec.to(Device::cpu()));
         return result.to(values.device());
     }
-    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
-        throw std::runtime_error("Vulkan SpMV only supports F32/F64/F16/BF16, got " +
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64 &&
+        values.dtype() != DType::Int32 && values.dtype() != DType::Int64) {
+        throw std::runtime_error("Vulkan SpMV only supports F32/F64/F16/BF16/Int32/Int64, got " +
             std::string(dtype_name(values.dtype())));
     }
     int32_t device_id = values.device().index;
-    bool is_f64 = (values.dtype() == DType::Float64);
-    std::string shader_name = is_f64 ? "sparse_spmv_f64" : "sparse_spmv";
+    // Native shader per dtype (Int32/Int64 use plain integer arithmetic in the
+    // shared-memory tree reduction, no atomics needed).
+    bool is_wide = (values.dtype() == DType::Float64 || values.dtype() == DType::Int64);
+    std::string shader_name;
+    switch (values.dtype()) {
+        case DType::Float64: shader_name = "sparse_spmv_f64"; break;
+        case DType::Int32:   shader_name = "sparse_spmv_i32"; break;
+        case DType::Int64:   shader_name = "sparse_spmv_i64"; break;
+        default:              shader_name = "sparse_spmv";    break;
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // M31: guard the narrowing cast below against silent Int64->Int32
@@ -2576,7 +2701,7 @@ auto VulkanBackend::dispatchSparseSpMV(const Tensor& crow_indices, const Tensor&
     // Output: y of shape [M]
     Tensor output = dispatchZeros({M}, values.dtype(), values.device());
 
-    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t elem_size = is_wide ? 8 : 4;
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
     size_t values_size = values_c.numel() * elem_size;
@@ -2709,13 +2834,30 @@ auto VulkanBackend::dispatchSparseAdd(const Tensor& crow_indices, const Tensor& 
         Tensor result = sparse::add(sp_cpu, dense.to(Device::cpu()));
         return result.to(values.device());
     }
-    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
-        throw std::runtime_error("Vulkan SparseAdd only supports Float32/Float64, got " +
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64 &&
+        values.dtype() != DType::Int32 && values.dtype() != DType::Int64) {
+        throw std::runtime_error("Vulkan SparseAdd only supports Float32/Float64/Int32/Int64, got " +
             std::string(dtype_name(values.dtype())));
     }
     int32_t device_id = values.device().index;
-    bool is_f64 = (values.dtype() == DType::Float64);
-    std::string shader_name = is_f64 ? "sparse_add_f64" : "sparse_add";
+    // Duplicate CSR entries within a row require atomic accumulation into the
+    // output buffer. Int32 uses core atomicAdd (no extension needed). Int64
+    // needs a 64-bit CAS loop (sparse_add_i64.comp), which requires the
+    // device to advertise VK_KHR_shader_atomic_int64 — mirrors
+    // dispatchIndexAdd's Int64/UInt64 gate (clean throw, no CPU fallback).
+    if (values.dtype() == DType::Int64 && !devices_[device_id].hasAtomicInt64) {
+        throw std::runtime_error(
+            "Vulkan SparseAdd with Int64 requires VK_KHR_shader_atomic_int64 "
+            "support. Use CPU backend or Int32 for this device.");
+    }
+    bool is_wide = (values.dtype() == DType::Float64 || values.dtype() == DType::Int64);
+    std::string shader_name;
+    switch (values.dtype()) {
+        case DType::Float64: shader_name = "sparse_add_f64"; break;
+        case DType::Int32:   shader_name = "sparse_add_i32"; break;
+        case DType::Int64:   shader_name = "sparse_add_i64"; break;
+        default:              shader_name = "sparse_add";    break;
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // M31: guard the narrowing cast below against silent Int64->Int32
@@ -2731,7 +2873,7 @@ auto VulkanBackend::dispatchSparseAdd(const Tensor& crow_indices, const Tensor& 
     // Output must be pre-filled with dense values; clone dense into output
     Tensor output = dispatchClone(dense);
 
-    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t elem_size = is_wide ? 8 : 4;
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
     size_t values_size = values.numel() * elem_size;
@@ -2982,6 +3124,7 @@ auto VulkanBackend::dispatchCross(const Tensor& a, const Tensor& b,
 // pivots is Int32 tensor of shape (..., n) containing 1-based LAPACK pivot indices.
 // ============================================================================
 auto VulkanBackend::dispatchLinalgLU(const Tensor& input) -> std::vector<Tensor> {
+    validate_linalg_dtype(input, "lu");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (ndim < 2) throw std::invalid_argument("linalg.lu: input must be at least 2D");
@@ -3083,6 +3226,7 @@ auto VulkanBackend::dispatchLinalgLU(const Tensor& input) -> std::vector<Tensor>
 // ============================================================================
 auto VulkanBackend::dispatchLinalgLUSolve(const Tensor& LU_data, const Tensor& pivots,
                                           const Tensor& B) -> Tensor {
+    validate_linalg_dtype(LU_data, "lu_solve");
     auto lu_shape = LU_data.shape();
     auto b_shape = B.shape();
     int64_t lu_ndim = static_cast<int64_t>(lu_shape.size());
@@ -3125,6 +3269,7 @@ auto VulkanBackend::dispatchLinalgLUSolve(const Tensor& LU_data, const Tensor& p
     // Dispatch TRSM shader (identical pattern to dispatchLinalgSolve tiled path)
     auto lu_cont = lu.contiguous();
     auto b_cont = bmat.contiguous();
+    checkLuNonSingular(lu_cont, n, batch_size, is_f64, "lu_solve");
     Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), work_dtype, LU_data.device());
 
     std::string trsm_shader = is_f64 ? "linalg_trsm_f64" : "linalg_trsm";
@@ -3358,13 +3503,27 @@ auto VulkanBackend::dispatchSparseSpGEMM(const Tensor& a_crow, const Tensor& a_c
 auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor& col_indices,
                                         const Tensor& values, const Tensor& b,
                                         int64_t N, bool upper) -> Tensor {
-    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
-        throw std::runtime_error("Vulkan SparseTrsv only supports Float32/Float64, got " +
+    // Complex64/Complex128 get genuine GPU compute via dedicated shader
+    // variants (sparse_trsv_c64 / sparse_trsv_c128) below — same
+    // single-workgroup sequential substitution as the real shaders, with
+    // complex multiply-subtract and complex divide. Values/RHS/Output are
+    // interleaved [re,im] float (Complex64) or float64_t (Complex128) pairs,
+    // matching every other complex Vulkan kernel's layout (fft.comp,
+    // complex_from_parts.comp, conj_f64.comp).
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64 &&
+        values.dtype() != DType::Complex64 && values.dtype() != DType::Complex128) {
+        throw std::runtime_error("Vulkan SparseTrsv only supports Float32/Float64/Complex64/Complex128, got " +
             std::string(dtype_name(values.dtype())));
     }
     int32_t device_id = values.device().index;
-    bool is_f64 = (values.dtype() == DType::Float64);
-    std::string shader_name = is_f64 ? "sparse_trsv_f64" : "sparse_trsv";
+    bool is_complex = (values.dtype() == DType::Complex64 || values.dtype() == DType::Complex128);
+    bool is_f64 = (values.dtype() == DType::Float64 || values.dtype() == DType::Complex128);
+    std::string shader_name;
+    if (is_complex) {
+        shader_name = (values.dtype() == DType::Complex128) ? "sparse_trsv_c128" : "sparse_trsv_c64";
+    } else {
+        shader_name = is_f64 ? "sparse_trsv_f64" : "sparse_trsv";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // M31: guard the narrowing cast below against silent Int64->Int32
@@ -3386,7 +3545,10 @@ auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor&
     // Solved flags: one int per row, zero-initialized
     Tensor solved = dispatchZeros({N}, DType::Int32, values.device());
 
-    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    // Complex elements are 2 interleaved lanes (re,im) of the base float/double
+    // width, matching the Complex64=8B / Complex128=16B convention used
+    // throughout the Vulkan backend (e.g. vulkan_ops_fft.cpp's elem_size).
+    size_t elem_size = (is_f64 ? sizeof(double) : sizeof(float)) * (is_complex ? 2 : 1);
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
     size_t values_size = values_c.numel() * elem_size;
@@ -3430,13 +3592,27 @@ auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor&
 auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor& col_indices,
                                         const Tensor& values, const Tensor& B,
                                         int64_t N, int64_t K_rhs, bool upper) -> Tensor {
-    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
-        throw std::runtime_error("Vulkan SparseTrsm only supports Float32/Float64, got " +
+    // Complex64/Complex128 get genuine GPU compute via dedicated shader
+    // variants (sparse_trsm_c64 / sparse_trsm_c128) below — same
+    // single-workgroup, columns-parallel substitution as the real shaders,
+    // with complex multiply-subtract and complex divide. Values/RHS/Output
+    // are interleaved [re,im] float (Complex64) or float64_t (Complex128)
+    // pairs, matching every other complex Vulkan kernel's layout (fft.comp,
+    // complex_from_parts.comp, conj_f64.comp).
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64 &&
+        values.dtype() != DType::Complex64 && values.dtype() != DType::Complex128) {
+        throw std::runtime_error("Vulkan SparseTrsm only supports Float32/Float64/Complex64/Complex128, got " +
             std::string(dtype_name(values.dtype())));
     }
     int32_t device_id = values.device().index;
-    bool is_f64 = (values.dtype() == DType::Float64);
-    std::string shader_name = is_f64 ? "sparse_trsm_f64" : "sparse_trsm";
+    bool is_complex = (values.dtype() == DType::Complex64 || values.dtype() == DType::Complex128);
+    bool is_f64 = (values.dtype() == DType::Float64 || values.dtype() == DType::Complex128);
+    std::string shader_name;
+    if (is_complex) {
+        shader_name = (values.dtype() == DType::Complex128) ? "sparse_trsm_c128" : "sparse_trsm_c64";
+    } else {
+        shader_name = is_f64 ? "sparse_trsm_f64" : "sparse_trsm";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // M31: guard the narrowing cast below against silent Int64->Int32
@@ -3458,7 +3634,10 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
     // Solved flags: one int per row, zero-initialized
     Tensor solved = dispatchZeros({N}, DType::Int32, values.device());
 
-    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    // Complex elements are 2 interleaved lanes (re,im) of the base float/double
+    // width, matching the Complex64=8B / Complex128=16B convention used
+    // throughout the Vulkan backend (e.g. vulkan_ops_fft.cpp's elem_size).
+    size_t elem_size = (is_f64 ? sizeof(double) : sizeof(float)) * (is_complex ? 2 : 1);
     size_t crow_size = crow_i32.numel() * sizeof(int32_t);
     size_t col_size = col_i32.numel() * sizeof(int32_t);
     size_t values_size = values_c.numel() * elem_size;
@@ -3530,16 +3709,59 @@ auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor&
 
     auto a_shape = A_c.shape();
     auto b_shape = B_c.shape();
+    int64_t a_ndim = static_cast<int64_t>(a_shape.size());
+    int64_t b_ndim = static_cast<int64_t>(b_shape.size());
     uint32_t N = static_cast<uint32_t>(a_shape[a_shape.size() - 1]);
-    uint32_t M = (b_shape.size() >= 2) ? static_cast<uint32_t>(b_shape[b_shape.size() - 1]) : 1;
+    // Disambiguate a matrix RHS (..., N, nrhs) from a batched vector RHS
+    // (..., N) the same way dispatchLinalgSolve's small path does: only
+    // treat the trailing dim as nrhs when the second-to-last dim equals N.
+    // Without this guard a batched vector RHS shaped (batch, N) with
+    // batch != N would wrongly yield M == N and make the shader over-read B.
+    uint32_t M = (b_ndim >= 2 && b_shape[b_ndim - 2] == static_cast<int64_t>(N))
+                     ? static_cast<uint32_t>(b_shape[b_ndim - 1])
+                     : 1;
+
+    // Batch dimension: product of all leading dims of A before the trailing
+    // N x N matrix. The shader indexes A/B/X with a per-batch offset, so
+    // this must match the batch layout B (and the output, which mirrors B's
+    // shape) was flattened with above.
+    int64_t batch_size = 1;
+    for (int64_t i = 0; i < a_ndim - 2; ++i) batch_size *= a_shape[i];
+
+    // The shader divides by the diagonal with no epsilon guard and no
+    // error-reporting path back to the host, so a singular (zero-diagonal)
+    // triangular matrix would otherwise silently produce Inf/NaN instead of
+    // throwing. Matches the CPU backend's solve_triangular, which rejects a
+    // zero diagonal up front with the same diagnostic (src/ops/linalg.cpp).
+    if (!unitriangular) {
+        Tensor a_host = A_c.to(Device::cpu());
+        auto check_zero_diag = [&](auto* a_data) {
+            for (int64_t b = 0; b < batch_size; ++b) {
+                auto* A_mat = a_data + b * N * N;
+                for (uint32_t i = 0; i < N; ++i) {
+                    if (A_mat[i * N + i] == 0) {
+                        throw std::runtime_error(
+                            "linalg::solve_triangular: zero diagonal element at row " +
+                            std::to_string(i));
+                    }
+                }
+            }
+        };
+        if (is_f64) {
+            check_zero_diag(a_host.data<double>());
+        } else {
+            check_zero_diag(a_host.data<float>());
+        }
+    }
 
     Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), B_c.dtype(), B_c.device());
 
-    struct { uint32_t N; uint32_t M; uint32_t upper; uint32_t unitriangular; } pc;
+    struct { uint32_t N; uint32_t M; uint32_t upper; uint32_t unitriangular; uint32_t batch; } pc;
     pc.N = N;
     pc.M = M;
     pc.upper = upper ? 1 : 0;
     pc.unitriangular = unitriangular ? 1 : 0;
+    pc.batch = static_cast<uint32_t>(batch_size);
 
     size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
     size_t a_buf = static_cast<size_t>(A_c.numel()) * elem_size;
@@ -3558,7 +3780,8 @@ auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor&
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg_checked(M, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(M, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"),
+                  static_cast<uint32_t>(batch_size), 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
@@ -3571,6 +3794,7 @@ auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor&
 // ============================================================================
 
 auto VulkanBackend::dispatchGeqrf(const Tensor& input) -> std::vector<Tensor> {
+    validate_linalg_dtype(input, "geqrf");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
 
@@ -3613,6 +3837,7 @@ auto VulkanBackend::dispatchGeqrf(const Tensor& input) -> std::vector<Tensor> {
 
 auto VulkanBackend::dispatchOrmqr(const Tensor& reflectors, const Tensor& tau,
                                    const Tensor& C, bool left, bool transpose_q) -> Tensor {
+    validate_linalg_dtype(C, "ormqr");
     auto c_shape = C.shape();
     auto r_shape = reflectors.shape();
     int64_t c_ndim = static_cast<int64_t>(c_shape.size());
@@ -3736,6 +3961,7 @@ auto VulkanBackend::dispatchLinalgHouseholder(const Tensor& input,
 // =========================================================================
 auto VulkanBackend::dispatchLinalgLDLFactor(const Tensor& A)
     -> std::vector<Tensor> {
+    validate_linalg_dtype(A, "ldl_factor");
     auto shape = A.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (ndim < 2) throw std::invalid_argument("linalg.ldl_factor: input must be at least 2D");
@@ -3808,6 +4034,7 @@ auto VulkanBackend::dispatchLinalgLDLFactor(const Tensor& A)
 auto VulkanBackend::dispatchLinalgLDLSolve(const Tensor& LD,
                                             const Tensor& pivots,
                                             const Tensor& B) -> Tensor {
+    validate_linalg_dtype(LD, "ldl_solve");
     auto ld_shape = LD.shape();
     auto b_shape = B.shape();
     int64_t ld_ndim = static_cast<int64_t>(ld_shape.size());
@@ -3839,6 +4066,48 @@ auto VulkanBackend::dispatchLinalgLDLSolve(const Tensor& LD,
     Tensor pivots_cont = pivots.contiguous();
     auto ld_cont = ld.contiguous();
     auto b_cont = bmat.contiguous();
+
+    // The LDL^T solve shader has no error-reporting path back to the host, so
+    // an exactly-zero D-block pivot (a singular factor) would silently
+    // produce Inf/NaN instead of throwing (matches CPU/CUDA/ROCm, which all
+    // detect this via the same pivot-block decoding and throw). Validate
+    // host-side before ever dispatching the shader.
+    {
+        Tensor ld_host = ld_cont.to(Device::cpu());
+        Tensor piv_host = pivots_cont.to(Device::cpu());
+        const int32_t* piv_ptr = piv_host.data<int32_t>();
+        auto check_batch = [&](auto* ld_ptr) {
+            for (int64_t bidx = 0; bidx < batch_size; ++bidx) {
+                auto* ld_mat = ld_ptr + bidx * n * n;
+                const int32_t* piv_mat = piv_ptr + bidx * n;
+                for (int64_t k = 0; k < n; ) {
+                    int32_t p = piv_mat[k];
+                    if (p > 0) {
+                        if (ld_mat[k * n + k] == 0) {
+                            throw std::runtime_error(
+                                "linalg.ldl_solve: singular LDL^T factor (zero pivot)");
+                        }
+                        k++;
+                    } else {
+                        auto d11 = ld_mat[k * n + k];
+                        auto d21 = ld_mat[(k + 1) * n + k];
+                        auto d22 = ld_mat[(k + 1) * n + (k + 1)];
+                        if (d11 * d22 - d21 * d21 == 0) {
+                            throw std::runtime_error(
+                                "linalg.ldl_solve: singular LDL^T factor (zero pivot)");
+                        }
+                        k += 2;
+                    }
+                }
+            }
+        };
+        if (is_f64) {
+            check_batch(ld_host.data<double>());
+        } else {
+            check_batch(ld_host.data<float>());
+        }
+    }
+
     Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), work_dtype, LD.device());
 
     std::string shader = is_f64 ? "linalg_ldl_bk_solve_f64" : "linalg_ldl_bk_solve";

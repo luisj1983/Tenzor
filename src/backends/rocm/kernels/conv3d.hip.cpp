@@ -1206,6 +1206,19 @@ auto conv_transpose3d_forward_hip(
         return result.to(DType::BFloat16);
     }
 
+    // The transposed-conv gather kernel below reads input/weight/bias with
+    // dense NCDHW / (C_in, C_out/groups, kD,kH,kW) strides, so a non-contiguous
+    // view (e.g. a permuted input) would be read at the wrong offsets.
+    // Materialize contiguous copies once by recursing with packed tensors
+    // (mirrors the conv_transpose2d_forward_kernel guard in conv2d.hip.cpp).
+    if (!input.is_contiguous() || !weight.is_contiguous() || (bias.numel() > 0 && !bias.is_contiguous())) {
+        Tensor input_c = input.contiguous();
+        Tensor weight_c = weight.contiguous();
+        Tensor bias_c = (bias.numel() > 0 && !bias.is_contiguous()) ? bias.contiguous() : bias;
+        return conv_transpose3d_forward_hip(input_c, weight_c, bias_c,
+                                             stride, padding, output_padding, dilation, groups, stream);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 

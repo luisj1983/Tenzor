@@ -2778,13 +2778,22 @@ auto deformable_conv2d_forward_kernel(
 
     int64_t total = batch * out_channels * out_h * out_w;
 
+    // data<T>() ignores strides -- contiguify all raw-pointer operands so a
+    // non-contiguous (channels-last/permuted/sliced) view is read correctly.
+    // Matches the CPU kernel's guard (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor input_c  = input.is_contiguous()  ? input  : input.contiguous();
+    const Tensor offset_c = offset.is_contiguous() ? offset : offset.contiguous();
+    const Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+    const Tensor bias_c   = bias.is_contiguous()   ? bias   : bias.contiguous();
+    const Tensor mask_c   = mask.is_contiguous()   ? mask   : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         auto [num_blocks, block_size] = optimal_launch_config(
             deformable_conv2d_forward_impl<float>, total);
         deformable_conv2d_forward_impl<float><<<num_blocks, block_size, 0, stream>>>(
-            input.data<float>(), offset.data<float>(), weight.data<float>(),
-            has_bias ? bias.data<float>() : nullptr,
-            has_mask ? mask.data<float>() : nullptr,
+            input_c.data<float>(), offset_c.data<float>(), weight_c.data<float>(),
+            has_bias ? bias_c.data<float>() : nullptr,
+            has_mask ? mask_c.data<float>() : nullptr,
             output.data<float>(),
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,
@@ -2795,9 +2804,9 @@ auto deformable_conv2d_forward_kernel(
         auto [num_blocks, block_size] = optimal_launch_config(
             deformable_conv2d_forward_impl<double>, total);
         deformable_conv2d_forward_impl<double><<<num_blocks, block_size, 0, stream>>>(
-            input.data<double>(), offset.data<double>(), weight.data<double>(),
-            has_bias ? bias.data<double>() : nullptr,
-            has_mask ? mask.data<double>() : nullptr,
+            input_c.data<double>(), offset_c.data<double>(), weight_c.data<double>(),
+            has_bias ? bias_c.data<double>() : nullptr,
+            has_mask ? mask_c.data<double>() : nullptr,
             output.data<double>(),
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,
@@ -2867,6 +2876,14 @@ auto deformable_conv2d_backward_input_kernel(
 
     int64_t total = batch * out_channels * out_h * out_w;
 
+    // data<T>() ignores strides -- contiguify all raw-pointer read operands.
+    // Matches the CPU kernel's guard (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c       = input.is_contiguous()       ? input       : input.contiguous();
+    const Tensor offset_c      = offset.is_contiguous()      ? offset      : offset.contiguous();
+    const Tensor weight_c      = weight.is_contiguous()      ? weight      : weight.contiguous();
+    const Tensor mask_c        = mask.is_contiguous()        ? mask        : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float), stream));
         TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_offset.data<float>(), 0, grad_offset.numel() * sizeof(float), stream));
@@ -2877,9 +2894,9 @@ auto deformable_conv2d_backward_input_kernel(
         auto [num_blocks, block_size] = optimal_launch_config(
             deformable_conv2d_backward_input_impl<float>, total);
         deformable_conv2d_backward_input_impl<float><<<num_blocks, block_size, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
-            weight.data<float>(),
-            has_mask ? mask.data<float>() : nullptr,
+            grad_output_c.data<float>(), input_c.data<float>(), offset_c.data<float>(),
+            weight_c.data<float>(),
+            has_mask ? mask_c.data<float>() : nullptr,
             grad_input.data<float>(), grad_offset.data<float>(),
             has_mask ? grad_mask_tensor.data<float>() : nullptr,
             batch, in_channels, in_h, in_w,
@@ -2897,9 +2914,9 @@ auto deformable_conv2d_backward_input_kernel(
         auto [num_blocks, block_size] = optimal_launch_config(
             deformable_conv2d_backward_input_impl<double>, total);
         deformable_conv2d_backward_input_impl<double><<<num_blocks, block_size, 0, stream>>>(
-            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
-            weight.data<double>(),
-            has_mask ? mask.data<double>() : nullptr,
+            grad_output_c.data<double>(), input_c.data<double>(), offset_c.data<double>(),
+            weight_c.data<double>(),
+            has_mask ? mask_c.data<double>() : nullptr,
             grad_input.data<double>(), grad_offset.data<double>(),
             has_mask ? grad_mask_tensor.data<double>() : nullptr,
             batch, in_channels, in_h, in_w,
@@ -2963,14 +2980,21 @@ auto deformable_conv2d_backward_weight_kernel(
 
     int64_t total_weight = out_channels * in_channels_per_group * kernel_h * kernel_w;
 
+    // data<T>() ignores strides -- contiguify all raw-pointer read operands.
+    // Matches the CPU kernel's guard (src/backends/cpu/kernels/conv2d.cpp).
+    const Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    const Tensor input_c       = input.is_contiguous()       ? input       : input.contiguous();
+    const Tensor offset_c      = offset.is_contiguous()      ? offset      : offset.contiguous();
+    const Tensor mask_c        = mask.is_contiguous()        ? mask        : mask.contiguous();
+
     if (input.dtype() == DType::Float32) {
         TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float), stream));
 
         auto [num_blocks, block_size] = optimal_launch_config(
             deformable_conv2d_backward_weight_impl<float>, total_weight);
         deformable_conv2d_backward_weight_impl<float><<<num_blocks, block_size, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
-            has_mask ? mask.data<float>() : nullptr,
+            grad_output_c.data<float>(), input_c.data<float>(), offset_c.data<float>(),
+            has_mask ? mask_c.data<float>() : nullptr,
             grad_weight.data<float>(),
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,
@@ -2983,8 +3007,8 @@ auto deformable_conv2d_backward_weight_kernel(
         auto [num_blocks, block_size] = optimal_launch_config(
             deformable_conv2d_backward_weight_impl<double>, total_weight);
         deformable_conv2d_backward_weight_impl<double><<<num_blocks, block_size, 0, stream>>>(
-            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
-            has_mask ? mask.data<double>() : nullptr,
+            grad_output_c.data<double>(), input_c.data<double>(), offset_c.data<double>(),
+            has_mask ? mask_c.data<double>() : nullptr,
             grad_weight.data<double>(),
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,

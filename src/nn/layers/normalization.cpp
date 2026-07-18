@@ -342,6 +342,30 @@ public:
         return attrs;
     }
 
+    // jvp_pack_inputs_for_walker's job here is to insert the (non-Variable)
+    // mean/gamma stat into the walker's per-input array so the multi-output
+    // jvp_adapter_layer_norm rule sees (x, gamma, beta) — mean/rstd are
+    // recomputed internally by that adapter, so they don't need injecting.
+    //
+    // `walker_primals`/`walker_tangents` are ALREADY the walker's normal
+    // per-input resolution of this node's `input_variables()`, which is
+    // built at the forward call site (see LayerNorm::forward below) as a
+    // conditional subsequence of {input, weight, bias} — each appended only
+    // if it `requires_grad()`, in that fixed relative order. So walker_
+    // primals[0] is x ONLY when x requires_grad; otherwise position 0 may
+    // be weight or bias, and there is no guaranteed positional mapping.
+    //
+    // Match entries by data_ptr() against the tensors we DO have a
+    // reference to (saved x = sav[0], saved gamma = sav[3]) to correctly
+    // identify weight vs bias regardless of which subset of {x, weight,
+    // bias} required grad — this is the "resolve via the normal seed-
+    // tangent-matching path" the walker already did; we just need to sort
+    // its output back into (x, gamma, beta) order. Previously this
+    // unconditionally zeroed dgamma/dbeta, discarding whatever real
+    // tangents the walker had already resolved (including a seed tangent
+    // when the user calls `autograd::jvp(func, gamma_or_beta, tangent)`
+    // directly) — silently dropping the direct dbeta/dgamma contribution
+    // instead of using it.
     auto jvp_pack_inputs_for_walker(
             const std::vector<Tensor>& walker_primals,
             const std::vector<Tensor>& walker_tangents) const
@@ -349,15 +373,41 @@ public:
         if (walker_primals.empty()) return std::nullopt;
         if (num_saved_tensors() < 4) return std::nullopt;
         const auto& sav = const_cast<LayerNormBackward*>(this)->saved_tensors();
-        const Tensor& gamma = sav[3];
+        const Tensor& x_saved = sav[0];
+        const Tensor& gamma   = sav[3];
 
         std::vector<int64_t> g_shape(gamma.shape().begin(), gamma.shape().end());
+        Tensor x     = x_saved;
+        Tensor dx    = tenzor::zeros(
+            std::vector<int64_t>(x_saved.shape().begin(), x_saved.shape().end()),
+            x_saved.dtype(), x_saved.device());
         Tensor beta  = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
         Tensor dgamma = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
         Tensor dbeta  = tenzor::zeros(g_shape, gamma.dtype(), gamma.device());
 
-        std::vector<Tensor> primals  = { walker_primals[0],  gamma,  beta  };
-        std::vector<Tensor> tangents = { walker_tangents[0], dgamma, dbeta };
+        bool found_x = false;
+        for (size_t i = 0; i < walker_primals.size(); ++i) {
+            const void* ptr = walker_primals[i].data_ptr();
+            if (ptr != nullptr && ptr == x_saved.data_ptr()) {
+                x = walker_primals[i];
+                dx = walker_tangents[i];
+                found_x = true;
+            } else if (ptr != nullptr && ptr == gamma.data_ptr()) {
+                dgamma = walker_tangents[i];
+            } else {
+                // Not x, not gamma -> must be beta (LayerNormBackward
+                // doesn't save beta's value at all — the closed-form
+                // backward never needs it — only its tangent, when present,
+                // for this repacked call).
+                beta = walker_primals[i];
+                dbeta = walker_tangents[i];
+            }
+        }
+        (void)found_x;  // x defaults to the saved value (zero tangent) if
+                         // x itself wasn't in input_variables() at all.
+
+        std::vector<Tensor> primals  = { x,  gamma,  beta  };
+        std::vector<Tensor> tangents = { dx, dgamma, dbeta };
         return std::make_pair(std::move(primals), std::move(tangents));
     }
 
@@ -434,12 +484,20 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
         return results;
     }
 
-    // CPU path
-    auto grad_output = grad_output_orig.contiguous().to(DType::Float32);
-    auto input = input_orig.contiguous().to(DType::Float32);
-    auto mean = mean_orig.contiguous().to(DType::Float32);
-    auto rstd = rstd_orig.contiguous().to(DType::Float32);
-    auto weight = weight_orig.contiguous().to(DType::Float32);
+    // CPU path: keep Float64 inputs in double precision (matches
+    // GroupNormBackward/RMSNormBackward). The reduction below is already
+    // done in double; the previous unconditional .to(Float32) on the
+    // stored data was the only place that discarded the extra F64 mantissa
+    // bits. Float16/BFloat16 widen to Float32; Float32 stays Float32;
+    // Float64 stays Float64.
+    const DType work_dtype =
+        (original_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+
+    auto grad_output = grad_output_orig.contiguous().to(work_dtype);
+    auto input = input_orig.contiguous().to(work_dtype);
+    auto mean = mean_orig.contiguous().to(work_dtype);
+    auto rstd = rstd_orig.contiguous().to(work_dtype);
+    auto weight = weight_orig.contiguous().to(work_dtype);
 
     auto shape = input.shape();
     int64_t batch_size = 1;
@@ -449,23 +507,23 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 
     int64_t N = normalized_size_;
 
-    auto* input_data = input.data<float>();
-    auto* mean_data = mean.data<float>();
-    auto* rstd_data = rstd.data<float>();
-    auto* grad_out_data = grad_output.data<float>();
-    auto* weight_data = weight.data<float>();
-
     auto grad_input = zeros_like(input);
-    auto grad_weight = zeros({N}, grad_output.dtype(), grad_output.device());
-    auto grad_bias = zeros({N}, grad_output.dtype(), grad_output.device());
+    auto grad_weight = zeros({N}, work_dtype, grad_output.device());
+    auto grad_bias = zeros({N}, work_dtype, grad_output.device());
 
-    auto* grad_in_data = grad_input.data<float>();
-    auto* grad_weight_data = grad_weight.data<float>();
-    auto* grad_bias_data = grad_bias.data<float>();
+    auto compute = [&]<typename T>() {
+    const T* input_data = input.data<T>();
+    const T* mean_data = mean.data<T>();
+    const T* rstd_data = rstd.data<T>();
+    const T* grad_out_data = grad_output.data<T>();
+    const T* weight_data = weight.data<T>();
+    T* grad_in_data = grad_input.data<T>();
+    T* grad_weight_data = grad_weight.data<T>();
+    T* grad_bias_data = grad_bias.data<T>();
 
     for (int64_t b = 0; b < batch_size; b++) {
-        float mu = mean_data[b];
-        float inv_std = rstd_data[b];
+        const double mu = static_cast<double>(mean_data[b]);
+        const double inv_std = static_cast<double>(rstd_data[b]);
 
         // NOTE: do NOT short-circuit on low variance. rstd is the saved
         // 1/sqrt(var+eps) and is therefore always finite (eps guards the
@@ -484,14 +542,16 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 
         for (int64_t i = 0; i < N; i++) {
             int64_t idx = b * N + i;
-            float x_normalized = (input_data[idx] - mu) * inv_std;
-            float grad_out = grad_out_data[idx] * weight_data[i];
+            const double x_normalized =
+                (static_cast<double>(input_data[idx]) - mu) * inv_std;
+            const double grad_out = static_cast<double>(grad_out_data[idx]) *
+                                    static_cast<double>(weight_data[i]);
 
-            sum_grad_out += static_cast<double>(grad_out);
-            sum_grad_out_normalized += static_cast<double>(grad_out) *
-                                       static_cast<double>(x_normalized);
+            sum_grad_out += grad_out;
+            sum_grad_out_normalized += grad_out * x_normalized;
 
-            grad_weight_data[i] += grad_out_data[idx] * x_normalized;
+            grad_weight_data[i] += static_cast<T>(
+                static_cast<double>(grad_out_data[idx]) * x_normalized);
             grad_bias_data[i] += grad_out_data[idx];
         }
 
@@ -502,18 +562,21 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
         for (int64_t i = 0; i < N; i++) {
             int64_t idx = b * N + i;
             const double x_normalized =
-                (static_cast<double>(input_data[idx]) - static_cast<double>(mu)) *
-                static_cast<double>(inv_std);
+                (static_cast<double>(input_data[idx]) - mu) * inv_std;
 
             const double grad_out_w =
                 static_cast<double>(grad_out_data[idx]) *
                 static_cast<double>(weight_data[i]);
             const double gi = (grad_out_w - mean_grad_out -
                                x_normalized * mean_grad_out_normalized) *
-                              static_cast<double>(inv_std);
-            grad_in_data[idx] = static_cast<float>(gi);
+                              inv_std;
+            grad_in_data[idx] = static_cast<T>(gi);
         }
     }
+    };
+
+    if (work_dtype == DType::Float64) compute.template operator()<double>();
+    else compute.template operator()<float>();
 
     // grad_weight/grad_bias are accumulated flat as [N]. When normalized_shape is
     // multi-dimensional the weight/bias parameters are multi-dimensional too, so
@@ -862,6 +925,23 @@ public:
         throw std::runtime_error("GroupNormBackward::forward should not be called");
     }
 
+    // A.4 multi-op JVP walker hooks, mirroring LayerNormBackward. group_norm
+    // forward's input_vars() is built as a strict {input, weight, bias}
+    // subsequence (each appended only if it requires_grad, in that fixed
+    // relative order — see GroupNorm2d::forward below), so a full 3-entry
+    // walker_primals/tangents array is ALWAYS exactly (x, gamma, beta) in
+    // the right order (never a wrong-order 3-tuple), and any smaller arity
+    // safely fails jvp_adapter_group_norm_s15's own `primals.size() != 3`
+    // check — no jvp_pack_inputs_for_walker override is needed here.
+    auto op_id() const -> OpId override { return OpId::GroupNorm; }
+
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
+        attrs.set(AttrKey::NumGroups, num_groups_);
+        return attrs;
+    }
+
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& grad_output_orig = grad_outputs[0];
         auto saved = saved_tensors();
@@ -882,9 +962,19 @@ public:
             auto rs = rstd_orig.contiguous();
             auto wt = weight_orig.contiguous();
 
-            // Upcast Float16/Float64 to Float32 for backend kernels that
-            // only support Float32 internally (ROCm GroupNorm, etc.)
-            bool needs_cast = (original_dtype != DType::Float32);
+            // Upcast Float16/BFloat16 to Float32 for backend kernels that
+            // only support Float32 internally for those narrow types (ROCm
+            // GroupNorm, etc.). Float64 must NOT be downcast here: all four
+            // GPU backends (CUDA batchnorm.cu::group_norm_backward_kernel,
+            // ROCm normalization.hip.cpp::group_norm_backward_kernel, OneAPI
+            // kernels/batchnorm.cpp::group_norm_backward_kernel, and Vulkan
+            // vulkan_ops_norm.cpp::dispatchGroupNormBackward via the
+            // "group_norm_backward_f64" shader) already register a native
+            // Float64 code path. Unconditionally downcasting Float64 to
+            // Float32 here silently dropped the extra double-precision
+            // mantissa bits before ever reaching those kernels, failing
+            // Float64 gradcheck tolerance on every GPU backend.
+            bool needs_cast = (original_dtype == DType::Float16 || original_dtype == DType::BFloat16);
             if (needs_cast) {
                 go = go.to(DType::Float32);
                 inp = inp.to(DType::Float32);
@@ -1417,6 +1507,23 @@ public:
         throw std::runtime_error("InstanceNormBackwardFn::forward should not be called");
     }
 
+    // A.4 multi-op JVP walker hooks, mirroring LayerNormBackward/
+    // GroupNormBackward. input_vars() is a strict {input, weight, bias}
+    // subsequence (see InstanceNorm2d::forward below) so a full 3-entry
+    // walker_primals/tangents array is always exactly (x, gamma, beta) in
+    // order; smaller arities safely fail jvp_adapter_instance_norm_s15's
+    // own arity check. No jvp_pack_inputs_for_walker override needed.
+    auto op_id() const -> OpId override { return OpId::InstanceNorm; }
+
+    // jvp_adapter_instance_norm_s15 forces NumGroups = num_channels
+    // internally (instance norm is group norm with G == C), so only Eps
+    // needs to be surfaced here.
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
+        return attrs;
+    }
+
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& grad_output_orig = grad_outputs[0];
         auto saved = saved_tensors();
@@ -1906,6 +2013,23 @@ public:
 
     auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("RMSNormBackward::forward should not be called");
+    }
+
+    // A.4 multi-op JVP walker hooks, mirroring LayerNormBackward/
+    // GroupNormBackward. input_vars() is a strict {input, weight}
+    // subsequence (see the RMSNorm forward below) so a full 2-entry
+    // walker_primals/tangents array is always exactly (x, weight) in order;
+    // smaller arities safely fail jvp_adapter_rms_norm_s15's own
+    // `primals.size() != 2` check. No jvp_pack_inputs_for_walker override
+    // needed (unlike LayerNorm/BatchNorm2d, RMSNorm's JVP adapter needs no
+    // extra mean/var stat injected — RMSNorm has no mean-centering, and the
+    // adapter recomputes rrms internally from x and weight alone).
+    auto op_id() const -> OpId override { return OpId::RMSNorm; }
+
+    auto saved_attributes() const -> OpAttributes override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Eps, eps_);
+        return attrs;
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {

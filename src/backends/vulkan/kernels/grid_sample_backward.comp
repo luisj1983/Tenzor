@@ -82,10 +82,19 @@ float safe_get(int n, int c, int y, int x) {
     return 0.0;
 }
 
-// Bicubic neighbour fetch with padding (matches forward bicubic_get).
+// Bicubic neighbour fetch with padding (matches forward bicubic_get): zeros
+// padding returns 0 out of range; border clamps the neighbour to the edge;
+// reflection true-reflects the out-of-range neighbour back into [0, size-1]
+// via reflect_coord instead of edge-clamping (matches CUDA/CPU/ROCm/OneAPI
+// bicubic backward's `fetch` helper).
 float bicubic_get(int n, int c, int y, int x) {
     if (params.padding_mode == 0) {
         if (y < 0 || y >= params.H_in || x < 0 || x >= params.W_in) return 0.0;
+    } else if (params.padding_mode == 2) {
+        y = int(reflect_coord(float(y), params.H_in, params.align_corners));
+        x = int(reflect_coord(float(x), params.W_in, params.align_corners));
+        y = clamp(y, 0, params.H_in - 1);
+        x = clamp(x, 0, params.W_in - 1);
     } else {
         y = clamp(y, 0, params.H_in - 1);
         x = clamp(x, 0, params.W_in - 1);
@@ -200,12 +209,24 @@ void main() {
                     int yy = iy_floor + dy;
                     int xx = ix_floor + dx;
                     float weight = wy[dy + 1] * wx[dx + 1];
-                    // Scatter (padding-aware): zeros => skip OOB; border/reflection => clamp.
+                    // Scatter (padding-aware): zeros => skip OOB; border => clamp to
+                    // edge; reflection => true-reflect back into [0, size-1] via
+                    // reflect_coord instead of edge-clamping, so the gradient lands
+                    // on the SAME pixel bicubic_get()/the forward pass actually
+                    // sampled (matches CPU/CUDA/ROCm/OneAPI bicubic backward's
+                    // `scatter` helper).
                     if (params.padding_mode == 0) {
                         if (yy >= 0 && yy < params.H_in && xx >= 0 && xx < params.W_in) {
                             atomicAdd(grad_input[((n * params.C + c) * params.H_in + yy) * params.W_in + xx],
                                       go * weight);
                         }
+                    } else if (params.padding_mode == 2) {
+                        int ry = int(reflect_coord(float(yy), params.H_in, params.align_corners));
+                        int rx = int(reflect_coord(float(xx), params.W_in, params.align_corners));
+                        ry = clamp(ry, 0, params.H_in - 1);
+                        rx = clamp(rx, 0, params.W_in - 1);
+                        atomicAdd(grad_input[((n * params.C + c) * params.H_in + ry) * params.W_in + rx],
+                                  go * weight);
                     } else {
                         int cy = clamp(yy, 0, params.H_in - 1);
                         int cx = clamp(xx, 0, params.W_in - 1);

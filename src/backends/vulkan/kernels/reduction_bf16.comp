@@ -18,6 +18,7 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 shared float shared_data[WORKGROUP_SIZE];
+shared float shared_comp[WORKGROUP_SIZE]; // Kahan compensation for tree reduction (see reduction.comp)
 
 // NaN-propagating max/min (IEEE/PyTorch); `x != x` is true iff x is NaN.
 float nanmax(float a, float b) { return (a != a) ? a : ((b != b) ? b : max(a, b)); }
@@ -53,6 +54,7 @@ void main() {
     if (output_idx0 < params.outer_size) {
         // Initialize accumulator based on operation
         float accum;
+        float compensation = 0.0; // Kahan compensation for per-thread accumulation
         if (params.op == 2) { // max
             accum = -1.0 / 0.0; // -infinity
         } else if (params.op == 3) { // min
@@ -74,8 +76,14 @@ void main() {
                 switch (params.op) {
                     case 0: // sum
                     case 1: // mean
-                        accum += val;
+                    {
+                        // Kahan compensated summation (see reduction.comp)
+                        float y = val - compensation;
+                        float t = accum + y;
+                        compensation = (t - accum) - y;
+                        accum = t;
                         break;
+                    }
                     case 2: // max
                         accum = nanmax(accum, val);
                         break;
@@ -87,6 +95,7 @@ void main() {
         }
 
         shared_data[tid] = accum;
+        shared_comp[tid] = compensation;
         barrier();
 
         // Parallel reduction in shared memory
@@ -95,8 +104,15 @@ void main() {
                 switch (params.op) {
                     case 0: // sum
                     case 1: // mean
-                        shared_data[tid] += shared_data[tid + s];
+                    {
+                        // Kahan compensated addition for tree reduction (see reduction.comp)
+                        float comp = shared_comp[tid] + shared_comp[tid + s];
+                        float y = shared_data[tid + s] - comp;
+                        float t = shared_data[tid] + y;
+                        shared_comp[tid] = (t - shared_data[tid]) - y;
+                        shared_data[tid] = t;
                         break;
+                    }
                     case 2: // max
                         shared_data[tid] = nanmax(shared_data[tid], shared_data[tid + s]);
                         break;
@@ -122,6 +138,7 @@ void main() {
     if (output_idx1 < params.outer_size) {
         // Initialize accumulator based on operation
         float accum;
+        float compensation = 0.0; // Kahan compensation for per-thread accumulation
         if (params.op == 2) { // max
             accum = -1.0 / 0.0; // -infinity
         } else if (params.op == 3) { // min
@@ -143,8 +160,14 @@ void main() {
                 switch (params.op) {
                     case 0: // sum
                     case 1: // mean
-                        accum += val;
+                    {
+                        // Kahan compensated summation (see reduction.comp)
+                        float y = val - compensation;
+                        float t = accum + y;
+                        compensation = (t - accum) - y;
+                        accum = t;
                         break;
+                    }
                     case 2: // max
                         accum = nanmax(accum, val);
                         break;
@@ -156,6 +179,7 @@ void main() {
         }
 
         shared_data[tid] = accum;
+        shared_comp[tid] = compensation;
         barrier();
 
         // Parallel reduction in shared memory
@@ -164,8 +188,15 @@ void main() {
                 switch (params.op) {
                     case 0: // sum
                     case 1: // mean
-                        shared_data[tid] += shared_data[tid + s];
+                    {
+                        // Kahan compensated addition for tree reduction (see reduction.comp)
+                        float comp = shared_comp[tid] + shared_comp[tid + s];
+                        float y = shared_data[tid + s] - comp;
+                        float t = shared_data[tid] + y;
+                        shared_comp[tid] = (t - shared_data[tid]) - y;
+                        shared_data[tid] = t;
                         break;
+                    }
                     case 2: // max
                         shared_data[tid] = nanmax(shared_data[tid], shared_data[tid + s]);
                         break;

@@ -1,0 +1,76 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Sparse triangular solve: L*x = b (lower) or U*x = b (upper) -- Complex128
+// Same single-workgroup, single-thread SEQUENTIAL substitution strategy as
+// sparse_trsv_f64.comp (see sparse_trsv.comp for why: Vulkan gives no
+// cross-workgroup forward-progress guarantee). The host dispatches a single
+// (1,1,1) workgroup.
+//
+// Complex128 values are stored as interleaved [re0, im0, re1, im1, ...]
+// float64_t pairs (matching the codebase's Complex128 convention, e.g.
+// advanced_index_gather_c128.comp / conj_f64.comp's 2-lanes-per-element
+// layout): one complex element = 2 consecutive float64_t. Values/RHS/Output
+// buffers are therefore sized 2x the element count.
+//
+// Numerics mirror the CPU reference (cpu_forward_substitution /
+// cpu_backward_substitution in src/sparse/sparse_ops.cpp, T=std::complex<double>):
+// plain (non-conjugated) complex multiply-subtract, then complex divide by the
+// diagonal — no Hermitian-transpose assumption.
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float64_t values[]; };  // 2*nnz (re,im pairs)
+layout(set = 0, binding = 3) readonly buffer RHS        { float64_t b[];      };  // 2*n
+layout(set = 0, binding = 4) buffer Output              { float64_t x[];      };  // 2*n
+// Retained for descriptor-set compatibility with the host (now unused).
+layout(set = 0, binding = 5) buffer SolvedCounter        { int solved[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint n;       // matrix dimension
+    uint upper;   // 0 = lower triangular, 1 = upper triangular
+};
+
+void solve_row(uint row) {
+    float64_t rhs_re = b[2u * row];
+    float64_t rhs_im = b[2u * row + 1u];
+    float64_t diag_re = 1.0lf;
+    float64_t diag_im = 0.0lf;
+    uint rs = uint(row_offsets[row]);
+    uint re = uint(row_offsets[row + 1u]);
+    for (uint i = rs; i < re; i++) {
+        uint col = uint(col_indices[i]);
+        float64_t val_re = values[2u * i];
+        float64_t val_im = values[2u * i + 1u];
+        if (col == row) {
+            diag_re = val_re;
+            diag_im = val_im;
+        } else {
+            float64_t xc_re = x[2u * col];
+            float64_t xc_im = x[2u * col + 1u];
+            // rhs -= val * x[col]  (complex multiply, then subtract)
+            rhs_re -= (val_re * xc_re - val_im * xc_im);
+            rhs_im -= (val_re * xc_im + val_im * xc_re);
+        }
+    }
+    // x[row] = rhs / diag (complex division)
+    float64_t denom = diag_re * diag_re + diag_im * diag_im;
+    x[2u * row]      = (rhs_re * diag_re + rhs_im * diag_im) / denom;
+    x[2u * row + 1u] = (rhs_im * diag_re - rhs_re * diag_im) / denom;
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+
+    if (upper == 0u) {
+        for (uint row = 0u; row < n; row++) {
+            solve_row(row);
+        }
+    } else {
+        for (uint t = 0u; t < n; t++) {
+            solve_row(n - 1u - t);
+        }
+    }
+}

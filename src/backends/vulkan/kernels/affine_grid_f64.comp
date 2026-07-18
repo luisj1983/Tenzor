@@ -1,0 +1,47 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Affine grid generator, Float64 variant. Mirrors affine_grid.comp exactly
+// but computes in double precision throughout -- the Float32 shader can only
+// be used for a Float64 theta by downcasting first, which silently drops
+// precision instead of preserving it end-to-end (matches CPU/CUDA/ROCm/
+// OneAPI, which all compute natively in double for Float64 input).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer ThetaBuf { float64_t theta[]; };
+layout(binding = 1) buffer GridBuf  { float64_t grid[]; };
+
+layout(push_constant) uniform PushConstants {
+    int N;
+    int H;
+    int W;
+    int align_corners;  // bool
+    int total;          // N*H*W
+} params;
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= params.total) return;
+
+    int w = idx % params.W;
+    int h = (idx / params.W) % params.H;
+    int n = idx / (params.H * params.W);
+
+    float64_t x_norm, y_norm;
+    if (params.align_corners != 0) {
+        x_norm = (params.W > 1) ? (2.0lf * float64_t(w) / float64_t(params.W - 1) - 1.0lf) : 0.0lf;
+        y_norm = (params.H > 1) ? (2.0lf * float64_t(h) / float64_t(params.H - 1) - 1.0lf) : 0.0lf;
+    } else {
+        x_norm = (2.0lf * float64_t(w) + 1.0lf) / float64_t(params.W) - 1.0lf;
+        y_norm = (2.0lf * float64_t(h) + 1.0lf) / float64_t(params.H) - 1.0lf;
+    }
+
+    int t_off = n * 6;
+    float64_t x_out = theta[t_off + 0] * x_norm + theta[t_off + 1] * y_norm + theta[t_off + 2];
+    float64_t y_out = theta[t_off + 3] * x_norm + theta[t_off + 4] * y_norm + theta[t_off + 5];
+
+    int out_idx = ((n * params.H + h) * params.W + w) * 2;
+    grid[out_idx]     = x_out;
+    grid[out_idx + 1] = y_out;
+}

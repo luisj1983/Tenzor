@@ -37,7 +37,15 @@ int frac_pool_start(int i, int in_size, int out_size, int pool, float u) {
         float alpha = float(in_size - pool) / float(out_size - 1);
         start = int((float(i) + u) * alpha) - int(u * alpha);
     }
-    return clamp(start, 0, in_size - pool);
+    // GLSL's clamp(x, minVal, maxVal) is undefined when minVal > maxVal, which
+    // happens here whenever pool > in_size (in_size - pool < 0). Observed on
+    // this driver as clamp() effectively applying the upper bound last,
+    // driving start negative -- an out-of-bounds input read. Apply the two
+    // bounds explicitly, upper first, matching the CPU reference's
+    // frac_pool_start (src/backends/cpu/kernels/pooling.cpp).
+    start = min(start, in_size - pool);
+    start = max(start, 0);
+    return start;
 }
 
 void main() {

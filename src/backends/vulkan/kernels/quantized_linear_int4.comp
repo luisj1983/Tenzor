@@ -1,0 +1,99 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Quantized Linear: INT4-packed weight (QInt4x2) x INT8 activation, int64
+// accumulation, dequantize to Float32. Weights are packed two signed 4-bit
+// values per byte, out-feature-major: weight_data[o*(K/2)+p] holds elements
+// [o, 2p] (low nibble, bits 0..3) and [o, 2p+1] (high nibble, bits 4..7),
+// each sign-extended from [-8,7] — matches CPU's cpu::unpack_int4 /
+// AWQQuantizer::pack_int4 / CUDA's unpack_int4_dev packing convention.
+// INT4 weights are symmetric only (weight zero-point is always 0, matching
+// CPU fused_qlinear_dequant / CUDA quantized_linear_int4_cuda_kernel); the
+// WeightZeroPoints binding is still bound (descriptor-set completeness) but
+// unused. K (in_features) must be even — each packed byte holds a whole
+// pair of input columns (enforced host-side before dispatch).
+// Each thread computes one output element: output[b][o]
+//
+// Per-channel (F045/F076): when per_channel != 0 each output channel o uses
+// weight_scales[o] (binding 4) instead of the scalar push-constant
+// weight_scale. Binding 4 is always bound (placeholder 1-element buffer in
+// the per-tensor case) so the descriptor set is always complete.
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputData { int8_t input_data[]; };
+layout(binding = 1) buffer WeightData { uint8_t weight_data[]; };  // packed INT4, [N, K/2] bytes
+layout(binding = 2) buffer BiasData { float bias_data[]; };
+layout(binding = 3) buffer OutputData { float output_data[]; };
+layout(binding = 4) readonly buffer WeightScales { float weight_scales[]; };
+layout(binding = 5) readonly buffer WeightZeroPoints { int weight_zps[]; };  // unused: INT4 is symmetric-only
+
+layout(push_constant) uniform PushConstants {
+    uint M;                 // batch_size
+    uint N;                 // out_features
+    uint K;                 // in_features (must be even)
+    float input_scale;
+    float weight_scale;
+    int input_zero_point;
+    int weight_zero_point;  // unused: INT4 is symmetric-only
+    uint per_channel;       // 0 = per-tensor scalar, 1 = per-channel buffer
+} params;
+
+// Unpack a packed INT4 byte into two sign-extended values in [-8, 7].
+// Low nibble (bits 0..3) -> lo, high nibble (bits 4..7) -> hi. Takes a plain
+// uint (not uint8_t): (u)int8 scalars are only valid in buffer/uniform
+// storage per GL_EXT_shader_8bit_storage, not as function parameters/locals.
+void unpack_int4(uint packed, out int lo, out int hi) {
+    int l = int(packed & 0x0Fu);
+    if ((l & 0x8) != 0) l -= 16;
+    int h = int((packed >> 4) & 0x0Fu);
+    if ((h & 0x8) != 0) h -= 16;
+    lo = l;
+    hi = h;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = params.M * params.N;
+    if (idx >= total) return;
+
+    uint b = idx / params.N;  // batch index
+    uint o = idx % params.N;  // output feature index
+
+    float w_scale = params.weight_scale;
+    if (params.per_channel != 0u) {
+        w_scale = weight_scales[o];
+    }
+
+    uint packed_k = params.K / 2u;
+    uint input_base = b * params.K;
+    uint weight_base = o * packed_k;
+
+    // Accumulate in int64 (mirrors the int8 quantized_linear shader): the
+    // running total can exceed INT32_MAX for wide layers.
+    int64_t acc = 0;
+    int64_t sum_w = 0;
+
+    for (uint p = 0; p < packed_k; ++p) {
+        int lo, hi;
+        unpack_int4(uint(weight_data[weight_base + p]), lo, hi);
+        int64_t iv0 = int64_t(input_data[input_base + 2u * p]);
+        int64_t iv1 = int64_t(input_data[input_base + 2u * p + 1u]);
+        acc += iv0 * int64_t(lo) + iv1 * int64_t(hi);
+        sum_w += int64_t(lo) + int64_t(hi);
+    }
+
+    // Asymmetric-activation zero-point correction (INT4 weights are always
+    // symmetric, so there is no weight-zero-point cross term, unlike the
+    // int8 shader's full 4-term correction):
+    //   sum_k (x_k - x_zp) * w_k = sum_k x_k*w_k - x_zp * sum_k w_k
+    if (params.input_zero_point != 0) {
+        acc -= int64_t(params.input_zero_point) * sum_w;
+    }
+
+    // Dequantize to float and add bias
+    float result = float(acc) * params.input_scale * w_scale;
+    result += bias_data[o];
+
+    output_data[idx] = result;
+}

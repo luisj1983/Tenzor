@@ -173,19 +173,40 @@ double lgamma_lanczos_d(double x) {
     return 0.5 * log_d(2.0 * PI_D) + (xm + 0.5) * log_d(t) - t + log_d(a);
 }
 double lgamma_impl_d(double x) {
+    // Pole at every non-positive integer: return the real IEEE +inf
+    // directly rather than relying on sin_d(PI_D*x)==0.0 (which used a
+    // finite 1e308 sentinel and, since sin_d is a custom polynomial
+    // approximation rather than an exact reduction, does not reliably hit
+    // bit-exact zero at every pole anyway).
+    if (x <= 0.0 && x == floor(x)) {
+        return 1.0 / 0.0;  // +inf
+    }
     if (x < 0.5) {
         double sinpx = sin_d(PI_D * x);
-        if (sinpx == 0.0) return 1.0e308;
+        if (sinpx == 0.0) return 1.0 / 0.0;  // +inf (safety net; see check above)
         return log_d(PI_D / abs(sinpx)) - lgamma_lanczos_d(1.0 - x);
     }
     return lgamma_lanczos_d(x);
 }
 double tgamma_impl_d(double x) {
+    // gamma has a true sign-ambiguous pole at non-positive integers; NaN is
+    // the standard convention (matches std::tgamma/scipy). Must be checked
+    // here too, not just inherited via exp_d(lgamma_impl_d(x)) -- exp_d(+inf)
+    // would wrongly give +inf instead of NaN.
+    if (x <= 0.0 && x == floor(x)) {
+        return 0.0 / 0.0;  // NaN
+    }
     return exp_d(lgamma_impl_d(x));
 }
 
 // ----- Digamma (double precision) -----
 double digamma_impl_d(double x) {
+    // True pole at every non-positive integer (see the Float32
+    // digamma_impl in special_math_unary.comp for the full rationale on why
+    // NaN, not a signed infinity, is the correct cross-backend convention).
+    if (x <= 0.0 && x == floor(x)) {
+        return 0.0 / 0.0;  // NaN
+    }
     double result = 0.0;
     if (x < 0.5) {
         double y = 1.0 - x;
@@ -272,7 +293,12 @@ double bessel_j1_impl_d(double x_in) {
 
 // ----- Bessel Y0 (double precision) -----
 double bessel_y0_impl_d(double x) {
-    if (x <= 0.0) return -1.0e308;
+    // Y0 has a true pole at x=0 and is undefined for x<0. Standardize on
+    // the IEEE-754/native-libm convention: NaN for x<0, real -inf exactly
+    // at x==0 -- a finite sentinel like -1e308 is silently indistinguishable
+    // from an actual finite Y0 result.
+    if (x < 0.0) return 0.0 / 0.0;   // NaN
+    if (x == 0.0) return -1.0 / 0.0; // -inf
     if (x < 8.0) {
         double y = x * x;
         double r1 = -2957821389.0 + y * (7062834065.0
@@ -296,7 +322,9 @@ double bessel_y0_impl_d(double x) {
 
 // ----- Bessel Y1 (double precision) -----
 double bessel_y1_impl_d(double x) {
-    if (x <= 0.0) return -1.0e308;
+    // Same NaN-for-x<0/-inf-at-x==0 convention as bessel_y0_impl_d above.
+    if (x < 0.0) return 0.0 / 0.0;   // NaN
+    if (x == 0.0) return -1.0 / 0.0; // -inf
     if (x < 8.0) {
         double y = x * x;
         double r1 = x * (-4.900604943e13 + y * (1.275274390e13

@@ -19,5 +19,17 @@ layout(push_constant) uniform PushConstants {
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.num_elements) return;
-    output_buf.data[idx] = int64_t(input_buf.data[idx]);
+    float v = input_buf.data[idx];
+    // Saturating conversion (NaN->0, +Inf/overflow->INT64_MAX,
+    // -Inf/-overflow->INT64_MIN), matching CPU/CUDA/ROCm/OneAPI's convention
+    // instead of GLSL's UB int64_t() conversion for out-of-range/NaN input.
+    if (isnan(v)) {
+        output_buf.data[idx] = 0l;
+    } else if (v >= 9223372036854775807.0) {
+        output_buf.data[idx] = 9223372036854775807l;
+    } else if (v <= -9223372036854775808.0) {
+        output_buf.data[idx] = -9223372036854775808l;
+    } else {
+        output_buf.data[idx] = int64_t(v);
+    }
 }

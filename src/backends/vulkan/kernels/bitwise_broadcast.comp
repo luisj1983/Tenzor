@@ -1,0 +1,80 @@
+#version 450
+
+// Broadcasting-aware bitwise binary operations (int32 only -- callers widen
+// narrower integer dtypes to Int32 before dispatch, matching the non-
+// broadcast bitwise_*.comp shaders).
+//
+// op: 0=and, 1=or, 2=xor, 3=left_shift, 4=right_shift (arithmetic, sign-
+// preserving). Shift amounts outside [0, 32) are undefined behavior in
+// GLSL's own << / >> operators; guarded explicitly to match CPU/CUDA's
+// defined out-of-range semantics (left -> 0, right -> sign-saturated).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { int a[]; };
+layout(binding = 1) buffer InputB { int b[]; };
+layout(binding = 2) buffer Output { int result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_size;
+    uint op;
+    uint ndim_a;
+    uint ndim_b;
+    uint ndim_out;
+    uint strides_a[8];
+    uint strides_b[8];
+    uint shape_out[8];
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.output_size) {
+        return;
+    }
+
+    uint idx_a = 0;
+    uint idx_b = 0;
+    uint tmp = out_idx;
+
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+        idx_a += coord * params.strides_a[dim_idx];
+        idx_b += coord * params.strides_b[dim_idx];
+    }
+
+    int val_a = a[idx_a];
+    int val_b = b[idx_b];
+    int res = 0;
+
+    switch (params.op) {
+        case 0u: // and
+            res = val_a & val_b;
+            break;
+        case 1u: // or
+            res = val_a | val_b;
+            break;
+        case 2u: // xor
+            res = val_a ^ val_b;
+            break;
+        case 3u: // left_shift
+            if (val_b < 0 || val_b >= 32) {
+                res = 0;
+            } else {
+                res = int(uint(val_a) << uint(val_b));
+            }
+            break;
+        case 4u: // right_shift (arithmetic)
+            if (val_b < 0 || val_b >= 32) {
+                res = (val_a < 0) ? -1 : 0;
+            } else {
+                res = val_a >> val_b;
+            }
+            break;
+        default:
+            res = 0;
+            break;
+    }
+
+    result[out_idx] = res;
+}

@@ -4316,94 +4316,123 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, D
 }
 
 // ============================================================================
-// Random Number Generation (hipRAND)
+// Random Number Generation (F042: device Philox 4x32-10 — bit-for-bit port of
+// the CPU tenzor::cpu::philox implementation (src/backends/cpu/kernels/
+// philox.hpp) and CUDA's device port (src/backends/cuda/kernels/math.cu),
+// keyed by (seed, element index). This makes rand/randint bit-identical to
+// CPU (pure integer + power-of-two scaling) and randn match to ~1e-6 (Box-
+// Muller log/cos differ by a few ULP between host libm and device
+// intrinsics). The previous implementation seeded per-thread hipRAND
+// (XORWOW) states via hiprand_init()/hiprand_uniform()/hiprand_normal(),
+// which is hipRAND's own opaque stream/transform — NOT bit- or
+// value-compatible with CPU's manual Philox + Box-Muller, even though both
+// are "a uniform stream" and "a Gaussian transform" in the abstract. That
+// desync produced statistically-plausible-looking but numerically WRONG
+// randn/randint values relative to CPU for the same manual_seed().
 // ============================================================================
 
 #ifdef TENZOR_HAS_HIPRAND
-/**
- * @brief Kernel to initialize hipRAND states
- * @param states Array of random states (one per thread)
- * @param seed Random seed
- * @param n Number of states to initialize
- *
- * Each thread gets a unique state initialized with different sequence number
- */
-__global__ void init_hiprand_states(hiprandState* states, unsigned long long seed, int64_t n) {
-    HIP_KERNEL_LOOP(idx, n) {
-        // Each thread gets different seed, a different sequence number, no offset
-        hiprand_init(seed, idx, 0, &states[idx]);
+__device__ __forceinline__ void dev_philox_round(uint32_t* ctr, const uint32_t* key) {
+    const uint64_t M0 = 0xD2511F53ULL, M1 = 0xCD9E8D57ULL;
+    uint64_t p0 = M0 * static_cast<uint64_t>(ctr[0]);
+    uint64_t p1 = M1 * static_cast<uint64_t>(ctr[2]);
+    uint32_t hi0 = static_cast<uint32_t>(p0 >> 32), lo0 = static_cast<uint32_t>(p0);
+    uint32_t hi1 = static_cast<uint32_t>(p1 >> 32), lo1 = static_cast<uint32_t>(p1);
+    ctr[0] = hi1 ^ ctr[1] ^ key[0];
+    ctr[1] = lo1;
+    ctr[2] = hi0 ^ ctr[3] ^ key[1];
+    ctr[3] = lo0;
+}
+__device__ __forceinline__ void dev_philox_gen(uint64_t seed, int64_t idx, uint32_t out[4]) {
+    uint32_t ctr[4] = {static_cast<uint32_t>(idx & 0xFFFFFFFFULL),
+                       static_cast<uint32_t>((idx >> 32) & 0xFFFFFFFFULL), 0u, 0u};
+    uint32_t k[2] = {static_cast<uint32_t>(seed & 0xFFFFFFFFULL),
+                     static_cast<uint32_t>((seed >> 32) & 0xFFFFFFFFULL)};
+    #pragma unroll
+    for (int r = 0; r < 10; ++r) {
+        dev_philox_round(ctr, k);
+        k[0] += 0x9E3779B9U;
+        k[1] += 0xBB67AE85U;
     }
+    out[0] = ctr[0]; out[1] = ctr[1]; out[2] = ctr[2]; out[3] = ctr[3];
+}
+__device__ __forceinline__ float dev_philox_uniform_f32(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    return static_cast<float>(o[0] >> 8) * (1.0f / 16777216.0f);
+}
+__device__ __forceinline__ float dev_philox_normal_f32(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    float u1 = static_cast<float>(o[0] >> 8) * (1.0f / 16777216.0f);
+    float u2 = static_cast<float>(o[1] >> 8) * (1.0f / 16777216.0f);
+    if (u1 < 1e-37f) u1 = 1e-37f;
+    return sqrtf(-2.0f * logf(u1)) * cosf(6.28318530718f * u2);
+}
+__device__ __forceinline__ double dev_philox_uniform_f64(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    uint64_t bits = (static_cast<uint64_t>(o[0]) << 21) | (static_cast<uint64_t>(o[1]) >> 11);
+    return static_cast<double>(bits) * (1.0 / 9007199254740992.0);
+}
+__device__ __forceinline__ double dev_philox_normal_f64(uint64_t seed, int64_t idx) {
+    uint32_t o[4]; dev_philox_gen(seed, idx, o);
+    uint64_t b1 = (static_cast<uint64_t>(o[0]) << 21) | (static_cast<uint64_t>(o[1]) >> 11);
+    uint64_t b2 = (static_cast<uint64_t>(o[2]) << 21) | (static_cast<uint64_t>(o[3]) >> 11);
+    double u1 = static_cast<double>(b1) * (1.0 / 9007199254740992.0);
+    double u2 = static_cast<double>(b2) * (1.0 / 9007199254740992.0);
+    if (u1 < 1e-300) u1 = 1e-300;
+    return sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2);
 }
 
 /**
  * @brief Kernel for uniform random [0, 1) generation
- * @param output Output tensor data
- * @param states Random states
- * @param n Number of elements to generate
  */
-__global__ void rand_kernel_device(float* output, hiprandState* states, int64_t n) {
+__global__ void rand_kernel_device(float* output, uint64_t seed, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = hiprand_uniform(&states[idx]);
+        output[idx] = dev_philox_uniform_f32(seed, idx);
     }
 }
 
 /**
  * @brief Kernel for normal distribution N(0,1) generation
- * @param output Output tensor data
- * @param states Random states
- * @param n Number of elements to generate
  */
-__global__ void randn_kernel_device(float* output, hiprandState* states, int64_t n) {
+__global__ void randn_kernel_device(float* output, uint64_t seed, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = hiprand_normal(&states[idx]);
+        output[idx] = dev_philox_normal_f32(seed, idx);
     }
 }
 
 /**
  * @brief Kernel for uniform random [0, 1) generation - Float64 version
- * @param output Output tensor data (double precision)
- * @param states Random states
- * @param n Number of elements to generate
  */
-__global__ void rand_kernel_device_f64(double* output, hiprandState* states, int64_t n) {
+__global__ void rand_kernel_device_f64(double* output, uint64_t seed, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = hiprand_uniform_double(&states[idx]);
+        output[idx] = dev_philox_uniform_f64(seed, idx);
     }
 }
 
 /**
  * @brief Kernel for normal distribution N(0,1) generation - Float64 version
- * @param output Output tensor data (double precision)
- * @param states Random states
- * @param n Number of elements to generate
  */
-__global__ void randn_kernel_device_f64(double* output, hiprandState* states, int64_t n) {
+__global__ void randn_kernel_device_f64(double* output, uint64_t seed, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = hiprand_normal_double(&states[idx]);
+        output[idx] = dev_philox_normal_f64(seed, idx);
     }
 }
 
 /**
  * @brief Kernel for uniform random [0, 1) generation - Float16 version
- * @param output Output tensor data (half precision)
- * @param states Random states
- * @param n Number of elements to generate
  */
-__global__ void rand_kernel_device_f16(__half* output, hiprandState* states, int64_t n) {
+__global__ void rand_kernel_device_f16(__half* output, uint64_t seed, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = tenzor::rocm::safe_f2h(hiprand_uniform(&states[idx]));
+        output[idx] = tenzor::rocm::safe_f2h(dev_philox_uniform_f32(seed, idx));
     }
 }
 
 /**
  * @brief Kernel for normal distribution N(0,1) generation - Float16 version
- * @param output Output tensor data (half precision)
- * @param states Random states
- * @param n Number of elements to generate
  */
-__global__ void randn_kernel_device_f16(__half* output, hiprandState* states, int64_t n) {
+__global__ void randn_kernel_device_f16(__half* output, uint64_t seed, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = tenzor::rocm::safe_f2h(hiprand_normal(&states[idx]));
+        output[idx] = tenzor::rocm::safe_f2h(dev_philox_normal_f32(seed, idx));
     }
 }
 
@@ -4437,33 +4466,23 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    // Allocate hipRAND states
-    HipBuffer d_states_buf(static_cast<size_t>(n) * sizeof(hiprandState));
-    hiprandState* d_states = d_states_buf.as<hiprandState>();
-
-    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
-    uint64_t seed = ::tenzor::get_global_seed();
-    hipLaunchKernelGGL(init_hiprand_states, grid, block, 0, stream, d_states, seed, n);
-    HIP_CHECK(hipGetLastError());
+    // F042: device Philox keyed by (seed, element index) — bit-identical to
+    // the CPU stream for the same seed, no per-element state array needed.
+    uint64_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
 
     if (dtype == DType::Float32) {
-        // Generate uniform random numbers
         hipLaunchKernelGGL(rand_kernel_device, grid, block, 0, stream,
-            result.data<float>(), d_states, n);
+            result.data<float>(), seed, n);
         HIP_CHECK(hipGetLastError());
     } else if (dtype == DType::Float64) {
-        // Generate double-precision uniform random numbers directly
         hipLaunchKernelGGL(rand_kernel_device_f64, grid, block, 0, stream,
-            result.data<double>(), d_states, n);
+            result.data<double>(), seed, n);
         HIP_CHECK(hipGetLastError());
     } else if (dtype == DType::Float16) {
-        // Generate half-precision uniform random numbers (generate as float, convert to half)
         hipLaunchKernelGGL(rand_kernel_device_f16, grid, block, 0, stream,
-            reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
+            reinterpret_cast<__half*>(result.data<Float16>()), seed, n);
         HIP_CHECK(hipGetLastError());
     }
-
-    // d_states freed by its HipBuffer guard on scope exit.
 
     return result;
 #else
@@ -4501,33 +4520,23 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    // Allocate hipRAND states
-    HipBuffer d_states_buf(static_cast<size_t>(n) * sizeof(hiprandState));
-    hiprandState* d_states = d_states_buf.as<hiprandState>();
-
-    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
-    uint64_t seed = ::tenzor::get_global_seed();
-    hipLaunchKernelGGL(init_hiprand_states, grid, block, 0, stream, d_states, seed, n);
-    HIP_CHECK(hipGetLastError());
+    // F042: device Philox keyed by (seed, element index). The uniform stream
+    // is bit-identical to CPU; the Box-Muller transcendentals differ by ~ULP.
+    uint64_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
 
     if (dtype == DType::Float32) {
-        // Generate normal random numbers
         hipLaunchKernelGGL(randn_kernel_device, grid, block, 0, stream,
-            result.data<float>(), d_states, n);
+            result.data<float>(), seed, n);
         HIP_CHECK(hipGetLastError());
     } else if (dtype == DType::Float64) {
-        // Generate double-precision normal random numbers directly
         hipLaunchKernelGGL(randn_kernel_device_f64, grid, block, 0, stream,
-            result.data<double>(), d_states, n);
+            result.data<double>(), seed, n);
         HIP_CHECK(hipGetLastError());
     } else if (dtype == DType::Float16) {
-        // Generate half-precision normal random numbers (generate as float, convert to half)
         hipLaunchKernelGGL(randn_kernel_device_f16, grid, block, 0, stream,
-            reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
+            reinterpret_cast<__half*>(result.data<Float16>()), seed, n);
         HIP_CHECK(hipGetLastError());
     }
-
-    // d_states freed by its HipBuffer guard on scope exit.
 
     return result;
 #else
@@ -4535,14 +4544,16 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 #endif
 }
 
-// Device kernel for randint generation
+// Device kernel for randint generation. F042: device Philox uniform double in
+// [0,1), scaled to [low, high) exactly as CPU randint
+// (low + (int64_t)(philox_uniform_f64 * range)) — bit-identical.
 template<typename T>
-__global__ void randint_kernel_device(T* output, hiprandState* states, int64_t n, int64_t low, int64_t high) {
+__global__ void randint_kernel_device(T* output, uint64_t seed, int64_t n, int64_t low, int64_t high) {
     HIP_KERNEL_LOOP(idx, n) {
-        float r = hiprand_uniform(&states[idx]);
+        double r = dev_philox_uniform_f64(seed, idx);  // [0, 1)
         int64_t range = high - low;
-        int64_t val = low + static_cast<int64_t>(r * static_cast<float>(range));
-        if (val >= high) val = high - 1;
+        int64_t val = low + static_cast<int64_t>(r * static_cast<double>(range));
+        if (val >= high) val = high - 1;  // safety; r < 1 keeps val < high
         output[idx] = static_cast<T>(val);
     }
 }
@@ -4563,31 +4574,28 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    // Allocate hipRAND states
-    HipBuffer d_states_buf(static_cast<size_t>(n) * sizeof(hiprandState));
-    hiprandState* d_states = d_states_buf.as<hiprandState>();
-
-    // Honor `tenzor::manual_seed`. Time-based seed in the unsetted case.
-    uint64_t seed = ::tenzor::get_global_seed();
-    hipLaunchKernelGGL(init_hiprand_states, grid, block, 0, stream, d_states, seed, n);
-    HIP_CHECK(hipGetLastError());
+    // F042: device Philox keyed by (seed, element index) — bit-identical to CPU.
+    uint64_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
 
     if (dtype == DType::Int32) {
         hipLaunchKernelGGL(randint_kernel_device<int32_t>, grid, block, 0, stream,
-            result.data<int32_t>(), d_states, n, low, high);
+            result.data<int32_t>(), seed, n, low, high);
         HIP_CHECK(hipGetLastError());
     } else {
         hipLaunchKernelGGL(randint_kernel_device<int64_t>, grid, block, 0, stream,
-            result.data<int64_t>(), d_states, n, low, high);
+            result.data<int64_t>(), seed, n, low, high);
         HIP_CHECK(hipGetLastError());
     }
 
-    // d_states freed by HipBuffer RAII destructor (matches rand_kernel/randn_kernel);
-    // an explicit hipFree here would double-free the buffer.
     return result;
 }
 
-#endif // TENZOR_HAS_HIPRAND (end of all hipRAND code)
+#endif // TENZOR_HAS_HIPRAND (end of all hipRAND-gated code; the RNG kernels
+       // above no longer call into hipRAND itself — F042's device Philox is a
+       // pure hand-rolled port with no hipRAND dependency — but the guard is
+       // kept so builds without hipRAND still get a clear "library missing"
+       // error instead of silently registering rand/randn/randint kernels
+       // whose availability the rest of the build system doesn't expect.
 
 // ============================================================================
 // Creation Operations
@@ -4628,8 +4636,24 @@ __global__ void eye_complex128_impl(hipDoubleComplex* output, int64_t n, int64_t
 }
 
 auto arange_kernel(double start, double end, double step, DType dtype, Device device, hipStream_t stream) -> Tensor {
-    // Calculate number of elements
-    int64_t n = static_cast<int64_t>(std::ceil((end - start) / step));
+    // Element count matches PyTorch's torch.arange: ceil((end - start) / step),
+    // but a naive ceil over a floating-point ratio rounds an exact-integer
+    // quotient (e.g. (1.0 - 0.0) / 0.1 = 9.999999999999998 or
+    // 10.000000000000002) up by one, yielding a spurious final element whose
+    // value can also drift past `end`. Snap a ratio that is integral within a
+    // relative epsilon to that integer before applying ceil, so exact ranges
+    // produce the exact count. Mirrors CPU's arange_kernel exactly
+    // (src/backends/cpu/kernels/creation.cpp).
+    const double ratio = (end - start) / step;
+    double rounded = std::round(ratio);
+    double count_d;
+    if (std::abs(ratio - rounded) < std::numeric_limits<double>::epsilon() *
+                                    std::max(1.0, std::abs(ratio)) * 4.0) {
+        count_d = rounded;  // exact integer ratio: half-open interval => `rounded` elements
+    } else {
+        count_d = std::ceil(ratio);
+    }
+    int64_t n = static_cast<int64_t>(count_d);
     if (n < 0) n = 0;
 
     Tensor result({n}, dtype, device);
@@ -4922,9 +4946,19 @@ static void cumsum_slice_hipcub(const T* d_in, T* d_out, int64_t n, hipStream_t 
 
 auto cumsum_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor
 {
+    // Float16/BFloat16: widen to Float32, compute, narrow back -- matches
+    // CPU/CUDA/OneAPI/Vulkan, none of which throw for half-precision cumsum.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = cumsum_kernel(input_f32, dim, stream);
+        return result_f32.to(orig);
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape (matches CPU/CUDA)
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();
@@ -5006,9 +5040,19 @@ static void cumprod_slice_hipcub(const T* d_in, T* d_out, int64_t n, hipStream_t
 
 auto cumprod_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor
 {
+    // Float16/BFloat16: widen to Float32, compute, narrow back -- matches
+    // CPU/CUDA/OneAPI/Vulkan, none of which throw for half-precision cumprod.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = cumprod_kernel(input_f32, dim, stream);
+        return result_f32.to(orig);
+    }
+
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;  // normalize negative dim before indexing shape (matches CPU/CUDA)
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();
@@ -5439,15 +5483,31 @@ __global__ void fmod_kernel_f16(const __half* a, const __half* b, __half* output
     }
 }
 
+// Divisor-sign convention (matches CPU/CUDA/Python/NumPy/PyTorch `%`/`remainder`:
+// a - floor(a/b)*b), NOT IEEE round-to-nearest-even remainderf/remainder.
+// e.g. remainder(-7, 3) == 2, not -1. Implemented via fmod (sign of the
+// dividend) with a correction term when the fmod result's sign disagrees
+// with the divisor's sign.
+__device__ inline float remainder_dev_f32(float x, float y) {
+    float r = fmodf(x, y);
+    if (r != 0.0f && ((r < 0.0f) != (y < 0.0f))) r += y;
+    return r;
+}
+__device__ inline double remainder_dev_f64(double x, double y) {
+    double r = fmod(x, y);
+    if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
+    return r;
+}
+
 __global__ void remainder_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = remainderf(a[idx], b[idx]);
+        output[idx] = remainder_dev_f32(a[idx], b[idx]);
     }
 }
 
 __global__ void remainder_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = remainder(a[idx], b[idx]);
+        output[idx] = remainder_dev_f64(a[idx], b[idx]);
     }
 }
 
@@ -5455,7 +5515,7 @@ __global__ void remainder_kernel_f16(const __half* a, const __half* b, __half* o
     HIP_KERNEL_LOOP(idx, n) {
         float va = tenzor::rocm::safe_h2f(a[idx]);
         float vb = tenzor::rocm::safe_h2f(b[idx]);
-        output[idx] = tenzor::rocm::safe_f2h(remainderf(va, vb));
+        output[idx] = tenzor::rocm::safe_f2h(remainder_dev_f32(va, vb));
     }
 }
 
@@ -6248,13 +6308,24 @@ auto lerp_kernel(const Tensor& a, const Tensor& b, const Tensor& weight, hipStre
 // Host Wrappers: Logical Operations
 // ============================================================================
 
-auto logical_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.numel() != b.numel()) {
-        throw std::runtime_error("logical_and: tensors must have the same number of elements");
-    }
-
+auto logical_and_kernel(const Tensor& a_in_raw, const Tensor& b_in_raw, hipStream_t stream) -> Tensor {
+    // Logical ops are dtype-agnostic (operands may differ in dtype, each
+    // independently reduced to bool) matching CPU/CUDA/Vulkan's convention,
+    // NOT a hard dtype-equality requirement.
+    Tensor a_in = a_in_raw.dtype() == DType::Bool ? a_in_raw : a_in_raw.to(DType::Bool);
+    Tensor b_in = b_in_raw.dtype() == DType::Bool ? b_in_raw : b_in_raw.to(DType::Bool);
+    // Broadcast both operands to a common shape and materialize contiguous
+    // copies (mirrors CUDA's DEFINE_BINARY_LOGICAL_KERNEL and this file's own
+    // comparison-kernel convention). The device kernels index a[idx]/b[idx]
+    // with one linear index, so without this a smaller operand would be read
+    // out of bounds and the result would silently take `a`'s shape instead
+    // of the true broadcast shape.
+    std::vector<int64_t> shape = detail::compute_broadcast_shape(
+        std::vector<int64_t>(a_in.shape().begin(), a_in.shape().end()),
+        std::vector<int64_t>(b_in.shape().begin(), b_in.shape().end()));
+    Tensor a = a_in.expand(shape).contiguous();
+    Tensor b = b_in.expand(shape).contiguous();
     int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, DType::Bool, a.device());
 
     if (n == 0) return result;
@@ -6290,13 +6361,19 @@ auto logical_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) ->
     return result;
 }
 
-auto logical_or_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.numel() != b.numel()) {
-        throw std::runtime_error("logical_or: tensors must have the same number of elements");
-    }
-
+auto logical_or_kernel(const Tensor& a_in_raw, const Tensor& b_in_raw, hipStream_t stream) -> Tensor {
+    // Logical ops are dtype-agnostic (operands may differ in dtype, each
+    // independently reduced to bool) matching CPU/CUDA/Vulkan's convention,
+    // NOT a hard dtype-equality requirement.
+    Tensor a_in = a_in_raw.dtype() == DType::Bool ? a_in_raw : a_in_raw.to(DType::Bool);
+    Tensor b_in = b_in_raw.dtype() == DType::Bool ? b_in_raw : b_in_raw.to(DType::Bool);
+    // Broadcast support — see logical_and_kernel above for rationale.
+    std::vector<int64_t> shape = detail::compute_broadcast_shape(
+        std::vector<int64_t>(a_in.shape().begin(), a_in.shape().end()),
+        std::vector<int64_t>(b_in.shape().begin(), b_in.shape().end()));
+    Tensor a = a_in.expand(shape).contiguous();
+    Tensor b = b_in.expand(shape).contiguous();
     int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, DType::Bool, a.device());
 
     if (n == 0) return result;
@@ -6374,13 +6451,19 @@ auto logical_not_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
     return result;
 }
 
-auto logical_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.numel() != b.numel()) {
-        throw std::runtime_error("logical_xor: tensors must have the same number of elements");
-    }
-
+auto logical_xor_kernel(const Tensor& a_in_raw, const Tensor& b_in_raw, hipStream_t stream) -> Tensor {
+    // Logical ops are dtype-agnostic (operands may differ in dtype, each
+    // independently reduced to bool) matching CPU/CUDA/Vulkan's convention,
+    // NOT a hard dtype-equality requirement.
+    Tensor a_in = a_in_raw.dtype() == DType::Bool ? a_in_raw : a_in_raw.to(DType::Bool);
+    Tensor b_in = b_in_raw.dtype() == DType::Bool ? b_in_raw : b_in_raw.to(DType::Bool);
+    // Broadcast support — see logical_and_kernel above for rationale.
+    std::vector<int64_t> shape = detail::compute_broadcast_shape(
+        std::vector<int64_t>(a_in.shape().begin(), a_in.shape().end()),
+        std::vector<int64_t>(b_in.shape().begin(), b_in.shape().end()));
+    Tensor a = a_in.expand(shape).contiguous();
+    Tensor b = b_in.expand(shape).contiguous();
     int64_t n = a.numel();
-    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, DType::Bool, a.device());
 
     if (n == 0) return result;
@@ -7120,7 +7203,20 @@ __device__ double __ocml_erfinv_f64(double);
 }
 
 // --- Digamma (psi function) — Cephes-style asymptotic expansion ---
+// True pole at every non-positive integer: PI/tan(PI*x) below depends on
+// tan(PI*x) hitting exactly zero, which floating-point PI never does -- each
+// backend's differing PI precision then makes the "near-pole" result diverge
+// wildly and inconsistently from every other backend, not just from the true
+// pole (e.g. CPU/CUDA ~-2.565e16 vs ROCm/OneAPI/Vulkan ~+3.59e7 at x=-1
+// Float32 -- opposite sign, ~9 orders of magnitude apart). Digamma has no
+// single-valued limit at these poles (it diverges to +inf from one side,
+// -inf from the other), so NaN -- not a signed infinity -- is the
+// mathematically honest, scipy/PyTorch-consistent convention shared by every
+// backend after this fix.
 __device__ inline float digamma_dev_f32(float x) {
+    if (x <= 0.0f && x == floorf(x)) {
+        return nanf("");
+    }
     float result = 0.0f;
     if (x < 0.5f) {
         float y = 1.0f - x;
@@ -7140,6 +7236,10 @@ __device__ inline float digamma_dev_f32(float x) {
     return result;
 }
 __device__ inline double digamma_dev_f64(double x) {
+    // See digamma_dev_f32 above for the pole-convention rationale.
+    if (x <= 0.0 && x == floor(x)) {
+        return nan("");
+    }
     double result = 0.0;
     if (x < 0.5) {
         double y = 1.0 - x;
@@ -7172,6 +7272,10 @@ __device__ inline double sinc_dev_f64(double x) {
 }
 
 // --- Hurwitz zeta ζ(s,q) — Euler-Maclaurin partial sum ---
+// Includes the leading Bernoulli correction terms (B2,B4,B6); without them
+// the truncated sum carries an O(s·(a+N)^(-s-1)) error (~7.6e-5 for ζ(2,1)).
+// Mirrors CPU's hurwitz_zeta in src/backends/cpu/kernels/math.cpp (and
+// CUDA's/OneAPI's zeta_dev), which the correction block drops below ~1e-9.
 __device__ inline float zeta_dev_f32(float s, float a) {
     float result = 0.0f;
     #pragma unroll
@@ -7181,6 +7285,12 @@ __device__ inline float zeta_dev_f32(float s, float a) {
     float aN = a + 12.0f;
     if (s != 1.0f) result += powf(aN, 1.0f - s) / (s - 1.0f);
     result += 0.5f * powf(aN, -s);
+    // Σ_k B_{2k}/(2k)! · (s)_{2k-1} · (a+N)^(-s-2k+1):
+    //   B2/2! = 1/12, B4/4! = -1/720, B6/6! = 1/30240.
+    result += s * powf(aN, -s - 1.0f) / 12.0f;
+    result -= (s * (s + 1.0f) * (s + 2.0f)) * powf(aN, -s - 3.0f) / 720.0f;
+    result += (s * (s + 1.0f) * (s + 2.0f) * (s + 3.0f) * (s + 4.0f))
+              * powf(aN, -s - 5.0f) / 30240.0f;
     return result;
 }
 __device__ inline double zeta_dev_f64(double s, double a) {
@@ -7192,6 +7302,10 @@ __device__ inline double zeta_dev_f64(double s, double a) {
     double aN = a + 12.0;
     if (s != 1.0) result += pow(aN, 1.0 - s) / (s - 1.0);
     result += 0.5 * pow(aN, -s);
+    result += s * pow(aN, -s - 1.0) / 12.0;
+    result -= (s * (s + 1.0) * (s + 2.0)) * pow(aN, -s - 3.0) / 720.0;
+    result += (s * (s + 1.0) * (s + 2.0) * (s + 3.0) * (s + 4.0))
+              * pow(aN, -s - 5.0) / 30240.0;
     return result;
 }
 
@@ -7258,12 +7372,21 @@ __device__ inline double polygamma_dev_f64(int n, double x) {
         -3617.0/10670622842880000.0
     };
     double inv_x2 = inv_x * inv_x;
-    double power = inv_x_n * inv_x;  // x^-(n+1)
-    double rising = 1.0;             // (n)(n+1)…(n+2k-1) as we accumulate k
+    double power = inv_x_n;          // x^-n; becomes x^-(n+2k) after the k-th multiply below
+    double rising = 1.0;             // (n)(n+1)…(n+2k-1) = (n+2k-1)! / (n-1)!
     for (int k = 1; k <= 8; ++k) {
         rising *= static_cast<double>(n + 2*k - 1) * static_cast<double>(n + 2*k - 2);
         power *= inv_x2;
-        sum_asym += B_over_fact[k-1] * rising * power;
+        // term = B_{2k}/(2k)! * (n+2k-1)! / x^(n+2k)
+        //      = B_over_fact[k-1] * rising * fact_nm1 * power
+        // `rising` alone only accumulates (n+2k-1)!/(n-1)! -- the missing
+        // fact_nm1 = (n-1)! recovery factor here was the bug (CPU/CUDA/
+        // OneAPI's polygamma all include the full (n+2k-1)! numerator;
+        // OneAPI's special_math.cpp comment documents this exact
+        // requirement). Without it this term (and hence Polygamma(n>=1,x))
+        // was off by a factor of (n-1)!, verified up to 3.3e-4 relative
+        // error for n=4 vs CPU's 1e-11..1e-16.
+        sum_asym += B_over_fact[k-1] * rising * fact_nm1 * power;
     }
 
     // Unsigned sum = shifted-recurrence part + asymptotic expansion part.
@@ -7857,52 +7980,124 @@ auto nan_to_num_kernel(const Tensor& input_in, double nan_v, double posinf_v, do
 }
 
 // Bitwise ops
-__global__ void bitwise_and_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
-__global__ void bitwise_and_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
-__global__ void bitwise_and_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
-__global__ void bitwise_and_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
+//
+// launch_broadcast_bitwise mirrors the AddOp/SubOp/MulOp broadcast_kernel
+// launcher pattern above (detail::compute_broadcast_shape/_strides + the
+// generic broadcast_kernel<T,Op> template) instead of sizing the launch by
+// a.numel() alone and indexing b at the same flat index: the fast (same-
+// shape) path skips the broadcast machinery entirely, but the previous code
+// had NO broadcast path at all, so e.g. bitwise_and(shape(2,3)_tensor, scalar)
+// read 5 elements past the end of the 1-element scalar buffer.
+// SupportsBool gates the Bool dtype branch at COMPILE time (via `if constexpr`
+// below), not just at runtime: LShiftOp/RShiftOp's operator() instantiates
+// std::make_unsigned_t<T>, which is ill-formed for T=bool, so simply adding a
+// runtime `dtype == DType::Bool` case here would break those two Ops even
+// though they'd never actually be called with a Bool tensor. Bitwise
+// And/Or/Xor (which DO support Bool, matching CPU) opt in explicitly; the
+// shift ops keep the default (false) and never instantiate broadcast_kernel<bool, Op>.
+template<typename Op, bool SupportsBool = false>
+static auto launch_broadcast_bitwise(const Tensor& a, const Tensor& b, Op op,
+                                      const char* name, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> a_shape_vec(a.shape().begin(), a.shape().end());
+    std::vector<int64_t> b_shape_vec(b.shape().begin(), b.shape().end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
+
+    int64_t n = result.numel();
+    if (n == 0) return result;
+
+    std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
+    std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
+
+    int64_t* d_strides_a;
+    int64_t* d_strides_b;
+    int64_t* d_output_shape;
+    HIP_CHECK(hipMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpyAsync(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+
+    int64_t ndim = static_cast<int64_t>(output_shape.size());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Int8) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int8_t, Op>), grid, block, 0, stream,
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Int16) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int16_t, Op>), grid, block, 0, stream,
+            a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int32_t, Op>), grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int64_t, Op>), grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::UInt8) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<uint8_t, Op>), grid, block, 0, stream,
+            a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::UInt16) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<uint16_t, Op>), grid, block, 0, stream,
+            a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<uint32_t, Op>), grid, block, 0, stream,
+            a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::UInt64) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<uint64_t, Op>), grid, block, 0, stream,
+            a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if constexpr (SupportsBool) {
+        if (a.dtype() == DType::Bool) {
+            // Bool: & / | / ^ on 0/1 operands match &&, ||, != respectively —
+            // same semantics CPU's bitwise_and/or/xor use for Bool (CPU has no
+            // unsigned-int coverage but does support Bool; mirror both here so
+            // ROCm's dtype coverage is the union of CPU's and CUDA's).
+            hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<bool, Op>), grid, block, 0, stream,
+                a.data<bool>(), b.data<bool>(), result.data<bool>(),
+                d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+        } else {
+            (void)hipFree(d_strides_a);
+            (void)hipFree(d_strides_b);
+            (void)hipFree(d_output_shape);
+            throw std::runtime_error(std::string(name) + ": unsupported dtype");
+        }
+    } else {
+        (void)hipFree(d_strides_a);
+        (void)hipFree(d_strides_b);
+        (void)hipFree(d_output_shape);
+        throw std::runtime_error(std::string(name) + ": unsupported dtype");
+    }
+
+    HIP_CHECK(hipFree(d_strides_a));
+    HIP_CHECK(hipFree(d_strides_b));
+    HIP_CHECK(hipFree(d_output_shape));
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+struct BitAndOp { template<typename T> __device__ T operator()(T a, T b) const { return a & b; } };
+struct BitOrOp  { template<typename T> __device__ T operator()(T a, T b) const { return a | b; } };
+struct BitXorOp { template<typename T> __device__ T operator()(T a, T b) const { return a ^ b; } };
+
 auto bitwise_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int8)        { hipLaunchKernelGGL(bitwise_and_i8,  grid, block, 0, stream, a.data<int8_t>(),  b.data<int8_t>(),  result.data<int8_t>(),  n); }
-    else if (a.dtype() == DType::Int16)  { hipLaunchKernelGGL(bitwise_and_i16, grid, block, 0, stream, a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (a.dtype() == DType::Int32)  { hipLaunchKernelGGL(bitwise_and_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64)  { hipLaunchKernelGGL(bitwise_and_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_and: unsupported dtype"); }
-    HIP_CHECK(hipGetLastError()); return result;
+    return launch_broadcast_bitwise<BitAndOp, /*SupportsBool=*/true>(a, b, BitAndOp(), "bitwise_and", stream);
 }
 
-__global__ void bitwise_or_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
-__global__ void bitwise_or_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
-__global__ void bitwise_or_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
-__global__ void bitwise_or_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
 auto bitwise_or_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int8)        { hipLaunchKernelGGL(bitwise_or_i8,  grid, block, 0, stream, a.data<int8_t>(),  b.data<int8_t>(),  result.data<int8_t>(),  n); }
-    else if (a.dtype() == DType::Int16)  { hipLaunchKernelGGL(bitwise_or_i16, grid, block, 0, stream, a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (a.dtype() == DType::Int32)  { hipLaunchKernelGGL(bitwise_or_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64)  { hipLaunchKernelGGL(bitwise_or_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_or: unsupported dtype"); }
-    HIP_CHECK(hipGetLastError()); return result;
+    return launch_broadcast_bitwise<BitOrOp, /*SupportsBool=*/true>(a, b, BitOrOp(), "bitwise_or", stream);
 }
 
-__global__ void bitwise_xor_i8(const int8_t* a, const int8_t* b, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
-__global__ void bitwise_xor_i16(const int16_t* a, const int16_t* b, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
-__global__ void bitwise_xor_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
-__global__ void bitwise_xor_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
 auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
-    Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (a.dtype() == DType::Int8)        { hipLaunchKernelGGL(bitwise_xor_i8,  grid, block, 0, stream, a.data<int8_t>(),  b.data<int8_t>(),  result.data<int8_t>(),  n); }
-    else if (a.dtype() == DType::Int16)  { hipLaunchKernelGGL(bitwise_xor_i16, grid, block, 0, stream, a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (a.dtype() == DType::Int32)  { hipLaunchKernelGGL(bitwise_xor_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (a.dtype() == DType::Int64)  { hipLaunchKernelGGL(bitwise_xor_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_xor: unsupported dtype"); }
-    HIP_CHECK(hipGetLastError()); return result;
+    return launch_broadcast_bitwise<BitXorOp, /*SupportsBool=*/true>(a, b, BitXorOp(), "bitwise_xor", stream);
 }
 
 __global__ void bitwise_not_i8(const int8_t* in, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; } }
@@ -7925,36 +8120,34 @@ auto bitwise_not_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
     HIP_CHECK(hipGetLastError()); return result;
 }
 
-__global__ void bitwise_lshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
-__global__ void bitwise_lshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
-__global__ void bitwise_lshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
-__global__ void bitwise_lshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
+// Shift amounts >= the operand's bit width, or negative, are undefined
+// behavior in C++; clamp defensively the same way the (already-fixed)
+// element-parallel version did, matching CPU/CUDA's guarded shift.
+struct LShiftOp {
+    template<typename T> __device__ T operator()(T a, T b) const {
+        using UT = std::make_unsigned_t<T>;
+        constexpr int bits = sizeof(T) * 8;
+        if (b < T(0) || b >= T(bits)) return T(0);
+        // Left-shifting a negative signed value is UB in C++ even when the
+        // shift count is in range; shift the unsigned bit pattern instead
+        // (matches CPU's static_cast<uintN_t>(x) << s).
+        return static_cast<T>(static_cast<UT>(a) << static_cast<int>(b));
+    }
+};
+struct RShiftOp {
+    template<typename T> __device__ T operator()(T a, T b) const {
+        constexpr int bits = sizeof(T) * 8;
+        if (b < T(0) || b >= T(bits)) return (a < T(0)) ? T(-1) : T(0);
+        return static_cast<T>(a >> b);
+    }
+};
+
 auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor {
-    int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int8)       { hipLaunchKernelGGL(bitwise_lshift_i8,  grid, block, 0, stream, input.data<int8_t>(),  shift.data<int8_t>(),  result.data<int8_t>(),  n); }
-    else if (input.dtype() == DType::Int16) { hipLaunchKernelGGL(bitwise_lshift_i16, grid, block, 0, stream, input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_lshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_lshift_i64, grid, block, 0, stream, input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_left_shift: unsupported dtype"); }
-    HIP_CHECK(hipGetLastError()); return result;
+    return launch_broadcast_bitwise(input, shift, LShiftOp(), "bitwise_left_shift", stream);
 }
 
-__global__ void bitwise_rshift_i8(const int8_t* in, const int8_t* sh, int8_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
-__global__ void bitwise_rshift_i16(const int16_t* in, const int16_t* sh, int16_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
-__global__ void bitwise_rshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
-__global__ void bitwise_rshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
 auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor {
-    int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
-    dim3 grid, block; compute_launch_config_1d(n, grid, block);
-    if (input.dtype() == DType::Int8)       { hipLaunchKernelGGL(bitwise_rshift_i8,  grid, block, 0, stream, input.data<int8_t>(),  shift.data<int8_t>(),  result.data<int8_t>(),  n); }
-    else if (input.dtype() == DType::Int16) { hipLaunchKernelGGL(bitwise_rshift_i16, grid, block, 0, stream, input.data<int16_t>(), shift.data<int16_t>(), result.data<int16_t>(), n); }
-    else if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_rshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
-    else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_rshift_i64, grid, block, 0, stream, input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
-    else { throw std::runtime_error("bitwise_right_shift: unsupported dtype"); }
-    HIP_CHECK(hipGetLastError()); return result;
+    return launch_broadcast_bitwise(input, shift, RShiftOp(), "bitwise_right_shift", stream);
 }
 
 // ============================================================================
@@ -9135,6 +9328,13 @@ __global__ void cummax_hip_kernel(
 
 auto cummax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // Float16/BFloat16: widen to Float32, compute, narrow the VALUES back
+    // (indices are dtype-independent). Matches CPU/CUDA's widen-through-Float32
+    // convention and this file's own kthvalue_kernel pattern.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto [vals, idx] = cummax_kernel(input.to(DType::Float32), dim, stream);
+        return {vals.to(input.dtype()), idx};
+    }
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
@@ -9218,6 +9418,13 @@ __global__ void cummin_hip_kernel(
 
 auto cummin_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // Float16/BFloat16: widen to Float32, compute, narrow the VALUES back
+    // (indices are dtype-independent). Matches CPU/CUDA's widen-through-Float32
+    // convention and this file's own kthvalue_kernel/cummax_kernel pattern.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto [vals, idx] = cummin_kernel(input.to(DType::Float32), dim, stream);
+        return {vals.to(input.dtype()), idx};
+    }
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
@@ -9626,6 +9833,13 @@ __global__ void kthvalue_hip_kernel(
 auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
                      hipStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // Float16/BFloat16: widen to Float32, compute, narrow the VALUES back
+    // (indices are dtype-independent). Matches CPU's kthvalue (widen through
+    // Float32) and CUDA's kthvalue_kernel.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto [vals, idx] = kthvalue_kernel(input.to(DType::Float32), k, dim, keepdim, stream);
+        return {vals.to(input.dtype()), idx};
+    }
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
@@ -9648,7 +9862,9 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
             out_shape.push_back(shape[i]);
         }
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor values(out_shape, dtype, device);
     Tensor indices_out(out_shape, DType::Int64, device);
@@ -9760,6 +9976,59 @@ __global__ void nanquantile_hip_kernel(
     }
 }
 
+// Dedicated NaN-ignoring LOWER-median kernel (no interpolation). Must NOT
+// delegate to nanquantile_hip_kernel(q=0.5), which linearly interpolates
+// between the two middle values (nanmedian([1,2,3,4]) would wrongly give 2.5
+// instead of 2). PyTorch/CPU nanmedian semantics select the lower median
+// with no interpolation: index (count-1)/2 of the sorted non-NaN values,
+// matching CPU's nanmedian_impl (src/backends/cpu/kernels/advanced.cpp) and
+// CUDA's nanmedian_kernel_impl (src/backends/cuda/kernels/advanced.cu).
+template<typename T>
+__global__ void nanmedian_hip_kernel(
+    const T* __restrict__ input, T* __restrict__ output,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices,
+    T* __restrict__ workspace)
+{
+    HIP_KERNEL_LOOP(idx, total_slices) {
+        int64_t outer = idx / inner_size;
+        int64_t inner = idx % inner_size;
+
+        T* ws = workspace + idx * dim_size;
+        int64_t count = 0;
+        for (int64_t i = 0; i < dim_size; ++i) {
+            T val = input[outer * dim_size * inner_size + i * inner_size + inner];
+            // F7: IEEE-754 bit pattern NaN check (see nanquantile_hip_kernel
+            // above) — this backend builds with -ffast-math.
+            if (!tenzor::rocm::is_nan_bits(val)) {
+                ws[count++] = val;
+            }
+        }
+
+        if (count == 0) {
+            // All-NaN slice → NaN sentinel, built from bits (static_cast<T>(NAN)
+            // can become finite under -ffast-math).
+            output[idx] = tenzor::rocm::make_qnan<T>();
+            return;
+        }
+
+        // Insertion sort (NaN-as-largest, but NaNs were already filtered out
+        // above so this simply sorts the non-NaN values ascending).
+        for (int64_t i = 1; i < count; ++i) {
+            T key = ws[i];
+            int64_t j = i - 1;
+            while (j >= 0 && nan_gt_bits(ws[j], key)) {
+                ws[j + 1] = ws[j];
+                --j;
+            }
+            ws[j + 1] = key;
+        }
+
+        // Lower median, no interpolation: index (count-1)/2, matching CPU's
+        // nanmedian_impl and PyTorch (nanmedian([1,2,3,4]) -> 2, not 2.5).
+        output[idx] = ws[(count - 1) / 2];
+    }
+}
+
 template<typename T>
 __global__ void quantile_hip_kernel(
     const T* __restrict__ input, T* __restrict__ output,
@@ -9799,6 +10068,17 @@ static auto quantile_nanquantile_impl(const Tensor& input, double q, int64_t dim
                                        bool keepdim, bool ignore_nan,
                                        hipStream_t stream) -> Tensor
 {
+    // Float16/BFloat16: widen to Float32 for the computation and narrow the
+    // result back, matching CPU's quantile/nanquantile kernels (which widen
+    // through Float32) and CUDA's quantile_kernel/nanquantile_kernel.
+    // nanmedian_kernel has its own dedicated implementation below (it does
+    // NOT delegate here — quantile(q=0.5) interpolates, nanmedian must not).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor out_f32 = quantile_nanquantile_impl(input.to(DType::Float32), q, dim,
+                                                     keepdim, ignore_nan, stream);
+        return out_f32.to(orig);
+    }
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
@@ -9821,12 +10101,39 @@ static auto quantile_nanquantile_impl(const Tensor& input, double q, int64_t dim
             out_shape.push_back(shape[i]);
         }
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor output(out_shape, dtype, device);
 
     // empty tensor (zero-sized non-reduced dim): zero-grid launch fails on HIP
     if (total_slices == 0) return output;
+
+    // dim_size==0 (the REDUCED dimension itself is empty, e.g. shape (3,0,5)
+    // with dim=1): total_slices is still nonzero here (outer*inner from the
+    // OTHER dims), so the guard above doesn't catch this case. Without this
+    // guard, ws was allocated as {total_slices * 0} = a truly empty buffer,
+    // and quantile_hip_kernel/nanquantile_hip_kernel indexed into it assuming
+    // dim_size elements per slice -- a null-pointer-adjacent GPU memory
+    // fault (confirmed live: "faulting addr: 0x0"). A zero-length reduction
+    // axis has no values to interpolate; emit NaN instead, matching CPU's
+    // quantile_impl (src/backends/cpu/kernels/advanced.cpp).
+    if (dim_size == 0) {
+        if (dtype == DType::Float32) {
+            std::vector<float> nan_fill(output.numel(), std::numeric_limits<float>::quiet_NaN());
+            HIP_CHECK(hipMemcpyAsync(output.data<float>(), nan_fill.data(),
+                nan_fill.size() * sizeof(float), hipMemcpyHostToDevice, stream));
+        } else if (dtype == DType::Float64) {
+            std::vector<double> nan_fill(output.numel(), std::numeric_limits<double>::quiet_NaN());
+            HIP_CHECK(hipMemcpyAsync(output.data<double>(), nan_fill.data(),
+                nan_fill.size() * sizeof(double), hipMemcpyHostToDevice, stream));
+        } else {
+            throw std::runtime_error("quantile ROCm: unsupported dtype");
+        }
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return output;
+    }
 
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(total_slices, grid_dim, block_dim);
@@ -9877,28 +10184,221 @@ auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim
     return quantile_nanquantile_impl(input, q, dim, keepdim, true, stream);
 }
 
+// F-NANMEDIAN: dedicated NaN-ignoring LOWER-median implementation. This must
+// NOT delegate to nanquantile_kernel(q=0.5) (as it previously did) — quantile
+// linearly interpolates between the two middle values for even-sized slices
+// (nanmedian([1,2,3,4]) would wrongly give 2.5), while PyTorch/CPU nanmedian
+// semantics return the exact lower median with no interpolation: index
+// (count-1)/2 of the sorted non-NaN values. Mirrors CPU's nanmedian_impl
+// (src/backends/cpu/kernels/advanced.cpp) and CUDA's nanmedian_kernel_impl /
+// nanmedian_kernel (src/backends/cuda/kernels/advanced.cu) — same per-slice
+// NaN-filter + insertion-sort + direct-index structure as
+// quantile_nanquantile_impl above, just swapping the final interpolation
+// step for nanmedian_hip_kernel's direct index.
 auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim,
                       hipStream_t stream) -> Tensor
 {
-    return nanquantile_kernel(input, 0.5, dim, keepdim, stream);
+    // Float16/BFloat16: widen to Float32, compute, narrow back. Matches CPU's
+    // nanmedian_kernel and CUDA's nanmedian_kernel.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor out_f32 = nanmedian_kernel(input.to(DType::Float32), dim, keepdim, stream);
+        return out_f32.to(orig);
+    }
+
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // Normalize (matches CPU + CUDA convention)
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
+
+    Tensor output(out_shape, dtype, device);
+
+    // empty tensor (zero-sized non-reduced dim): zero-grid launch fails on HIP
+    if (total_slices == 0) return output;
+
+    // dim_size==0 (the REDUCED dimension itself is empty): no values to take
+    // a median of — emit NaN, matching quantile_nanquantile_impl above and
+    // CPU's nanmedian_impl (which pushes nothing into `slice` and emits NaN).
+    if (dim_size == 0) {
+        if (dtype == DType::Float32) {
+            std::vector<float> nan_fill(output.numel(), std::numeric_limits<float>::quiet_NaN());
+            HIP_CHECK(hipMemcpyAsync(output.data<float>(), nan_fill.data(),
+                nan_fill.size() * sizeof(float), hipMemcpyHostToDevice, stream));
+        } else if (dtype == DType::Float64) {
+            std::vector<double> nan_fill(output.numel(), std::numeric_limits<double>::quiet_NaN());
+            HIP_CHECK(hipMemcpyAsync(output.data<double>(), nan_fill.data(),
+                nan_fill.size() * sizeof(double), hipMemcpyHostToDevice, stream));
+        } else {
+            throw std::runtime_error("nanmedian ROCm: unsupported dtype");
+        }
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return output;
+    }
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(total_slices, grid_dim, block_dim);
+
+    switch (dtype) {
+        case DType::Float32: {
+            Tensor ws({total_slices * dim_size}, DType::Float32, device);
+            hipLaunchKernelGGL(nanmedian_hip_kernel<float>, grid_dim, block_dim, 0, stream,
+                input_cont.data<float>(), output.data<float>(), dim_size, inner_size,
+                total_slices, ws.data<float>());
+            break;
+        }
+        case DType::Float64: {
+            Tensor ws({total_slices * dim_size}, DType::Float64, device);
+            hipLaunchKernelGGL(nanmedian_hip_kernel<double>, grid_dim, block_dim, 0, stream,
+                input_cont.data<double>(), output.data<double>(), dim_size, inner_size,
+                total_slices, ws.data<double>());
+            break;
+        }
+        default:
+            throw std::runtime_error("nanmedian ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
 }
 
 // ============================================================================
 // Histc kernel — fixed-bin histogram using atomicAdd
 // ============================================================================
 
-__global__ void histc_hip_f32(const float* __restrict__ input, float* __restrict__ output,
-                               int64_t n, int64_t bins, float min_val, float max_val)
+// Counts accumulate into a scratch int64_t buffer (via the unsigned-long-long
+// atomic alias -- HIP has no native int64 atomicAdd overload) rather than
+// directly into a T output. atomicAdd(&output[bin], T(1)) silently stops
+// incrementing once a bin passes ~2^24 hits for T=float (float32 can't
+// exactly represent integers beyond 2^24) -- CPU's histc_kernel
+// (src/backends/cpu/kernels/advanced.cpp) and CUDA's histc_kernel_impl
+// (src/backends/cuda/kernels/advanced.cu, F-035) already document and avoid
+// this exact issue with an int64_t `counts` buffer. histc_narrow_hip_kernel
+// below performs the final int64_t -> T narrow once all bins are tallied,
+// mirroring CPU's `out_data[b] = static_cast<T>(counts[b])` pass.
+template<typename T>
+__global__ void histc_hip_kernel_impl(const T* __restrict__ input, int64_t* __restrict__ counts,
+                                       int64_t n, int64_t bins, T min_val, T max_val)
 {
-    float bin_width = (max_val - min_val) / static_cast<float>(bins);
+    T bin_width = (max_val - min_val) / static_cast<T>(bins);
     HIP_KERNEL_LOOP(idx, n) {
-        float val = input[idx];
+        T val = input[idx];
         if (val >= min_val && val <= max_val) {
             int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
             if (bin >= bins) bin = bins - 1;
-            atomicAdd(&output[bin], 1.0f);
+            atomicAdd(reinterpret_cast<unsigned long long*>(&counts[bin]),
+                      static_cast<unsigned long long>(1));
         }
     }
+}
+
+// Narrows the int64_t bin-count accumulator to the output dtype T once
+// counting is complete (see histc_hip_kernel_impl's comment above).
+template<typename T>
+__global__ void histc_narrow_hip_kernel(const int64_t* __restrict__ counts,
+                                         T* __restrict__ output, int64_t bins)
+{
+    HIP_KERNEL_LOOP(b, bins) {
+        output[b] = static_cast<T>(counts[b]);
+    }
+}
+
+// NaN-ignoring min/max reduction functors used for auto-range detection
+// (torch.histc convention: min==max==0 means "scan the data"). Mirrors
+// CUDA's HistMinIgnoreNaN/HistMaxIgnoreNaN (src/backends/cuda/kernels/advanced.cu).
+// Uses the IEEE-754 bit-pattern NaN check (is_nan_bits) rather than `a != a`
+// because this translation unit builds under -ffast-math by default (see
+// CMakeLists.txt's per-file -fno-fast-math override for THIS file, which
+// pre-dates this fix and covers it, but the bit-pattern check is kept for
+// defense in depth, matching kth_is_nan/nan_gt_bits above).
+template<typename T> struct HistcMinIgnoreNaN {
+    __host__ __device__ T operator()(const T& a, const T& b) const {
+        bool an = tenzor::rocm::is_nan_bits(a);
+        bool bn = tenzor::rocm::is_nan_bits(b);
+        if (an) return b;
+        if (bn) return a;
+        return a < b ? a : b;
+    }
+};
+template<typename T> struct HistcMaxIgnoreNaN {
+    __host__ __device__ T operator()(const T& a, const T& b) const {
+        bool an = tenzor::rocm::is_nan_bits(a);
+        bool bn = tenzor::rocm::is_nan_bits(b);
+        if (an) return b;
+        if (bn) return a;
+        return a > b ? a : b;
+    }
+};
+
+// Device-side min/max scan over the input, used only when histc_kernel's
+// caller passed the auto-range sentinel (min==max==0). CPU's histc_kernel
+// does this with a simple host-side loop over `data`; here the data lives
+// on-device, so hipcub::DeviceReduce::Reduce performs the same scan in
+// parallel using the NaN-ignoring functors above (skipping NaN when
+// auto-detecting the range matches CPU/CUDA/torch.histc).
+template<typename T>
+static void histc_auto_range(const T* d_in, int64_t n, T& out_min, T& out_max,
+                              hipStream_t stream)
+{
+    HipBuffer min_buf(sizeof(T));
+    HipBuffer max_buf(sizeof(T));
+    T* d_min = min_buf.as<T>();
+    T* d_max = max_buf.as<T>();
+
+    const T init_min = std::numeric_limits<T>::infinity();
+    const T init_max = -std::numeric_limits<T>::infinity();
+
+    // Raw hipMalloc/hipFree (not HipBuffer) for the temp-storage buffer: CUB's
+    // query protocol distinguishes "give me the size" from "run the op" by
+    // whether d_temp_storage is null, not by temp_storage_bytes, and
+    // HipBuffer(0 bytes) deliberately leaves ptr==nullptr -- which would
+    // (in the vanishingly unlikely event temp_bytes comes back 0) re-trigger
+    // query mode on the second call instead of running the reduction. A real
+    // hipMalloc(&p, 0) always returns a valid non-null pointer, matching the
+    // existing hipcub::DeviceScan call sites elsewhere in this file.
+    {
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        HIP_CHECK(hipcub::DeviceReduce::Reduce(d_temp, temp_bytes, d_in, d_min,
+            static_cast<int>(n), HistcMinIgnoreNaN<T>{}, init_min, stream));
+        HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+        HIP_CHECK(hipcub::DeviceReduce::Reduce(d_temp, temp_bytes, d_in, d_min,
+            static_cast<int>(n), HistcMinIgnoreNaN<T>{}, init_min, stream));
+        HIP_CHECK(hipFree(d_temp));
+    }
+    {
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        HIP_CHECK(hipcub::DeviceReduce::Reduce(d_temp, temp_bytes, d_in, d_max,
+            static_cast<int>(n), HistcMaxIgnoreNaN<T>{}, init_max, stream));
+        HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+        HIP_CHECK(hipcub::DeviceReduce::Reduce(d_temp, temp_bytes, d_in, d_max,
+            static_cast<int>(n), HistcMaxIgnoreNaN<T>{}, init_max, stream));
+        HIP_CHECK(hipFree(d_temp));
+    }
+
+    HIP_CHECK(hipMemcpyAsync(&out_min, d_min, sizeof(T), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipMemcpyAsync(&out_max, d_max, sizeof(T), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 }
 
 auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val,
@@ -9910,43 +10410,92 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
         throw std::runtime_error("histc ROCm: bins must be positive");
     }
 
-    // A degenerate range (min==max — e.g. all-equal input, or an unresolved
-    // auto-range) yields a zero-width bin: bin_width=0 -> div-by-zero and an
-    // out-of-bounds atomicAdd. Expand it like PyTorch's histc.
-    if (min_val == max_val) {
-        min_val -= 1.0;
-        max_val += 1.0;
+    // Float16/BFloat16: widen to Float32, compute, narrow the result back
+    // (matches CPU's histc_kernel, which widens through Float32, and CUDA's
+    // histc_kernel).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return histc_kernel(input.to(DType::Float32), bins, min_val, max_val, stream)
+            .to(input.dtype());
     }
 
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
-    int64_t n = input_cont.numel();
+    const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
 
-    Tensor output({bins}, DType::Float32, device);
-    HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, bins * sizeof(float), stream));
+    // Any other non-floating dtype (Int32/Int64/etc.): cast through Float32,
+    // matching CPU's histc_kernel exactly -- CPU computes every non-Float64
+    // input via a Float32 widen and returns a Float32-dtype output (only
+    // F16/BF16 narrow back to the original dtype, handled above).
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        return histc_kernel(input_cont.to(DType::Float32), bins, min_val, max_val, stream);
+    }
 
-    // Empty input: bins were already zeroed; a zero-grid launch is rejected by
-    // HIP, so just return the all-zero histogram (matches torch.histc).
+    int64_t n = input_cont.numel();
+
+    // Auto-detect range ONLY when both bounds are the sentinel 0 (torch.histc
+    // convention). A user-supplied range -- including an inverted or equal
+    // one -- is honored as-is (then fixed by the degenerate-range guard
+    // below). Matches CPU's histc_kernel and CUDA's histc_kernel.
+    if (min_val == 0.0 && max_val == 0.0 && n > 0) {
+        if (dtype == DType::Float32) {
+            float lo, hi;
+            histc_auto_range<float>(input_cont.data<float>(), n, lo, hi, stream);
+            min_val = lo;
+            max_val = hi;
+        } else {
+            double lo, hi;
+            histc_auto_range<double>(input_cont.data<double>(), n, lo, hi, stream);
+            min_val = lo;
+            max_val = hi;
+        }
+    }
+
+    // Degenerate-range guard (matches CPU: `if (lo >= hi) hi = lo + 1`) so
+    // bin_width is never zero/negative (which would give NaN/garbage bin
+    // indices) -- covers both an explicit min==max call and an auto-detected
+    // range over an all-equal (or all-NaN) input.
+    if (min_val >= max_val) {
+        max_val = min_val + 1.0;
+    }
+
+    Tensor output({bins}, dtype, device);
+
+    // Empty input: nothing to count -- return the all-zero histogram (matches
+    // torch.histc). A zero-grid launch is rejected by HIP, so bail out before
+    // any kernel launch.
     if (n == 0) {
+        size_t elem_size = (dtype == DType::Float64) ? sizeof(double) : sizeof(float);
+        HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, static_cast<size_t>(bins) * elem_size, stream));
         HIP_CHECK(hipStreamSynchronize(stream));
         return output;
     }
 
     dim3 grid_dim, block_dim;
     compute_launch_config_1d(n, grid_dim, block_dim);
+    dim3 narrow_grid, narrow_block;
+    compute_launch_config_1d(bins, narrow_grid, narrow_block);
 
-    if (input_cont.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(histc_hip_f32, grid_dim, block_dim, 0, stream,
-            input_cont.data<float>(), output.data<float>(), n, bins,
+    // Accumulate into a scratch int64_t counts buffer (zero-initialized)
+    // rather than atomically incrementing the T output directly -- see
+    // histc_hip_kernel_impl's comment above for why. Narrowed to `output`'s
+    // dtype T by histc_narrow_hip_kernel once all elements have been counted.
+    HipBuffer counts_buf(static_cast<size_t>(bins) * sizeof(int64_t));
+    int64_t* d_counts = counts_buf.as<int64_t>();
+    HIP_CHECK(hipMemsetAsync(d_counts, 0, static_cast<size_t>(bins) * sizeof(int64_t), stream));
+
+    if (dtype == DType::Float32) {
+        hipLaunchKernelGGL(histc_hip_kernel_impl<float>, grid_dim, block_dim, 0, stream,
+            input_cont.data<float>(), d_counts, n, bins,
             static_cast<float>(min_val), static_cast<float>(max_val));
-    } else if (input_cont.dtype() == DType::Float64) {
-        // Convert to float32 for atomicAdd compatibility
-        Tensor f32_input = input_cont.to(DType::Float32);
-        hipLaunchKernelGGL(histc_hip_f32, grid_dim, block_dim, 0, stream,
-            f32_input.data<float>(), output.data<float>(), n, bins,
-            static_cast<float>(min_val), static_cast<float>(max_val));
+        hipLaunchKernelGGL(histc_narrow_hip_kernel<float>, narrow_grid, narrow_block, 0, stream,
+            d_counts, output.data<float>(), bins);
     } else {
-        throw std::runtime_error("histc ROCm: unsupported dtype");
+        // Float64: native double-precision histogram -- bin_width and bin
+        // membership are computed in double, matching CPU/CUDA. No downcast.
+        hipLaunchKernelGGL(histc_hip_kernel_impl<double>, grid_dim, block_dim, 0, stream,
+            input_cont.data<double>(), d_counts, n, bins, min_val, max_val);
+        hipLaunchKernelGGL(histc_narrow_hip_kernel<double>, narrow_grid, narrow_block, 0, stream,
+            d_counts, output.data<double>(), bins);
     }
     HIP_CHECK(hipGetLastError());
     return output;
@@ -11217,7 +11766,9 @@ auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
     for (int64_t i = 0; i < ndim; i++) {
         if (i != dim) out_shape.push_back(shape[i]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor result(out_shape, ca.dtype(), ca.device());
     int64_t total = outer_size * inner_size;

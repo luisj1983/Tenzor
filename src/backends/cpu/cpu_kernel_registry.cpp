@@ -1335,18 +1335,37 @@ static void register_cpu_kernels_extended_math(BackendDispatchTable& table) {
         return cpu::multigammaln_kernel(inputs[0], d);
     });
 
-    // LinalgVectorNorm: delegates to existing Norm kernel
+    // LinalgVectorNorm: delegates to linalg::vector_norm(), which supports
+    // both the p-norm math AND genuine multi-axis reduction — cpu::norm_kernel
+    // (the old delegate) only accepts a single int64_t dim. AttrKey::Dims
+    // (list) is preferred when present; AttrKey::Dim (single value, INT64_MIN
+    // sentinel = reduce-all) is kept as a fallback since it's how the
+    // currently-only caller (the LinalgVectorNorm JVP adapter) sets it.
     table.register_single_output_kernel(OpId::LinalgVectorNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
-        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        double p = attrs.get_float(AttrKey::P, 2.0);
         bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
-        return cpu::norm_kernel(inputs[0], p, dim, keepdim);
+        auto dims = attrs.get_int_list(AttrKey::Dims);
+        if (dims.empty()) {
+            int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+            if (dim != INT64_MIN) dims = {dim};
+        }
+        return linalg::vector_norm(inputs[0], p, dims, keepdim);
     });
 
-    // LinalgMatrixNorm: Frobenius (ord=0), nuclear (ord=1), spectral (ord=2)
+    // LinalgMatrixNorm: ord=0 is this dispatch path's Frobenius sentinel
+    // (matches the only current caller, the Frobenius-only JVP adapter).
+    // Every other ord follows torch.linalg.matrix_norm's real numeric-ord
+    // convention (1/-1 = max/min abs column sum, 2/-2 = largest/smallest
+    // singular value, +-inf = max/min abs row sum) and is delegated to
+    // linalg::matrix_norm(), which already implements that correctly
+    // (including preserving batch dims). This used to reimplement ord==1 as
+    // the nuclear norm (sum of singular values -- that's PyTorch's ord='nuc',
+    // a different value entirely) and any other nonzero ord as a
+    // batch-collapsing (INT64_MIN reduce-all) spectral norm, which matched
+    // neither PyTorch nor linalg::matrix_norm()'s own semantics.
     table.register_single_output_kernel(OpId::LinalgMatrixNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t ord = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
-        if (ord == 0) {
+        double ord = attrs.get_float(AttrKey::Order, 0.0);
+        if (ord == 0.0) {
             // Frobenius norm: sqrt(sum(x^2)) reduced ONLY over the last two
             // (matrix) axes, preserving batch dims so a batched [B,M,N] input
             // yields [B] instead of collapsing to a scalar. Matches
@@ -1364,20 +1383,16 @@ static void register_cpu_kernels_extended_math(BackendDispatchTable& table) {
             s = cpu::sum_kernel(s, in_ndim - 2, false);
             return cpu::sqrt_kernel(s);
         }
-        // Nuclear (ord==1) or Spectral (ord==2): use SVD
-        auto svd_result = linalg::svd(inputs[0], /*full_matrices=*/false);
-        const auto& S = std::get<1>(svd_result);
-        if (ord == 1) {
-            return cpu::sum_kernel(S, INT64_MIN, false);
-        }
-        return cpu::max_kernel(S, INT64_MIN, false);
+        return linalg::matrix_norm(inputs[0], ord);
     });
 
-    // LinalgVecdot: sum(a * b, dim)
+    // LinalgVecdot: sum(conj(a) * b, dim) for complex, sum(a * b, dim) for
+    // real -- delegate to linalg::vecdot() so the complex conjugation (which
+    // this dispatch kernel used to omit entirely) stays in one place instead
+    // of being reimplemented (and easy to drift out of sync) here.
     table.register_single_output_kernel(OpId::LinalgVecdot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        Tensor product = cpu::mul_kernel(inputs[0], inputs[1]);
-        return cpu::sum_kernel(product, dim, false);
+        return linalg::vecdot(inputs[0], inputs[1], dim);
     });
 
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsNan, cpu::isnan_kernel);
@@ -1858,9 +1873,13 @@ static void register_cpu_kernels_convolution(BackendDispatchTable& table) {
     // The NN layer handles manual 1D padding before dispatching, so the kernel
     // receives pre-padded input with padding=0 in attrs.
     table.register_kernel(OpId::Conv1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Read stride/padding/dilation via the shared per-axis-with-scalar-fallback
+        // helpers (StrideW/PaddingW/DilationW override the scalar Stride/Padding/
+        // Dilation when present), matching CUDA/ROCm's conv1d_to_conv2d_attrs()
+        // convention instead of only ever reading the scalar keys.
+        int64_t stride = ::tenzor::backend::attrs::stride_1d(attrs)[0];
+        int64_t padding = ::tenzor::backend::attrs::padding_1d(attrs)[0];
+        int64_t dilation = ::tenzor::backend::attrs::dilation_1d(attrs)[0];
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_4d = inputs[0].unsqueeze(2);   // [N,C,L] -> [N,C,1,L]
         auto weight_4d = inputs[1].unsqueeze(2);  // [O,I,kL] -> [O,I,1,kL]
@@ -3376,7 +3395,12 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         // Per docs/internals/attention-contract.md, returns 4 tensors:
         // [output, lse_f32, philox_seed_int64, philox_offset_int64].
         // seed/offset are empty Tensors when dropout_p == 0.
-        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        // Scale defaults to 1/sqrt(head_dim) (mathematically-correct scaled
+        // dot-product attention), not an unscaled 1.0 — matches OneAPI's
+        // registration and the docs/internals/attention-contract.md formula.
+        int64_t head_dim_for_scale = inputs[0].shape().back();
+        float default_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_for_scale));
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, default_scale));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
         bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
@@ -3562,11 +3586,13 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);
 
         // ScoreModId 0/1: route to fused FlashAttention backward (mathematically
-        // identical) — but only when no block_mask was supplied (AUTOGRAD-R027:
-        // this fixed-arity call has no block_mask parameter and would silently
-        // ignore one if present).
-        if ((score_mod_id == 0 || score_mod_id == 1) &&
-            !attrs.get_bool(AttrKey::HasBlockMask, false)) {
+        // identical) — but only when no block_mask AND no relpos_bias was
+        // supplied (AUTOGRAD-R027: this fixed-arity call has no block_mask/
+        // relpos_bias parameter and would silently ignore either if present,
+        // matching CUDA/ROCm/OneAPI/Vulkan's identical has_extra_tensor guard).
+        const bool has_extra_tensor = attrs.get_bool(AttrKey::HasBlockMask, false) ||
+                                      attrs.get_bool(AttrKey::HasRelposBias, false);
+        if ((score_mod_id == 0 || score_mod_id == 1) && !has_extra_tensor) {
             bool causal = (score_mod_id == 1);
             return cpu::flash_attention_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                                                  scale, causal, /*dropout_p=*/0.0f,

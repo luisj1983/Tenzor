@@ -1,0 +1,36 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// SpMM (Int64): C = A * B where A is CSR sparse, B and C are dense (row-major).
+// One workgroup per output row; no atomics needed (see sparse_spmm.comp) since
+// each thread owns a distinct output column.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { int64_t values[]; };
+layout(set = 0, binding = 3) readonly buffer MatB       { int64_t B[];      };
+layout(set = 0, binding = 4) buffer MatC                { int64_t C[];      };
+
+layout(push_constant) uniform PushConstants {
+    uint m;       // rows of A and C
+    uint k;       // cols of A, rows of B
+    uint n_cols;  // cols of B and C
+};
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= m) return;
+
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
+        int64_t sum = int64_t(0);
+        for (uint i = row_start; i < row_end; i++) {
+            sum += values[i] * B[uint(col_indices[i]) * n_cols + col];
+        }
+        C[row * n_cols + col] = sum;
+    }
+}

@@ -713,16 +713,23 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     // manual_seed() with no reset hook made `manual_seed(s); rand(...)`
     // non-reproducible. With offset==0 the sequence is fully determined by
     // the seed, matching the manual_seed contract and other backends.
+    //
+    // F042: seed_lo/seed_hi carry the FULL 64-bit global seed (not a single
+    // truncated word XORed with a constant in the shader) so the Philox key
+    // matches CPU's philox.hpp exactly — see random.comp.
 
     struct PushConstants {
         uint32_t n_elements;
-        uint32_t seed;
+        uint32_t seed_lo;
+        uint32_t seed_hi;
         uint32_t offset;
         uint32_t distribution;  // 0 = uniform
     } push_constants;
 
+    uint64_t seed64 = static_cast<uint32_t>(::tenzor::get_global_seed());
     push_constants.n_elements = static_cast<uint32_t>(numel);
-    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
+    push_constants.seed_lo = static_cast<uint32_t>(seed64 & 0xFFFFFFFFu);
+    push_constants.seed_hi = static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu);
     push_constants.offset = 0;
     push_constants.distribution = 0;  // uniform
 
@@ -794,16 +801,21 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     // Offset derived deterministically from the (per-call incrementing) seed
     // rather than a process-global static counter — see dispatchRand for the
     // reproducibility rationale.
+    //
+    // F042: seed_lo/seed_hi carry the FULL 64-bit global seed — see random.comp.
 
     struct PushConstants {
         uint32_t n_elements;
-        uint32_t seed;
+        uint32_t seed_lo;
+        uint32_t seed_hi;
         uint32_t offset;
         uint32_t distribution;  // 1 = normal
     } push_constants;
 
+    uint64_t seed64 = static_cast<uint32_t>(::tenzor::get_global_seed());
     push_constants.n_elements = static_cast<uint32_t>(numel);
-    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
+    push_constants.seed_lo = static_cast<uint32_t>(seed64 & 0xFFFFFFFFu);
+    push_constants.seed_hi = static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu);
     push_constants.offset = 0;
     push_constants.distribution = 1;  // normal
 
@@ -842,6 +854,11 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
 
     int32_t device_id = device.index;
 
+    // F042: randint.comp/randint_i64.comp now compute the range mapping in
+    // double precision (matching CPU's philox_uniform_f64-based randint_kernel
+    // bit-for-bit), so they require shaderFloat64 like the other fp64 paths.
+    vulkan::ensure_fp64_supported(device_id, "Randint");
+
     // Select shader based on dtype
     std::string shader_name = "randint";
     if (dtype == DType::Int64) {
@@ -864,7 +881,13 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
     // Honor `tenzor::manual_seed`; the Philox offset is derived deterministically
     // from the (per-call incrementing) seed rather than a process-global static
     // counter — see dispatchRand for the reproducibility rationale.
-    uint32_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
+    //
+    // F042: seed_lo/seed_hi carry the FULL 64-bit global seed (not a single
+    // truncated word XORed with a constant in the shader) so the Philox key
+    // matches CPU's philox.hpp exactly — see random.comp.
+    uint64_t seed64 = static_cast<uint32_t>(::tenzor::get_global_seed());
+    uint32_t seed_lo = static_cast<uint32_t>(seed64 & 0xFFFFFFFFu);
+    uint32_t seed_hi = static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu);
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -880,7 +903,8 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
             uint32_t low_hi;
             uint32_t high_lo;
             uint32_t high_hi;
-            uint32_t seed;
+            uint32_t seed_lo;
+            uint32_t seed_hi;
             uint32_t offset;
         } pc;
         uint64_t low_bits = static_cast<uint64_t>(low);
@@ -890,7 +914,8 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
         pc.low_hi = static_cast<uint32_t>((low_bits >> 32) & 0xFFFFFFFFu);
         pc.high_lo = static_cast<uint32_t>(high_bits & 0xFFFFFFFFu);
         pc.high_hi = static_cast<uint32_t>((high_bits >> 32) & 0xFFFFFFFFu);
-        pc.seed = seed;
+        pc.seed_lo = seed_lo;
+        pc.seed_hi = seed_hi;
         pc.offset = 0;
         vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RandintPCI64), &pc);
@@ -900,13 +925,15 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
             uint32_t n;
             int32_t low;
             int32_t high;
-            uint32_t seed;
+            uint32_t seed_lo;
+            uint32_t seed_hi;
             uint32_t offset;
         } pc;
         pc.n = static_cast<uint32_t>(numel);
         pc.low = static_cast<int32_t>(low);
         pc.high = static_cast<int32_t>(high);
-        pc.seed = seed;
+        pc.seed_lo = seed_lo;
+        pc.seed_hi = seed_hi;
         pc.offset = 0;
         vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RandintPC), &pc);
@@ -1246,6 +1273,17 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
         vulkan::ensure_fp64_supported(x.device().index, "Where");
     }
 
+    // Match CPU (indexing.cpp:1084-1089) and CUDA (validate_mask_dtype): a
+    // where() condition must be Bool or a floating dtype. Vulkan previously
+    // accepted any dtype here (generic .to(Bool)), silently succeeding on a
+    // call CPU/CUDA both reject (e.g. an Int32 condition).
+    {
+        DType cd = condition.dtype();
+        if (cd != DType::Bool && cd != DType::Float32 && cd != DType::Float64 &&
+            cd != DType::Float16 && cd != DType::BFloat16) {
+            throw std::invalid_argument("where: condition tensor must have dtype Bool or a floating dtype");
+        }
+    }
     Tensor cond_u8 = (condition.dtype() == DType::Bool) ? condition : condition.to(DType::Bool);
 
     Tensor x_work, y_work;
@@ -2624,6 +2662,39 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         // a uvec2 and writes the low word — exactly low-32-bit truncation,
         // bit-identical for Int32 and UInt32 targets.
         shader_name = "cast_int64_to_int32";
+    } else if ([&] {
+                   auto is_integer_like = [](DType d) {
+                       return d == DType::Int8 || d == DType::Int16 || d == DType::Int32 ||
+                              d == DType::Int64 || d == DType::UInt8 || d == DType::UInt16 ||
+                              d == DType::UInt32 || d == DType::UInt64 || d == DType::Bool;
+                   };
+                   // Exclude target_dtype == Int32: that direction is a widen
+                   // for every source narrower than 32 bits (exact through the
+                   // existing Float32 two-step below) and Int64/UInt64->Int32
+                   // is already a dedicated exact shader (cast_int64_to_int32,
+                   // matched earlier in this chain) -- routing it here too
+                   // would recurse into dispatchCast(input, Int32) with no
+                   // base case.
+                   return is_integer_like(src_dtype) && is_integer_like(target_dtype) &&
+                          target_dtype != DType::Int32;
+               }()) {
+        // Any remaining integer/bool -> integer/bool pair not already given a
+        // dedicated shader above: truncate the exact low-N-bit pattern via
+        // Int32 instead of a lossy/saturating Float32 round-trip. Two low-bit
+        // truncations compose (the low N bits of "the low 32 bits of X"
+        // equal the low N bits of X), so widening to Int32 first (exact for
+        // every integer source: narrow types widen losslessly through the
+        // Float32 two-step below, Int64/UInt64 truncate via the dedicated
+        // cast_int64_to_int32 shader matched earlier) and then truncating
+        // that Int32 value with dispatchCastTruncateInt32 reproduces the
+        // original value's exact low bits -- matching CPU/CUDA/ROCm's raw
+        // static_cast (modular truncation/wraparound, e.g.
+        // tensor([-1], Int8).to(UInt8) == 255) instead of the previous
+        // Float32 detour, which both saturated (cast_f32_i8/u8's old clamp)
+        // and silently lost precision for |value| > 2^24.
+        Tensor as_i32 = (src_dtype == DType::Int32) ? dispatchContiguous(input)
+                                                     : dispatchCast(input, DType::Int32);
+        return dispatchCastTruncateInt32(as_i32, target_dtype);
     } else if (src_dtype != DType::Float32 && target_dtype != DType::Float32) {
         // Generic two-step via Float32 for any remaining dtype pair
         two_step = true;
@@ -2749,14 +2820,18 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
 }
 
 /*
- * Modular-truncating Int32 -> {Int8, Int16, Int64, Bool} cast.
+ * Modular-truncating Int32 -> {Int8, UInt8, Int16, UInt16, Int64, UInt64,
+ * UInt32, Bool} cast.
  *
- * dispatchCast routes Int32 -> Int8 / Int16 through cast_f32_i8 / cast_f32_i16
- * which CLAMP to the destination range. That's the right behaviour for normal
- * casts (e.g. converting a float result to int8) but wrong for bitwise ops
- * where the upper bits of the int32 input are intentionally significant and
- * the contract is "discard the top bits" (PyTorch / numpy / C). This helper
- * uses dedicated truncating shaders so the bit pattern is preserved.
+ * dispatchCast's generic OpId::Cast path now also routes plain
+ * integer-to-integer narrowing casts through this helper directly (see the
+ * "any remaining integer/bool pair" branch in dispatchCast) instead of a
+ * Float32 round-trip, which would silently lose precision for |value| >
+ * 2^24. It remains the required path for bitwise ops (AND/OR/XOR/NOT/
+ * shifts), where the upper bits of the int32 input are intentionally
+ * significant and the contract is "discard the top bits" (PyTorch / numpy /
+ * C two's-complement wraparound) -- this helper's dedicated truncating
+ * shaders preserve the exact bit pattern.
  */
 auto VulkanBackend::dispatchCastTruncateInt32(const Tensor& input, DType target_dtype) -> Tensor {
     if (input.dtype() != DType::Int32) {
@@ -2773,22 +2848,44 @@ auto VulkanBackend::dispatchCastTruncateInt32(const Tensor& input, DType target_
 
     if (numel == 0) return output;
 
+    // UInt32 is bit-identical to Int32 at this width (no truncation is
+    // possible between two 4-byte integer types) -- a pure device-to-device
+    // byte copy re-tagged with the unsigned dtype, no shader dispatch
+    // required.
+    if (target_dtype == DType::UInt32) {
+        size_t bytes = static_cast<size_t>(numel) * sizeof(int32_t);
+        copy(output.data_ptr(), input.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        return output;
+    }
+
     std::string shader_name;
     size_t out_buf_size = 0;
     switch (target_dtype) {
         case DType::Int8:
+        case DType::UInt8:
         case DType::Bool:
-            shader_name = (target_dtype == DType::Int8) ? "cast_i32_i8_truncate"
-                                                        : "cast_i32_bool";
+            // Int8 and UInt8 keep the identical low byte of the bit pattern
+            // (two's-complement narrowing is bit-for-bit the same regardless
+            // of the target's signedness) -- only the output tensor's dtype
+            // tag differs, matching PyTorch's wraparound semantics, e.g.
+            // tensor([-1], Int8).to(UInt8) == 255. Bool instead does a real
+            // (x != 0) test via cast_i32_bool.
+            shader_name = (target_dtype == DType::Bool) ? "cast_i32_bool"
+                                                        : "cast_i32_i8_truncate";
             // 1 byte per element, rounded up to 4-byte boundary
             out_buf_size = (static_cast<size_t>(numel) + 3) & ~size_t(3);
             break;
         case DType::Int16:
+        case DType::UInt16:
+            // Same reasoning as Int8/UInt8: identical low-16-bit pattern.
             shader_name = "cast_i32_i16";
             // 2 bytes per element, rounded up to 4-byte boundary
             out_buf_size = (static_cast<size_t>(numel) * 2 + 3) & ~size_t(3);
             break;
         case DType::Int64:
+        case DType::UInt64:
+            // Sign-extending widen; the emitted 64-bit pattern is identical
+            // for Int64 and UInt64 (two's-complement reinterpretation).
             shader_name = "cast_i32_i64";
             out_buf_size = static_cast<size_t>(numel) * sizeof(int64_t);
             break;
@@ -2950,6 +3047,24 @@ auto VulkanBackend::dispatchChunk(const Tensor& input, int64_t chunks, int64_t d
     int64_t dim_size = shape[dim];
     // Each chunk gets ceil(dim_size / chunks) elements (except possibly the last)
     int64_t chunk_size = (dim_size + chunks - 1) / chunks;
+
+    // For a zero-size chunk dim, chunk_size collapses to 0, and dispatchSplit's
+    // loop (`start < dim_size`, with dim_size == 0) never executes -- it
+    // silently returns an empty vector (0 tensors) instead of `chunks` empty
+    // tensors. PyTorch's chunk() on an empty dim returns `chunks` empty
+    // tensors (each carrying a 0 in the chunk dim); mirror CPU's chunk_kernel
+    // (src/backends/cpu/kernels/transform.cpp) fix for this exact case
+    // (F075) so Vulkan matches instead of silently dropping all chunks.
+    if (chunk_size == 0) {
+        std::vector<Tensor> result;
+        result.reserve(static_cast<size_t>(chunks));
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[dim] = 0;
+        for (int64_t c = 0; c < chunks; ++c) {
+            result.emplace_back(out_shape, input.dtype(), input.device());
+        }
+        return result;
+    }
 
     return dispatchSplit(input, chunk_size, dim);
 }
@@ -3611,10 +3726,13 @@ auto VulkanBackend::dispatchHasInfNan(const Tensor& input) -> Tensor {
     bool is_f64 = (input.dtype() == DType::Float64);
     std::string shader = is_f64 ? "has_inf_nan_f64" : "has_inf_nan";
 
-    // For non-float types, no inf/nan possible
+    // For non-float types, no inf/nan possible.
+    // Shape {} (rank-0 scalar), matching CPU/CUDA/ROCm's has_inf_nan_kernel
+    // (Tensor result({}, DType::Bool, ...)); a shape-{1} rank-1 result here
+    // previously diverged from every other backend's output rank.
     if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
         input.dtype() != DType::Float16 && input.dtype() != DType::BFloat16) {
-        Tensor result({1}, DType::Bool, input.device());
+        Tensor result({}, DType::Bool, input.device());
         result = dispatchFill(result, 0.0f);
         return result;
     }
@@ -3629,8 +3747,10 @@ auto VulkanBackend::dispatchHasInfNan(const Tensor& input) -> Tensor {
 
     auto* pipeline = getPipeline(shader, device_id);
 
-    // Result buffer — single uint32 initialized to 0
-    Tensor result_buf({1}, DType::Int32, input.device());
+    // Result buffer — single uint32 initialized to 0. Shape {} (rank-0
+    // scalar) so the Bool tensor returned below matches CPU/CUDA/ROCm's
+    // has_inf_nan_kernel output rank instead of a rank-1 shape-(1,) tensor.
+    Tensor result_buf({}, DType::Int32, input.device());
     result_buf = dispatchFill(result_buf, 0.0f);
 
     int64_t numel = work_input.numel();
@@ -4471,25 +4591,6 @@ auto VulkanBackend::dispatchBoolPredicateOp(const std::string& op_name,
 
 auto VulkanBackend::dispatchLogicalOp(const std::string& op_name,
                                        const Tensor& a, const Tensor& b) -> Tensor {
-    // Handle empty tensors
-    if (a.numel() == 0) {
-        auto a_shape = a.shape();
-        std::vector<int64_t> output_shape(a_shape.begin(), a_shape.end());
-        return Tensor(output_shape, DType::Bool, a.device());
-    }
-
-    int32_t device_id = a.device().index;
-
-    // Convert inputs to Bool if not already
-    Tensor a_bool = (a.dtype() == DType::Bool) ? a : a.to(DType::Bool);
-    Tensor b_bool = (b.dtype() == DType::Bool) ? b : b.to(DType::Bool);
-
-    auto* pipeline = getPipeline("logical", device_id);
-
-    auto a_shape = a_bool.shape();
-    std::vector<int64_t> output_shape(a_shape.begin(), a_shape.end());
-    Tensor output(output_shape, DType::Bool, a.device());
-
     // Map operation name to opcode
     uint32_t opcode = 0;
     if (op_name == "logical_and") opcode = 0;
@@ -4498,23 +4599,134 @@ auto VulkanBackend::dispatchLogicalOp(const std::string& op_name,
     else if (op_name == "logical_xor") opcode = 3;
     else throw std::runtime_error("Unknown logical operation: " + op_name);
 
-    struct PushConstants {
-        uint32_t n;
+    // Convert inputs to Bool if not already
+    Tensor a_bool = (a.dtype() == DType::Bool) ? a : a.to(DType::Bool);
+    Tensor b_bool = (b.dtype() == DType::Bool) ? b : b.to(DType::Bool);
+    // Materialize offset/non-contiguous views to zero-offset buffers before
+    // binding (as dispatchUnaryOp/dispatchBinaryOp/dispatchComparisonOp do) --
+    // the dtype==Bool short-circuit above can pass through an arbitrary view
+    // (e.g. a sliced mask) with a nonzero storage offset, which the plain
+    // data_ptr()-based binding below does not account for.
+    a_bool = dispatchContiguous(a_bool);
+    b_bool = dispatchContiguous(b_bool);
+
+    auto a_shape = a_bool.shape();
+    auto b_shape = b_bool.shape();
+    std::vector<int64_t> shape_a_vec(a_shape.begin(), a_shape.end());
+    std::vector<int64_t> shape_b_vec(b_shape.begin(), b_shape.end());
+
+    // logical_not is unary (caller passes the same tensor for a and b, opcode
+    // ignores b), so it always takes the same-shape fast path below.
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(),
+                                  b_shape.begin(), b_shape.end());
+
+    int32_t device_id = a.device().index;
+
+    if (same_shape) {
+        // Handle empty tensors
+        if (a_bool.numel() == 0) {
+            std::vector<int64_t> output_shape(a_shape.begin(), a_shape.end());
+            return Tensor(output_shape, DType::Bool, a.device());
+        }
+
+        auto* pipeline = getPipeline("logical", device_id);
+
+        std::vector<int64_t> output_shape(a_shape.begin(), a_shape.end());
+        Tensor output(output_shape, DType::Bool, a.device());
+
+        struct PushConstants {
+            uint32_t n;
+            uint32_t op;
+        } push_constants;
+        push_constants.n = static_cast<uint32_t>(a_bool.numel());
+        push_constants.op = opcode;
+
+        size_t buffer_size = a_bool.numel() * a_bool.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, a_bool.data_ptr()}, {1, b_bool.data_ptr()}, {2, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {buffer_size, buffer_size, buffer_size};
+
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+
+        uint32_t workgroups = div_wg_checked(a_bool.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+
+        return output;
+    }
+
+    // Broadcasting path: `a` and `b` differ in shape. The flat "logical"
+    // shader binds b's buffer sized to a.numel() with no broadcast-shape
+    // handling, so a smaller-but-broadcastable b (e.g. a scalar mask) reads
+    // out of bounds past the end of its buffer -- a real heap-buffer-overflow
+    // read (mirrors the exact bug fixed for bitwise ops in
+    // dispatchBitwiseBinaryOp above; see bitwise_broadcast.comp). Use the
+    // dedicated broadcast shader instead, matching CPU's logical_binary_kernel
+    // (src/backends/cpu/kernels/math.cpp), which broadcasts per numpy rules.
+    if (!are_broadcastable(shape_a_vec, shape_b_vec)) {
+        throw std::invalid_argument(op_name + ": tensors not broadcastable, shapes [" +
+            std::to_string(a_bool.numel()) + "] and [" + std::to_string(b_bool.numel()) + "]");
+    }
+    std::vector<int64_t> output_shape = compute_broadcast_shape(shape_a_vec, shape_b_vec);
+
+    int64_t out_numel = 1;
+    for (auto d : output_shape) out_numel *= d;
+    if (out_numel == 0) {
+        return Tensor(output_shape, DType::Bool, a.device());
+    }
+
+    if (output_shape.size() > 8 || shape_a_vec.size() > 8 || shape_b_vec.size() > 8) {
+        throw std::runtime_error("Vulkan broadcast supports at most 8 dimensions");
+    }
+
+    Tensor output(output_shape, DType::Bool, a.device());
+
+    auto* pipeline = getPipeline("logical_broadcast", device_id);
+
+    auto strides_a = compute_broadcast_strides(shape_a_vec, output_shape);
+    auto strides_b = compute_broadcast_strides(shape_b_vec, output_shape);
+
+    struct PushConstantsBroadcast {
+        uint32_t output_size;
         uint32_t op;
-    } push_constants;
-    push_constants.n = static_cast<uint32_t>(a_bool.numel());
+        uint32_t ndim_a;
+        uint32_t ndim_b;
+        uint32_t ndim_out;
+        uint32_t strides_a[8];
+        uint32_t strides_b[8];
+        uint32_t shape_out[8];
+    } push_constants = {};
+
+    push_constants.output_size = static_cast<uint32_t>(out_numel);
     push_constants.op = opcode;
+    push_constants.ndim_a = static_cast<uint32_t>(shape_a_vec.size());
+    push_constants.ndim_b = static_cast<uint32_t>(shape_b_vec.size());
+    push_constants.ndim_out = static_cast<uint32_t>(output_shape.size());
+    for (size_t i = 0; i < std::min(size_t(8), strides_a.size()); ++i) push_constants.strides_a[i] = strides_a[i];
+    for (size_t i = 0; i < std::min(size_t(8), strides_b.size()); ++i) push_constants.strides_b[i] = strides_b[i];
+    for (size_t i = 0; i < std::min(size_t(8), output_shape.size()); ++i) push_constants.shape_out[i] = static_cast<uint32_t>(output_shape[i]);
 
-    const void* buffer_a = a_bool.data_ptr();
-    const void* buffer_b = b_bool.data_ptr();
-    const void* buffer_out = output.data_ptr();
-
-    size_t buffer_size = a_bool.numel() * a_bool.dtype_size();
+    size_t buffer_size_a = static_cast<size_t>(a_bool.numel()) * a_bool.dtype_size();
+    size_t buffer_size_b = static_cast<size_t>(b_bool.numel()) * b_bool.dtype_size();
+    size_t buffer_size_out = static_cast<size_t>(output.numel()) * output.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, buffer_a}, {1, buffer_b}, {2, buffer_out}
+        {0, a_bool.data_ptr()}, {1, b_bool.data_ptr()}, {2, output.data_ptr()}
     };
-    std::vector<size_t> sizes = {buffer_size, buffer_size, buffer_size};
+    std::vector<size_t> sizes = {buffer_size_a, buffer_size_b, buffer_size_out};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
@@ -4523,11 +4735,10 @@ auto VulkanBackend::dispatchLogicalOp(const std::string& op_name,
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                      VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(push_constants), &push_constants);
 
-    uint32_t workgroups = div_wg_checked(a_bool.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+    uint32_t workgroups = div_wg_checked(static_cast<uint32_t>(out_numel), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -4816,6 +5027,30 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
         return self.clone();
     }
 
+    // Validate index VALUES host-side and throw std::out_of_range on an
+    // out-of-range index (matching CPU's scatter_add_kernel, and mirroring
+    // dispatchIndexAdd's identical block in this file). scatter_add.comp
+    // already wraps negatives and bounds-checks, but previously only
+    // silently skipped the accumulate on an out-of-range index instead of
+    // raising — this makes it fail loudly like every other backend.
+    {
+        int64_t ndim_self = static_cast<int64_t>(self_shape.size());
+        int64_t norm_dim = dim < 0 ? dim + ndim_self : dim;
+        int64_t dim_size = self_shape[norm_dim];
+        Tensor idx_host = dispatchContiguous(index).to(Device::cpu());
+        Tensor idx_i64 = idx_host.dtype() == DType::Int64 ? idx_host : idx_host.to(DType::Int64);
+        const int64_t* ip = idx_i64.data<int64_t>();
+        for (int64_t i = 0; i < idx_i64.numel(); ++i) {
+            int64_t di = ip[i] < 0 ? ip[i] + dim_size : ip[i];
+            if (di < 0 || di >= dim_size) {
+                throw std::out_of_range(
+                    "scatter_add_(): index " + std::to_string(ip[i]) +
+                    " is out of bounds for dimension " + std::to_string(norm_dim) +
+                    " with size " + std::to_string(dim_size));
+            }
+        }
+    }
+
     // Accumulation is undefined / unsupported for these dtypes: fail loudly
     // rather than silently dropping or corrupting writes. (Bool += is UB-prone;
     // complex accumulation is not implemented in the Vulkan scatter_add path.)
@@ -4841,20 +5076,32 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
     }
 
     // Integer dtypes: accumulate via the native Int32 atomic shader (integer
-    // atomicAdd is core Vulkan). Narrow integers widen losslessly to Int32;
-    // 64-bit integers narrow to Int32 (sparse counts/indices are well within
-    // range). Previously every integer dtype fell through to the Float32 shader,
-    // which reinterpreted the integer bits as floats and produced all-zeros.
+    // atomicAdd is core Vulkan). Narrow integers widen losslessly to Int32.
+    // Int64/UInt64 must NOT be narrowed to Int32 — that silently truncates
+    // magnitudes > 2^31-1 and accumulates in 32-bit, diverging from CPU.
+    // Mirror dispatchIndexAdd: route them to the native int64-atomic CAS
+    // shader when the device supports GL_EXT_shader_atomic_int64; otherwise
+    // throw (mirroring the Float64 check below). UInt64 shares Int64's
+    // two's-complement add (bit-identical), so the signed accumulation
+    // shader is correct for both.
     {
         DType d = self.dtype();
-        bool is_int = (d == DType::Int8 || d == DType::Int16 || d == DType::Int64 ||
-                       d == DType::UInt8 || d == DType::UInt16 || d == DType::UInt32 ||
-                       d == DType::UInt64 || d == DType::Bool);
-        if (is_int) {
+        bool is_narrow_int = (d == DType::Int8 || d == DType::Int16 ||
+                               d == DType::UInt8 || d == DType::UInt16 ||
+                               d == DType::UInt32 || d == DType::Bool);
+        if (is_narrow_int) {
             auto self_i32 = self.to(DType::Int32);
             auto src_i32 = src.to(DType::Int32);
             auto result_i32 = dispatchScatterAdd(self_i32, dim, index, src_i32);
             return result_i32.to(d);
+        }
+        if (d == DType::Int64 || d == DType::UInt64) {
+            if (!devices_[device_id].hasAtomicInt64) {
+                throw std::runtime_error(
+                    "ScatterAdd with Int64/UInt64 requires VK_KHR_shader_atomic_int64 "
+                    "support. Use CPU backend or a narrower integer dtype.");
+            }
+            // Fall through to the dispatch below with the native int64 shader.
         }
     }
 
@@ -4883,6 +5130,7 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
                             : (self.dtype() == DType::Float16) ? "scatter_add_f16"
                             : (self.dtype() == DType::BFloat16) ? "scatter_add_bf16"
                             : (self.dtype() == DType::Int32) ? "scatter_add_i32"
+                            : (self.dtype() == DType::Int64 || self.dtype() == DType::UInt64) ? "scatter_add_i64"
                             : "scatter_add";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -5040,6 +5288,29 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
         // tensor of the same shape leaves it uninitialised, which on
         // Vulkan defaults to zeros and silently corrupts the result.
         return self.clone();
+    }
+
+    // Validate index VALUES host-side and throw std::out_of_range on an
+    // out-of-range index (mirrors dispatchScatterAdd's identical block in
+    // this file). scatter_reduce.comp already wraps negatives and
+    // bounds-checks, but previously only silently skipped the reduce on an
+    // out-of-range index instead of raising.
+    {
+        int64_t ndim_self = static_cast<int64_t>(self_shape.size());
+        int64_t norm_dim = dim < 0 ? dim + ndim_self : dim;
+        int64_t dim_size = self_shape[norm_dim];
+        Tensor idx_host = dispatchContiguous(index).to(Device::cpu());
+        Tensor idx_i64 = idx_host.dtype() == DType::Int64 ? idx_host : idx_host.to(DType::Int64);
+        const int64_t* ip = idx_i64.data<int64_t>();
+        for (int64_t i = 0; i < idx_i64.numel(); ++i) {
+            int64_t di = ip[i] < 0 ? ip[i] + dim_size : ip[i];
+            if (di < 0 || di >= dim_size) {
+                throw std::out_of_range(
+                    "scatter_reduce_(): index " + std::to_string(ip[i]) +
+                    " is out of bounds for dimension " + std::to_string(norm_dim) +
+                    " with size " + std::to_string(dim_size));
+            }
+        }
     }
 
     int32_t device_id = self.device().index;
@@ -5713,7 +5984,7 @@ auto VulkanBackend::dispatchIndexCopy(const Tensor& self, int64_t dim,
 // ============================================================================
 
 auto VulkanBackend::dispatchIndexFill(const Tensor& self, int64_t dim,
-                                       const Tensor& index, float value) -> Tensor {
+                                       const Tensor& index, double value) -> Tensor {
     auto self_shape = self.shape();
 
     if (self.numel() == 0 || index.numel() == 0) {
@@ -5726,15 +5997,75 @@ auto VulkanBackend::dispatchIndexFill(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
-    // Non-Float32: upcast, compute, downcast
-    if (self.dtype() != DType::Float32) {
-        DType orig_dtype = self.dtype();
-        auto self_f32 = self.to(DType::Float32);
-        auto result_f32 = dispatchIndexFill(self_f32, dim, index, value);
-        return result_f32.to(orig_dtype);
+    // Validate index VALUES host-side and throw std::out_of_range on an
+    // out-of-range index (matching CPU's index_fill_kernel, which wraps
+    // negative indices then throws). The shaders below also wrap+bounds-check
+    // (defense in depth for a caller that bypasses this validation via a raw
+    // dispatch), but previously only silently no-op'd instead of raising.
+    {
+        int64_t ndim_self = static_cast<int64_t>(self_shape.size());
+        int64_t norm_dim = dim < 0 ? dim + ndim_self : dim;
+        int64_t dim_size = self_shape[norm_dim];
+        Tensor idx_host = dispatchContiguous(index).to(Device::cpu());
+        Tensor idx_i64 = idx_host.dtype() == DType::Int64 ? idx_host : idx_host.to(DType::Int64);
+        const int64_t* ip = idx_i64.data<int64_t>();
+        for (int64_t i = 0; i < idx_i64.numel(); ++i) {
+            int64_t di = ip[i] < 0 ? ip[i] + dim_size : ip[i];
+            if (di < 0 || di >= dim_size) {
+                throw std::out_of_range(
+                    "index_fill_(): index " + std::to_string(ip[i]) +
+                    " is out of bounds for dimension " + std::to_string(norm_dim) +
+                    " with size " + std::to_string(dim_size));
+            }
+        }
     }
 
-    auto* pipeline = getPipeline("index_fill", device_id);
+    // index_fill only ever WRITES a scalar constant at indexed positions and
+    // copies every other element through byte-for-byte — but round-tripping
+    // the WHOLE self tensor through Float32 (the previous implementation, for
+    // any non-Float32/Float64 dtype) silently corrupts Int32/Int64/UInt32/
+    // UInt64 values above 2^24 even at positions the fill never touches.
+    // Route each width to a bit-exact native shader instead:
+    //   - Float32/Float64: dedicated shaders below (unchanged).
+    //   - Int32: dedicated 4-byte integer shader (index_fill_i32).
+    //   - Int64/UInt64: dedicated 8-byte integer shader (index_fill_i64).
+    //   - Int8/Int16/UInt8/UInt16/Bool: widen losslessly to Int32 and recurse.
+    //   - UInt32: widen losslessly to Int64 and recurse (out of Int32 range).
+    //   - Float16/BFloat16: widen to Float32 and recurse (exact for these widths).
+    {
+        const DType d = self.dtype();
+        if (d == DType::Int8 || d == DType::Int16 ||
+            d == DType::UInt8 || d == DType::UInt16 || d == DType::Bool) {
+            auto self_i32 = self.to(DType::Int32);
+            auto result_i32 = dispatchIndexFill(self_i32, dim, index, value);
+            return result_i32.to(d);
+        }
+        if (d == DType::UInt32) {
+            auto self_i64 = self.to(DType::Int64);
+            auto result_i64 = dispatchIndexFill(self_i64, dim, index, value);
+            return result_i64.to(d);
+        }
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto self_f32 = self.to(DType::Float32);
+            auto result_f32 = dispatchIndexFill(self_f32, dim, index, value);
+            return result_f32.to(d);
+        }
+        if (d != DType::Float32 && d != DType::Float64 && d != DType::Int32 &&
+            d != DType::Int64 && d != DType::UInt64) {
+            throw std::runtime_error(
+                "VulkanBackend::dispatchIndexFill: unsupported dtype");
+        }
+    }
+
+    const DType dt = self.dtype();
+    const bool is_f64 = (dt == DType::Float64);
+    const bool is_f32 = (dt == DType::Float32);
+    const bool is_i64 = (dt == DType::Int64 || dt == DType::UInt64);
+    const char* shader_name = is_f64 ? "index_fill_f64"
+                             : is_f32 ? "index_fill"
+                             : is_i64 ? "index_fill_i64"
+                                      : "index_fill_i32";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     int64_t ndim = self.ndim();
     if (dim < 0) dim += ndim;
@@ -5803,19 +6134,44 @@ auto VulkanBackend::dispatchIndexFill(const Tensor& self, int64_t dim,
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
+    // Float32/Int32 push constants share a (4 x uint32, 4-byte scalar value)
+    // layout; Float64/Int64 push constants share a (4 x uint32, 8-byte scalar
+    // value) layout. 8-byte alignment for the 64-bit `value` field falls out
+    // naturally here since the 4 leading uint32s already sum to 16 bytes (a
+    // multiple of 8) — no explicit pad field needed. Mirrors
+    // dispatchNanToNum's PushConstantsF32/PushConstantsF64 + union pattern.
+    struct PushConstants32 {
         uint32_t outer;
         uint32_t dim_size;
         uint32_t idx_n;
         uint32_t inner;
-        float value;
-    } push_constants;
-
-    push_constants.outer = outer;
-    push_constants.dim_size = dim_size;
-    push_constants.idx_n = idx_n;
-    push_constants.inner = inner;
-    push_constants.value = value;
+        union { float f; int32_t i; } value;
+    };
+    struct PushConstants64 {
+        uint32_t outer;
+        uint32_t dim_size;
+        uint32_t idx_n;
+        uint32_t inner;
+        union { double f; int64_t i; } value;
+    };
+    const bool is_64bit = is_f64 || is_i64;
+    size_t pc_size = is_64bit ? sizeof(PushConstants64) : sizeof(PushConstants32);
+    union { PushConstants32 p32; PushConstants64 p64; } push_constants = {};
+    if (is_64bit) {
+        push_constants.p64.outer = outer;
+        push_constants.p64.dim_size = dim_size;
+        push_constants.p64.idx_n = idx_n;
+        push_constants.p64.inner = inner;
+        if (is_f64) push_constants.p64.value.f = value;
+        else push_constants.p64.value.i = static_cast<int64_t>(value);
+    } else {
+        push_constants.p32.outer = outer;
+        push_constants.p32.dim_size = dim_size;
+        push_constants.p32.idx_n = idx_n;
+        push_constants.p32.inner = inner;
+        if (is_f32) push_constants.p32.value.f = static_cast<float>(value);
+        else push_constants.p32.value.i = static_cast<int32_t>(value);
+    }
 
     uint32_t workgroups = div_wg_checked(total, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -5823,7 +6179,7 @@ auto VulkanBackend::dispatchIndexFill(const Tensor& self, int64_t dim,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(push_constants), &push_constants);
+                       0, static_cast<uint32_t>(pc_size), &push_constants);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -5934,28 +6290,117 @@ auto VulkanBackend::dispatchNanToNum(const Tensor& input,
 // bitwise_xor, bitwise_left_shift, bitwise_right_shift)
 // ============================================================================
 auto VulkanBackend::dispatchBitwiseBinaryOp(const std::string& shader_name,
-                                             const Tensor& a,
-                                             const Tensor& b) -> Tensor {
-    if (a.numel() == 0) {
-        auto s = a.shape();
-        return Tensor(std::vector<int64_t>(s.begin(), s.end()), a.dtype(), a.device());
+                                             const Tensor& a_raw,
+                                             const Tensor& b_raw) -> Tensor {
+    Tensor a = dispatchContiguous(a_raw);
+    Tensor b = dispatchContiguous(b_raw);
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    std::vector<int64_t> shape_a_vec(a_shape.begin(), a_shape.end());
+    std::vector<int64_t> shape_b_vec(b_shape.begin(), b_shape.end());
+    std::vector<int64_t> output_shape = compute_broadcast_shape(shape_a_vec, shape_b_vec);
+
+    int64_t out_numel = 1;
+    for (auto d : output_shape) out_numel *= d;
+    if (out_numel == 0) {
+        return Tensor(output_shape, a.dtype(), a.device());
     }
 
     int32_t device_id = a.device().index;
-    auto s = a.shape();
-    std::vector<int64_t> output_shape(s.begin(), s.end());
     Tensor output(output_shape, a.dtype(), a.device());
 
-    auto* pipeline = getPipeline(shader_name, device_id);
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
-    struct PushConstants { uint32_t num_elements; } pc;
-    pc.num_elements = static_cast<uint32_t>(a.numel());
+    // Int64 operands use the dedicated native int64 shaders (bitwise_*_i64.comp /
+    // bitwise_broadcast_i64.comp, via GL_EXT_shader_explicit_arithmetic_types_int64)
+    // instead of the Int32-narrowing path used by the registry for Int8/Int16/Bool —
+    // narrowing an Int64 operand to Int32 would silently drop its high 32 bits.
+    // vulkan_kernel_registry.cpp passes genuine (un-narrowed) Int64 tensors
+    // straight through to this function for that reason.
+    const bool is_i64 = (a.dtype() == DType::Int64);
 
-    size_t buf_size = a.numel() * a.dtype_size();
+    if (same_shape) {
+        // Fast path: the flat single-buffer-size shaders (bitwise_and.comp
+        // etc., or the _i64-suffixed variants for Int64) assume a and b have
+        // identical element counts.
+        auto* pipeline = getPipeline(is_i64 ? (shader_name + "_i64") : shader_name, device_id);
+
+        struct PushConstants { uint32_t num_elements; } pc;
+        pc.num_elements = static_cast<uint32_t>(a.numel());
+
+        size_t buf_size = a.numel() * a.dtype_size();
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, a.data_ptr()}, {1, b.data_ptr()}, {2, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
+
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+
+        uint32_t workgroups = div_wg_checked(a.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+
+        return output;
+    }
+
+    // Broadcasting path: the flat shaders size their b buffer binding by
+    // a.numel() with no broadcast-shape handling at all, so a smaller-but-
+    // broadcastable b (e.g. a scalar) previously read out of bounds past the
+    // end of its buffer. Use the dedicated broadcast shader (mirrors
+    // dispatchBinaryOp's complex_math_broadcast / math_broadcast path).
+    if (output_shape.size() > 8 || shape_a_vec.size() > 8 || shape_b_vec.size() > 8) {
+        throw std::runtime_error("Vulkan broadcast supports at most 8 dimensions");
+    }
+    uint32_t opcode = 0;
+    if (shader_name == "bitwise_and") opcode = 0;
+    else if (shader_name == "bitwise_or") opcode = 1;
+    else if (shader_name == "bitwise_xor") opcode = 2;
+    else if (shader_name == "bitwise_left_shift") opcode = 3;
+    else if (shader_name == "bitwise_right_shift") opcode = 4;
+    else throw std::runtime_error("dispatchBitwiseBinaryOp: unknown op " + shader_name);
+
+    auto* pipeline = getPipeline(is_i64 ? "bitwise_broadcast_i64" : "bitwise_broadcast", device_id);
+
+    auto strides_a = compute_broadcast_strides(shape_a_vec, output_shape);
+    auto strides_b = compute_broadcast_strides(shape_b_vec, output_shape);
+
+    struct PushConstantsBroadcast {
+        uint32_t output_size;
+        uint32_t op;
+        uint32_t ndim_a;
+        uint32_t ndim_b;
+        uint32_t ndim_out;
+        uint32_t strides_a[8];
+        uint32_t strides_b[8];
+        uint32_t shape_out[8];
+    } push_constants = {};
+
+    push_constants.output_size = static_cast<uint32_t>(out_numel);
+    push_constants.op = opcode;
+    push_constants.ndim_a = static_cast<uint32_t>(shape_a_vec.size());
+    push_constants.ndim_b = static_cast<uint32_t>(shape_b_vec.size());
+    push_constants.ndim_out = static_cast<uint32_t>(output_shape.size());
+    for (size_t i = 0; i < std::min(size_t(8), strides_a.size()); ++i) push_constants.strides_a[i] = strides_a[i];
+    for (size_t i = 0; i < std::min(size_t(8), strides_b.size()); ++i) push_constants.strides_b[i] = strides_b[i];
+    for (size_t i = 0; i < std::min(size_t(8), output_shape.size()); ++i) push_constants.shape_out[i] = static_cast<uint32_t>(output_shape[i]);
+
+    size_t buffer_size_a = a.numel() * a.dtype_size();
+    size_t buffer_size_b = b.numel() * b.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, a.data_ptr()}, {1, b.data_ptr()}, {2, output.data_ptr()}
     };
-    std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
+    std::vector<size_t> sizes = {buffer_size_a, buffer_size_b, buffer_size_out};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
@@ -5965,9 +6410,9 @@ auto VulkanBackend::dispatchBitwiseBinaryOp(const std::string& shader_name,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(pc), &pc);
+                      0, sizeof(push_constants), &push_constants);
 
-    uint32_t workgroups = div_wg_checked(a.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
+    uint32_t workgroups = div_wg_checked(out_numel, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -6042,15 +6487,17 @@ auto VulkanBackend::dispatchCumMax(const Tensor& input, int64_t dim) -> std::pai
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
 
-    // Same int-dtype fall-through as cumsum/cumprod: only Float32/Float64
-    // shaders exist. Int32/Int64 promote to Float64 so values above 2^24
-    // survive the round-trip exactly; smaller integers are exact in Float32.
+    // Only Int16/Int8/UInt8/Bool lack a native shader below; their range is
+    // exact in Float32 (well under its 24-bit mantissa), so promote-and-
+    // recurse is safe. Float32/Float64/Float16/BFloat16/Int32/Int64 all have
+    // dedicated native shaders — in particular Int64 must NOT be promoted
+    // through Float64 (53-bit mantissa): values differing only above 2^53
+    // would silently resolve to the wrong running max/index. Float16/BFloat16
+    // must NOT fall through to the plain float-typed "cummax" shader either:
+    // that shader's buffers are declared as 4-byte `float` elements, so
+    // binding a 2-byte-per-element F16/BF16 tensor to it is a real
+    // out-of-bounds GPU access (undersized buffer for the shader's stride).
     DType src_dtype = input.dtype();
-    if (src_dtype == DType::Int32 || src_dtype == DType::Int64) {
-        auto f64 = input.to(DType::Float64);
-        auto [v_f64, idx] = dispatchCumMax(f64, dim);
-        return {v_f64.to(src_dtype), idx};
-    }
     if (src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
         src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
         auto f32 = input.to(DType::Float32);
@@ -6059,8 +6506,17 @@ auto VulkanBackend::dispatchCumMax(const Tensor& input, int64_t dim) -> std::pai
     }
 
     int32_t device_id = input.device().index;
-    bool is_f64 = (input.dtype() == DType::Float64);
-    std::string shader = is_f64 ? "cummax_f64" : "cummax";
+    bool is_f64  = (src_dtype == DType::Float64);
+    bool is_f16  = (src_dtype == DType::Float16);
+    bool is_bf16 = (src_dtype == DType::BFloat16);
+    bool is_i32  = (src_dtype == DType::Int32);
+    bool is_i64  = (src_dtype == DType::Int64);
+    std::string shader = is_f64  ? "cummax_f64"
+                        : is_f16  ? "cummax_f16"
+                        : is_bf16 ? "cummax_bf16"
+                        : is_i32  ? "cummax_i32"
+                        : is_i64  ? "cummax_i64"
+                        : "cummax";
     auto* pipeline = getPipeline(shader, device_id);
 
     Tensor values(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), input.device());
@@ -6080,6 +6536,13 @@ auto VulkanBackend::dispatchCumMax(const Tensor& input, int64_t dim) -> std::pai
 
     size_t elem = input.dtype_size();
     size_t buf_size = static_cast<size_t>(input.numel()) * elem;
+    if (is_f16 || is_bf16) {
+        // cummax_f16.comp/cummax_bf16.comp pack two 2-byte elements per
+        // uint32 word (matching cumsum_f16.comp/cumsum_bf16.comp's
+        // convention), so the bound range must cover whole words.
+        size_t num_pairs = (static_cast<size_t>(input.numel()) + 1) / 2;
+        buf_size = num_pairs * 4;
+    }
     size_t idx_size = static_cast<size_t>(input.numel()) * sizeof(int32_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -6112,15 +6575,13 @@ auto VulkanBackend::dispatchCumMin(const Tensor& input, int64_t dim) -> std::pai
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
 
-    // Same int-dtype fall-through — only Float32/Float64 shaders exist.
-    // Int32/Int64 promote to Float64 so values above 2^24 survive the
-    // round-trip exactly; smaller integers are exact in Float32.
+    // Same dtype dispatch as dispatchCumMax (see there for the rationale):
+    // Int16/Int8/UInt8/Bool promote-and-recurse through Float32 (exact,
+    // small range); everything else uses a native shader so Int64 is not
+    // rounded through Float64's 53-bit mantissa and Float16/BFloat16 never
+    // bind their 2-byte-per-element buffers to the plain 4-byte-per-element
+    // "cummin" shader (which would be a real out-of-bounds GPU access).
     DType src_dtype = input.dtype();
-    if (src_dtype == DType::Int32 || src_dtype == DType::Int64) {
-        auto f64 = input.to(DType::Float64);
-        auto [v_f64, idx] = dispatchCumMin(f64, dim);
-        return {v_f64.to(src_dtype), idx};
-    }
     if (src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
         src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
         auto f32 = input.to(DType::Float32);
@@ -6129,8 +6590,17 @@ auto VulkanBackend::dispatchCumMin(const Tensor& input, int64_t dim) -> std::pai
     }
 
     int32_t device_id = input.device().index;
-    bool is_f64 = (input.dtype() == DType::Float64);
-    std::string shader = is_f64 ? "cummin_f64" : "cummin";
+    bool is_f64  = (src_dtype == DType::Float64);
+    bool is_f16  = (src_dtype == DType::Float16);
+    bool is_bf16 = (src_dtype == DType::BFloat16);
+    bool is_i32  = (src_dtype == DType::Int32);
+    bool is_i64  = (src_dtype == DType::Int64);
+    std::string shader = is_f64  ? "cummin_f64"
+                        : is_f16  ? "cummin_f16"
+                        : is_bf16 ? "cummin_bf16"
+                        : is_i32  ? "cummin_i32"
+                        : is_i64  ? "cummin_i64"
+                        : "cummin";
     auto* pipeline = getPipeline(shader, device_id);
 
     Tensor values(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), input.device());
@@ -6150,6 +6620,13 @@ auto VulkanBackend::dispatchCumMin(const Tensor& input, int64_t dim) -> std::pai
 
     size_t elem = input.dtype_size();
     size_t buf_size = static_cast<size_t>(input.numel()) * elem;
+    if (is_f16 || is_bf16) {
+        // cummin_f16.comp/cummin_bf16.comp pack two 2-byte elements per
+        // uint32 word (matching cumsum_f16.comp/cumsum_bf16.comp's
+        // convention), so the bound range must cover whole words.
+        size_t num_pairs = (static_cast<size_t>(input.numel()) + 1) / 2;
+        buf_size = num_pairs * 4;
+    }
     size_t idx_size = static_cast<size_t>(input.numel()) * sizeof(int32_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -6193,29 +6670,60 @@ auto VulkanBackend::dispatchFmin(const Tensor& a, const Tensor& b) -> Tensor {
 // ============================================================================
 
 auto VulkanBackend::dispatchIsin(const Tensor& elements, const Tensor& test_elements) -> Tensor {
-    // For non-Float32 dtypes, cast to Float32 for the shader
-    if (elements.dtype() != DType::Float32) {
-        auto elem_f32 = elements.to(DType::Float32);
-        auto test_f32 = test_elements.to(DType::Float32);
-        return dispatchIsin(elem_f32, test_f32);
-    }
+    // Compare at native-enough bit-width per dtype family, mirroring the CPU
+    // isin_kernel fix (src/backends/cpu/kernels/advanced.cpp:952-954): the
+    // previous implementation blanket-downcast every non-Float32 dtype to
+    // Float32 and compared 32-bit floats, which collides distinct
+    // Int32/Int64/UInt32/UInt64 values above 2^24 and loses Float64 precision
+    // above 2^24 too — false-positive membership for genuinely distinct
+    // values. Integral dtypes widen losslessly to Int64 (matches CPU);
+    // floating dtypes widen losslessly to Float64 (Float16/BFloat16/Float32
+    // all fit exactly).
+    auto is_integral = [](DType d) {
+        return d == DType::Int8 || d == DType::Int16 || d == DType::Int32 ||
+               d == DType::Int64 || d == DType::UInt8 || d == DType::UInt16 ||
+               d == DType::UInt32 || d == DType::UInt64 || d == DType::Bool;
+    };
+    const bool integral = is_integral(elements.dtype()) && is_integral(test_elements.dtype());
 
     int32_t device_id = elements.device().index;
-    auto* pipeline = getPipeline("isin", device_id);
+
+    Tensor e, t;
+    const char* shader_name;
+    size_t elem_elt_bytes, test_elt_bytes;
+    if (integral) {
+        e = (elements.dtype() == DType::Int64) ? elements : elements.to(DType::Int64);
+        t = (test_elements.dtype() == DType::Int64) ? test_elements : test_elements.to(DType::Int64);
+        shader_name = "isin_i64";
+        elem_elt_bytes = sizeof(int64_t);
+        test_elt_bytes = sizeof(int64_t);
+    } else {
+        // Float64 needs shaderFloat64; fail fast with a readable diagnostic
+        // instead of an opaque SPIR-V validation error (R.13 pattern, same
+        // as dispatchMaskedScatterWithPrefix's f64 path above).
+        vulkan::ensure_fp64_supported(device_id, "Isin");
+        e = (elements.dtype() == DType::Float64) ? elements : elements.to(DType::Float64);
+        t = (test_elements.dtype() == DType::Float64) ? test_elements : test_elements.to(DType::Float64);
+        shader_name = "isin_f64";
+        elem_elt_bytes = sizeof(double);
+        test_elt_bytes = sizeof(double);
+    }
+
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     auto elem_shape = elements.shape();
     Tensor output(std::vector<int64_t>(elem_shape.begin(), elem_shape.end()), DType::Bool, elements.device());
 
     struct { uint32_t num_elements; uint32_t num_test_elements; } pc;
-    pc.num_elements = static_cast<uint32_t>(elements.numel());
-    pc.num_test_elements = static_cast<uint32_t>(test_elements.numel());
+    pc.num_elements = static_cast<uint32_t>(e.numel());
+    pc.num_test_elements = static_cast<uint32_t>(t.numel());
 
-    size_t elem_buf = static_cast<size_t>(elements.numel()) * elements.dtype_size();
-    size_t test_buf = static_cast<size_t>(test_elements.numel()) * test_elements.dtype_size();
+    size_t elem_buf = static_cast<size_t>(e.numel()) * elem_elt_bytes;
+    size_t test_buf = static_cast<size_t>(t.numel()) * test_elt_bytes;
     size_t out_buf = static_cast<size_t>(output.numel()) * output.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, elements.data_ptr()}, {1, test_elements.data_ptr()}, {2, output.data_ptr()}
+        {0, e.data_ptr()}, {1, t.data_ptr()}, {2, output.data_ptr()}
     };
     std::vector<size_t> sizes = {elem_buf, test_buf, out_buf};
 
@@ -6226,7 +6734,7 @@ auto VulkanBackend::dispatchIsin(const Tensor& elements, const Tensor& test_elem
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, div_wg_checked(elements.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+    vkCmdDispatch(cmd, div_wg_checked(e.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
@@ -6264,7 +6772,8 @@ auto VulkanBackend::dispatchKthvalue(const Tensor& input, int64_t k, int64_t dim
         if (i == dim) { if (keepdim) out_shape.push_back(1); }
         else out_shape.push_back(in_shape[i]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/ROCm/OneAPI's convention -- do not force a size-1 dim.
 
     int32_t device_id = input.device().index;
     if (is_f64) {
@@ -6333,7 +6842,18 @@ auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim,
         if (i == dim) { if (keepdim) out_shape.push_back(1); }
         else out_shape.push_back(in_shape[i]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/ROCm/OneAPI's convention -- do not force a size-1 dim.
+
+    // A zero-length reduction axis has no values to interpolate. Without this
+    // guard the shader's push constant dim_size=0 feeds an unsigned
+    // dim_size-1 underflow inside the sort/interpolation logic. Emit NaN
+    // instead, matching CPU's quantile_impl
+    // (src/backends/cpu/kernels/advanced.cpp).
+    if (dim_size == 0) {
+        return dispatchFull(out_shape, std::numeric_limits<double>::quiet_NaN(),
+                            input.dtype(), input.device());
+    }
 
     int32_t device_id = input.device().index;
     if (is_f64) {
@@ -6345,11 +6865,35 @@ auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim,
     // Scratch buffer for per-slice sorting (same dtype as input)
     Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, input.dtype(), input.device());
 
-    struct { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; float q; } pc;
-    pc.total_slices = total_slices;
-    pc.dim_size = static_cast<uint32_t>(dim_size);
-    pc.inner_size = inner_sz;
-    pc.q = static_cast<float>(q);
+    // quantile_f64's shader takes `q` as a float64_t push constant (see
+    // quantile_f64.comp) so the fraction isn't rounded to float32 precision
+    // before the double-precision interpolation runs -- it therefore needs
+    // its own, differently-laid-out struct (with the padding double
+    // alignment requires) from the f32 "quantile" shader's `float q`.
+    // Mirrors the PushConstantsF32/PushConstantsF64 split used for math_f64.
+    struct PushConstantsF32 { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; float q; };
+    struct PushConstantsF64 { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; uint32_t _pad; double q; };
+
+    PushConstantsF32 pc32;
+    PushConstantsF64 pc64;
+    const void* pc_ptr;
+    size_t pc_size;
+    if (is_f64) {
+        pc64.total_slices = total_slices;
+        pc64.dim_size = static_cast<uint32_t>(dim_size);
+        pc64.inner_size = inner_sz;
+        pc64._pad = 0;
+        pc64.q = q;
+        pc_ptr = &pc64;
+        pc_size = sizeof(pc64);
+    } else {
+        pc32.total_slices = total_slices;
+        pc32.dim_size = static_cast<uint32_t>(dim_size);
+        pc32.inner_size = inner_sz;
+        pc32.q = static_cast<float>(q);
+        pc_ptr = &pc32;
+        pc_size = sizeof(pc32);
+    }
 
     size_t in_buf = static_cast<size_t>(input.numel()) * input.dtype_size();
     size_t out_buf = static_cast<size_t>(total_slices) * output.dtype_size();
@@ -6366,7 +6910,7 @@ auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
-    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, static_cast<uint32_t>(pc_size), pc_ptr);
     vkCmdDispatch(cmd, div_wg_checked(total_slices, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
@@ -6403,7 +6947,16 @@ auto VulkanBackend::dispatchNanquantile(const Tensor& input, double q, int64_t d
         if (i == dim) { if (keepdim) out_shape.push_back(1); }
         else out_shape.push_back(in_shape[i]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/ROCm/OneAPI's convention -- do not force a size-1 dim.
+
+    // A zero-length reduction axis has no values to interpolate (there is
+    // nothing to NaN-filter either). Emit NaN instead, matching CPU's
+    // nanquantile_impl (src/backends/cpu/kernels/advanced.cpp).
+    if (dim_size == 0) {
+        return dispatchFull(out_shape, std::numeric_limits<double>::quiet_NaN(),
+                            input.dtype(), input.device());
+    }
 
     int32_t device_id = input.device().index;
     if (is_f64) {
@@ -6444,11 +6997,100 @@ auto VulkanBackend::dispatchNanquantile(const Tensor& input, double q, int64_t d
 }
 
 // ============================================================================
-// Nanmedian — NaN-ignoring median (delegates to nanquantile with q=0.5)
+// Nanmedian — NaN-ignoring LOWER median, no interpolation (native Vulkan
+// compute shader).
+//
+// F-NANMEDIAN: this must NOT delegate to dispatchNanquantile(q=0.5), which
+// linearly interpolates between the two middle values (e.g.
+// nanmedian([1,2,3,4]) would give 2.5). PyTorch/CPU/CUDA nanmedian semantics
+// pick the exact lower median -- index (count-1)/2 of the sorted non-NaN
+// values (nanmedian([1,2,3,4]) -> 2). Mirrors CPU's nanmedian_impl
+// (src/backends/cpu/kernels/advanced.cpp) and CUDA's nanmedian_kernel_impl
+// (src/backends/cuda/kernels/advanced.cu), and reuses nanquantile's
+// NaN-filter + insertion-sort shader structure (nanmedian.comp /
+// nanmedian_f64.comp) with the final interpolation step swapped for a direct
+// index.
 // ============================================================================
 
 auto VulkanBackend::dispatchNanmedian(const Tensor& input, int64_t dim) -> Tensor {
-    return dispatchNanquantile(input, 0.5, dim, false);
+    const bool is_f64 = (input.dtype() == DType::Float64);
+    // Float64 uses the dedicated f64 shader (full precision sort/select);
+    // other non-Float32 dtypes are promoted to Float32 and narrowed back,
+    // matching CPU/CUDA's Float16/BFloat16 widen-narrow.
+    if (input.dtype() != DType::Float32 && !is_f64) {
+        auto input_f32 = input.to(DType::Float32);
+        return dispatchNanmedian(input_f32, dim).to(input.dtype());
+    }
+
+    auto in_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(in_shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t dim_size = in_shape[dim];
+
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t inner_sz = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_sz *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t total_slices = outer_size * inner_sz;
+
+    // nanmedian always squeezes the reduced dim (the op-level wrapper in
+    // src/ops/reduction.cpp never sets Keepdim), matching this function's
+    // previous delegation to dispatchNanquantile(..., keepdim=false).
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i != dim) out_shape.push_back(in_shape[i]);
+    }
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/CUDA/ROCm/OneAPI's convention -- do not force a size-1 dim.
+
+    // A zero-length reduction axis has no values to select a median from
+    // (nothing to NaN-filter either). Emit NaN, matching dispatchNanquantile's
+    // guard and CPU's nanmedian_impl (empty slice -> NaN).
+    if (dim_size == 0) {
+        return dispatchFull(out_shape, std::numeric_limits<double>::quiet_NaN(),
+                            input.dtype(), input.device());
+    }
+
+    int32_t device_id = input.device().index;
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "Nanmedian");
+    }
+    auto* pipeline = getPipeline(is_f64 ? "nanmedian_f64" : "nanmedian", device_id);
+
+    // Keep the reduced dim at size 1 while dispatching (flat total_slices
+    // layout matches dispatchNanquantile); squeeze once the compute is done.
+    std::vector<int64_t> out_shape_keepdim(in_shape.begin(), in_shape.end());
+    out_shape_keepdim[dim] = 1;
+    Tensor output(out_shape_keepdim, input.dtype(), input.device());
+    Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, input.dtype(), input.device());
+
+    struct { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; } pc;
+    pc.total_slices = total_slices;
+    pc.dim_size = static_cast<uint32_t>(dim_size);
+    pc.inner_size = inner_sz;
+
+    size_t in_buf = static_cast<size_t>(input.numel()) * input.dtype_size();
+    size_t out_buf = static_cast<size_t>(total_slices) * output.dtype_size();
+    size_t scratch_buf = static_cast<size_t>(total_slices) * dim_size * scratch.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}, {2, scratch.data_ptr()}
+    };
+    std::vector<size_t> sizes = {in_buf, out_buf, scratch_buf};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg_checked(total_slices, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    // Squeeze the reduced dim (matches CPU nanmedian_kernel's final reshape).
+    return dispatchReshape(output, out_shape);
 }
 
 // ============================================================================
@@ -6456,40 +7098,61 @@ auto VulkanBackend::dispatchNanmedian(const Tensor& input, int64_t dim) -> Tenso
 // ============================================================================
 
 auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-    // input_f32 is bound directly into a STORAGE_BUFFER descriptor below; an
+    const DType orig_dtype = input.dtype();
+    const bool is_f64 = (orig_dtype == DType::Float64);
+    int32_t device_id = input.device().index;
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "Histc");
+    }
+
+    // Float64 input computes and returns natively in double precision (bin
+    // membership near edges, or beyond float32's ~7 significant digits, must
+    // be evaluated in double), matching CPU/CUDA's histc_kernel. Every other
+    // floating dtype computes through Float32; Float16/BFloat16 additionally
+    // narrow the *result* back to the original dtype below, matching CPU's
+    // histc_kernel exactly (it widens F16/BF16 through Float32 for the
+    // computation but returns a tensor of the input dtype, not Float32).
+    Tensor work = is_f64 ? input
+                : (orig_dtype != DType::Float32) ? input.to(DType::Float32)
+                : input;
+    // work is bound directly into a STORAGE_BUFFER descriptor below; an
     // unmaterialized view (non-contiguous or non-zero storage offset) would
     // trip the descriptor-offset alignment guard. dispatchContiguous guarantees
     // is_contiguous() && offset()==0 (Tensor::contiguous() does NOT reset offset).
-    input_f32 = (input_f32.is_contiguous() && input_f32.offset() == 0)
-                    ? input_f32
-                    : dispatchContiguous(input_f32);
-    int32_t device_id = input.device().index;
+    work = (work.is_contiguous() && work.offset() == 0)
+                    ? work
+                    : dispatchContiguous(work);
 
-    // Output is uint32 histogram, zero-initialized
+    // Output is uint32 histogram, zero-initialized. Bin counts are always
+    // small non-negative integers regardless of input dtype -- atomicAdd on
+    // this 32-bit unsigned buffer is exact up to 2^32-1 hits per bin, so no
+    // dtype-specific accumulator is needed; only the binning math (min/max/
+    // bin_width comparisons) needs to run at the input's native precision.
     Tensor output_u32 = dispatchFull({bins}, 0.0f, DType::Int32);
 
     const bool auto_range = (min_val >= max_val);
-    size_t in_buf = static_cast<size_t>(input_f32.numel()) * sizeof(float);
+    const size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t in_buf = static_cast<size_t>(work.numel()) * elem_size;
     size_t out_buf = static_cast<size_t>(bins) * sizeof(int32_t);
 
     if (auto_range) {
         // Phase 8.4: auto-range path runs entirely on device. The pack shader
-        // writes (min, max, bin_width) into range_buf; histc_dyn reads it.
-        Tensor flat = input_f32.contiguous().reshape({input_f32.numel()});
+        // writes (min, max, bin_width) into range_buf; histc_dyn[_f64] reads it.
+        Tensor flat = work.contiguous().reshape({work.numel()});
         Tensor mn_gpu = dispatchReduction("min", flat, 0, false).contiguous();
         Tensor mx_gpu = dispatchReduction("max", flat, 0, false).contiguous();
-        Tensor range_buf({3}, DType::Float32, input.device());
+        Tensor range_buf({3}, is_f64 ? DType::Float64 : DType::Float32, input.device());
 
         {
-            auto* pack_pipeline = getPipeline("histogram_pack_range", device_id);
+            auto* pack_pipeline = getPipeline(
+                is_f64 ? "histogram_pack_range_f64" : "histogram_pack_range", device_id);
             struct { uint32_t num_bins; } pack_pc{static_cast<uint32_t>(bins)};
             std::vector<std::pair<uint32_t, const void*>> bindings = {
                 {0, mn_gpu.data_ptr()},
                 {1, mx_gpu.data_ptr()},
                 {2, range_buf.data_ptr()},
             };
-            std::vector<size_t> sizes = {sizeof(float), sizeof(float), 3 * sizeof(float)};
+            std::vector<size_t> sizes = {elem_size, elem_size, 3 * elem_size};
             VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pack_pipeline, bindings, sizes);
             VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pack_pipeline->pipeline());
@@ -6502,15 +7165,15 @@ auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_
             endSingleTimeCommands(cmd, device_id);
         }
 
-        auto* hist_pipeline = getPipeline("histc_dyn", device_id);
+        auto* hist_pipeline = getPipeline(is_f64 ? "histc_dyn_f64" : "histc_dyn", device_id);
         struct { uint32_t num_elements; uint32_t num_bins; } pc{
-            static_cast<uint32_t>(input_f32.numel()), static_cast<uint32_t>(bins)};
+            static_cast<uint32_t>(work.numel()), static_cast<uint32_t>(bins)};
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, input_f32.data_ptr()},
+            {0, work.data_ptr()},
             {1, output_u32.data_ptr()},
             {2, range_buf.data_ptr()},
         };
-        std::vector<size_t> sizes = {in_buf, out_buf, 3 * sizeof(float)};
+        std::vector<size_t> sizes = {in_buf, out_buf, 3 * elem_size};
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, hist_pipeline, bindings, sizes);
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hist_pipeline->pipeline());
@@ -6518,19 +7181,19 @@ auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_
                                hist_pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, hist_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg_checked(input_f32.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        vkCmdDispatch(cmd, div_wg_checked(work.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
-    } else {
-        auto* pipeline = getPipeline("histc", device_id);
-        struct { uint32_t num_elements; uint32_t num_bins; float min_val; float max_val; } pc;
-        pc.num_elements = static_cast<uint32_t>(input_f32.numel());
+    } else if (is_f64) {
+        auto* pipeline = getPipeline("histc_f64", device_id);
+        struct { uint32_t num_elements; uint32_t num_bins; double min_val; double max_val; } pc;
+        pc.num_elements = static_cast<uint32_t>(work.numel());
         pc.num_bins = static_cast<uint32_t>(bins);
-        pc.min_val = static_cast<float>(min_val);
-        pc.max_val = static_cast<float>(max_val);
+        pc.min_val = min_val;
+        pc.max_val = max_val;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, input_f32.data_ptr()}, {1, output_u32.data_ptr()}
+            {0, work.data_ptr()}, {1, output_u32.data_ptr()}
         };
         std::vector<size_t> sizes = {in_buf, out_buf};
 
@@ -6540,12 +7203,38 @@ auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg_checked(input_f32.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        vkCmdDispatch(cmd, div_wg_checked(work.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    } else {
+        auto* pipeline = getPipeline("histc", device_id);
+        struct { uint32_t num_elements; uint32_t num_bins; float min_val; float max_val; } pc;
+        pc.num_elements = static_cast<uint32_t>(work.numel());
+        pc.num_bins = static_cast<uint32_t>(bins);
+        pc.min_val = static_cast<float>(min_val);
+        pc.max_val = static_cast<float>(max_val);
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, work.data_ptr()}, {1, output_u32.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_buf, out_buf};
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg_checked(work.numel(), devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
     }
 
-    return output_u32.to(DType::Float32);
+    Tensor result = output_u32.to(is_f64 ? DType::Float64 : DType::Float32);
+    if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+        result = result.to(orig_dtype);
+    }
+    return result;
 }
 
 // ============================================================================
@@ -6564,11 +7253,14 @@ auto VulkanBackend::dispatchMaskedScatterWithPrefix(const Tensor& input, const T
     size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
     size_t i32_size = static_cast<size_t>(n) * sizeof(int32_t);
 
-    // 8-byte dtypes (Float64/Int64/UInt64) go through masked_scatter_f64, which
-    // moves 8-byte elements verbatim (no value conversion), so Float64 precision
-    // and Int64 values > 2^24 survive. The Float32 path below converts values.
+    // 8-byte dtypes (Float64/Int64/UInt64/Complex64) go through masked_scatter_f64,
+    // which moves 8-byte elements verbatim (no value conversion), so Float64
+    // precision and Int64 values > 2^24 survive. Complex64 (2x float32 = 8 bytes)
+    // is likewise a pure bit-exact copy through this path -- masked_scatter never
+    // does arithmetic on the bound values. The Float32 path below converts values.
     const DType orig = input.dtype();
-    if (orig == DType::Float64 || orig == DType::Int64 || orig == DType::UInt64) {
+    if (orig == DType::Float64 || orig == DType::Int64 || orig == DType::UInt64 ||
+        orig == DType::Complex64) {
         vulkan::ensure_fp64_supported(device_id, "MaskedScatter");
         auto* pipeline64 = getPipeline("masked_scatter_f64", device_id);
         Tensor in_c = input.contiguous();
@@ -6593,6 +7285,73 @@ auto VulkanBackend::dispatchMaskedScatterWithPrefix(const Tensor& input, const T
         return out64;
     }
 
+    // 16-byte Complex128 (2x float64): masked_scatter_c128 mirrors masked_scatter_f64
+    // but moves 2 consecutive float64_t lanes (re, im) per element, bit-exact.
+    if (orig == DType::Complex128) {
+        vulkan::ensure_fp64_supported(device_id, "MaskedScatter");
+        auto* pipeline128 = getPipeline("masked_scatter_c128", device_id);
+        Tensor in_c = input.contiguous();
+        Tensor src_c = source.contiguous();
+        Tensor out128 = in_c.clone();
+        size_t w_size = static_cast<size_t>(n) * 16;
+        size_t src_size = static_cast<size_t>(source.numel()) * 16;
+        std::vector<std::pair<uint32_t, const void*>> b128 = {
+            {0, out128.data_ptr()}, {1, mask_u8.data_ptr()}, {2, src_c.data_ptr()},
+            {3, prefix_sum.data_ptr()}, {4, out128.data_ptr()}
+        };
+        std::vector<size_t> s128 = {w_size, bool_size, src_size, i32_size, w_size};
+        VkDescriptorSet ds128 = allocateAndWriteDescriptorSet(device_id, pipeline128, b128, s128);
+        VkCommandBuffer cmd128 = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd128, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline128->pipeline());
+        vkCmdBindDescriptorSets(cmd128, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline128->layout(), 0, 1, &ds128, 0, nullptr);
+        vkCmdPushConstants(cmd128, pipeline128->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd128, div_wg_checked(n, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        insertComputeOnlyBarrier(cmd128);
+        endSingleTimeCommands(cmd128, device_id);
+        return out128;
+    }
+
+    // Int32/UInt32 are also fixed-width 4-byte types, like Float32. The
+    // masked_scatter shader performs no arithmetic on the bound values — it
+    // only ever does output[i] = input[i] or output[i] = source[i] — so
+    // binding the RAW Int32/UInt32 storage to it (instead of first
+    // converting through Float32) moves the bits verbatim, exactly like the
+    // f64 path above does for Int64/UInt64. Converting through
+    // `.to(DType::Float32)` first (the fallback below) is a real numeric
+    // conversion that silently drops precision once the magnitude exceeds
+    // 2^24 (Float32's exact-integer range), corrupting large Int32/UInt32
+    // values. Float32 itself needs no conversion at all — it is already the
+    // shader's native 4-byte type — so route it through this bit-exact path
+    // too instead of the redundant self-to-self `.to()` below.
+    if (orig == DType::Int32 || orig == DType::UInt32 || orig == DType::Float32) {
+        auto* pipeline32 = getPipeline("masked_scatter", device_id);
+        Tensor in_c = input.contiguous();
+        Tensor src_c = source.contiguous();
+        Tensor out32 = in_c.clone();
+        size_t w_size = static_cast<size_t>(n) * 4;
+        size_t src_size = static_cast<size_t>(source.numel()) * 4;
+        std::vector<std::pair<uint32_t, const void*>> b32 = {
+            {0, out32.data_ptr()}, {1, mask_u8.data_ptr()}, {2, src_c.data_ptr()},
+            {3, prefix_sum.data_ptr()}, {4, out32.data_ptr()}
+        };
+        std::vector<size_t> s32 = {w_size, bool_size, src_size, i32_size, w_size};
+        VkDescriptorSet ds32 = allocateAndWriteDescriptorSet(device_id, pipeline32, b32, s32);
+        VkCommandBuffer cmd32 = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd32, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline32->pipeline());
+        vkCmdBindDescriptorSets(cmd32, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline32->layout(), 0, 1, &ds32, 0, nullptr);
+        vkCmdPushConstants(cmd32, pipeline32->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd32, div_wg_checked(n, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"), 1, 1);
+        insertComputeOnlyBarrier(cmd32);
+        endSingleTimeCommands(cmd32, device_id);
+        return out32;
+    }
+
+    // Remaining dtypes (Int8/Int16/UInt8/UInt16/Bool/Float16/BFloat16) have a
+    // maximum magnitude well within Float32's 24-bit exact-integer range, so
+    // round-tripping them through Float32 is value-exact (not merely
+    // bit-exact) — no precision loss is possible for these widths.
     Tensor in_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
     Tensor src_f32 = (source.dtype() != DType::Float32) ? source.to(DType::Float32) : source;
     auto* pipeline = getPipeline("masked_scatter", device_id);
@@ -6646,12 +7405,44 @@ auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_i
                 Tensor({0}, DType::Int64, dev)};
     }
 
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    // Select a native mark/compact dtype instead of always widening to
+    // Float32: Float32 only has a 24-bit mantissa, so distinct Int32/Int64/
+    // Float64 values whose magnitude exceeds 2^24 can round to the same
+    // Float32 value and get incorrectly merged as "equal" and deduplicated.
+    // Float16/BFloat16 and the narrow integer types (Bool/Int8/UInt8/Int16/
+    // UInt16) are all exactly representable in Float32, so widening those is
+    // still lossless and kept as the default path below. unique_mark_i32/
+    // _i64/_f64 and unique_compact_i32/_i64/_f64 already exist (shared with
+    // dispatchUnique in vulkan_ops_sort.cpp) and have the identical
+    // "compare/write element i against element i-1" contract that
+    // unique_consecutive_mark/unique_compact use, just typed differently, so
+    // they're directly reusable here without any new shaders.
+    DType work_dtype;
+    const char* mark_shader;
+    const char* compact_shader;
+    if (input.dtype() == DType::Float64) {
+        work_dtype = DType::Float64;
+        mark_shader = "unique_mark_f64";
+        compact_shader = "unique_compact_f64";
+    } else if (input.dtype() == DType::Int32) {
+        work_dtype = DType::Int32;
+        mark_shader = "unique_mark_i32";
+        compact_shader = "unique_compact_i32";
+    } else if (input.dtype() == DType::Int64) {
+        work_dtype = DType::Int64;
+        mark_shader = "unique_mark_i64";
+        compact_shader = "unique_compact_i64";
+    } else {
+        work_dtype = DType::Float32;
+        mark_shader = "unique_consecutive_mark";
+        compact_shader = "unique_compact";
+    }
+    Tensor input_f32 = (input.dtype() != work_dtype) ? input.to(work_dtype) : input;
     int32_t device_id = dev.index;
     uint32_t wg_size = devices_[device_id].workgroupSize;
     uint32_t wg = static_cast<uint32_t>(div_wg_checked(n, wg_size, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch"));
 
-    const size_t f32_buf = static_cast<size_t>(n) * sizeof(float);
+    const size_t f32_buf = static_cast<size_t>(n) * dtype_size(work_dtype);
     const size_t i32_buf = static_cast<size_t>(n) * sizeof(int32_t);
     const size_t i64_buf = static_cast<size_t>(n) * sizeof(int64_t);
 
@@ -6659,7 +7450,7 @@ auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_i
     // marks[i] = (i == 0 || input[i] != input[i-1]) ? 1 : 0
     Tensor marks({n}, DType::Int32, dev);
     {
-        auto* mark_pipeline = getPipeline("unique_consecutive_mark", device_id);
+        auto* mark_pipeline = getPipeline(mark_shader, device_id);
         struct { uint32_t num_elements; } pc;
         pc.num_elements = static_cast<uint32_t>(n);
 
@@ -6694,13 +7485,13 @@ auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_i
     // ---- Pass 3a: Scatter unique values on GPU -----------------------------
     // unique_compact: when (gid == 0 || prefix_sum[gid] != prefix_sum[gid-1]),
     // writes output[prefix_sum[gid] - 1] = input_f32[gid].
-    Tensor unique_vals_f32({nu}, DType::Float32, dev);
+    Tensor unique_vals_f32({nu}, work_dtype, dev);
     {
-        auto* compact_pipeline = getPipeline("unique_compact", device_id);
+        auto* compact_pipeline = getPipeline(compact_shader, device_id);
         struct { uint32_t numel; } pc;
         pc.numel = static_cast<uint32_t>(n);
 
-        size_t out_bytes = static_cast<size_t>(nu) * sizeof(float);
+        size_t out_bytes = static_cast<size_t>(nu) * dtype_size(work_dtype);
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, input_f32.data_ptr()}, {1, prefix_sum.data_ptr()}, {2, unique_vals_f32.data_ptr()}
         };
@@ -6717,7 +7508,7 @@ auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_i
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
     }
-    Tensor unique_vals = (input.dtype() != DType::Float32)
+    Tensor unique_vals = (input.dtype() != work_dtype)
         ? unique_vals_f32.to(input.dtype()) : unique_vals_f32;
 
     // ---- Pass 3b: Scatter inverse map on GPU -------------------------------
@@ -8016,15 +8807,27 @@ auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
 
     int32_t device_id = log_probs_in.device().index;
 
-    // Stage inputs onto the device with expected dtypes (Float32 / Int32).
+    // Native double-precision DP for Float64 inputs (matches CPU/CUDA/ROCm/
+    // OneAPI, which all instantiate a genuine T=double CTC kernel) instead of
+    // unconditionally downcasting to Float32 and losing precision. Everything
+    // else (Float32, Float16, BFloat16, ...) computes in Float32, same as
+    // before.
+    const bool native_f64 = (log_probs_in.dtype() == DType::Float64);
+    const DType compute_dtype = native_f64 ? DType::Float64 : DType::Float32;
+    if (native_f64) {
+        vulkan::ensure_fp64_supported(device_id, "CTCLoss");
+    }
+
+    // Stage inputs onto the device with expected dtypes (Float32/Float64 +
+    // Int32).
     auto to_int32 = [&](const Tensor& t) -> Tensor {
         Tensor x = t;
         if (x.dtype() != DType::Int32) x = x.to(DType::Int32);
         return x.contiguous();
     };
-    Tensor log_probs = (log_probs_in.dtype() == DType::Float32)
+    Tensor log_probs = (log_probs_in.dtype() == compute_dtype)
         ? log_probs_in.contiguous()
-        : log_probs_in.to(DType::Float32).contiguous();
+        : log_probs_in.to(compute_dtype).contiguous();
     Tensor targets = to_int32(targets_in);
     Tensor input_lengths = to_int32(input_lengths_in);
     Tensor target_lengths = to_int32(target_lengths_in);
@@ -8073,8 +8876,48 @@ auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
                   : (tgt_shape.size() == 1) ? tgt_shape[0] : 0;
     int64_t L_max = 2 * S_max + 1;
 
-    Tensor loss_out({N}, DType::Float32, log_probs.device());
-    Tensor grad_out({T_max, N, C}, DType::Float32, log_probs.device());
+    // Validate blank and every active target label BEFORE dispatching the
+    // shader. ctc_forward(_f64).comp's ext_label(s, n) returns `blank` or a
+    // target label directly and the caller uses it, unchecked, as a channel
+    // index into log_probs / grad -- an out-of-range value would be a real
+    // out-of-bounds GPU read/write (device heap corruption), not just a wrong
+    // result. Mirrors CPU's ctc.cpp validation (same checks, same error
+    // message convention) which CUDA/ROCm/OneAPI also perform.
+    if (blank < 0 || blank >= C) {
+        throw std::invalid_argument(
+            "ctc_loss_forward (Vulkan): blank index " + std::to_string(blank) +
+            " out of range [0, " + std::to_string(C) + ")");
+    }
+    if (N > 0) {
+        Tensor il_cpu = input_lengths.to(Device::cpu()).contiguous();
+        Tensor tl_cpu = target_lengths.to(Device::cpu()).contiguous();
+        Tensor tg_cpu = targets.to(Device::cpu()).contiguous();
+        const int32_t* il = il_cpu.data<int32_t>();
+        const int32_t* tl = tl_cpu.data<int32_t>();
+        const int32_t* tg = tg_cpu.data<int32_t>();
+        const int64_t tg_numel = tg_cpu.numel();
+        for (int64_t n = 0; n < N; ++n) {
+            int64_t T_n = il[n];
+            int64_t S_n = tl[n];
+            if (T_n <= 0 || S_n <= 0 || T_n > T_max || S_n > S_max) {
+                continue;  // inactive sample; skipped by the shader too
+            }
+            for (int64_t s = 0; s < S_n; ++s) {
+                int64_t off = n * S_max + s;
+                if (off >= tg_numel) break;  // guarded again by sample_oob-equivalent below
+                int64_t label = static_cast<int64_t>(tg[off]);
+                if (label < 0 || label >= C) {
+                    throw std::invalid_argument(
+                        "ctc_loss_forward (Vulkan): target label " +
+                        std::to_string(label) + " out of range [0, " +
+                        std::to_string(C) + ")");
+                }
+            }
+        }
+    }
+
+    Tensor loss_out({N}, compute_dtype, log_probs.device());
+    Tensor grad_out({T_max, N, C}, compute_dtype, log_probs.device());
 
     if (N == 0 || T_max == 0 || C == 0) {
         // Zero-sized: nothing to dispatch. Leave outputs zero-initialised
@@ -8083,14 +8926,14 @@ auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
     }
 
     // Workspace tiles. alpha / beta: (N, T_max, L_max). post_scratch:
-    // (N, T_max, C). All Float32, on the same device.
+    // (N, T_max, C). Same precision as compute_dtype, on the same device.
     int64_t ab_elems = N * T_max * L_max;
     int64_t post_elems = N * T_max * C;
-    Tensor alpha_buf({ab_elems}, DType::Float32, log_probs.device());
-    Tensor beta_buf({ab_elems}, DType::Float32, log_probs.device());
-    Tensor post_scratch({post_elems}, DType::Float32, log_probs.device());
+    Tensor alpha_buf({ab_elems}, compute_dtype, log_probs.device());
+    Tensor beta_buf({ab_elems}, compute_dtype, log_probs.device());
+    Tensor post_scratch({post_elems}, compute_dtype, log_probs.device());
 
-    auto* pipeline = getPipeline("ctc_forward", device_id);
+    auto* pipeline = getPipeline(native_f64 ? "ctc_forward_f64" : "ctc_forward", device_id);
 
     struct PushConstants {
         uint32_t T_max;

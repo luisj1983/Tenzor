@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <random>
 #include <chrono>
+#include <limits>
 
 #ifdef TENZOR_HAS_ONEMKL
 #include <oneapi/mkl.hpp>
@@ -18,14 +19,33 @@ namespace oneapi {
 
 
 
+// ============================================================================
+// F042: on-device Philox 4x32-10 — a bit-for-bit port of the CPU
+// tenzor::cpu::philox implementation (src/backends/cpu/kernels/philox.hpp)
+// and the CUDA/ROCm device ports, keyed by (seed, element index). Written
+// inline in each kernel lambda (matching this file's existing SYCL
+// single-source conventions) rather than as free device functions.
+//
+// This replaces two previously-broken paths:
+//   - oneMKL's ::oneapi::mkl::rng::philox4x32x10 engine + gaussian/uniform
+//     distribution objects: despite the matching "philox4x32x10" name, MKL's
+//     internal counter/key layout and its Gaussian transform (Box-Muller or
+//     ziggurat, unspecified) are an opaque implementation detail — not
+//     bit-compatible with CPU's hand-written Philox + Box-Muller.
+//   - the non-MKL fallback: a structurally different Philox-2x32-10 (only
+//     two 32-bit counter/key lanes, multiplier 0xD256D193) that also wrote
+//     TWO Box-Muller outputs (cos and sin) per work-item index, rather than
+//     one N(0,1) sample per element index drawn from a full 4-word Philox
+//     block (out[0], out[1] -> cos only) the way CPU's philox_normal_f32
+//     does. Both paths produced statistically-plausible but numerically
+//     WRONG values relative to CPU for the same manual_seed().
+// ============================================================================
+
 /**
  * @brief Generate random numbers from a standard normal distribution (Gaussian with mean=0, stddev=1)
  *
- * Uses Intel oneMKL VSL (Vector Statistics Library) when available for high-performance RNG.
- * Falls back to an on-device Philox 4x32-10 + Box-Muller SYCL kernel when oneMKL is not available.
- *
  * @param shape Shape of the output tensor
- * @param dtype Data type (Float32 or Float64)
+ * @param dtype Data type (Float32, Float64, Float16, or BFloat16)
  * @param device Device to allocate the tensor on
  * @param queue SYCL queue for execution
  * @return Tensor filled with random values from N(0, 1) distribution
@@ -38,151 +58,50 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         return output;
     }
 
-#ifdef TENZOR_HAS_ONEMKL
-    // Use Intel oneMKL VSL for high-performance random number generation
+    uint64_t seed64 = static_cast<uint32_t>(tenzor::get_global_seed());
 
-    // Use global seed (respects manual_seed) or fall back to time-based
-    auto seed = tenzor::get_global_seed();
-
-    try {
-        if (dtype == DType::Float32) {
-            float* ptr = get_data_ptr<float>(output);
-
-            // Create Philox4x32x10 engine (good quality, high performance)
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-
-            // Generate Gaussian distribution with mean=0.0, stddev=1.0
-            ::oneapi::mkl::rng::gaussian<float> distribution(0.0f, 1.0f);
-
-            // Generate random numbers directly into device memory
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-        }
-        else if (dtype == DType::Float64) {
-            double* ptr = get_data_ptr<double>(output);
-
-            // Create Philox4x32x10 engine
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-
-            // Generate Gaussian distribution with mean=0.0, stddev=1.0
-            ::oneapi::mkl::rng::gaussian<double> distribution(0.0, 1.0);
-
-            // Generate random numbers directly into device memory
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-        }
-        else if (dtype == DType::Float16) {
-            // oneMKL doesn't support half precision directly, so generate float32 and convert
-            sycl::half* ptr = get_data_ptr<sycl::half>(output);
-
-            // Create temporary float32 buffer
-            Tensor temp_buffer({numel}, DType::Float32, device);
-            float* temp_ptr = get_data_ptr<float>(temp_buffer);
-
-            // Create Philox4x32x10 engine
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-
-            // Generate Gaussian distribution with mean=0.0, stddev=1.0
-            ::oneapi::mkl::rng::gaussian<float> distribution(0.0f, 1.0f);
-
-            // Generate random numbers into temp buffer
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
-
-            // Convert from float32 to float16. Wait so the function-local
-            // temp_buffer is not freed while this conversion kernel still reads
-            // temp_ptr, and so the host sees the written output.
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                ptr[i] = sycl::half(temp_ptr[i]);
-            }).wait();
-        }
-        else if (dtype == DType::BFloat16) {
-            // Generate Float32 then convert to BFloat16
-            uint16_t* ptr = get_data_ptr<uint16_t>(output);
-
-            Tensor temp_buffer({numel}, DType::Float32, device);
-            float* temp_ptr = get_data_ptr<float>(temp_buffer);
-
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-            ::oneapi::mkl::rng::gaussian<float> distribution(0.0f, 1.0f);
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
-
-            // Wait so temp_buffer outlives the conversion kernel reading temp_ptr.
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                uint32_t bits;
-                __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
-                ptr[i] = static_cast<uint16_t>(bits >> 16);
-            }).wait();
-        }
-        else {
-            throw std::runtime_error("Unsupported dtype for randn (oneMKL path)");
-        }
-    }
-    catch (const ::oneapi::mkl::exception& e) {
-        throw std::runtime_error(
-            std::string("oneMKL RNG failed: ") + e.what()
-        );
-    }
-#else
-#pragma message("WARNING: Building without oneMKL — using on-device Philox RNG fallback")
-    // On-device Philox 4x32-10 counter-based RNG with Box-Muller for normal distribution.
-    // Each work-item uses its index as counter and the global seed as key.
-
-    uint64_t seed64 = static_cast<uint64_t>(tenzor::get_global_seed());
-
-    // Generate Float32 on device, then convert if needed
-    // We generate pairs via Box-Muller, so allocate (numel + 1) / 2 * 2 floats
-    int64_t padded = ((numel + 1) / 2) * 2;
-    Tensor f32_buf({padded}, DType::Float32, device);
+    // Generate Float32 on device (one N(0,1) sample per element index), then
+    // convert if needed.
+    Tensor f32_buf({numel}, DType::Float32, device);
     float* f32_ptr = get_data_ptr<float>(f32_buf);
 
-    // Number of pairs for Box-Muller
-    int64_t num_pairs = padded / 2;
+    queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        uint32_t ctr[4] = {
+            static_cast<uint32_t>(static_cast<uint64_t>(idx[0]) & 0xFFFFFFFFu),
+            static_cast<uint32_t>((static_cast<uint64_t>(idx[0]) >> 32) & 0xFFFFFFFFu),
+            0u, 0u
+        };
+        uint32_t key[2] = {
+            static_cast<uint32_t>(seed64 & 0xFFFFFFFFu),
+            static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu)
+        };
 
-    queue.parallel_for(sycl::range<1>(num_pairs), [=](sycl::id<1> idx) {
-        // Split the full 64-bit per-element counter across both Philox lanes so
-        // the stream period is not exhausted below 2^64 elements, and seed the
-        // key schedule with both halves of the 64-bit global seed so that two
-        // manual_seed() values differing only above bit 31 produce distinct
-        // streams.
-        uint64_t ctr = static_cast<uint64_t>(idx[0]);
-        uint32_t c0 = static_cast<uint32_t>(ctr & 0xFFFFFFFFu);
-        uint32_t c1 = static_cast<uint32_t>(ctr >> 32);
-        uint32_t k0 = static_cast<uint32_t>(seed64 & 0xFFFFFFFFu);
-        uint32_t k1 = static_cast<uint32_t>(seed64 >> 32);
-
-        // Philox-2x32-10 (Salmon et al., "Parallel Random Numbers", 2011).
-        // Each round multiplies the counter lane c0, then mixes the high word
-        // with c1 and the key; the key advances by the Weyl constant. Both
-        // 64-bit-seed halves participate: k0 mixes into the state directly while
-        // k1 (added to the Weyl increment) perturbs the key schedule, ensuring
-        // the high seed word affects the output stream.
-        constexpr uint32_t PHILOX_M = 0xD256D193u;  // 2x32 multiplier
-        constexpr uint32_t PHILOX_W = 0x9E3779B9u;  // Weyl key increment
+        // Philox 4x32-10 (Salmon et al., "Parallel Random Numbers", 2011) —
+        // same round function/constants as CPU's philox.hpp.
+        constexpr uint64_t M0 = 0xD2511F53ULL;
+        constexpr uint64_t M1 = 0xCD9E8D57ULL;
+        constexpr uint32_t W0 = 0x9E3779B9u;
+        constexpr uint32_t W1 = 0xBB67AE85u;
         for (int round = 0; round < 10; ++round) {
-            uint32_t hi = static_cast<uint32_t>((static_cast<uint64_t>(c0) * PHILOX_M) >> 32);
-            uint32_t lo = c0 * PHILOX_M;
-            uint32_t new_c0 = hi ^ c1 ^ k0;
-            c1 = lo;
-            c0 = new_c0;
-            k0 += PHILOX_W + k1;
+            uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+            uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+            uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+            uint32_t lo0 = static_cast<uint32_t>(prod0);
+            uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+            uint32_t lo1 = static_cast<uint32_t>(prod1);
+            uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+            uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+            ctr[0] = new0; ctr[1] = lo1; ctr[2] = new2; ctr[3] = lo0;
+            key[0] += W0; key[1] += W1;
         }
 
-        // Convert two uint32 outputs to uniform [0,1) floats
-        constexpr float INV = 2.3283064365386963e-10f; // 1/2^32
-        float u1 = (static_cast<float>(c0) + 0.5f) * INV;
-        float u2 = (static_cast<float>(c1) + 0.5f) * INV;
-
-        // Clamp to avoid log(0)
-        u1 = sycl::fmax(u1, 1e-30f);
-        u2 = sycl::fmax(u2, 1e-30f);
-
-        // Box-Muller transform: generate two independent N(0,1) samples
-        float r = sycl::sqrt(-2.0f * sycl::log(u1));
-        constexpr float TWO_PI = 6.283185307179586f;
-        float z0 = r * sycl::cos(TWO_PI * u2);
-        float z1 = r * sycl::sin(TWO_PI * u2);
-
-        int64_t base = static_cast<int64_t>(idx[0]) * 2;
-        f32_ptr[base] = z0;
-        f32_ptr[base + 1] = z1;
+        // Box-Muller on the first two output words (out[0], out[1]), matching
+        // CPU's philox_normal_f32 exactly: top-24-bits -> uniform, cos-only.
+        float u1 = static_cast<float>(ctr[0] >> 8) * (1.0f / 16777216.0f);
+        float u2 = static_cast<float>(ctr[1] >> 8) * (1.0f / 16777216.0f);
+        u1 = sycl::fmax(u1, 1e-37f);
+        constexpr float TWO_PI = 6.28318530718f;
+        f32_ptr[idx[0]] = sycl::sqrt(-2.0f * sycl::log(u1)) * sycl::cos(TWO_PI * u2);
     }).wait();
 
     if (dtype == DType::Float32) {
@@ -190,9 +109,44 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         queue.memcpy(device_ptr, f32_ptr, numel * sizeof(float)).wait();
     }
     else if (dtype == DType::Float64) {
+        // Float64 needs its own full-precision Philox pass (paired with
+        // CPU's philox_normal_f64, which draws u1/u2 from a 53-bit mantissa
+        // built out of two 32-bit words each, i.e. all four output words),
+        // not a narrow-then-widen of the Float32 pass above.
         double* device_ptr = get_data_ptr<double>(output);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            device_ptr[i] = static_cast<double>(f32_ptr[i]);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint32_t ctr[4] = {
+                static_cast<uint32_t>(static_cast<uint64_t>(idx[0]) & 0xFFFFFFFFu),
+                static_cast<uint32_t>((static_cast<uint64_t>(idx[0]) >> 32) & 0xFFFFFFFFu),
+                0u, 0u
+            };
+            uint32_t key[2] = {
+                static_cast<uint32_t>(seed64 & 0xFFFFFFFFu),
+                static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu)
+            };
+            constexpr uint64_t M0 = 0xD2511F53ULL;
+            constexpr uint64_t M1 = 0xCD9E8D57ULL;
+            constexpr uint32_t W0 = 0x9E3779B9u;
+            constexpr uint32_t W1 = 0xBB67AE85u;
+            for (int round = 0; round < 10; ++round) {
+                uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+                uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+                uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+                uint32_t lo0 = static_cast<uint32_t>(prod0);
+                uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+                uint32_t lo1 = static_cast<uint32_t>(prod1);
+                uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+                uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+                ctr[0] = new0; ctr[1] = lo1; ctr[2] = new2; ctr[3] = lo0;
+                key[0] += W0; key[1] += W1;
+            }
+            uint64_t bits1 = (static_cast<uint64_t>(ctr[0]) << 21) | (static_cast<uint64_t>(ctr[1]) >> 11);
+            uint64_t bits2 = (static_cast<uint64_t>(ctr[2]) << 21) | (static_cast<uint64_t>(ctr[3]) >> 11);
+            double u1 = static_cast<double>(bits1) * (1.0 / 9007199254740992.0);
+            double u2 = static_cast<double>(bits2) * (1.0 / 9007199254740992.0);
+            u1 = sycl::fmax(u1, 1e-300);
+            constexpr double TWO_PI = 6.283185307179586;
+            device_ptr[idx[0]] = sycl::sqrt(-2.0 * sycl::log(u1)) * sycl::cos(TWO_PI * u2);
         }).wait();
     }
     else if (dtype == DType::Float16) {
@@ -210,9 +164,8 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         }).wait();
     }
     else {
-        throw std::runtime_error("Unsupported dtype for randn (fallback path)");
+        throw std::runtime_error("Unsupported dtype for randn");
     }
-#endif
 
     return output;
 }
@@ -220,10 +173,12 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 /**
  * @brief Generate random numbers from a uniform distribution [0, 1)
  *
- * Uses Intel oneMKL VSL when available. Falls back to an on-device Philox 4x32-10 SYCL kernel otherwise.
+ * F042: on-device Philox 4x32-10, bit-for-bit matching CPU's philox_uniform_f32/f64
+ * (src/backends/cpu/kernels/philox.hpp). See the comment above randn_kernel for why
+ * oneMKL's rng engine and the old Philox-2x32 fallback were both replaced.
  *
  * @param shape Shape of the output tensor
- * @param dtype Data type (Float32 or Float64)
+ * @param dtype Data type (Float32, Float64, Float16, or BFloat16)
  * @param device Device to allocate the tensor on
  * @param queue SYCL queue for execution
  * @return Tensor filled with random values from U(0, 1) distribution
@@ -236,114 +191,41 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         return output;
     }
 
-#ifdef TENZOR_HAS_ONEMKL
-    // Use Intel oneMKL VSL for high-performance random number generation
+    uint64_t seed64 = static_cast<uint32_t>(tenzor::get_global_seed());
 
-    // Use global seed (respects manual_seed) or fall back to time-based
-    auto seed = tenzor::get_global_seed();
-
-    try {
-        if (dtype == DType::Float32) {
-            float* ptr = get_data_ptr<float>(output);
-
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-
-            // Generate uniform distribution [0, 1)
-            ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
-
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-        }
-        else if (dtype == DType::Float64) {
-            double* ptr = get_data_ptr<double>(output);
-
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-
-            ::oneapi::mkl::rng::uniform<double> distribution(0.0, 1.0);
-
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, ptr);
-        }
-        else if (dtype == DType::Float16) {
-            // Generate Float32 then convert to Float16
-            sycl::half* ptr = get_data_ptr<sycl::half>(output);
-
-            Tensor temp_buffer({numel}, DType::Float32, device);
-            float* temp_ptr = get_data_ptr<float>(temp_buffer);
-
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-            ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
-
-            // Wait so the function-local temp_buffer is not freed while this
-            // conversion kernel still reads temp_ptr, and the host sees output.
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                ptr[i] = sycl::half(temp_ptr[i]);
-            }).wait();
-        }
-        else if (dtype == DType::BFloat16) {
-            // Generate Float32 then convert to BFloat16 (truncate upper 16 bits)
-            uint16_t* ptr = get_data_ptr<uint16_t>(output);
-
-            Tensor temp_buffer({numel}, DType::Float32, device);
-            float* temp_ptr = get_data_ptr<float>(temp_buffer);
-
-            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
-            ::oneapi::mkl::rng::uniform<float> distribution(0.0f, 1.0f);
-            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
-
-            // Wait so temp_buffer outlives the conversion kernel reading temp_ptr.
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                // BFloat16: upper 16 bits of float32
-                uint32_t bits;
-                __builtin_memcpy(&bits, &temp_ptr[i], sizeof(uint32_t));
-                ptr[i] = static_cast<uint16_t>(bits >> 16);
-            }).wait();
-        }
-        else {
-            throw std::runtime_error("Unsupported dtype for rand (oneMKL path)");
-        }
-    }
-    catch (const ::oneapi::mkl::exception& e) {
-        throw std::runtime_error(
-            std::string("oneMKL RNG failed: ") + e.what()
-        );
-    }
-#else
-    // On-device Philox 4x32-10 counter-based RNG for uniform distribution [0, 1)
-    uint64_t seed64 = static_cast<uint64_t>(tenzor::get_global_seed());
-
-    // Generate Float32 on device directly
+    // Generate Float32 on device directly (one Philox block's out[0] per
+    // element index, top 24 bits -> mantissa — matches CPU's
+    // philox_uniform_f32 exactly).
     Tensor f32_buf({numel}, DType::Float32, device);
     float* f32_ptr = get_data_ptr<float>(f32_buf);
 
     queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-        // Split the full 64-bit per-element counter across both Philox lanes so
-        // the stream period is not exhausted below 2^64 elements, and seed the
-        // key schedule with both halves of the 64-bit global seed so distinct
-        // 64-bit seeds produce distinct streams. Mirrors the randn fallback.
-        uint64_t ctr = static_cast<uint64_t>(idx[0]);
-        uint32_t c0 = static_cast<uint32_t>(ctr & 0xFFFFFFFFu);
-        uint32_t c1 = static_cast<uint32_t>(ctr >> 32);
-        uint32_t k0 = static_cast<uint32_t>(seed64 & 0xFFFFFFFFu);
-        uint32_t k1 = static_cast<uint32_t>(seed64 >> 32);
-
-        // Philox-2x32-10 (Salmon et al., "Parallel Random Numbers", 2011).
-        // Each round multiplies counter lane c0, mixes the high word with c1 and
-        // the key, and advances the key by the Weyl constant perturbed by the
-        // high seed word k1 so both seed halves affect the output stream.
-        constexpr uint32_t PHILOX_M = 0xD256D193u;  // 2x32 multiplier
-        constexpr uint32_t PHILOX_W = 0x9E3779B9u;  // Weyl key increment
+        uint32_t ctr[4] = {
+            static_cast<uint32_t>(static_cast<uint64_t>(idx[0]) & 0xFFFFFFFFu),
+            static_cast<uint32_t>((static_cast<uint64_t>(idx[0]) >> 32) & 0xFFFFFFFFu),
+            0u, 0u
+        };
+        uint32_t key[2] = {
+            static_cast<uint32_t>(seed64 & 0xFFFFFFFFu),
+            static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu)
+        };
+        constexpr uint64_t M0 = 0xD2511F53ULL;
+        constexpr uint64_t M1 = 0xCD9E8D57ULL;
+        constexpr uint32_t W0 = 0x9E3779B9u;
+        constexpr uint32_t W1 = 0xBB67AE85u;
         for (int round = 0; round < 10; ++round) {
-            uint32_t hi = static_cast<uint32_t>((static_cast<uint64_t>(c0) * PHILOX_M) >> 32);
-            uint32_t lo = c0 * PHILOX_M;
-            uint32_t new_c0 = hi ^ c1 ^ k0;
-            c1 = lo;
-            c0 = new_c0;
-            k0 += PHILOX_W + k1;
+            uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+            uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+            uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+            uint32_t lo0 = static_cast<uint32_t>(prod0);
+            uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+            uint32_t lo1 = static_cast<uint32_t>(prod1);
+            uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+            uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+            ctr[0] = new0; ctr[1] = lo1; ctr[2] = new2; ctr[3] = lo0;
+            key[0] += W0; key[1] += W1;
         }
-
-        // Convert to uniform [0, 1)
-        constexpr float INV = 2.3283064365386963e-10f; // 1/2^32
-        f32_ptr[idx[0]] = (static_cast<float>(c0) + 0.5f) * INV;
+        f32_ptr[idx[0]] = static_cast<float>(ctr[0] >> 8) * (1.0f / 16777216.0f);
     }).wait();
 
     if (dtype == DType::Float32) {
@@ -351,9 +233,38 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         queue.memcpy(device_ptr, f32_ptr, numel * sizeof(float)).wait();
     }
     else if (dtype == DType::Float64) {
+        // Float64 needs its own full-precision Philox pass (53-bit mantissa
+        // from out[0]/out[1]), matching CPU's philox_uniform_f64 exactly —
+        // not a narrow-then-widen of the Float32 pass above.
         double* device_ptr = get_data_ptr<double>(output);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            device_ptr[i] = static_cast<double>(f32_ptr[i]);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint32_t ctr[4] = {
+                static_cast<uint32_t>(static_cast<uint64_t>(idx[0]) & 0xFFFFFFFFu),
+                static_cast<uint32_t>((static_cast<uint64_t>(idx[0]) >> 32) & 0xFFFFFFFFu),
+                0u, 0u
+            };
+            uint32_t key[2] = {
+                static_cast<uint32_t>(seed64 & 0xFFFFFFFFu),
+                static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu)
+            };
+            constexpr uint64_t M0 = 0xD2511F53ULL;
+            constexpr uint64_t M1 = 0xCD9E8D57ULL;
+            constexpr uint32_t W0 = 0x9E3779B9u;
+            constexpr uint32_t W1 = 0xBB67AE85u;
+            for (int round = 0; round < 10; ++round) {
+                uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+                uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+                uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+                uint32_t lo0 = static_cast<uint32_t>(prod0);
+                uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+                uint32_t lo1 = static_cast<uint32_t>(prod1);
+                uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+                uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+                ctr[0] = new0; ctr[1] = lo1; ctr[2] = new2; ctr[3] = lo0;
+                key[0] += W0; key[1] += W1;
+            }
+            uint64_t bits = (static_cast<uint64_t>(ctr[0]) << 21) | (static_cast<uint64_t>(ctr[1]) >> 11);
+            device_ptr[idx[0]] = static_cast<double>(bits) * (1.0 / 9007199254740992.0);
         }).wait();
     }
     else if (dtype == DType::Float16) {
@@ -371,9 +282,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         }).wait();
     }
     else {
-        throw std::runtime_error("Unsupported dtype for rand (fallback path)");
+        throw std::runtime_error("Unsupported dtype for rand");
     }
-#endif
 
     return output;
 }
@@ -382,7 +292,26 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
  * @brief Generate a 1D tensor of evenly spaced values in [start, end) with given step
  */
 auto arange_kernel(double start, double end, double step, DType dtype, Device device, sycl::queue& queue) -> Tensor {
-    int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
+    if (step == 0.0) {
+        throw std::runtime_error("arange: step must be non-zero");
+    }
+    // Length matches PyTorch's torch.arange: ceil((end - start) / step), but a
+    // naive ceil over a floating-point ratio rounds an exact-integer quotient
+    // (e.g. (1.0 - 0.0) / 0.1 = 9.999999999999998 or 10.000000000000002) up by
+    // one, yielding a spurious final element whose value can also drift past
+    // `end`. Snap a ratio that is integral within a relative epsilon to that
+    // integer before applying ceil, so exact ranges produce the exact count.
+    // Ported from CPU's arange_kernel (src/backends/cpu/kernels/creation.cpp:467-481).
+    const double ratio = (end - start) / step;
+    const double rounded = std::round(ratio);
+    double count_d;
+    if (std::abs(ratio - rounded) < std::numeric_limits<double>::epsilon() *
+                                    std::max(1.0, std::abs(ratio)) * 4.0) {
+        count_d = rounded;  // exact integer ratio: half-open interval => `rounded` elements
+    } else {
+        count_d = std::ceil(ratio);
+    }
+    int64_t numel = static_cast<int64_t>(count_d);
     if (numel <= 0) numel = 0;
 
     Tensor output({numel}, dtype, device);
@@ -733,6 +662,14 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& q
 
 // ============================================================================
 // Randint - Random integers in [low, high)
+//
+// F042: on-device Philox 4x32-10 uniform double in [0,1), scaled to
+// [low, high) exactly as CPU randint (low + (int64_t)(philox_uniform_f64 *
+// range)) — bit-identical to CPU. The previous implementation used a
+// SplitMix64-style hash (`x ^= x >> 30; x *= 0x...`) with `x % range`
+// rejection-free modulo mapping — a completely different RNG family and
+// range-mapping scheme from CPU's Philox + multiply-by-range-then-truncate,
+// producing plausible-looking but numerically wrong integers relative to CPU.
 // ============================================================================
 
 struct RandintKernelInt32 {};
@@ -748,31 +685,76 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
     const int64_t numel = output.numel();
     if (numel == 0) return output;
 
-    auto seed = tenzor::get_global_seed();
-    int64_t range = high - low;
+    uint64_t seed64 = static_cast<uint32_t>(tenzor::get_global_seed());
+    const double range = static_cast<double>(high - low);
 
     if (dtype == DType::Int32) {
         int32_t* ptr = get_data_ptr<int32_t>(output);
-        int32_t lo = static_cast<int32_t>(low);
-        int32_t r = static_cast<int32_t>(range);
-        uint64_t s = seed;
         queue.parallel_for<RandintKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            // Philox-inspired hash for uniform random
-            uint64_t x = static_cast<uint64_t>(idx[0]) ^ s;
-            x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-            x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-            x = x ^ (x >> 31);
-            ptr[idx] = lo + static_cast<int32_t>(x % static_cast<uint64_t>(r));
+            uint32_t ctr[4] = {
+                static_cast<uint32_t>(static_cast<uint64_t>(idx[0]) & 0xFFFFFFFFu),
+                static_cast<uint32_t>((static_cast<uint64_t>(idx[0]) >> 32) & 0xFFFFFFFFu),
+                0u, 0u
+            };
+            uint32_t key[2] = {
+                static_cast<uint32_t>(seed64 & 0xFFFFFFFFu),
+                static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu)
+            };
+            constexpr uint64_t M0 = 0xD2511F53ULL;
+            constexpr uint64_t M1 = 0xCD9E8D57ULL;
+            constexpr uint32_t W0 = 0x9E3779B9u;
+            constexpr uint32_t W1 = 0xBB67AE85u;
+            for (int round = 0; round < 10; ++round) {
+                uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+                uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+                uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+                uint32_t lo0 = static_cast<uint32_t>(prod0);
+                uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+                uint32_t lo1 = static_cast<uint32_t>(prod1);
+                uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+                uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+                ctr[0] = new0; ctr[1] = lo1; ctr[2] = new2; ctr[3] = lo0;
+                key[0] += W0; key[1] += W1;
+            }
+            uint64_t bits = (static_cast<uint64_t>(ctr[0]) << 21) | (static_cast<uint64_t>(ctr[1]) >> 11);
+            double r = static_cast<double>(bits) * (1.0 / 9007199254740992.0);
+            int64_t val = low + static_cast<int64_t>(r * range);
+            if (val >= high) val = high - 1;
+            ptr[idx] = static_cast<int32_t>(val);
         });
     } else if (dtype == DType::Int64) {
         int64_t* ptr = get_data_ptr<int64_t>(output);
-        uint64_t s = seed;
         queue.parallel_for<RandintKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            uint64_t x = static_cast<uint64_t>(idx[0]) ^ s;
-            x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-            x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-            x = x ^ (x >> 31);
-            ptr[idx] = low + static_cast<int64_t>(x % static_cast<uint64_t>(range));
+            uint32_t ctr[4] = {
+                static_cast<uint32_t>(static_cast<uint64_t>(idx[0]) & 0xFFFFFFFFu),
+                static_cast<uint32_t>((static_cast<uint64_t>(idx[0]) >> 32) & 0xFFFFFFFFu),
+                0u, 0u
+            };
+            uint32_t key[2] = {
+                static_cast<uint32_t>(seed64 & 0xFFFFFFFFu),
+                static_cast<uint32_t>((seed64 >> 32) & 0xFFFFFFFFu)
+            };
+            constexpr uint64_t M0 = 0xD2511F53ULL;
+            constexpr uint64_t M1 = 0xCD9E8D57ULL;
+            constexpr uint32_t W0 = 0x9E3779B9u;
+            constexpr uint32_t W1 = 0xBB67AE85u;
+            for (int round = 0; round < 10; ++round) {
+                uint64_t prod0 = M0 * static_cast<uint64_t>(ctr[0]);
+                uint64_t prod1 = M1 * static_cast<uint64_t>(ctr[2]);
+                uint32_t hi0 = static_cast<uint32_t>(prod0 >> 32);
+                uint32_t lo0 = static_cast<uint32_t>(prod0);
+                uint32_t hi1 = static_cast<uint32_t>(prod1 >> 32);
+                uint32_t lo1 = static_cast<uint32_t>(prod1);
+                uint32_t new0 = hi1 ^ ctr[1] ^ key[0];
+                uint32_t new2 = hi0 ^ ctr[3] ^ key[1];
+                ctr[0] = new0; ctr[1] = lo1; ctr[2] = new2; ctr[3] = lo0;
+                key[0] += W0; key[1] += W1;
+            }
+            uint64_t bits = (static_cast<uint64_t>(ctr[0]) << 21) | (static_cast<uint64_t>(ctr[1]) >> 11);
+            double r = static_cast<double>(bits) * (1.0 / 9007199254740992.0);
+            int64_t val = low + static_cast<int64_t>(r * range);
+            if (val >= high) val = high - 1;
+            ptr[idx] = val;
         });
     } else {
         throw std::runtime_error("randint_kernel: only Int32 and Int64 supported");

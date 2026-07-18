@@ -1014,6 +1014,10 @@ auto where_hip(
     Tensor cond_bool;
     bool used_temp_cond = false;
     const bool* cond_ptr;
+    // Outer-scope temporary for a widened Float16/BFloat16 condition buffer —
+    // must outlive the async cond_to_bool_kernel launch below, which only
+    // completes at the hipStreamSynchronize further down this function.
+    Tensor cond_f32_widened;
     if (condition.dtype() == DType::Bool) {
         cond_ptr = condition.data<bool>();
     } else {
@@ -1027,17 +1031,20 @@ auto where_hip(
         } else if (condition.dtype() == DType::Float64) {
             hipLaunchKernelGGL(cond_to_bool_kernel<double>, dim3(cblocks), dim3(threads), 0, stream,
                 condition.data<double>(), cond_bool.data<bool>(), condition.numel());
-        } else if (condition.dtype() == DType::Int32) {
-            hipLaunchKernelGGL(cond_to_bool_kernel<int32_t>, dim3(cblocks), dim3(threads), 0, stream,
-                condition.data<int32_t>(), cond_bool.data<bool>(), condition.numel());
-        } else if (condition.dtype() == DType::Int64) {
-            hipLaunchKernelGGL(cond_to_bool_kernel<int64_t>, dim3(cblocks), dim3(threads), 0, stream,
-                condition.data<int64_t>(), cond_bool.data<bool>(), condition.numel());
-        } else if (condition.dtype() == DType::UInt8) {
-            hipLaunchKernelGGL(cond_to_bool_kernel<uint8_t>, dim3(cblocks), dim3(threads), 0, stream,
-                condition.data<uint8_t>(), cond_bool.data<bool>(), condition.numel());
+        } else if (condition.dtype() == DType::Float16 || condition.dtype() == DType::BFloat16) {
+            // Match CPU/CUDA: widen to Float32 first (lossless) instead of
+            // adding half/bf16 comparison-operator instantiations. CPU/CUDA
+            // both accept Float16/BFloat16 conditions; ROCm previously threw
+            // for them (no branch existed at all).
+            cond_f32_widened = condition.to(DType::Float32);
+            hipLaunchKernelGGL(cond_to_bool_kernel<float>, dim3(cblocks), dim3(threads), 0, stream,
+                cond_f32_widened.data<float>(), cond_bool.data<bool>(), condition.numel());
         } else {
-            throw std::runtime_error("where_hip: condition must be Bool or a numeric dtype");
+            // Match CPU (indexing.cpp:1084-1089) and CUDA (validate_mask_dtype):
+            // a where() condition must be Bool or a floating dtype. ROCm
+            // previously accepted Int32/Int64/UInt8 here too, silently
+            // succeeding on a call CPU/CUDA both reject.
+            throw std::invalid_argument("where_hip: condition must be Bool or a floating dtype");
         }
         HIP_POST_LAUNCH_CHECK();
         cond_ptr = cond_bool.data<bool>();
@@ -1556,7 +1563,8 @@ __global__ void put_kernel(
     const T* source,
     int64_t num_indices,
     int64_t total_size,
-    bool accumulate
+    bool accumulate,
+    int* error_flag
 ) {
     HIP_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
@@ -1576,12 +1584,42 @@ __global__ void put_kernel(
                 // types), so gate the call out at compile time to instantiate.
                 if constexpr (put_atomic_capable<T>::value) {
                     atomicAddHelper(&output[target_idx], source[idx]);
+                } else if constexpr (std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t>) {
+                    // No 8-bit atomicAdd on HIP. CAS-loop on the aligned 32-bit
+                    // word containing this byte (matches CUDA's put_kernel_impl
+                    // <int8_t>/<uint8_t> specializations), so CPU/CUDA/ROCm all
+                    // support put(accumulate=true) for Int8/UInt8. The word base
+                    // is shifted down so the 4-byte access never runs past the
+                    // buffer end when total_size % 4 != 0 and target_idx falls in
+                    // the last 1-3 bytes.
+                    int64_t word_base = target_idx & ~static_cast<int64_t>(3);
+                    if (word_base + 4 > total_size) {
+                        word_base = total_size - 4;
+                    }
+                    if (word_base < 0) word_base = 0;  // buffer smaller than 4 bytes
+                    unsigned int byte_offset = static_cast<unsigned int>(target_idx - word_base);
+                    unsigned int* addr = reinterpret_cast<unsigned int*>(
+                        reinterpret_cast<char*>(output) + word_base);
+                    unsigned int old_val, new_val;
+                    do {
+                        old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
+                        T cur = static_cast<T>((old_val >> (byte_offset * 8)) & 0xFF);
+                        T sum = static_cast<T>(cur + source[idx]);
+                        new_val = (old_val & ~(0xFFu << (byte_offset * 8))) |
+                                  (static_cast<unsigned int>(static_cast<uint8_t>(sum)) << (byte_offset * 8));
+                    } while (atomicCAS(addr, old_val, new_val) != old_val);
                 } else {
                     output[target_idx] = source[idx];
                 }
             } else {
                 output[target_idx] = source[idx];
             }
+        } else {
+            // Out-of-range: record the error; the host wrapper raises a
+            // catchable std::out_of_range after synchronizing (matches CPU/
+            // CUDA/OneAPI). The write stays gated, so the kernel remains
+            // memory-safe -- previously this silently no-op'd instead.
+            atomicExch(error_flag, 1);
         }
     }
 }
@@ -1597,7 +1635,8 @@ __global__ void put_complex_add_kernel(
     const int64_t* indices,
     const RealT* source,
     int64_t num_indices,
-    int64_t total_size
+    int64_t total_size,
+    int* error_flag
 ) {
     HIP_KERNEL_LOOP(idx, num_indices) {
         int64_t target_idx = indices[idx];
@@ -1607,6 +1646,8 @@ __global__ void put_complex_add_kernel(
         if (target_idx >= 0 && target_idx < total_size) {
             atomicAddHelper(&output[2 * target_idx + 0], source[2 * idx + 0]);
             atomicAddHelper(&output[2 * target_idx + 1], source[2 * idx + 1]);
+        } else {
+            atomicExch(error_flag, 1);
         }
     }
 }
@@ -1626,6 +1667,14 @@ auto put_hip(
     int threads = 256;
     int blocks = (num_indices + threads - 1) / threads;
 
+    // Device-side OOB error flag (matches take_hip above and CUDA's put_kernel_impl):
+    // the kernel sets it when an index (after negative adjustment) is still out of
+    // range instead of silently no-op'ing, and the host raises a catchable
+    // std::out_of_range after synchronizing, matching CPU/CUDA/OneAPI.
+    int* d_error_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_error_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(put_kernel<float>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1634,7 +1683,8 @@ auto put_hip(
             source.data<float>(),
             num_indices,
             total_size,
-            accumulate
+            accumulate,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
@@ -1645,7 +1695,8 @@ auto put_hip(
             source.data<double>(),
             num_indices,
             total_size,
-            accumulate
+            accumulate,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
@@ -1656,7 +1707,8 @@ auto put_hip(
             source.data<int32_t>(),
             num_indices,
             total_size,
-            accumulate
+            accumulate,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
@@ -1667,7 +1719,8 @@ auto put_hip(
             source.data<int64_t>(),
             num_indices,
             total_size,
-            accumulate
+            accumulate,
+            d_error_flag
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
@@ -1677,7 +1730,7 @@ auto put_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<const __half*>(source.data<Float16>()),
-            num_indices, total_size, accumulate);
+            num_indices, total_size, accumulate, d_error_flag);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         // atomicAddHelper<hip_bfloat16> uses round-to-nearest-even accumulation.
@@ -1686,29 +1739,52 @@ auto put_hip(
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             indices.data<int64_t>(),
             reinterpret_cast<const hip_bfloat16*>(source.data<BFloat16>()),
-            num_indices, total_size, accumulate);
+            num_indices, total_size, accumulate, d_error_flag);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::UInt32) {
         hipLaunchKernelGGL(put_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<uint32_t*>(output.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<const uint32_t*>(source.data_ptr()),
-            num_indices, total_size, accumulate);
+            num_indices, total_size, accumulate, d_error_flag);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::UInt64) {
         hipLaunchKernelGGL(put_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<const uint64_t*>(source.data_ptr()),
-            num_indices, total_size, accumulate);
+            num_indices, total_size, accumulate, d_error_flag);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
         // No 16-bit atomicAdd; only the overwrite path is meaningful for these.
         if (accumulate) {
+            HIP_CHECK(hipFree(d_error_flag));
             throw std::runtime_error("put_hip: accumulate not supported for 16-bit integer dtype");
         }
         hipLaunchKernelGGL(put_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<uint16_t*>(output.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<const uint16_t*>(source.data_ptr()),
-            num_indices, total_size, accumulate);
+            num_indices, total_size, accumulate, d_error_flag);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8) {
+        // put_kernel<uint8_t> now handles accumulate=true via a boundary-safe
+        // CAS-loop on the containing 32-bit word (matches CPU's serial add and
+        // CUDA's own int8_t/uint8_t CAS specializations).
+        hipLaunchKernelGGL(put_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint8_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint8_t*>(source.data_ptr()),
+            num_indices, total_size, accumulate, d_error_flag);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Bool) {
+        // Bool accumulate has no defined semantics and CPU explicitly throws
+        // for it too (put_kernel accumulate dtype allowlist excludes Bool);
+        // only the overwrite path is meaningful here.
+        if (accumulate) {
+            HIP_CHECK(hipFree(d_error_flag));
+            throw std::runtime_error("put_hip: accumulate not supported for Bool dtype");
+        }
+        hipLaunchKernelGGL(put_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint8_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint8_t*>(source.data_ptr()),
+            num_indices, total_size, accumulate, d_error_flag);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Complex64) {
         if (accumulate) {
@@ -1717,12 +1793,12 @@ auto put_hip(
             hipLaunchKernelGGL(put_complex_add_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
                 reinterpret_cast<float*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const float*>(source.data_ptr()),
-                num_indices, total_size);
+                num_indices, total_size, d_error_flag);
         } else {
             hipLaunchKernelGGL(put_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
                 reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const uint64_t*>(source.data_ptr()),
-                num_indices, total_size, accumulate);
+                num_indices, total_size, accumulate, d_error_flag);
         }
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Complex128) {
@@ -1730,19 +1806,31 @@ auto put_hip(
             hipLaunchKernelGGL(put_complex_add_kernel<double>, dim3(blocks), dim3(threads), 0, stream,
                 reinterpret_cast<double*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const double*>(source.data_ptr()),
-                num_indices, total_size);
+                num_indices, total_size, d_error_flag);
         } else {
             hipLaunchKernelGGL(put_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
                 reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
                 reinterpret_cast<const Bytes16*>(source.data_ptr()),
-                num_indices, total_size, accumulate);
+                num_indices, total_size, accumulate, d_error_flag);
         }
         HIP_POST_LAUNCH_CHECK();
     } else {
+        HIP_CHECK(hipFree(d_error_flag));
         throw std::runtime_error("put_hip: Unsupported dtype");
     }
 
     HIP_POST_LAUNCH_CHECK();
+
+    // Check for out-of-bounds index errors (matches CPU/CUDA/OneAPI which throw).
+    int host_error = 0;
+    HIP_CHECK(hipMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_error_flag));
+    if (host_error != 0) {
+        throw std::out_of_range("put: index out of range");
+    }
+
     return output;
 }
 
@@ -2260,6 +2348,10 @@ auto masked_fill_hip(
     Tensor output = input.clone();
 
     int64_t total_elements = output.numel();
+    // Empty tensor: a zero-block grid makes HIP reject the launch
+    // ("invalid configuration argument"), unlike CPU/CUDA/OneAPI/Vulkan which
+    // all correctly return an empty tensor (matches where_hip's own guard).
+    if (total_elements == 0) return output;
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
 
@@ -2355,23 +2447,21 @@ template<typename T>
 static void masked_select_flagged(const T* d_in, const bool* d_flags, T* d_out,
                                   int64_t* d_num_selected, int64_t total_elements,
                                   hipStream_t stream) {
-    // hipcub::DeviceSelect::Flagged takes a 32-bit num_items; silently casting an
-    // int64 element count > INT_MAX would truncate/overflow and select the wrong
-    // number of elements. Reject it cleanly instead of returning garbage.
-    if (total_elements > static_cast<int64_t>(std::numeric_limits<int>::max())) {
-        throw std::overflow_error(
-            "masked_select: element count " + std::to_string(total_elements) +
-            " exceeds hipcub DeviceSelect 32-bit limit");
-    }
+    // hipcub::DeviceSelect::Flagged (rocprim backend, __HIP_PLATFORM_AMD__) takes
+    // num_items as int64_t natively — unlike CUB's overload-set-by-NumItemsT
+    // design, there is no 32-bit-limited overload to fall into here, so no cast
+    // or size guard is needed; pass total_elements straight through (mirrors
+    // CUDA's indexing.cu masked_select_kernel, which selects CUB's 64-bit
+    // NumItemsT overload the same way).
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
     HIP_CHECK(hipcub::DeviceSelect::Flagged(
         d_temp, temp_bytes, d_in, d_flags, d_out, d_num_selected,
-        static_cast<int>(total_elements), stream));
+        total_elements, stream));
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
     HIP_CHECK(hipcub::DeviceSelect::Flagged(
         d_temp, temp_bytes, d_in, d_flags, d_out, d_num_selected,
-        static_cast<int>(total_elements), stream));
+        total_elements, stream));
     HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_temp));
 }
@@ -2382,6 +2472,10 @@ auto masked_select_hip(
     hipStream_t stream
 ) -> Tensor {
     int64_t total_elements = input.numel();
+    // Empty tensor: a zero-block grid makes HIP reject the launch
+    // ("invalid configuration argument"), unlike CPU/CUDA/OneAPI/Vulkan which
+    // all correctly return an empty tensor (matches where_hip's own guard).
+    if (total_elements == 0) return Tensor({0}, input.dtype(), input.device());
 
     int64_t* d_count;
     HIP_CHECK(hipMalloc(&d_count, sizeof(int64_t)));
@@ -2463,7 +2557,11 @@ auto take_hip(
     int64_t input_size = input.numel();
     int64_t indices_size = indices.numel();
 
-    Tensor output = Tensor({indices_size}, input.dtype(), input.device());
+    // take() output must preserve the index tensor's shape (matches CPU/CUDA/
+    // OneAPI/Vulkan / PyTorch semantics), not flatten to 1D. A 2D index of
+    // shape [2,3] must produce a [2,3] output, not [6].
+    std::vector<int64_t> out_shape(indices_arg.shape().begin(), indices_arg.shape().end());
+    Tensor output = Tensor(out_shape, input.dtype(), input.device());
 
     int threads = 256;
     int blocks = (indices_size + threads - 1) / threads;
@@ -3005,6 +3103,32 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     int64_t offsets_size = offsets.numel();
     int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
 
+    // Pre-validate offsets host-side before any kernel dispatch. Per-bag
+    // [start, end) bounds are derived from offsets and indexed directly into
+    // the embeddings buffer with no on-device bounds checking; a malformed
+    // offset (negative, non-monotonic, or exceeding the embedding table
+    // length) would cause an out-of-bounds device read (and an OOB write of
+    // the argmax buffer in max mode). Mirrors the CPU reference
+    // (nn_kernels.cpp) and OneAPI's embedding_bag_forward_kernel.
+    if (num_bags > 0) {
+        Tensor offsets_host = offsets.to(Device::cpu());
+        const int64_t* host_offsets = offsets_host.data<int64_t>();
+        int64_t prev = 0;
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            int64_t start = host_offsets[bag];
+            int64_t end = (bag + 1 < offsets_size) ? host_offsets[bag + 1] : total_elements;
+            if (start < prev || start > total_elements ||
+                end < start || end > total_elements) {
+                throw std::out_of_range(
+                    "embedding_bag_forward: offset out of range or non-monotonic "
+                    "at bag " + std::to_string(bag) + " ([" +
+                    std::to_string(start) + ", " + std::to_string(end) +
+                    ") not within [0, " + std::to_string(total_elements) + "])");
+            }
+            prev = start;
+        }
+    }
+
     bool is_mean = (mode == "mean");
     bool is_max = (mode == "max");
 
@@ -3314,6 +3438,48 @@ __global__ void one_hot_kernel_impl(
 auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
                     hipStream_t stream) -> Tensor {
     int64_t batch_size = indices.numel();
+
+    // If num_classes is not specified, infer it from the max index value + 1
+    // (mirrors CPU's one_hot_kernel in src/backends/cpu/kernels/indexing.cpp).
+    // Not reachable via the public API today (num_classes is always resolved
+    // before dispatch), but kept for defense-in-depth cross-backend parity.
+    if (num_classes <= 0) {
+        int64_t inferred = 0;
+        if (indices.dtype() == DType::Int64) {
+            std::vector<int64_t> host(static_cast<size_t>(batch_size));
+            if (batch_size > 0) {
+                HIP_CHECK(hipMemcpy(host.data(), indices.data<int64_t>(),
+                                    static_cast<size_t>(batch_size) * sizeof(int64_t),
+                                    hipMemcpyDeviceToHost));
+            }
+            for (int64_t v : host) {
+                if (v < 0) throw std::out_of_range("one_hot: indices must be non-negative");
+                if (v + 1 > inferred) inferred = v + 1;
+            }
+        } else if (indices.dtype() == DType::Int32) {
+            std::vector<int32_t> host(static_cast<size_t>(batch_size));
+            if (batch_size > 0) {
+                HIP_CHECK(hipMemcpy(host.data(), indices.data<int32_t>(),
+                                    static_cast<size_t>(batch_size) * sizeof(int32_t),
+                                    hipMemcpyDeviceToHost));
+            }
+            for (int32_t v : host) {
+                if (v < 0) throw std::out_of_range("one_hot: indices must be non-negative");
+                int64_t v64 = static_cast<int64_t>(v) + 1;
+                if (v64 > inferred) inferred = v64;
+            }
+        } else {
+            throw std::runtime_error("one_hot: unsupported index dtype (expected Int32 or Int64)");
+        }
+        // An empty index tensor or all-zero indices can leave inferred == 0;
+        // a one-hot dimension must be positive, so reject before allocating.
+        if (inferred <= 0) {
+            throw std::invalid_argument(
+                "one_hot: could not infer a positive num_classes from indices; "
+                "pass num_classes explicitly");
+        }
+        num_classes = inferred;
+    }
 
     // one_hot appends the class axis while preserving the index shape:
     // [d0, ..., dk] -> [d0, ..., dk, num_classes] (matching PyTorch and the
@@ -3658,7 +3824,8 @@ __global__ void advanced_index_gather_kernel_hip(
     T* __restrict__ dst,
     const int64_t* __restrict__ const* __restrict__ idx_ptrs,
     AdvancedIndexMeta meta,
-    int64_t total_out
+    int64_t total_out,
+    int* __restrict__ error_flag
 ) {
     int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (out_idx >= total_out) return;
@@ -3667,12 +3834,25 @@ __global__ void advanced_index_gather_kernel_hip(
     int64_t bc = (meta.pass_numel > 0) ? (out_idx / meta.pass_numel) : out_idx;
 
     int64_t src_offset = 0;
+    bool oob = false;
     for (int i = 0; i < meta.num_indices; ++i) {
         if (meta.is_indexed[i]) {
             int64_t idx_val = idx_ptrs[i][bc];
             if (idx_val < 0) idx_val += meta.src_shape[i];
+            if (idx_val < 0 || idx_val >= meta.src_shape[i]) {
+                oob = true;
+                break;
+            }
             src_offset += idx_val * meta.src_strides[i];
         }
+    }
+
+    if (oob) {
+        atomicExch(error_flag, 1);
+        // T{} rather than T(0): AdvIdxBytesN/Bytes16 are plain byte-array
+        // aggregates with no converting constructor from int.
+        dst[out_idx] = T{};
+        return;
     }
 
     if (meta.num_pass_dims > 0) {
@@ -3694,7 +3874,8 @@ __global__ void advanced_index_put_kernel_hip(
     const T* __restrict__ values,
     const int64_t* __restrict__ const* __restrict__ idx_ptrs,
     AdvancedIndexMeta meta,
-    int64_t total_out
+    int64_t total_out,
+    int* __restrict__ error_flag
 ) {
     int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (out_idx >= total_out) return;
@@ -3703,12 +3884,22 @@ __global__ void advanced_index_put_kernel_hip(
     int64_t bc = (meta.pass_numel > 0) ? (out_idx / meta.pass_numel) : out_idx;
 
     int64_t dst_offset = 0;
+    bool oob = false;
     for (int i = 0; i < meta.num_indices; ++i) {
         if (meta.is_indexed[i]) {
             int64_t idx_val = idx_ptrs[i][bc];
             if (idx_val < 0) idx_val += meta.src_shape[i];
+            if (idx_val < 0 || idx_val >= meta.src_shape[i]) {
+                oob = true;
+                break;
+            }
             dst_offset += idx_val * meta.src_strides[i];
         }
+    }
+
+    if (oob) {
+        atomicExch(error_flag, 1);
+        return;
     }
 
     if (meta.num_pass_dims > 0) {
@@ -3827,6 +4018,15 @@ auto launch_advanced_index_gather_hip(
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+
+    // Device-side OOB error flag: an out-of-range advanced index previously had
+    // no bounds check at all here (unlike gather_kernel/take_kernel elsewhere in
+    // this file), causing an unchecked out-of-bounds device memory read. Match
+    // CPU's AdvancedIndex, which throws std::out_of_range.
+    int* d_error_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_error_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
     // Use data_ptr() + reinterpret_cast for HIP-native types (__half, hip_bfloat16)
     // that don't have Tensor::data<T>() instantiations in the core library.
     hipLaunchKernelGGL(advanced_index_gather_kernel_hip<T>,
@@ -3835,11 +4035,19 @@ auto launch_advanced_index_gather_hip(
         reinterpret_cast<T*>(result.data_ptr()),
         d_idx_ptrs,
         prep.meta,
-        prep.total);
+        prep.total,
+        d_error_flag);
     HIP_POST_LAUNCH_CHECK();
 
+    int host_error = 0;
+    HIP_CHECK(hipMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
     HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_error_flag));
     HIP_CHECK(hipFree(d_idx_ptrs));
+    if (host_error != 0) {
+        throw std::out_of_range("AdvancedIndex: index out of range");
+    }
     return result;
 }
 
@@ -3874,6 +4082,14 @@ auto launch_advanced_index_put_hip(
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+
+    // Device-side OOB error flag: an out-of-range advanced index previously had
+    // no bounds check at all here, causing an unchecked out-of-bounds device
+    // memory write. Match CPU's AdvancedIndexPut, which throws std::out_of_range.
+    int* d_error_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_error_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
     // Use data_ptr() + reinterpret_cast for HIP-native types (__half, hip_bfloat16)
     // that don't have Tensor::data<T>() instantiations in the core library.
     hipLaunchKernelGGL(advanced_index_put_kernel_hip<T>,
@@ -3882,14 +4098,35 @@ auto launch_advanced_index_put_hip(
         reinterpret_cast<const T*>(values_contig.data_ptr()),
         d_idx_ptrs,
         prep.meta,
-        prep.total);
+        prep.total,
+        d_error_flag);
     HIP_POST_LAUNCH_CHECK();
 
+    int host_error = 0;
+    HIP_CHECK(hipMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
     HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_error_flag));
     HIP_CHECK(hipFree(d_idx_ptrs));
+    if (host_error != 0) {
+        throw std::out_of_range("AdvancedIndexPut: index out of range");
+    }
     return result_contig;
 }
 
+}  // namespace
+
+namespace {
+// Raw same-size PODs for dtype-agnostic gather/put: the gather/put kernels
+// only ever do a whole-element `dst[i] = src[i]` assignment (no arithmetic),
+// so any trivially-copyable type of the right byte width reproduces CPU's
+// dtype-agnostic memcpy semantics exactly -- this is how Bool/Int8/UInt8/
+// Int16/UInt16/UInt32/UInt64/Complex64/Complex128 get gather/put support
+// without a bespoke kernel instantiation per dtype.
+struct AdvIdxBytes1 { uint8_t b[1]; };
+struct AdvIdxBytes2 { uint8_t b[2]; };
+struct AdvIdxBytes8 { uint8_t b[8]; };
+struct AdvIdxBytes16 { uint8_t b[16]; };
 }  // namespace
 
 auto advanced_index_rocm_kernel(
@@ -3910,6 +4147,16 @@ auto advanced_index_rocm_kernel(
         return launch_advanced_index_gather_hip<__half>(src, idx_ptrs.data(), num_indices, stream);
     } else if (src.dtype() == DType::BFloat16) {
         return launch_advanced_index_gather_hip<hip_bfloat16>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Bool || src.dtype() == DType::Int8 || src.dtype() == DType::UInt8) {
+        return launch_advanced_index_gather_hip<AdvIdxBytes1>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int16 || src.dtype() == DType::UInt16) {
+        return launch_advanced_index_gather_hip<AdvIdxBytes2>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt32) {
+        return launch_advanced_index_gather_hip<int32_t>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt64 || src.dtype() == DType::Complex64) {
+        return launch_advanced_index_gather_hip<AdvIdxBytes8>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Complex128) {
+        return launch_advanced_index_gather_hip<AdvIdxBytes16>(src, idx_ptrs.data(), num_indices, stream);
     }
     throw std::runtime_error("AdvancedIndex ROCm: unsupported dtype");
 }
@@ -3932,6 +4179,16 @@ auto advanced_index_put_rocm_kernel(
         return launch_advanced_index_put_hip<__half>(src, values, idx_ptrs.data(), num_indices, stream);
     } else if (src.dtype() == DType::BFloat16) {
         return launch_advanced_index_put_hip<hip_bfloat16>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Bool || src.dtype() == DType::Int8 || src.dtype() == DType::UInt8) {
+        return launch_advanced_index_put_hip<AdvIdxBytes1>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int16 || src.dtype() == DType::UInt16) {
+        return launch_advanced_index_put_hip<AdvIdxBytes2>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt32) {
+        return launch_advanced_index_put_hip<int32_t>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt64 || src.dtype() == DType::Complex64) {
+        return launch_advanced_index_put_hip<AdvIdxBytes8>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Complex128) {
+        return launch_advanced_index_put_hip<AdvIdxBytes16>(src, values, idx_ptrs.data(), num_indices, stream);
     }
     throw std::runtime_error("AdvancedIndexPut ROCm: unsupported dtype");
 }
@@ -4209,6 +4466,41 @@ auto masked_scatter_hip(const Tensor& input, const Tensor& mask_arg,
             masked_scatter_write_hip_kernel<int64_t><<<blocks, BLOCK, 0, stream>>>(
                 input.data<int64_t>(), mask.data<bool>(), source.data<int64_t>(),
                 d_prefix, output.data<int64_t>(), numel, source_numel, d_error_flag);
+            break;
+        // masked_scatter is pure data movement (output[i] = source[s]), so any
+        // trivially-copyable type of the right byte width reproduces CPU/CUDA's
+        // dtype-agnostic copy exactly. CPU/CUDA both additionally support Bool/
+        // Int8/UInt8/Int16/Complex64/Complex128 here; ROCm previously threw for
+        // all of them (only Float32/64/Int32/64/Float16/BFloat16 were handled).
+        case DType::Bool:
+        case DType::Int8:
+        case DType::UInt8:
+            masked_scatter_write_hip_kernel<AdvIdxBytes1><<<blocks, BLOCK, 0, stream>>>(
+                reinterpret_cast<const AdvIdxBytes1*>(input.data_ptr()), mask.data<bool>(),
+                reinterpret_cast<const AdvIdxBytes1*>(source.data_ptr()),
+                d_prefix, reinterpret_cast<AdvIdxBytes1*>(output.data_ptr()),
+                numel, source_numel, d_error_flag);
+            break;
+        case DType::Int16:
+            masked_scatter_write_hip_kernel<AdvIdxBytes2><<<blocks, BLOCK, 0, stream>>>(
+                reinterpret_cast<const AdvIdxBytes2*>(input.data_ptr()), mask.data<bool>(),
+                reinterpret_cast<const AdvIdxBytes2*>(source.data_ptr()),
+                d_prefix, reinterpret_cast<AdvIdxBytes2*>(output.data_ptr()),
+                numel, source_numel, d_error_flag);
+            break;
+        case DType::Complex64:
+            masked_scatter_write_hip_kernel<AdvIdxBytes8><<<blocks, BLOCK, 0, stream>>>(
+                reinterpret_cast<const AdvIdxBytes8*>(input.data_ptr()), mask.data<bool>(),
+                reinterpret_cast<const AdvIdxBytes8*>(source.data_ptr()),
+                d_prefix, reinterpret_cast<AdvIdxBytes8*>(output.data_ptr()),
+                numel, source_numel, d_error_flag);
+            break;
+        case DType::Complex128:
+            masked_scatter_write_hip_kernel<AdvIdxBytes16><<<blocks, BLOCK, 0, stream>>>(
+                reinterpret_cast<const AdvIdxBytes16*>(input.data_ptr()), mask.data<bool>(),
+                reinterpret_cast<const AdvIdxBytes16*>(source.data_ptr()),
+                d_prefix, reinterpret_cast<AdvIdxBytes16*>(output.data_ptr()),
+                numel, source_numel, d_error_flag);
             break;
         default:
             HIP_CHECK(hipFree(d_prefix));

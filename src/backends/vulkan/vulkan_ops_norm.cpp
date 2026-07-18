@@ -1225,8 +1225,16 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
     int64_t W = input_shape[3];
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32 for numerical stability. This is
+    // also load-bearing for correctness, not just precision: the
+    // group_norm_backward_bf16.comp shader declares grad_weight/grad_bias as
+    // `float[]` (4 bytes/elem) and atomicAdds into them accordingly, while
+    // dispatchZeros(..., input.dtype(), ...) below allocates those buffers at
+    // BFloat16's 2 bytes/elem — leaving BFloat16 to fall through to the native
+    // dispatch path (as Float16 alone previously did) causes the shader's
+    // float-stride atomic writes to run past the halfway point of a 2-byte/elem
+    // allocation, an out-of-bounds GPU buffer write once C is large enough.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
@@ -1660,8 +1668,16 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
                                               -> std::pair<Tensor, Tensor> {
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32 for numerical stability. This is
+    // also load-bearing for correctness, not just precision: the
+    // rms_norm_backward_bf16.comp shader declares grad_weight as `float[]`
+    // (4 bytes/elem) and atomicAdds into it accordingly, while dispatchZeros(
+    // ..., input.dtype(), ...) below allocates that buffer at BFloat16's
+    // 2 bytes/elem — leaving BFloat16 to fall through to the native dispatch
+    // path (as Float16 alone previously did) causes the shader's float-stride
+    // atomic writes to run past the halfway point of a 2-byte/elem allocation,
+    // an out-of-bounds GPU buffer write once normalized_shape is large enough.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);

@@ -52,4 +52,38 @@ inline void vulkan_assert_dtype_supported(
         std::string(dtype_name(dtype)) + " on Vulkan backend");
 }
 
+// The IndexSelect/Gather/Take/Scatter compute shaders have no error-reporting
+// path back to the host (unlike CUDA/ROCm's device-error-flag pattern), so an
+// out-of-range index previously silently wrote 0.0 (gather/take/index_select)
+// or silently skipped the write (scatter) instead of raising, diverging from
+// CPU (throws std::out_of_range), CUDA (device error-flag + host throw), ROCm
+// (validate_index_bounds), and OneAPI (host-side pre-check). Validate host-side
+// before ever dispatching the shader, mirroring dispatchPut's own fix for the
+// same root-cause gap.
+inline void vulkan_validate_index_bounds(
+    const Tensor& indices, int64_t dim_size, const char* op_name) {
+    int64_t n = indices.numel();
+    if (n == 0) return;
+    Tensor idx_host = indices.contiguous().to(Device::cpu());
+    auto check = [&](int64_t raw) {
+        int64_t v = raw;
+        if (v < 0) v += dim_size;
+        if (v < 0 || v >= dim_size) {
+            throw std::out_of_range(
+                std::string(op_name) + ": index " + std::to_string(raw) +
+                " out of range for dimension of size " + std::to_string(dim_size));
+        }
+    };
+    if (idx_host.dtype() == DType::Int64) {
+        const int64_t* p = idx_host.data<int64_t>();
+        for (int64_t i = 0; i < n; ++i) check(p[i]);
+    } else if (idx_host.dtype() == DType::Int32) {
+        const int32_t* p = idx_host.data<int32_t>();
+        for (int64_t i = 0; i < n; ++i) check(static_cast<int64_t>(p[i]));
+    } else {
+        throw std::invalid_argument(
+            std::string(op_name) + ": index tensor must have dtype Int32 or Int64");
+    }
+}
+
 } // namespace tenzor

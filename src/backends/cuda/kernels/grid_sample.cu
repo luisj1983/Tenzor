@@ -230,7 +230,18 @@ __global__ void grid_sample_bicubic_kernel(
             if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
             return input[((n * C + c) * H_in + y) * W_in + x];
         }
-        // border / reflection: clamp neighbours past the edge.
+        if (H_in == 0 || W_in == 0) return T(0);
+        if (padding_mode == 2) {  // reflection: true-reflect this out-of-range
+            // 4x4 neighbour back into [0, size-1] (PyTorch reflection
+            // semantics), matching CPU's safe_get instead of edge-clamping.
+            // reflect_coord already clips to the sampleable range.
+            int64_t ry = static_cast<int64_t>(reflect_coord<T>(static_cast<T>(y), H_in, align_corners));
+            int64_t rx = static_cast<int64_t>(reflect_coord<T>(static_cast<T>(x), W_in, align_corners));
+            ry = max(static_cast<int64_t>(0), min(ry, H_in - 1));
+            rx = max(static_cast<int64_t>(0), min(rx, W_in - 1));
+            return input[((n * C + c) * H_in + ry) * W_in + rx];
+        }
+        // border: clamp neighbours past the edge.
         y = max(static_cast<int64_t>(0), min(y, H_in - 1));
         x = max(static_cast<int64_t>(0), min(x, W_in - 1));
         return input[((n * C + c) * H_in + y) * W_in + x];
@@ -777,6 +788,13 @@ __global__ void grid_sample_bicubic_backward_kernel(
                 bool valid_s = true;
                 if (padding_mode == 0) {
                     if (yy < 0 || yy >= H_in || xx < 0 || xx >= W_in) valid_s = false;
+                } else if (padding_mode == 2) {
+                    // reflection: true-reflect (matches CPU backward scatter),
+                    // not edge-clamp.
+                    yy_s = static_cast<int64_t>(reflect_coord<T>(static_cast<T>(yy), H_in, align_corners));
+                    xx_s = static_cast<int64_t>(reflect_coord<T>(static_cast<T>(xx), W_in, align_corners));
+                    yy_s = max(static_cast<int64_t>(0), min(yy_s, H_in - 1));
+                    xx_s = max(static_cast<int64_t>(0), min(xx_s, W_in - 1));
                 } else {
                     yy_s = max(static_cast<int64_t>(0), min(yy, H_in - 1));
                     xx_s = max(static_cast<int64_t>(0), min(xx, W_in - 1));
@@ -792,6 +810,12 @@ __global__ void grid_sample_bicubic_backward_kernel(
                     if (yy >= 0 && yy < H_in && xx >= 0 && xx < W_in) {
                         v = input[((n * C + c) * H_in + yy) * W_in + xx];
                     }
+                } else if (padding_mode == 2) {
+                    int64_t yy_f = static_cast<int64_t>(reflect_coord<T>(static_cast<T>(yy), H_in, align_corners));
+                    int64_t xx_f = static_cast<int64_t>(reflect_coord<T>(static_cast<T>(xx), W_in, align_corners));
+                    yy_f = max(static_cast<int64_t>(0), min(yy_f, H_in - 1));
+                    xx_f = max(static_cast<int64_t>(0), min(xx_f, W_in - 1));
+                    v = input[((n * C + c) * H_in + yy_f) * W_in + xx_f];
                 } else {
                     int64_t yy_f = max(static_cast<int64_t>(0), min(yy, H_in - 1));
                     int64_t xx_f = max(static_cast<int64_t>(0), min(xx, W_in - 1));

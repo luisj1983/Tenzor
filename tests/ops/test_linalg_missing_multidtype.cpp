@@ -664,4 +664,126 @@ TEST_P(LinalgMissingMultiDTypeTest, CholeskyReconstructs) {
     EXPECT_LT(max_err, 1e-3f) << "L L^T should reconstruct A";
 }
 
+// ----------------------------------------------------------------------------
+// CPU-only: solve_triangular zero-diagonal rejection on the MKL/LAPACKE
+// build path. cblas_trsm divides by the diagonal internally with no error
+// reporting, so a zero-diagonal triangular factor used to silently produce
+// Inf/NaN on this (the codebase's default) CPU build instead of throwing,
+// unlike every other singular-input-checked linalg op on CPU. Not fanned
+// cross-backend: the equivalent Vulkan/ROCm-fallback gaps are tracked and
+// fixed separately.
+class SolveTriangularZeroDiagCpu : public ::testing::Test {
+protected:
+    void SetUp() override { tenzor::testing::EnsureInitialized(); }
+};
+
+TEST_F(SolveTriangularZeroDiagCpu, LowerZeroDiagonalThrows) {
+    auto L = tenzor::eye(3, 3, DType::Float32, Device::cpu());
+    L.data<float>()[1 * 3 + 1] = 0.0f;  // zero out the middle diagonal entry
+    auto B = tenzor::ones({3, 1}, DType::Float32, Device::cpu());
+    EXPECT_THROW(linalg::solve_triangular(L, B, /*upper=*/false), std::runtime_error);
+}
+
+TEST_F(SolveTriangularZeroDiagCpu, UpperZeroDiagonalThrows) {
+    auto U = tenzor::eye(3, 3, DType::Float32, Device::cpu());
+    U.data<float>()[0 * 3 + 0] = 0.0f;
+    auto B = tenzor::ones({3, 1}, DType::Float32, Device::cpu());
+    EXPECT_THROW(linalg::solve_triangular(U, B, /*upper=*/true), std::runtime_error);
+}
+
+TEST_F(SolveTriangularZeroDiagCpu, Float64ZeroDiagonalThrows) {
+    auto L = tenzor::eye(3, 3, DType::Float64, Device::cpu());
+    L.data<double>()[2 * 3 + 2] = 0.0;
+    auto B = tenzor::ones({3, 1}, DType::Float64, Device::cpu());
+    EXPECT_THROW(linalg::solve_triangular(L, B, /*upper=*/false), std::runtime_error);
+}
+
+TEST_F(SolveTriangularZeroDiagCpu, UnitTriangularIgnoresZeroDiagonal) {
+    // unitriangular=true never reads the diagonal (implicitly 1), so a zero
+    // stored there must NOT trigger the guard.
+    auto L = tenzor::eye(3, 3, DType::Float32, Device::cpu());
+    L.data<float>()[1 * 3 + 1] = 0.0f;
+    auto B = tenzor::ones({3, 1}, DType::Float32, Device::cpu());
+    EXPECT_NO_THROW(linalg::solve_triangular(L, B, /*upper=*/false, /*unitriangular=*/true));
+}
+
+TEST_F(SolveTriangularZeroDiagCpu, NonSingularStillWorks) {
+    // Regression: the guard must not misfire on a well-conditioned input.
+    auto L_cpu = randn({3, 3}, DType::Float32, Device::cpu());
+    auto L = tenzor::tril(L_cpu);
+    // Push the diagonal away from zero.
+    for (int64_t i = 0; i < 3; ++i) {
+        float& d = L.data<float>()[i * 3 + i];
+        d = (d >= 0.0f) ? d + 2.0f : d - 2.0f;
+    }
+    auto B = tenzor::ones({3, 1}, DType::Float32, Device::cpu());
+    EXPECT_NO_THROW(linalg::solve_triangular(L, B, /*upper=*/false));
+}
+
+// ----------------------------------------------------------------------------
+// CPU-only: lu_solve/ldl_solve/householder_product/ormqr used to have no
+// upfront complex-dtype rejection (unlike sibling ops lu()/ldl_factor()/
+// geqrf(), which throw a clear std::invalid_argument("... complex ... is
+// not supported")). A complex input instead fell through to the Float64
+// branch and called .data<double>() on a complex tensor, throwing
+// Tensor::data<T>'s internal "Type mismatch" DTypeException -- confusing
+// and inconsistent with the sibling ops' error surface. Now all seven give
+// the same clear message.
+// ----------------------------------------------------------------------------
+class LinalgComplexRejectionCpu : public ::testing::Test {
+protected:
+    void SetUp() override { tenzor::testing::EnsureInitialized(); }
+};
+
+TEST_F(LinalgComplexRejectionCpu, LuSolveRejectsComplexWithClearMessage) {
+    auto LU = zeros({2, 2}, DType::Complex64, Device::cpu());
+    auto pivots = zeros({2}, DType::Int32, Device::cpu());
+    auto B = zeros({2, 1}, DType::Complex64, Device::cpu());
+    try {
+        linalg::lu_solve(LU, pivots, B);
+        FAIL() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("complex"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("not supported"), std::string::npos);
+    }
+}
+
+TEST_F(LinalgComplexRejectionCpu, LdlSolveRejectsComplexWithClearMessage) {
+    auto LD = zeros({2, 2}, DType::Complex64, Device::cpu());
+    auto pivots = zeros({2}, DType::Int32, Device::cpu());
+    auto B = zeros({2, 1}, DType::Complex64, Device::cpu());
+    try {
+        linalg::ldl_solve(LD, pivots, B);
+        FAIL() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("complex"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("not supported"), std::string::npos);
+    }
+}
+
+TEST_F(LinalgComplexRejectionCpu, HouseholderProductRejectsComplexWithClearMessage) {
+    auto input = zeros({3, 2}, DType::Complex64, Device::cpu());
+    auto tau = zeros({2}, DType::Complex64, Device::cpu());
+    try {
+        linalg::householder_product(input, tau);
+        FAIL() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("complex"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("not supported"), std::string::npos);
+    }
+}
+
+TEST_F(LinalgComplexRejectionCpu, OrmqrRejectsComplexWithClearMessage) {
+    auto input = zeros({3, 2}, DType::Complex64, Device::cpu());
+    auto tau = zeros({2}, DType::Complex64, Device::cpu());
+    auto other = zeros({3, 3}, DType::Complex64, Device::cpu());
+    try {
+        linalg::ormqr(input, tau, other, /*left=*/true, /*transpose=*/false);
+        FAIL() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("complex"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("not supported"), std::string::npos);
+    }
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LinalgMissingMultiDTypeTest);

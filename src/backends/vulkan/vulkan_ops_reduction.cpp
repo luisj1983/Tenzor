@@ -46,9 +46,18 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input_orig, int64_t dim, bool k
     }
 
     // argmax has no identity element; a zero-size reduction has no answer. Match
-    // CPU/CUDA/ROCm/OneAPI, which throw rather than return a bogus/zero index.
-    if (input.numel() == 0) {
-        throw std::runtime_error("argmax: cannot compute argmax of empty tensor");
+    // CPU/CUDA/ROCm/OneAPI exactly (message + exception type). Distinguish
+    // "whole tensor empty" (dim<0, full reduction) from "the specifically-
+    // requested dim is empty" (checked via input_shape[dim], NOT
+    // input.numel()==0 -- numel() can be 0 merely because some OTHER dim is
+    // empty, in which case out_shape is also empty and there is nothing to
+    // throw about).
+    if (dim < 0) {
+        if (input.numel() == 0) {
+            throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
+        }
+    } else if (input_shape[dim] == 0) {
+        throw std::invalid_argument("argmax: cannot reduce over a zero-size dimension");
     }
 
     int32_t device_id = input.device().index;
@@ -176,9 +185,15 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input_orig, int64_t dim, bool k
     }
 
     // argmin has no identity element; a zero-size reduction has no answer. Match
-    // CPU/CUDA/ROCm/OneAPI, which throw rather than return a bogus/zero index.
-    if (input.numel() == 0) {
-        throw std::runtime_error("argmin: cannot compute argmin of empty tensor");
+    // CPU/CUDA/ROCm/OneAPI exactly (message + exception type). See dispatchArgmax
+    // for why this must check input_shape[dim], not input.numel()==0, in the
+    // per-dim case.
+    if (dim < 0) {
+        if (input.numel() == 0) {
+            throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
+        }
+    } else if (input_shape[dim] == 0) {
+        throw std::invalid_argument("argmin: cannot reduce over a zero-size dimension");
     }
 
     int32_t device_id = input.device().index;
@@ -388,6 +403,14 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
     // For p=2 (L2 norm): sqrt(sum(x^2))
     // For p=1 (L1 norm): sum(|x|)
 
+    // norm is built from dispatchReduction("sum", ...), which -- like CPU's own
+    // sum -- happily fills 0 for an empty reduced dim. That silently produced 0
+    // (or, for negative p, +/-inf via exp(-inf log 0)) instead of throwing.
+    // Matches CPU/CUDA/ROCm/OneAPI, which all throw for this case.
+    if (dim >= 0 && input.shape()[dim] == 0) {
+        throw std::invalid_argument("norm: cannot reduce over a zero-size dimension");
+    }
+
     // General-p norm needs to stage the p / (1/p) scalars, which only supports
     // Float32/Float64. For Float16/BFloat16 with p not in {1,2}, widen to
     // Float32 on device, compute, narrow back. The p==1/p==2 branches below
@@ -399,6 +422,27 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
     }
 
     Tensor abs_input = dispatchUnaryOp("abs", input);
+
+    // p == 0 is the L0 "norm": count of nonzero elements. The general
+    // exp(p*log|x|) formula below gives |x|^0 == 1 for every element
+    // (including zero, per IEEE-754), which would wrongly sum to the
+    // reduced dimension's size instead of the nonzero count. Mirrors CPU's
+    // norm_kernel_dim p==0 special case.
+    if (p == 0.0f) {
+        Tensor count = dispatchCountNonzero(input, dim, keepdim);
+        return (count.dtype() == input.dtype()) ? count : count.to(input.dtype());
+    }
+
+    // p == +/-infinity: the general formula below computes |x|^p via
+    // exp(p*log|x|); for any element with |x|==1, log|x|==0, so p*log|x| ==
+    // inf*0 == NaN, poisoning the whole reduction with NaN instead of the
+    // correct max(|x|) (p=+inf) / min(|x|) (p=-inf). std::isinf(p) is true
+    // for both signs; std::signbit distinguishes them. Mirrors CPU's
+    // norm_kernel_dim isinf(p) special case.
+    if (std::isinf(p)) {
+        const bool is_neg_inf = std::signbit(p);
+        return dispatchReduction(is_neg_inf ? "min" : "max", abs_input, dim, keepdim);
+    }
 
     if (p == 1.0f) {
         // L1 norm: sum of absolute values
@@ -1619,9 +1663,133 @@ auto VulkanBackend::dispatchCountNonzero(const Tensor& input) -> Tensor {
     endSingleTimeCommands(cmdBuffer, device_id);
     synchronize(device_id);
 
-    // Convert count (uint32 for f32 path, float64 for f64 path) -> Int64;
-    // keep shape {1} to match CPU backend
-    return output.to(DType::Int64);
+    // Convert count (uint32 for f32 path, float64 for f64 path) -> Int64,
+    // then drop the shader-dispatch-only {1} shape down to a true 0-dim
+    // scalar to match CPU/CUDA/ROCm/OneAPI's full-reduction convention.
+    return dispatchReshape(output.to(DType::Int64), {});
+}
+
+// Dim-specific CountNonzero. Reuses the boolean_reduction shader's
+// per-dimension plumbing (op=2: accumulate a count instead of any/all's
+// bitwise reduce) so the reduced-dim-empty case gets the same identity-fill
+// treatment as any/all instead of leaving output uninitialized, and general
+// per-dim reduction matches CPU/CUDA/ROCm/OneAPI capability instead of
+// silently ignoring `dim` (the previous behavior: the op-layer always set
+// AttrKey::Dim, but the registered kernel never read it).
+auto VulkanBackend::dispatchCountNonzero(const Tensor& input_orig, int64_t dim, bool keepdim) -> Tensor {
+    Tensor input = dispatchContiguous(input_orig);
+
+    if (input.numel() == 0) {
+        // count_nonzero of an empty reduced dim is 0, regardless of why the
+        // tensor is empty (matches CPU: identity fill, never uninitialized).
+        std::vector<int64_t> out_shape;
+        if (dim == INT64_MIN) {
+            out_shape = keepdim ? std::vector<int64_t>(input.shape().size(), 1) : std::vector<int64_t>{};
+        } else {
+            auto input_shape = input.shape();
+            out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+            int64_t d = dim < 0 ? dim + static_cast<int64_t>(input_shape.size()) : dim;
+            if (keepdim) out_shape[d] = 1;
+            else out_shape.erase(out_shape.begin() + d);
+        }
+        return dispatchFull(out_shape, 0.0f, DType::Int64);
+    }
+
+    // The boolean_reduction shader reads the input buffer as 4-byte float
+    // (the _f64 variant as 8-byte double); narrow dtypes must be widened
+    // first, same as dispatchBooleanReduction.
+    if (input.dtype_size() < 4) {
+        auto input_f32 = input.to(DType::Float32);
+        return dispatchCountNonzero(input_f32, dim, keepdim);
+    }
+
+    int32_t device_id = input.device().index;
+    auto input_shape = input.shape();
+
+    bool full_reduction = (dim == INT64_MIN);
+    if (!full_reduction && dim < 0) {
+        dim = static_cast<int64_t>(input_shape.size()) + dim;
+    }
+
+    bool is_float64 = (input.dtype() == DType::Float64);
+    std::string shader_name = is_float64 ? "boolean_reduction_f64" : "boolean_reduction";
+    auto* pipeline = getPipeline(shader_name, device_id);
+    constexpr uint32_t OP_COUNT_NONZERO = 2;
+
+    std::vector<int64_t> out_shape;
+    if (full_reduction) {
+        out_shape = keepdim ? std::vector<int64_t>(input_shape.size(), 1) : std::vector<int64_t>{};
+    } else {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        if (keepdim) out_shape[dim] = 1;
+        else out_shape.erase(out_shape.begin() + dim);
+    }
+
+    // Int32 accumulator buffer (same as any/all), cast to Int64 at the end.
+    Tensor int_output(out_shape.empty() ? std::vector<int64_t>{1} : out_shape, DType::Int32, input.device());
+
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = int_output.data_ptr();
+    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_out = int_output.numel() * int_output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    uint32_t inner_size = 1;
+    if (!full_reduction) {
+        for (size_t i = static_cast<size_t>(dim) + 1; i < input_shape.size(); ++i) {
+            inner_size *= static_cast<uint32_t>(input_shape[i]);
+        }
+    }
+
+    struct {
+        uint32_t n;
+        uint32_t reduce_size;
+        uint32_t outer_size;
+        uint32_t inner_size;
+        uint32_t op;
+    } pushConstants;
+
+    pushConstants.n = static_cast<uint32_t>(input.numel());
+    pushConstants.reduce_size = full_reduction ? pushConstants.n : static_cast<uint32_t>(input_shape[dim]);
+    pushConstants.outer_size = static_cast<uint32_t>(int_output.numel());
+    pushConstants.inner_size = inner_size;
+    pushConstants.op = OP_COUNT_NONZERO;
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    uint32_t workgroups = pushConstants.outer_size;
+    checkSparseRowDispatch(device_id, "vk_row_dispatch", workgroups);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+    synchronize(device_id);
+
+    Tensor output = dispatchCast(int_output, DType::Int64);
+
+    // out_shape (computed above) is the true target shape; int_output/output
+    // were allocated at {1} internally when out_shape was empty (a shader
+    // dispatch needs at least one element), so reshape back down to the true
+    // 0-dim scalar here -- this also covers an explicit dim on a 1-D input
+    // with keepdim=false (out_shape.erase() leaves it empty), not just the
+    // INT64_MIN full_reduction sentinel.
+    if (out_shape.empty()) {
+        return output.reshape({});
+    }
+    return output;
 }
 
 auto VulkanBackend::dispatchNansum(const Tensor& input) -> Tensor {

@@ -213,7 +213,8 @@ auto layer_norm_kernel_with_stats(
     // Saved stats shape is the leading (ndim - norm_ndim) batch dims.
     std::vector<int64_t> stats_shape(input_shape.begin(),
                                      input_shape.begin() + (ndim - norm_ndim));
-    if (stats_shape.empty()) stats_shape.push_back(1);
+    // Empty stats_shape (normalized_shape covers every dim, no batch dims
+    // left) is a true 0-dim scalar -- do not force a size-1 dim.
     Tensor mean(stats_shape, input_contig.dtype(), input_contig.device());
     Tensor rstd(stats_shape, input_contig.dtype(), input_contig.device());
 
@@ -313,11 +314,21 @@ __global__ void layer_norm_backward_kernel(
     __syncthreads();
 
     // Compute gradient for input
+    // dx_i = rstd * (go_i*w_i - mean(go*w) - x_hat_i*mean(go*w*x_hat))
+    //      = rstd * (go_i*w_i - scale*(db + x_hat_i*ds))
+    // ds/db already include the `w` factor (accumulated as go*w and go*w*x_hat
+    // above), so `w` must NOT also multiply the correction term -- the
+    // previous `rs * w * (go - scale*(db+x_hat*ds))` incorrectly applied w to
+    // the whole expression instead of just the go term, matching neither the
+    // CPU nor CUDA reference (cuda/kernels/fused_ops.cu's
+    // fused_layer_norm_backward_kernel: grad_out_weighted - mean_grad_out -
+    // normalized*mean_grad_out_normalized, all scaled by inv_std at the end).
     Acc scale = Acc(1) / Acc(normalized_size);
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
         Acc x_hat = (static_cast<Acc>(input_row[i]) - m) * rs;
         Acc w = weight ? static_cast<Acc>(weight[i]) : Acc(1);
-        grad_in_row[i] = static_cast<T>(rs * w * (static_cast<Acc>(grad_out_row[i]) - scale * (db + x_hat * ds)));
+        Acc go_w = w * static_cast<Acc>(grad_out_row[i]);
+        grad_in_row[i] = static_cast<T>(rs * (go_w - scale * (db + x_hat * ds)));
 
         // Accumulate gradients for weight and bias
         if (grad_weight) {
@@ -770,8 +781,13 @@ __global__ void group_norm_backward_hip_kernel(
     const T* __restrict__ mean_saved,
     const T* __restrict__ inv_std_saved,
     T* __restrict__ grad_input,
-    T* __restrict__ grad_weight,
-    T* __restrict__ grad_bias,
+    // F-085 pattern: double-precision scratch accumulators, atomicAdd'd into
+    // by every contributing (n, group) block, then narrowed to T once by
+    // narrow_group_norm_grad_accum_kernel after this kernel completes. A
+    // plain-T atomicAdd accumulator (previous behavior) loses precision for
+    // Float32 across large N, unlike CPU's double accumulation.
+    double* __restrict__ grad_weight_accum,
+    double* __restrict__ grad_bias_accum,
     int64_t N, int64_t C, int64_t HW,
     int64_t num_groups, int64_t channels_per_group) {
 
@@ -855,17 +871,35 @@ __global__ void group_norm_backward_hip_kernel(
                 (sum_dy + static_cast<double>(xhat) * sum_dy_xhat)));
     }
 
-    // Accumulate grad_weight and grad_bias (atomic since multiple samples contribute)
-    if (weight && grad_weight && grad_bias) {
+    // Accumulate grad_weight and grad_bias (atomic since multiple samples contribute).
+    // Accumulate in double precision regardless of T (F-085 pattern).
+    if (weight && grad_weight_accum && grad_bias_accum) {
         for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
             int64_t c_offset = i / HW;
             int64_t hw = i % HW;
             int64_t c = c_start + c_offset;
             int64_t idx = (n * C + c) * HW + hw;
             T xhat = (input[idx] - mean_val) * inv_std;
-            atomicAdd(&grad_weight[c], grad_output[idx] * xhat);
-            atomicAdd(&grad_bias[c], grad_output[idx]);
+            atomicAdd(&grad_weight_accum[c], static_cast<double>(grad_output[idx]) * static_cast<double>(xhat));
+            atomicAdd(&grad_bias_accum[c], static_cast<double>(grad_output[idx]));
         }
+    }
+}
+
+// Narrows the double-precision grad_weight/grad_bias scratch accumulators
+// (populated via atomicAdd across every (n, group) block in
+// group_norm_backward_hip_kernel) down to the output dtype T, once per channel.
+template<typename T>
+__global__ void narrow_group_norm_grad_accum_kernel(
+    const double* __restrict__ grad_weight_accum,
+    const double* __restrict__ grad_bias_accum,
+    T* __restrict__ grad_weight,
+    T* __restrict__ grad_bias,
+    int64_t C) {
+    int64_t c = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (c < C) {
+        grad_weight[c] = static_cast<T>(grad_weight_accum[c]);
+        grad_bias[c] = static_cast<T>(grad_bias_accum[c]);
     }
 }
 
@@ -890,12 +924,20 @@ auto group_norm_backward_kernel(
     Tensor grad_weight({C}, input.dtype(), input.device());
     Tensor grad_bias({C}, input.dtype(), input.device());
 
-    // Zero-initialize grad_weight and grad_bias (atomicAdd accumulation)
-    HIP_CHECK(hipMemsetAsync(grad_weight.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
-    HIP_CHECK(hipMemsetAsync(grad_bias.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
+    // F-085 pattern: double-precision scratch accumulators, atomicAdd'd into
+    // by every (n, group) block in group_norm_backward_hip_kernel, then
+    // narrowed to input.dtype() in a single pass
+    // (narrow_group_norm_grad_accum_kernel) once the main kernel completes.
+    // Matches CPU's double accumulation and avoids the float32 atomicAdd
+    // rounding error compounding over large N.
+    Tensor grad_weight_accum({C}, DType::Float64, input.device());
+    Tensor grad_bias_accum({C}, DType::Float64, input.device());
+    HIP_CHECK(hipMemsetAsync(grad_weight_accum.data<double>(), 0, C * sizeof(double), stream));
+    HIP_CHECK(hipMemsetAsync(grad_bias_accum.data<double>(), 0, C * sizeof(double), stream));
 
     int64_t num_group_instances = N * num_groups;
     int block_size = BLOCK_SIZE;
+    int narrow_blocks = static_cast<int>((C + block_size - 1) / block_size);
 
     // Saved stats from group_norm_forward_with_stats are always Float32.
     // Cast to input dtype for the typed backward kernel.
@@ -908,8 +950,13 @@ auto group_norm_backward_kernel(
             grad_output.data<float>(), input.data<float>(),
             weight ? weight->data<float>() : nullptr,
             mean_typed.data<float>(), rstd_typed.data<float>(),
-            grad_input.data<float>(), grad_weight.data<float>(), grad_bias.data<float>(),
+            grad_input.data<float>(), grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
             N, C, HW, num_groups, channels_per_group);
+        HIP_POST_LAUNCH_CHECK();
+        hipLaunchKernelGGL(narrow_group_norm_grad_accum_kernel<float>,
+            dim3(narrow_blocks), dim3(block_size), 0, stream,
+            grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
+            grad_weight.data<float>(), grad_bias.data<float>(), C);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(group_norm_backward_hip_kernel<double>,
@@ -917,8 +964,13 @@ auto group_norm_backward_kernel(
             grad_output.data<double>(), input.data<double>(),
             weight ? weight->data<double>() : nullptr,
             mean_typed.data<double>(), rstd_typed.data<double>(),
-            grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
+            grad_input.data<double>(), grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
             N, C, HW, num_groups, channels_per_group);
+        HIP_POST_LAUNCH_CHECK();
+        hipLaunchKernelGGL(narrow_group_norm_grad_accum_kernel<double>,
+            dim3(narrow_blocks), dim3(block_size), 0, stream,
+            grad_weight_accum.data<double>(), grad_bias_accum.data<double>(),
+            grad_weight.data<double>(), grad_bias.data<double>(), C);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         // Mixed precision: compute in Float32, convert back

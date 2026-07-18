@@ -97,11 +97,19 @@ auto nms_kernel(
         queue.parallel_for(sycl::range<1>(num_boxes), [=](sycl::id<1> i) {
             d_order[i] = static_cast<int64_t>(i[0]);
         }).wait();
+        // Descending by score, with a deterministic ascending-index tie-break
+        // so equal-score boxes keep a stable, lowest-index-first order. This
+        // matches the CPU (std::sort with explicit i<j tiebreak), CUDA
+        // (stable radix sort), ROCm (explicit composite sort key), and Vulkan
+        // (explicit index tiebreak) NMS backends, making the surviving keep
+        // set identical across backends for tied scores.
         ::oneapi::dpl::sort(policy,
             ::oneapi::dpl::make_zip_iterator(d_scores, d_order),
             ::oneapi::dpl::make_zip_iterator(d_scores + num_boxes, d_order + num_boxes),
             [](const auto& a, const auto& b) {
-                return std::get<0>(a) > std::get<0>(b);
+                float sa = std::get<0>(a), sb = std::get<0>(b);
+                if (sa != sb) return sa > sb;
+                return std::get<1>(a) < std::get<1>(b);
             });
         sycl::free(d_scores, queue);
     }
@@ -1707,7 +1715,10 @@ auto box_iou_kernel(
             float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
             float union_area = area1 + area2 - inter_area;
 
-            float iou = inter_area / (union_area + 1e-7f);
+            // Matches CPU exactly: for degenerate/inverted input boxes union_area can
+            // be <= 0; the unguarded division can return a negative or blown-up
+            // IoU instead of the defined 0.
+            float iou = (union_area > 0.0f) ? (inter_area / union_area) : 0.0f;
 
             if (iou_type == 1) {
                 // GIoU
@@ -1716,7 +1727,7 @@ auto box_iou_kernel(
                 float enc_x2 = sycl::fmax(x2_1, x2_2);
                 float enc_y2 = sycl::fmax(y2_1, y2_2);
                 float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
-                iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+                iou = iou - (enc_area - union_area) / sycl::max(enc_area, 1e-7f);
             } else if (iou_type == 2 || iou_type == 3) {
                 // DIoU (2) / CIoU (3): subtract the center-distance penalty (and,
                 // for CIoU, the aspect-ratio penalty). Previously these fell
@@ -1779,7 +1790,8 @@ auto box_iou_kernel(
             double area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
             double union_area = area1 + area2 - inter_area;
 
-            double iou = inter_area / (union_area + 1e-7);
+            // Matches CPU exactly: see the Float32 variant above.
+            double iou = (union_area > 0.0) ? (inter_area / union_area) : 0.0;
 
             if (iou_type == 1) {
                 double enc_x1 = sycl::fmin(x1_1, x1_2);
@@ -1787,7 +1799,7 @@ auto box_iou_kernel(
                 double enc_x2 = sycl::fmax(x2_1, x2_2);
                 double enc_y2 = sycl::fmax(y2_1, y2_2);
                 double enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
-                iou = iou - (enc_area - union_area) / (enc_area + 1e-7);
+                iou = iou - (enc_area - union_area) / sycl::max(enc_area, 1e-7);
             } else if (iou_type == 2 || iou_type == 3) {
                 // DIoU (2) / CIoU (3): center-distance (+ aspect-ratio) penalty.
                 double enc_x1 = sycl::fmin(x1_1, x1_2);
@@ -1848,7 +1860,10 @@ auto box_iou_kernel(
             float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
             float union_area = area1 + area2 - inter_area;
 
-            float iou = inter_area / (union_area + 1e-7f);
+            // Matches CPU exactly: for degenerate/inverted input boxes union_area can
+            // be <= 0; the unguarded division can return a negative or blown-up
+            // IoU instead of the defined 0.
+            float iou = (union_area > 0.0f) ? (inter_area / union_area) : 0.0f;
 
             if (iou_type == 1) {
                 float enc_x1 = sycl::fmin(x1_1, x1_2);
@@ -1856,7 +1871,7 @@ auto box_iou_kernel(
                 float enc_x2 = sycl::fmax(x2_1, x2_2);
                 float enc_y2 = sycl::fmax(y2_1, y2_2);
                 float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
-                iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+                iou = iou - (enc_area - union_area) / sycl::max(enc_area, 1e-7f);
             } else if (iou_type == 2 || iou_type == 3) {
                 // DIoU (2) / CIoU (3): center-distance (+ aspect-ratio) penalty,
                 // computed in float accumulation. Matches the Float32 path/CPU.
@@ -1918,7 +1933,10 @@ auto box_iou_kernel(
             float area2 = (x2_2 - x1_2) * (y2_2 - y1_2);
             float union_area = area1 + area2 - inter_area;
 
-            float iou = inter_area / (union_area + 1e-7f);
+            // Matches CPU exactly: for degenerate/inverted input boxes union_area can
+            // be <= 0; the unguarded division can return a negative or blown-up
+            // IoU instead of the defined 0.
+            float iou = (union_area > 0.0f) ? (inter_area / union_area) : 0.0f;
 
             if (iou_type == 1) {
                 float enc_x1 = sycl::fmin(x1_1, x1_2);
@@ -1926,7 +1944,7 @@ auto box_iou_kernel(
                 float enc_x2 = sycl::fmax(x2_1, x2_2);
                 float enc_y2 = sycl::fmax(y2_1, y2_2);
                 float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
-                iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+                iou = iou - (enc_area - union_area) / sycl::max(enc_area, 1e-7f);
             } else if (iou_type == 2 || iou_type == 3) {
                 // DIoU (2) / CIoU (3): center-distance (+ aspect-ratio) penalty,
                 // computed in float accumulation. Matches the Float32 path/CPU.

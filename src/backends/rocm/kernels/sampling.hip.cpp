@@ -110,27 +110,85 @@ auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor {
 // Poisson sampling (Knuth algorithm with LCG PRNG)
 // =========================================================================
 
+// Uniform draw for the Poisson samplers, clamped away from 0 so it is safe to
+// take a log() of it (both the Knuth product test and the Hormann PTRS
+// acceptance test do so). Mirrors CUDA's poisson_lcg_uniform helper
+// (advanced.cu), just re-based on this file's counter-hashed PRNG instead of
+// an evolving LCG state.
+__device__ __forceinline__ float poisson_next_uniform(uint64_t seed, uint64_t tid,
+                                                       uint64_t& counter) {
+    return fmaxf(splitmix64_next_uniform(seed, tid, counter), 1.0e-7f);
+}
+
 __global__ void poisson_kernel_impl(const float* rates, int64_t* output,
                                      int64_t n, uint64_t seed) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    // Counter-based draws: each Knuth-loop iteration is an independent uniform
+    // Counter-based draws: each loop iteration is an independent uniform
     // hashed from (seed, tid, counter), so adjacent threads are decorrelated.
     uint64_t counter = 0;
+    uint64_t utid = static_cast<uint64_t>(tid);
 
     float lambda = rates[tid];
-    float L = expf(-lambda);
+
+    if (!(lambda > 0.0f)) {
+        output[tid] = 0;
+        return;
+    }
+
+    if (lambda < 12.0f) {
+        // Knuth multiply-uniforms. expf(-lambda) is well above the float
+        // underflow threshold for lambda < ~88, and accumulating in double
+        // keeps the product representable across the (rare) long tails. Cap
+        // iterations as a hard safety bound so the kernel always terminates.
+        const double L = ::exp(-static_cast<double>(lambda));
+        int64_t k = 0;
+        double p = 1.0;
+        const int64_t max_iter = 1 << 20;
+        do {
+            k++;
+            p *= static_cast<double>(poisson_next_uniform(seed, utid, counter));
+        } while (p > L && k < max_iter);
+        output[tid] = k - 1;
+        return;
+    }
+
+    // Transformed rejection (Hoermann PTRS) for moderate/large lambda, where
+    // Knuth's expected iteration count grows linearly and expf(-lambda)
+    // underflows to exactly 0 for lambda gtr ~104 (silently truncating the
+    // Knuth loop after ~100-150 iterations regardless of true lambda, which
+    // severely low-biases the samples). Ported faithfully from CUDA's
+    // reference implementation (src/backends/cuda/kernels/advanced.cu).
+    const double dlam = static_cast<double>(lambda);
+    const double b = 0.931 + 2.53 * ::sqrt(dlam);
+    const double a = -0.059 + 0.02483 * b;
+    const double inv_alpha = 1.1239 + 1.1328 / (b - 3.4);
+    const double v_r = 0.9277 - 3.6224 / (b - 2.0);
+    const double loglam = ::log(dlam);
+
     int64_t k = 0;
-    float p = 1.0f;
-
-    do {
-        ++k;
-        float u = splitmix64_next_uniform(seed, static_cast<uint64_t>(tid), counter);
-        p *= u;
-    } while (p > L);
-
-    output[tid] = k - 1;
+    for (int iter = 0; iter < 1024; ++iter) {
+        double U = static_cast<double>(poisson_next_uniform(seed, utid, counter)) - 0.5;
+        double V = static_cast<double>(poisson_next_uniform(seed, utid, counter));
+        double us = 0.5 - fabs(U);
+        double kd = ::floor((2.0 * a / us + b) * U + dlam + 0.43);
+        if (us >= 0.07 && V <= v_r) {
+            k = static_cast<int64_t>(kd);
+            break;
+        }
+        if (kd < 0.0 || (us < 0.013 && V > us)) {
+            continue;
+        }
+        // lgamma(kd+1) = log(kd!)
+        double logV = ::log(V) + ::log(inv_alpha) - ::log(a / (us * us) + b);
+        double rhs = -dlam + kd * loglam - ::lgamma(kd + 1.0);
+        if (logV <= rhs) {
+            k = static_cast<int64_t>(kd);
+            break;
+        }
+    }
+    output[tid] = k;
 }
 
 auto poisson_sample_kernel(const Tensor& rates, hipStream_t stream) -> Tensor {
@@ -211,13 +269,50 @@ __global__ void exponential_sample_kernel_impl(const float* rate, float* output,
     output[tid] = -logf(1.0f - u) / rate[tid];
 }
 
+// The Exponential distribution is only defined for rate > 0 (rate==0 gives an
+// undefined +Inf-mean distribution; rate<0 has no valid support at all).
+// Every thread independently flags its own element into a single atomic int
+// (no reduction-tree ordering to worry about, so NaN is always caught). The
+// host reads that one scalar back and throws before ever dispatching the
+// sampler, instead of silently emitting +Inf (rate==0) or a mathematically
+// invalid negative sample (rate<0).
+__global__ void exponential_validate_rate_kernel(const float* rate, int64_t n,
+                                                  int* invalid_flag) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+    if (!(rate[tid] > 0.0f)) {
+        atomicExch(invalid_flag, 1);
+    }
+}
+
 auto exponential_sample_kernel(const Tensor& rate, hipStream_t stream) -> Tensor {
     auto input = rate.contiguous();
     if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
 
+    int64_t n = input.numel();
+    if (n > 0) {
+        // O(1) host<->device sync regardless of tensor size: one small
+        // scratch allocation, one kernel launch, one scalar readback — not an
+        // elementwise CPU round-trip.
+        HipBuffer flag_buf(sizeof(int));
+        int* d_flag = flag_buf.as<int>();
+        HIP_CHECK(hipMemsetAsync(d_flag, 0, sizeof(int), stream));
+        int vthreads = 256;
+        int vblocks = static_cast<int>((n + vthreads - 1) / vthreads);
+        hipLaunchKernelGGL(exponential_validate_rate_kernel,
+            dim3(vblocks), dim3(vthreads), 0, stream,
+            input.data<float>(), n, d_flag);
+        int h_flag = 0;
+        HIP_CHECK(hipMemcpyAsync(&h_flag, d_flag, sizeof(int), hipMemcpyDeviceToHost, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        if (h_flag != 0) {
+            throw std::invalid_argument(
+                "exponential: rate must be > 0 (got a non-positive or NaN rate)");
+        }
+    }
+
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Float32, input.device());
-    int64_t n = input.numel();
     if (n == 0) return result;
 
     int threads = 256;
@@ -293,6 +388,12 @@ __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* bet
 
 auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
                          hipStream_t stream) -> Tensor {
+    // Preserve the caller's dtype: sampling runs in Float32 for RNG, but
+    // gamma(Float64/BFloat16, ...) must return that dtype — matches the
+    // widen-compute-narrow pattern normal_sample_kernel/bernoulli_kernel
+    // already use in this file (was previously always Float32 regardless of
+    // input dtype).
+    const DType orig_dtype = concentration.dtype();
     auto a = concentration.contiguous();
     if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
     auto b = rate.contiguous();
@@ -301,7 +402,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
     std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
     Tensor result(shape, DType::Float32, a.device());
     int64_t n = a.numel();
-    if (n == 0) return result;
+    if (n == 0) return (orig_dtype == DType::Float32) ? result : result.to(orig_dtype);
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
@@ -311,7 +412,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
         dim3(blocks_n), dim3(threads), 0, stream,
         a.data<float>(), b.data<float>(), result.data<float>(), n, seed);
     HIP_CHECK(hipGetLastError());
-    return result;
+    return (orig_dtype == DType::Float32) ? result : result.to(orig_dtype);
 }
 
 // =========================================================================
@@ -792,7 +893,8 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
     for (int64_t d = 0; d < ndim; d++) {
         if (d != dim) out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input) is a true 0-dim scalar, matching
+    // CPU/CUDA/OneAPI/Vulkan's convention -- do not force a size-1 dim.
 
     Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;
@@ -1243,6 +1345,17 @@ auto histogramdd_kernel(const Tensor& input,
         int64_t nb = bins[sd];
         double fmin = ranges[sd].first;
         double fmax = ranges[sd].second;
+        // A caller-supplied degenerate range (fmin >= fmax) yields step<=0, so
+        // (v - fmin)/step at bin time is NaN/Inf (silently clamped afterward,
+        // but the bin assignment would be unspecified). The auto-range path
+        // already widens an equal-bounds interval by +-0.5 above; reuse that
+        // same widening here — matches CPU's histogramdd_kernel
+        // (src/backends/cpu/kernels/reduction.cpp) so step stays strictly
+        // positive.
+        if (fmin >= fmax) {
+            fmin -= 0.5;
+            fmax += 0.5;
+        }
         double step = (fmax - fmin) / static_cast<double>(nb);
         dim_min[sd] = fmin;
         dim_step[sd] = step;

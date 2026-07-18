@@ -1,7 +1,17 @@
 #version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-// Randint for Int64: Generate random integers in [low, high) using Philox 4x32-10 PRNG
+// Randint for Int64: Generate random integers in [low, high) using Philox
+// 4x32-10 PRNG.
+//
+// F042: bit-for-bit port of CPU's randint_kernel (src/backends/cpu/kernels/
+// creation.cpp): draw a double-precision uniform in [0,1) via the same
+// 53-bit-mantissa construction CPU's philox_uniform_f64 uses, then scale by
+// the (double) range and truncate to int64 — NOT the previous
+// `raw_bits64 % range` modulo-reduction scheme, which is a structurally
+// different, non-CPU-matching range-mapping algorithm that produced
+// plausible-looking but numerically wrong integers relative to CPU.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { int64_t output_data[]; };
@@ -14,7 +24,8 @@ layout(push_constant) uniform PushConstants {
     uint low_hi;
     uint high_lo;
     uint high_hi;
-    uint seed;
+    uint seed_lo;         // Low 32 bits of the 64-bit global seed
+    uint seed_hi;         // High 32 bits of the 64-bit global seed
     uint offset;
 } params;
 
@@ -61,31 +72,38 @@ uvec4 philox4x32(uvec4 ctr, uvec2 key) {
     return ctr;
 }
 
+// Convert two uint32s to double in [0, 1) with a 53-bit mantissa — matches
+// CPU's philox_uniform_f64 exactly: mantissa = (hi << 21) | (lo >> 11).
+double uints_to_double01(uint hi, uint lo) {
+    double mantissa = double(hi) * 2097152.0LF + double(lo >> 11);
+    return mantissa / 9007199254740992.0LF; // 2^53
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n) return;
 
+    // Counter/key layout matches CPU's philox.hpp exactly — see random.comp.
     uint element_idx = idx + params.offset;
-    uvec4 ctr = uvec4(element_idx, element_idx >> 16, 0, 0);
-    uvec2 key = uvec2(params.seed, params.seed ^ 0xDEADBEEF);
+    uvec4 ctr = uvec4(element_idx, 0u, 0u, 0u);
+    uvec2 key = uvec2(params.seed_lo, params.seed_hi);
 
     uvec4 rand_vals = philox4x32(ctr, key);
 
     int64_t low  = pack_i64(params.low_lo, params.low_hi);
     int64_t high = pack_i64(params.high_lo, params.high_hi);
 
-    // Combine two 32-bit Philox words into a 64-bit uniform value, then reduce
-    // modulo the (unsigned) range. Modulo avoids float precision loss across the
-    // full 64-bit range; a small modulo bias is acceptable for randint.
-    uint64_t rand64 = (uint64_t(rand_vals.y) << 32u) | uint64_t(rand_vals.x);
-    uint64_t range = uint64_t(high - low);
+    // Map uniform [0, 1) (double precision) to integer range [low, high),
+    // exactly as CPU: low + int64_t(u * range), clamped. `range` is the
+    // int64 difference converted to double (matching CPU's
+    // `static_cast<double>(high - low)`), not two separately-converted
+    // endpoints subtracted — the two agree unless |low|/|high| exceed
+    // double's 2^53 exact-integer range, in which case the int64
+    // subtraction-first order matches CPU bit-for-bit.
+    double u = uints_to_double01(rand_vals.x, rand_vals.y);
+    double range = double(high - low);
 
-    int64_t result;
-    if (range == uint64_t(0)) {
-        result = low;  // empty/degenerate range guard
-    } else {
-        result = low + int64_t(rand64 % range);
-    }
+    int64_t result = low + int64_t(u * range);
 
     if (result >= high) result = high - 1;
     if (result < low) result = low;

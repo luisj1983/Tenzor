@@ -97,4 +97,23 @@ TEST_P(FunctionalMultiDTypeTest, GroupNormFunctionalNumGroupsTwo) {
     EXPECT_NEAR(g1_mean, 0.0f, std::max(atol(), 5e-3f));
 }
 
+// Regression: F::group_norm() never checked num_channels % num_groups == 0
+// before dispatching. CPU/ROCm's kernels independently re-validate and
+// throw, but CUDA/OneAPI silently truncate channels_per_group = C /
+// num_groups with no check at all (Vulkan only checked ndim >= 2) --  on
+// OneAPI specifically this reached a verified out-of-bounds device read for
+// the tail channel. Every backend must now throw for a non-divisible
+// (channels, num_groups) pair.
+TEST_P(FunctionalMultiDTypeTest, GroupNormNonDivisibleChannelsThrows) {
+    // C=10 is not divisible by num_groups=3.
+    auto x = createInput({1, 10}, false);
+    Variable weight(createOnes({10}), false);
+    Variable bias(createZeros({10}), false);
+
+    EXPECT_THROW({
+        auto out = F::group_norm(x, /*num_groups=*/3, weight, bias, 1e-5);
+        device().synchronize();
+    }, std::exception);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(FunctionalMultiDTypeTest);

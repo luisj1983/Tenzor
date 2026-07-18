@@ -1,0 +1,72 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Sparse triangular solve: L*X = B (lower) or U*X = B (upper) -- Complex128
+// Same single-workgroup strategy as sparse_trsm_c64.comp / sparse_trsm.comp:
+// threads parallel across RHS columns, rows processed in strict dependency
+// order with a barrier() between rows. The host dispatches a single (1,1,1)
+// workgroup.
+//
+// Complex128 values are stored as interleaved [re0, im0, re1, im1, ...]
+// float64_t pairs, row-major over (N, K_rhs).
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float64_t values[]; };  // 2*nnz
+layout(set = 0, binding = 3) readonly buffer RHS        { float64_t B[];      };  // 2*n*k_rhs
+layout(set = 0, binding = 4) buffer Output              { float64_t X[];      };  // 2*n*k_rhs
+// Retained for descriptor-set compatibility with the host (now unused).
+layout(set = 0, binding = 5) buffer SolvedCounter        { int solved[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint n;       // matrix dimension (N x N)
+    uint k_rhs;   // number of RHS columns
+    uint upper;   // 0 = lower triangular, 1 = upper triangular
+};
+
+void solve_row(uint row, uint tid) {
+    uint rs = uint(row_offsets[row]);
+    uint re = uint(row_offsets[row + 1u]);
+
+    for (uint c = tid; c < k_rhs; c += gl_WorkGroupSize.x) {
+        float64_t rhs_re = B[2u * (row * k_rhs + c)];
+        float64_t rhs_im = B[2u * (row * k_rhs + c) + 1u];
+        float64_t diag_re = 1.0lf;
+        float64_t diag_im = 0.0lf;
+        for (uint i = rs; i < re; i++) {
+            uint col = uint(col_indices[i]);
+            float64_t val_re = values[2u * i];
+            float64_t val_im = values[2u * i + 1u];
+            if (col == row) {
+                diag_re = val_re;
+                diag_im = val_im;
+            } else {
+                float64_t xc_re = X[2u * (col * k_rhs + c)];
+                float64_t xc_im = X[2u * (col * k_rhs + c) + 1u];
+                rhs_re -= (val_re * xc_re - val_im * xc_im);
+                rhs_im -= (val_re * xc_im + val_im * xc_re);
+            }
+        }
+        float64_t denom = diag_re * diag_re + diag_im * diag_im;
+        X[2u * (row * k_rhs + c)]      = (rhs_re * diag_re + rhs_im * diag_im) / denom;
+        X[2u * (row * k_rhs + c) + 1u] = (rhs_im * diag_re - rhs_re * diag_im) / denom;
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    if (upper == 0u) {
+        for (uint row = 0u; row < n; row++) {
+            solve_row(row, tid);
+            barrier();
+        }
+    } else {
+        for (uint t = 0u; t < n; t++) {
+            solve_row(n - 1u - t, tid);
+            barrier();
+        }
+    }
+}

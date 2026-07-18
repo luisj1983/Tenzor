@@ -347,6 +347,16 @@ auto VulkanBackend::dispatchDropoutBackward(const Tensor& grad_output, const Ten
     if (p == 0.0f) {
         return grad_output;
     }
+    // p==1.0 drops every element (forward's mask is 0 everywhere, output is a
+    // clean zero tensor). scale=1/(1-p) is +inf at p=1.0, so mask(0)*scale(inf)
+    // is NaN/inf under IEEE-754 float arithmetic, not 0 -- unlike forward's
+    // direct zero write, this would poison every gradient element instead of
+    // the mathematically correct zero. Short-circuit before the shader ever
+    // computes with scale.
+    if (p >= 1.0f) {
+        return dispatchFull(std::vector<int64_t>(grad_output.shape().begin(), grad_output.shape().end()),
+                            0.0, grad_output.dtype(), grad_output.device());
+    }
 
     Tensor go_contig = (grad_output.is_contiguous() && grad_output.offset() == 0) ? grad_output : dispatchContiguous(grad_output);
     Tensor mask_contig = (mask.is_contiguous() && mask.offset() == 0) ? mask : dispatchContiguous(mask);

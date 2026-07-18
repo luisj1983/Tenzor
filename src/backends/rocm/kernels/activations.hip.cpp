@@ -3139,7 +3139,28 @@ auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
 // IndexAdd, IndexCopy, IndexFill HIP kernels
 // ============================================================================
 
-__global__ void index_add_f32_kernel(float* output, const float* source, const int64_t* index,
+// Atomic add helper local to this TU (mirrors the pattern in indexing.hip.cpp):
+// HIP's built-in atomicAdd natively covers float/double/int32_t; int64_t has
+// no native HIP atomicAdd overload and needs a CAS loop.
+template<typename T>
+__device__ __forceinline__ T index_atomic_add(T* address, T val) {
+    return atomicAdd(address, val);
+}
+
+template<>
+__device__ __forceinline__ int64_t index_atomic_add<int64_t>(int64_t* address, int64_t val) {
+    unsigned long long int* address_as_ull = reinterpret_cast<unsigned long long int*>(address);
+    unsigned long long int old = *address_as_ull, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_ull, assumed,
+                         static_cast<unsigned long long int>(static_cast<int64_t>(assumed) + val));
+    } while (assumed != old);
+    return static_cast<int64_t>(old);
+}
+
+template<typename T>
+__global__ void index_add_kernel_impl(T* output, const T* source, const int64_t* index,
                                      int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
                                      int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3158,11 +3179,12 @@ __global__ void index_add_f32_kernel(float* output, const float* source, const i
         atomicOr(error_flag, 1);
         return;
     }
-    atomicAdd(&output[(o * dim_size + ix) * inner + j],
-              source[(o * idx_n + k) * inner + j]);
+    index_atomic_add(&output[(o * dim_size + ix) * inner + j],
+                      source[(o * idx_n + k) * inner + j]);
 }
 
-__global__ void index_copy_f32_kernel(float* output, const float* source, const int64_t* index,
+template<typename T>
+__global__ void index_copy_kernel_impl(T* output, const T* source, const int64_t* index,
                                       int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
                                       int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3183,7 +3205,8 @@ __global__ void index_copy_f32_kernel(float* output, const float* source, const 
     output[(o * dim_size + ix) * inner + j] = source[(o * idx_n + k) * inner + j];
 }
 
-__global__ void index_fill_f32_kernel(float* output, const int64_t* index, float value,
+template<typename T>
+__global__ void index_fill_kernel_impl(T* output, const int64_t* index, T value,
                                       int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
                                       int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3204,6 +3227,25 @@ __global__ void index_fill_f32_kernel(float* output, const int64_t* index, float
     output[(o * dim_size + ix) * inner + j] = value;
 }
 
+// Shared launch+bounds-check helper for the IndexAdd/IndexCopy/IndexFill native
+// dtype paths below. Device flag for out-of-range indices is checked on the
+// host after sync so we can throw (matching the CPU reference) instead of an
+// OOB write.
+template<typename T, typename Launch>
+static void index_scatter_launch(Tensor& output, int64_t total, hipStream_t stream,
+                                  const char* op_name, Launch&& launch) {
+    int num_blocks = get_num_blocks(total);
+    Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
+    HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
+    int* err_ptr = err_tensor.data<int32_t>();
+    launch(num_blocks, err_ptr);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
+        throw std::out_of_range(std::string(op_name) + " ROCm: index out of range");
+    }
+}
+
 auto index_add_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
                       int64_t dim, hipStream_t stream) -> Tensor {
     auto output = self.clone();
@@ -3220,27 +3262,52 @@ auto index_add_kernel(const Tensor& self, const Tensor& index, const Tensor& sou
 
     if (total == 0) return output;
 
-    if (output.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(total);
-        // Device flag for out-of-range indices; checked on the host after sync so
-        // we can throw (matching the CPU reference) instead of an OOB write.
-        Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
-        HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
-        int* err_ptr = err_tensor.data<int32_t>();
-        hipLaunchKernelGGL(index_add_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                          output.data<float>(), source.data<float>(), index.data<int64_t>(),
-                          outer, dim_size, idx_n, inner, err_ptr);
-        HIP_CHECK(hipGetLastError());
-        HIP_CHECK(hipStreamSynchronize(stream));
-        if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
-            throw std::out_of_range("index_add ROCm: index out of range");
+    // Native fast paths: Float32/Float64 use HIP's built-in atomicAdd, Int32
+    // likewise (native atomicAdd(int*, int)), Int64 via the CAS-based
+    // index_atomic_add specialization above. Everything else (Float16,
+    // BFloat16, and any other dtype) round-trips through Float32.
+    auto dispatch = [&]<typename T>() {
+        index_scatter_launch<T>(output, total, stream, "index_add",
+            [&](int num_blocks, int* err_ptr) {
+                hipLaunchKernelGGL(index_add_kernel_impl<T>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                                  output.data<T>(), source.data<T>(), index.data<int64_t>(),
+                                  outer, dim_size, idx_n, inner, err_ptr);
+            });
+    };
+    // UInt32/UInt64 must NOT take the Float32-widen fallback below: unlike
+    // Int8/16/UInt8/16/Bool (always exact through a 24-bit Float32 mantissa),
+    // UInt32/UInt64 magnitudes routinely exceed 2^24, so round-tripping the
+    // WHOLE self/source tensors through Float32 would silently corrupt
+    // untouched elements too, not just the ones being added into. Reuse the
+    // native Int32/Int64 kernels via a raw bit-pattern reinterpret instead:
+    // two's-complement addition (including atomicAdd's CAS-based wraparound
+    // for int64) produces the identical result bit pattern whether the
+    // operand is interpreted as signed or unsigned, so this is exact — not
+    // an approximation. Mirrors index_fill_kernel's dispatch_reinterpret
+    // below for the same reasoning.
+    auto dispatch_reinterpret = [&]<typename T>() {
+        index_scatter_launch<T>(output, total, stream, "index_add",
+            [&](int num_blocks, int* err_ptr) {
+                hipLaunchKernelGGL(index_add_kernel_impl<T>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                                  reinterpret_cast<T*>(output.data_ptr()),
+                                  reinterpret_cast<const T*>(source.data_ptr()),
+                                  index.data<int64_t>(),
+                                  outer, dim_size, idx_n, inner, err_ptr);
+            });
+    };
+    switch (output.dtype()) {
+        case DType::Float32: dispatch.template operator()<float>(); return output;
+        case DType::Float64: dispatch.template operator()<double>(); return output;
+        case DType::Int32:   dispatch.template operator()<int32_t>(); return output;
+        case DType::Int64:   dispatch.template operator()<int64_t>(); return output;
+        case DType::UInt32:  dispatch_reinterpret.template operator()<int32_t>(); return output;
+        case DType::UInt64:  dispatch_reinterpret.template operator()<int64_t>(); return output;
+        default: {
+            auto f32_self = self.to(DType::Float32);
+            auto f32_src = source.to(DType::Float32);
+            auto result = index_add_kernel(f32_self, index, f32_src, dim, stream);
+            return result.to(self.dtype());
         }
-        return output;
-    } else {
-        auto f32_self = self.to(DType::Float32);
-        auto f32_src = source.to(DType::Float32);
-        auto result = index_add_kernel(f32_self, index, f32_src, dim, stream);
-        return result.to(self.dtype());
     }
 }
 
@@ -3260,27 +3327,48 @@ auto index_copy_kernel(const Tensor& self, const Tensor& index, const Tensor& so
 
     if (total == 0) return output;
 
-    if (output.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(total);
-        // Device flag for out-of-range indices; checked on the host after sync so
-        // we can throw (matching the CPU reference) instead of an OOB write.
-        Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
-        HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
-        int* err_ptr = err_tensor.data<int32_t>();
-        hipLaunchKernelGGL(index_copy_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                          output.data<float>(), source.data<float>(), index.data<int64_t>(),
-                          outer, dim_size, idx_n, inner, err_ptr);
-        HIP_CHECK(hipGetLastError());
-        HIP_CHECK(hipStreamSynchronize(stream));
-        if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
-            throw std::out_of_range("index_copy ROCm: index out of range");
+    // Native fast paths for Float32/Float64/Int32/Int64 (plain assignment, no
+    // atomics required); Float16/BFloat16/other dtypes round-trip through
+    // Float32.
+    auto dispatch = [&]<typename T>() {
+        index_scatter_launch<T>(output, total, stream, "index_copy",
+            [&](int num_blocks, int* err_ptr) {
+                hipLaunchKernelGGL(index_copy_kernel_impl<T>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                                  output.data<T>(), source.data<T>(), index.data<int64_t>(),
+                                  outer, dim_size, idx_n, inner, err_ptr);
+            });
+    };
+    // UInt32/UInt64 must NOT take the Float32-widen fallback below (same
+    // reasoning as index_add_kernel above): magnitudes routinely exceed
+    // Float32's 24-bit mantissa, so widening the WHOLE self/source tensors
+    // would silently corrupt untouched elements. index_copy is a plain
+    // scalar overwrite with no signedness-dependent arithmetic at all, so
+    // reusing the native Int32/Int64 kernel via a raw bit-pattern
+    // reinterpret is exact. Mirrors index_fill_kernel's dispatch_reinterpret
+    // below.
+    auto dispatch_reinterpret = [&]<typename T>() {
+        index_scatter_launch<T>(output, total, stream, "index_copy",
+            [&](int num_blocks, int* err_ptr) {
+                hipLaunchKernelGGL(index_copy_kernel_impl<T>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                                  reinterpret_cast<T*>(output.data_ptr()),
+                                  reinterpret_cast<const T*>(source.data_ptr()),
+                                  index.data<int64_t>(),
+                                  outer, dim_size, idx_n, inner, err_ptr);
+            });
+    };
+    switch (output.dtype()) {
+        case DType::Float32: dispatch.template operator()<float>(); return output;
+        case DType::Float64: dispatch.template operator()<double>(); return output;
+        case DType::Int32:   dispatch.template operator()<int32_t>(); return output;
+        case DType::Int64:   dispatch.template operator()<int64_t>(); return output;
+        case DType::UInt32:  dispatch_reinterpret.template operator()<int32_t>(); return output;
+        case DType::UInt64:  dispatch_reinterpret.template operator()<int64_t>(); return output;
+        default: {
+            auto f32_self = self.to(DType::Float32);
+            auto f32_src = source.to(DType::Float32);
+            auto result = index_copy_kernel(f32_self, index, f32_src, dim, stream);
+            return result.to(self.dtype());
         }
-        return output;
-    } else {
-        auto f32_self = self.to(DType::Float32);
-        auto f32_src = source.to(DType::Float32);
-        auto result = index_copy_kernel(f32_self, index, f32_src, dim, stream);
-        return result.to(self.dtype());
     }
 }
 
@@ -3300,26 +3388,49 @@ auto index_fill_kernel(const Tensor& self, const Tensor& index,
 
     if (total == 0) return output;
 
-    if (output.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(total);
-        // Device flag for out-of-range indices; checked on the host after sync so
-        // we can throw (matching the CPU reference) instead of an OOB write.
-        Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
-        HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
-        int* err_ptr = err_tensor.data<int32_t>();
-        hipLaunchKernelGGL(index_fill_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                          output.data<float>(), index.data<int64_t>(), static_cast<float>(value),
-                          outer, dim_size, idx_n, inner, err_ptr);
-        HIP_CHECK(hipGetLastError());
-        HIP_CHECK(hipStreamSynchronize(stream));
-        if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
-            throw std::out_of_range("index_fill ROCm: index out of range");
+    // Native fast paths for Float32/Float64/Int32/Int64; Float16/BFloat16 and
+    // narrow integers (Int8/16, UInt8/16, Bool) round-trip through Float32
+    // (always exact for those widths -- no magnitude can exceed Float32's
+    // 24-bit mantissa). UInt32/UInt64 must NOT take that fallback: they reuse
+    // the Int32/Int64 shaders via a raw bit-pattern reinterpret instead (a
+    // plain scalar write has no signedness-dependent arithmetic, so the
+    // int32_t/int64_t shader is bit-identical for the unsigned types) --
+    // otherwise the ENTIRE self tensor (not just the fill positions) would
+    // round-trip through Float32 and silently lose precision above 2^24.
+    auto dispatch = [&]<typename T>() {
+        index_scatter_launch<T>(output, total, stream, "index_fill",
+            [&](int num_blocks, int* err_ptr) {
+                hipLaunchKernelGGL(index_fill_kernel_impl<T>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                                  output.data<T>(), index.data<int64_t>(), static_cast<T>(value),
+                                  outer, dim_size, idx_n, inner, err_ptr);
+            });
+    };
+    auto dispatch_reinterpret = [&]<typename T>(T bit_value) {
+        index_scatter_launch<T>(output, total, stream, "index_fill",
+            [&](int num_blocks, int* err_ptr) {
+                hipLaunchKernelGGL(index_fill_kernel_impl<T>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                                  reinterpret_cast<T*>(output.data_ptr()), index.data<int64_t>(), bit_value,
+                                  outer, dim_size, idx_n, inner, err_ptr);
+            });
+    };
+    switch (output.dtype()) {
+        case DType::Float32: dispatch.template operator()<float>(); return output;
+        case DType::Float64: dispatch.template operator()<double>(); return output;
+        case DType::Int32:   dispatch.template operator()<int32_t>(); return output;
+        case DType::Int64:   dispatch.template operator()<int64_t>(); return output;
+        case DType::UInt32:
+            dispatch_reinterpret.template operator()<int32_t>(
+                static_cast<int32_t>(static_cast<uint32_t>(value)));
+            return output;
+        case DType::UInt64:
+            dispatch_reinterpret.template operator()<int64_t>(
+                static_cast<int64_t>(static_cast<uint64_t>(value)));
+            return output;
+        default: {
+            auto f32_self = self.to(DType::Float32);
+            auto result = index_fill_kernel(f32_self, index, dim, value, stream);
+            return result.to(self.dtype());
         }
-        return output;
-    } else {
-        auto f32_self = self.to(DType::Float32);
-        auto result = index_fill_kernel(f32_self, index, dim, value, stream);
-        return result.to(self.dtype());
     }
 }
 

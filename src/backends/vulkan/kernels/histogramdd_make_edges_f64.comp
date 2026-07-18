@@ -1,0 +1,25 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Phase 8.4 (Float64): emit one per-dimension edge buffer of length nb+1.
+// edges[i] = dim_params[2*d + 0] + i * dim_params[2*d + 1], i in [0, nb].
+// Mirrors histogramdd_make_edges.comp in native double precision.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer ParamsBuf { float64_t dim_params[]; };
+layout(binding = 1) buffer EdgeBuf   { float64_t edges[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint d;
+    uint nb;
+} params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i > params.nb) return;
+
+    float64_t fmin = dim_params[params.d * 2u + 0u];
+    float64_t step = dim_params[params.d * 2u + 1u];
+    edges[i] = fmin + float64_t(i) * step;
+}

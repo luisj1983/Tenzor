@@ -1,0 +1,45 @@
+#version 450
+
+// Cumulative Maximum along a dimension — native Int32 variant.
+// Compares int32 values directly instead of promoting through Float64,
+// keeping the shader dispatch symmetric with cummax_i64.comp (which is a
+// correctness requirement there — Int64 exceeds Float64's exact 53-bit
+// mantissa range). Int32 is exact under Float64 too, but this avoids the
+// promote-recurse round trip and matches the CumSum/argmax_argmin_i32.comp
+// convention of a native integer shader per int width.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input   { int input_data[]; };
+layout(binding = 1) buffer Values  { int values_data[]; };
+layout(binding = 2) buffer Indices { int indices_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;     // outer_size * inner_size
+    uint reduce_size;     // size of the dimension to scan over
+    uint inner_size;      // product of dimensions after the scan dim
+} params;
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    int running = input_data[base];
+    int ri = 0;
+    values_data[base]  = running;
+    indices_data[base] = 0;
+
+    for (uint i = 1; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        int val = input_data[idx];
+        if (val > running) {
+            running = val;
+            ri = int(i);
+        }
+        values_data[idx]  = running;
+        indices_data[idx] = ri;
+    }
+}

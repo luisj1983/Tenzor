@@ -68,28 +68,6 @@ inline hipStream_t get_hip_stream(const OpAttributes& attrs) {
 }
 
 
-// Helper to convert device string to Device
-inline Device device_from_string(std::string_view s, Device default_val = Device::rocm(0)) {
-    if (s.empty()) return default_val;
-    // Parse strings like "rocm:0", "cuda:1", "cpu"
-    size_t colon_pos = s.find(':');
-    std::string_view type_str = (colon_pos != std::string_view::npos) ? s.substr(0, colon_pos) : s;
-    int32_t device_id = 0;
-    if (colon_pos != std::string_view::npos) {
-        auto id_str = s.substr(colon_pos + 1);
-        int val = 0;
-        auto [ptr, ec] = std::from_chars(id_str.data(), id_str.data() + id_str.size(), val);
-        if (ec == std::errc{}) device_id = static_cast<int32_t>(val);
-    }
-
-    Device::Type type = Device::Type::CPU;
-    if (type_str == "rocm" || type_str == "hip") type = Device::Type::ROCm;
-    else if (type_str == "cuda") type = Device::Type::CUDA;
-    else if (type_str == "vulkan") type = Device::Type::Vulkan;
-
-    return Device{type, device_id};
-}
-
 // Forward declarations for ROCm kernels
 namespace rocm {
     // DataLayout enum (must match definition in conv2d.hip.cpp)
@@ -810,7 +788,7 @@ namespace rocm {
     // Fused optimizer steps
     auto fused_sgd_step_hip(Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
                             float lr, float momentum, float weight_decay, float dampening,
-                            bool nesterov, hipStream_t stream) -> void;
+                            bool nesterov, bool first_step, hipStream_t stream) -> void;
     auto fused_adam_step_hip(Tensor& param, const Tensor& grad, Tensor& exp_avg, Tensor& exp_avg_sq,
                              double lr, double beta1, double beta2, double eps, double weight_decay,
                              int64_t step, bool decoupled_weight_decay, hipStream_t stream,
@@ -832,7 +810,7 @@ namespace rocm {
                                     hipStream_t stream) -> void;
 
     // Embedding, Linear, Dropout operations
-    auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t stream) -> Tensor;
+    auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t padding_idx, hipStream_t stream) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                    int64_t num_embeddings, hipStream_t stream) -> Tensor;
     auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& indices,
@@ -1067,7 +1045,8 @@ namespace rocm {
 
     // RMSNorm backward (fused_ops.hip.cpp)
     auto fused_rms_norm_backward_hip(const Tensor& grad_output, const Tensor& input,
-                                      const Tensor& weight, const Tensor& rrms)
+                                      const Tensor& weight, const Tensor& rrms,
+                                      hipStream_t stream)
         -> std::tuple<Tensor, Tensor>;
 
     // Advanced indexing (indexing.hip.cpp)
@@ -1518,7 +1497,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         auto input_4d = inputs[1].unsqueeze(2);
         auto weight_4d = inputs[2].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        // Conv2dBackwardInput never sees the actual input tensor -- it reads
+        // its target shape from AttrKey::InputShape. conv1d_to_conv2d_attrs()
+        // only projects Stride/Padding/Dilation and leaves InputShape
+        // untouched, so a 1-D caller's (3-D, or absent) InputShape is not
+        // valid here; without setting the real 4-D shape the nested kernel
+        // reads an empty/garbage list. Previously unreachable (nn::Conv1d
+        // never dispatched this OpId) -- derive the 4-D shape locally from
+        // the already-unsqueezed input tensor, mirroring what CPU's
+        // Conv1dBackwardInput kernel already does via inputs[1].shape().
+        conv2d_attrs.set(AttrKey::InputShape,
+            ::tenzor::backend::attrs::shape_to_attr_string(input_4d.shape()));
         auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, conv2d_attrs);
         return {result[0].squeeze(2)};
     });
@@ -1528,7 +1518,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         auto input_4d = inputs[1].unsqueeze(2);
         auto weight_4d = inputs[2].unsqueeze(2);
         std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-        const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+        // Same fix as Conv1dBackwardInput above, for WeightShape.
+        conv2d_attrs.set(AttrKey::WeightShape,
+            ::tenzor::backend::attrs::shape_to_attr_string(weight_4d.shape()));
         auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, conv2d_attrs);
         return {result[0].squeeze(2)};
     });
@@ -2011,7 +2004,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         double end = attrs.get_float(AttrKey::End, 1.0);
         double step = attrs.get_float(AttrKey::Step, 1.0);
         DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
-        Device device = device_from_string(attrs.get_string(AttrKey::Device, ""), Device::rocm(0));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
+        Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::arange_kernel(start, end, step, dtype, device, get_hip_stream(attrs))};
     });
 
@@ -2020,7 +2014,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         double end = attrs.get_float(AttrKey::End, 1.0);
         int64_t steps = attrs.get_int(AttrKey::Steps, 100);
         DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
-        Device device = device_from_string(attrs.get_string(AttrKey::Device, ""), Device::rocm(0));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
+        Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::linspace_kernel(start, end, steps, dtype, device, get_hip_stream(attrs))};
     });
 
@@ -2029,7 +2024,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t m = attrs.get_int(AttrKey::M, -1);
         int64_t k = attrs.get_int(AttrKey::K, 0);
         DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
-        Device device = device_from_string(attrs.get_string(AttrKey::Device, ""), Device::rocm(0));
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
+        Device device = Device::rocm(device_id);
         return std::vector<Tensor>{rocm::eye_kernel(n, m, k, dtype, device, get_hip_stream(attrs))};
     });
 
@@ -2253,7 +2249,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         // Per docs/internals/attention-contract.md: returns 4-tuple
         // [output, lse, philox_seed, philox_offset]. Causal + dropout both
         // honored kernel-side (M5-rem fix; was throwing for dropout > 0).
-        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        // Scale defaults to 1/sqrt(head_dim) (mathematically-correct scaled
+        // dot-product attention), not an unscaled 1.0 — matches OneAPI's
+        // registration and the docs/internals/attention-contract.md formula.
+        int64_t head_dim_for_scale = inputs[0].shape().back();
+        float default_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_for_scale));
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, default_scale));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
         bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
@@ -2733,13 +2734,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
         float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
         bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
+        // Matches CPU/CUDA, which already read FirstStep: on the very first
+        // momentum step the buffer is initialised to the (weight-decayed)
+        // gradient with no dampening (audit finding #15).
+        bool first_step = attrs.get_bool(AttrKey::FirstStep, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0f)
             ? &const_cast<Tensor&>(inputs[2]) : nullptr;
 
         rocm::fused_sgd_step_hip(param, inputs[1], momentum_buffer,
-            lr, momentum, weight_decay, dampening, nesterov, get_hip_stream(attrs));
+            lr, momentum, weight_decay, dampening, nesterov, first_step, get_hip_stream(attrs));
         return std::vector<Tensor>{param};
     });
 
@@ -3225,7 +3230,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         }
         rocm::batchnorm2d_update_running_stats(running_mean, running_var, mean, running_var_in, momentum, stream);
 
-        return std::vector<Tensor>{output, mean, variance, running_mean, running_var};
+        // Dispatch contract (matches CPU fused_ops.cpp, CUDA cuda_kernel_registry.cpp,
+        // and Vulkan vulkan_kernel_registry.cpp): {output, updated_running_mean,
+        // updated_running_var, saved_batch_mean, saved_inv_var}. The 5th output must
+        // be invstd = 1/sqrt(var + eps), not raw variance, to match what
+        // BatchNorm2dBackward and the JVP rule expect.
+        Tensor saved_inv_var = tenzor::rsqrt(tenzor::add(variance, static_cast<double>(epsilon)));
+        return std::vector<Tensor>{output, running_mean, running_var, mean, saved_inv_var};
     });
 
     // ========================================================================
@@ -3299,14 +3310,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // RMSNorm Backward
     // ========================================================================
-    table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) {
+    table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, rrms, weight] — order set by the autograd
         // RMSNormBackward (saved [input, rrms, weight]). The wrapper expects
         // (grad_output, input, weight, rrms), so pass weight=inputs[3], rrms=inputs[2].
         // (Previously these were swapped — weight and rrms transposed — which
         // produced wrong grad_input and out-of-bounds reads on the 1-element rrms.)
         auto [grad_input, grad_weight] = rocm::fused_rms_norm_backward_hip(
-            inputs[0], inputs[1], inputs[3], inputs[2]);
+            inputs[0], inputs[1], inputs[3], inputs[2], get_hip_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight};
     });
 
@@ -3492,6 +3503,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // directly, same as the HIP fallback path has always done.
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMM: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
@@ -3501,6 +3519,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M).
     table.register_single_output_kernel(OpId::SparseSpMV,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMV: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
@@ -4155,10 +4180,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Embedding Operations --------------------------------------------------
     table.register_single_output_kernel(OpId::Embedding, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        return rocm::embedding_kernel(inputs[0], inputs[1], get_hip_stream(attrs));
+        // inputs: [weight, indices]; reads optional PaddingIdx (zeroes that row),
+        // matching CPU/CUDA/OneAPI/Vulkan.
+        int64_t padding_idx = attrs.has(AttrKey::PaddingIdx)
+                              ? attrs.get_int(AttrKey::PaddingIdx) : -1;
+        return rocm::embedding_kernel(inputs[0], inputs[1], padding_idx, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::EmbeddingWithBoundsCheck, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        return rocm::embedding_kernel(inputs[0], inputs[1], get_hip_stream(attrs));
+        int64_t padding_idx = attrs.has(AttrKey::PaddingIdx)
+                              ? attrs.get_int(AttrKey::PaddingIdx) : -1;
+        return rocm::embedding_kernel(inputs[0], inputs[1], padding_idx, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
@@ -4271,16 +4302,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             stride, padding, output_padding, dilation, groups, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::DepthwiseConv2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
-        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
-        int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-        int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
-        int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
-        int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::depthwise_conv2d_kernel(
-            inputs[0], inputs[1], bias, stride_h, stride_w, padding_h, padding_w,
-            dilation_h, dilation_w, get_hip_stream(attrs));
+            inputs[0], inputs[1], bias, stride[0], stride[1], padding[0], padding[1],
+            dilation[0], dilation[1], get_hip_stream(attrs));
     });
 
     // Real native depthwise 1D/3D kernels (forward; backward autograd-composed).
@@ -5367,6 +5395,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         });
 
     table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // The op layer sets AttrKey::Dim only when the user passed an explicit
+        // dim; the ROCm unique_consecutive_kernel has no dim-scoped path and
+        // always operates on the flattened tensor. Silently ignoring a requested
+        // dim would return a different result than the dim-scoped API advertises,
+        // so reject it with a clear error instead of flattening behind the
+        // caller's back, matching CPU/CUDA's contract.
+        if (attrs.has(AttrKey::Dim)) {
+            throw std::runtime_error(
+                "unique_consecutive with dim is not supported on the ROCm backend "
+                "(only the flattened form is implemented); omit dim to flatten.");
+        }
         bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);
         auto [unique_vals, inverse, counts] = rocm::unique_consecutive_kernel(
             inputs[0], return_inverse, get_hip_stream(attrs));

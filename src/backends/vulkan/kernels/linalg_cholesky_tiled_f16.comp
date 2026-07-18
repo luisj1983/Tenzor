@@ -7,6 +7,9 @@
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { uint A[]; };
+// See linalg_cholesky_tiled.comp — set to 1 when the input is not positive
+// definite; the host reads this back after dispatch and throws.
+layout(set = 0, binding = 1) buffer ErrorFlag { uint error_flag[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;
@@ -64,6 +67,9 @@ void main() {
             float sum = panel[k][k];
             for (uint j = 0; j < k; j++) {
                 sum -= panel[k][j] * panel[k][j];
+            }
+            if (sum <= 0.0) {
+                atomicOr(error_flag[0], 1u);
             }
             panel[k][k] = sqrt(max(sum, 1e-30));
         }

@@ -2146,6 +2146,7 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <hip/hip_runtime.h>
+#include <hip/hip_complex.h>
 #include <hipcub/hipcub.hpp>
 #include <cstdint>
 #include <stdexcept>
@@ -2393,6 +2394,63 @@ __global__ void sparse_trsv_sequential_kernel(
     }
 }
 
+// --- Complex64/Complex128 support --------------------------------------
+//
+// hipFloatComplex/hipDoubleComplex are plain float2/double2 structs with no
+// arithmetic operators, so the real-typed sparse_trsv_sequential_kernel<T>
+// above can't be instantiated directly for them (T*T / T-T / T/T would
+// either fail to compile or silently do componentwise float2 math instead
+// of complex math). cx_traits<C> supplies complex mul/sub/div (via HIP's
+// hipCmulf/hipCsubf/hipCdivf and double-precision counterparts) plus the
+// multiplicative identity used to seed the diagonal before it is found, and
+// sparse_trsv_sequential_complex_kernel<C> runs the exact same single-
+// workgroup sequential forward/backward-substitution algorithm as the real
+// kernel above, and the same algorithm as the Vulkan complex triangular
+// solve shaders (sparse_trsv_c64.comp / sparse_trsv_c128.comp): plain
+// (non-conjugated) complex multiply-subtract per off-diagonal nonzero, then
+// a complex divide by the diagonal entry. No Hermitian-transpose
+// assumption, matching the CPU reference (cpu_forward_substitution /
+// cpu_backward_substitution in src/sparse/sparse_ops.cpp).
+template <typename C> struct cx_traits;
+
+template <> struct cx_traits<hipFloatComplex> {
+    static __device__ __forceinline__ hipFloatComplex one() { return make_hipFloatComplex(1.0f, 0.0f); }
+    static __device__ __forceinline__ hipFloatComplex mul(hipFloatComplex a, hipFloatComplex b) { return hipCmulf(a, b); }
+    static __device__ __forceinline__ hipFloatComplex sub(hipFloatComplex a, hipFloatComplex b) { return hipCsubf(a, b); }
+    static __device__ __forceinline__ hipFloatComplex div(hipFloatComplex a, hipFloatComplex b) { return hipCdivf(a, b); }
+};
+
+template <> struct cx_traits<hipDoubleComplex> {
+    static __device__ __forceinline__ hipDoubleComplex one() { return make_hipDoubleComplex(1.0, 0.0); }
+    static __device__ __forceinline__ hipDoubleComplex mul(hipDoubleComplex a, hipDoubleComplex b) { return hipCmul(a, b); }
+    static __device__ __forceinline__ hipDoubleComplex sub(hipDoubleComplex a, hipDoubleComplex b) { return hipCsub(a, b); }
+    static __device__ __forceinline__ hipDoubleComplex div(hipDoubleComplex a, hipDoubleComplex b) { return hipCdiv(a, b); }
+};
+
+template <typename C>
+__global__ void sparse_trsv_sequential_complex_kernel(
+    const int64_t* __restrict__ crow, const int64_t* __restrict__ col,
+    const C* __restrict__ vals, const C* __restrict__ b,
+    C* __restrict__ x, int64_t N, bool upper)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    using tr = cx_traits<C>;
+    for (int64_t ii = 0; ii < N; ++ii) {
+        int64_t row = upper ? (N - 1 - ii) : ii;
+        C rhs = b[row];
+        C diag = tr::one();
+        for (int64_t j = crow[row]; j < crow[row + 1]; ++j) {
+            int64_t c = col[j];
+            if (c == row) {
+                diag = vals[j];
+            } else if (upper ? (c > row) : (c < row)) {
+                rhs = tr::sub(rhs, tr::mul(vals[j], x[c]));
+            }
+        }
+        x[row] = tr::div(rhs, diag);
+    }
+}
+
 auto sparse_trsv_standalone_hip(const Tensor& crow, const Tensor& col_idx,
     const Tensor& vals, const Tensor& b, int64_t N, bool upper,
     hipStream_t stream) -> Tensor
@@ -2408,8 +2466,25 @@ auto sparse_trsv_standalone_hip(const Tensor& crow, const Tensor& col_idx,
         hipLaunchKernelGGL(sparse_trsv_sequential_kernel<double>, dim3(1), dim3(1), 0, stream,
             crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<double>(),
             b.data<double>(), x.data<double>(), N, upper);
+    } else if (vals.dtype() == DType::Complex64) {
+        // Complex64 storage is interleaved (re, im) float pairs, bit-identical
+        // to hipFloatComplex (float2) layout — reinterpret rather than copy.
+        hipLaunchKernelGGL(sparse_trsv_sequential_complex_kernel<hipFloatComplex>,
+            dim3(1), dim3(1), 0, stream,
+            crow.data<int64_t>(), col_idx.data<int64_t>(),
+            reinterpret_cast<const hipFloatComplex*>(vals.data_ptr()),
+            reinterpret_cast<const hipFloatComplex*>(b.data_ptr()),
+            reinterpret_cast<hipFloatComplex*>(x.data_ptr()), N, upper);
+    } else if (vals.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(sparse_trsv_sequential_complex_kernel<hipDoubleComplex>,
+            dim3(1), dim3(1), 0, stream,
+            crow.data<int64_t>(), col_idx.data<int64_t>(),
+            reinterpret_cast<const hipDoubleComplex*>(vals.data_ptr()),
+            reinterpret_cast<const hipDoubleComplex*>(b.data_ptr()),
+            reinterpret_cast<hipDoubleComplex*>(x.data_ptr()), N, upper);
     } else {
-        throw std::runtime_error("sparse_trsv_standalone_hip: only Float32/Float64");
+        throw std::runtime_error("sparse_trsv_standalone_hip: only Float32/Float64/Complex64/Complex128 supported, got "
+            + std::string(dtype_name(vals.dtype())));
     }
     HIP_CHECK_SPARSE_SA(hipGetLastError());
     return x;
@@ -2431,11 +2506,21 @@ auto sparse_trsm_standalone_hip(const Tensor& crow, const Tensor& col_idx,
                 X.data<float>() + k, K * sizeof(float),
                 x_col.data<float>(), sizeof(float),
                 sizeof(float), N, hipMemcpyDeviceToDevice, stream));
-        } else {
+        } else if (vals.dtype() == DType::Float64) {
             HIP_CHECK_SPARSE_SA(hipMemcpy2DAsync(
                 X.data<double>() + k, K * sizeof(double),
                 x_col.data<double>(), sizeof(double),
                 sizeof(double), N, hipMemcpyDeviceToDevice, stream));
+        } else {
+            // Complex64/Complex128: scatter as opaque elem_size-byte elements
+            // (interleaved re/im pairs), same strided-2D-copy strategy as the
+            // real dtypes above — element size is all that differs.
+            const size_t elem_size = dtype_size(vals.dtype());
+            HIP_CHECK_SPARSE_SA(hipMemcpy2DAsync(
+                static_cast<char*>(X.data_ptr()) + k * elem_size,
+                K * elem_size,
+                x_col.data_ptr(), elem_size,
+                elem_size, N, hipMemcpyDeviceToDevice, stream));
         }
     }
     HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));

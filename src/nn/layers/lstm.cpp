@@ -407,8 +407,8 @@ public:
         auto grads = dispatch<OpId::LSTMCudnnBackward>(ins);
         // grads: [grad_input,grad_hx,grad_cx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
         // Order must mirror the forward wiring of next_functions/input_variables:
-        // [input, W_ih, W_hh, (b_ih if present), (b_hh if present)].
-        std::vector<Tensor> result = {grads[0], grads[3], grads[4]};
+        // [input, h0, c0, W_ih, W_hh, (b_ih if present), (b_hh if present)].
+        std::vector<Tensor> result = {grads[0], grads[1], grads[2], grads[3], grads[4]};
         if (has_bias_ih_) result.push_back(grads[5]);
         if (has_bias_hh_) result.push_back(grads[6]);
         return result;
@@ -507,13 +507,22 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     // param required grad killed the fused path for every normal module (params
     // default to requires_grad=true), leaving even no_grad inference stuck on the
     // slow per-timestep autograd cell loop (~10-30x slower than the fused kernel).
+    // The fused kernels below process every batch row for the full seq_len,
+    // silently ignoring `lengths` (a variable-length-sequence padding mask)
+    // entirely -- unlike the per-timestep autograd loop this path bypasses,
+    // which is lengths-aware. Gate the fast path on no lengths being
+    // supplied so a padded-batch caller correctly falls through to the slow
+    // path instead of getting corrupted output/h_n/c_n for every row
+    // shorter than the batch's max length.
+    const bool have_lengths_fused_check = lengths.is_valid() && lengths.numel() > 0;
     bool can_use_fused =
         is_op_supported(OpId::LSTMForward, input.device().type) &&
         input.dtype() == DType::Float32 &&
         !is_training() &&
         proj_size_ == 0 &&
         !input.requires_grad() &&
-        !tenzor::is_grad_enabled();
+        !tenzor::is_grad_enabled() &&
+        !have_lengths_fused_check;
 
     // JIT-R102 (non-JIT, same review pass): the fused-kernel blocks below
     // read Parameter tensors directly (bypassing LSTMCell::forward, whose
@@ -872,11 +881,15 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     // c_n each get a single-output autograd node; h_n is an autograd-aware slice
     // of output. Float32/CUDA only.
     // =========================================================================
+    // Same lengths gap as the inference fast path above: this fused cuDNN
+    // training path also processes the full seq_len for every batch row,
+    // silently ignoring `lengths`.
     if (std::getenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN") == nullptr &&
         is_op_supported(OpId::LSTMCudnnTrainForward, input.device().type) &&
         input.dtype() == DType::Float32 &&
         !bidirectional_ && proj_size_ == 0 &&
-        tenzor::is_grad_enabled()) {
+        tenzor::is_grad_enabled() &&
+        !(lengths.is_valid() && lengths.numel() > 0)) {
 
         // Multi-layer is handled by chaining the verified single-layer fused
         // step: each layer's output_var feeds the next layer's input, so the
@@ -939,12 +952,18 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             }
 
             Tensor x_t = layer_in.tensor().contiguous();  // (seq, batch, in)
-            Tensor h0_t = traced_reshape(
-                traced_slice(h.tensor(), 0, layer, layer + 1),
-                {kb, hidden_size_}).contiguous();
-            Tensor c0_t = traced_reshape(
-                traced_slice(c.tensor(), 0, layer, layer + 1),
-                {kb, hidden_size_}).contiguous();
+            // Autograd-aware slice+reshape (not traced_slice/traced_reshape on
+            // raw .tensor()) so h0_v/c0_v carry a real grad_fn back to the
+            // caller's h0/c0 Variables -- required for grad_hx/grad_cx (added
+            // to next_funcs/in_vars and backward()'s result below) to actually
+            // reach a learnable initial hidden/cell state instead of being
+            // silently discarded.
+            Variable h0_v = tenzor::reshape(
+                tenzor::slice(h, 0, layer, layer + 1), {kb, hidden_size_});
+            Variable c0_v = tenzor::reshape(
+                tenzor::slice(c, 0, layer, layer + 1), {kb, hidden_size_});
+            Tensor h0_t = h0_v.tensor().contiguous();
+            Tensor c0_t = c0_v.tensor().contiguous();
 
             std::vector<Tensor> fwd_in = {x_t, h0_t, c0_t,
                                           W_ih_v.tensor(), W_hh_v.tensor(),
@@ -960,8 +979,9 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
                                          b_ih_t, b_hh_t, output_t, wspace, reserve};
 
             std::vector<std::shared_ptr<Function>> next_funcs = {
-                layer_in.grad_fn(), W_ih_v.grad_fn(), W_hh_v.grad_fn()};
-            std::vector<Variable> in_vars = {layer_in, W_ih_v, W_hh_v};
+                layer_in.grad_fn(), h0_v.grad_fn(), c0_v.grad_fn(),
+                W_ih_v.grad_fn(), W_hh_v.grad_fn()};
+            std::vector<Variable> in_vars = {layer_in, h0_v, c0_v, W_ih_v, W_hh_v};
             if (has_bias_ih) {
                 next_funcs.push_back(b_ih_v.grad_fn());
                 in_vars.push_back(b_ih_v);

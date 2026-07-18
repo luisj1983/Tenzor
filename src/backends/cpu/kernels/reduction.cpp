@@ -3581,6 +3581,14 @@ static auto norm_kernel_dim(const Tensor& input, float p,
     int64_t inner = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner *= input_shape[i];
 
+    // Matches the codebase-wide reduction convention (max/min/argmax/argmin/
+    // median/mode all throw here) instead of silently returning 0, which
+    // was inconsistent with norm_kernel's own full-reduction empty-tensor
+    // throw just below.
+    if (reduce_sz == 0) {
+        throw std::invalid_argument("norm: cannot reduce over a zero-size dimension");
+    }
+
     // Output dtype matches input — Float32 → Float32, Float64 → Float64.
     constexpr DType out_dtype = std::is_same_v<T, double> ? DType::Float64 : DType::Float32;
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);
@@ -3589,12 +3597,26 @@ static auto norm_kernel_dim(const Tensor& input, float p,
     const auto* in_data = cont.data<T>();
 
     auto reduce_slice = [&](int64_t o, int64_t i) -> T {
+        // p == 0 is the L0 "norm": count of nonzero elements. The general
+        // pow(r, p) branch below gives pow(x,0)==1 for every element
+        // (including zero, per IEEE-754), which would wrongly sum to
+        // reduce_sz instead of the nonzero count.
+        if (p == 0.0f) {
+            int64_t count = 0;
+            for (int64_t k = 0; k < reduce_sz; ++k) {
+                if (static_cast<double>(in_data[(o * reduce_sz + k) * inner + i]) != 0.0) ++count;
+            }
+            return static_cast<T>(count);
+        }
         double acc = 0.0;
         if (std::isinf(p)) {
-            double m = 0.0;
+            // std::isinf(p) is true for both +inf and -inf; distinguish
+            // sign so p=-inf yields min(|x|) rather than max(|x|) again.
+            const bool is_neg_inf = std::signbit(p);
+            double m = is_neg_inf ? std::numeric_limits<double>::infinity() : 0.0;
             for (int64_t k = 0; k < reduce_sz; ++k) {
                 double v = std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i]));
-                if (v > m) m = v;
+                if (is_neg_inf ? (v < m) : (v > m)) m = v;
             }
             return static_cast<T>(m);
         }
@@ -3722,9 +3744,26 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             // (which reduces in double) — then narrow to float only on store, so the
             // full-reduction norm(x) has the same precision as norm(x, dim=...) (F005).
             double norm_value = 0.0;
-            if (p == 1.0f) {
+            if (p == 0.0f) {
+                // L0 "norm": count of nonzero elements. pow(x,0)==1 for every
+                // element (including zero) so the general branch below must
+                // not be used here — it would return n instead of the count.
+                int64_t count = 0;
+                #pragma omp parallel for reduction(+:count) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) if (input_data[i] != 0.0f) count += 1;
+                norm_value = static_cast<double>(count);
+            } else if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) norm_value += std::abs(static_cast<double>(input_data[i]));
+            } else if (std::isinf(p) && std::signbit(p)) {
+                // p == -inf: min(|x|), not max(|x|) — isinf() alone can't
+                // distinguish the sign.
+                norm_value = std::numeric_limits<double>::infinity();
+                #pragma omp parallel for reduction(min:norm_value) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) {
+                    double abs_val = std::abs(static_cast<double>(input_data[i]));
+                    if (abs_val < norm_value) norm_value = abs_val;
+                }
             } else if (std::isinf(p)) {
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
@@ -3741,9 +3780,21 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
             double norm_value = 0.0;
-            if (p == 1.0f) {
+            if (p == 0.0f) {
+                int64_t count = 0;
+                #pragma omp parallel for reduction(+:count) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) if (input_data[i] != 0.0) count += 1;
+                norm_value = static_cast<double>(count);
+            } else if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) norm_value += std::abs(input_data[i]);
+            } else if (std::isinf(p) && std::signbit(p)) {
+                norm_value = std::numeric_limits<double>::infinity();
+                #pragma omp parallel for reduction(min:norm_value) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) {
+                    double abs_val = std::abs(input_data[i]);
+                    if (abs_val < norm_value) norm_value = abs_val;
+                }
             } else if (std::isinf(p)) {
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
@@ -3761,9 +3812,21 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             output = Tensor(output_shape, DType::Float32, input.device());
             auto* output_data = output.data<float>();
             float norm_value = 0.0f;
-            if (p == 1.0f) {
+            if (p == 0.0f) {
+                int64_t count = 0;
+                #pragma omp parallel for reduction(+:count) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) if (static_cast<float>(input_data[i]) != 0.0f) count += 1;
+                norm_value = static_cast<float>(count);
+            } else if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) norm_value += std::abs(static_cast<float>(input_data[i]));
+            } else if (std::isinf(p) && std::signbit(p)) {
+                norm_value = std::numeric_limits<float>::infinity();
+                #pragma omp parallel for reduction(min:norm_value) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) {
+                    float abs_val = std::abs(static_cast<float>(input_data[i]));
+                    if (abs_val < norm_value) norm_value = abs_val;
+                }
             } else if (std::isinf(p)) {
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
@@ -3781,9 +3844,21 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
             output = Tensor(output_shape, DType::Float32, input.device());
             auto* output_data = output.data<float>();
             float norm_value = 0.0f;
-            if (p == 1.0f) {
+            if (p == 0.0f) {
+                int64_t count = 0;
+                #pragma omp parallel for reduction(+:count) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) if (static_cast<float>(input_data[i]) != 0.0f) count += 1;
+                norm_value = static_cast<float>(count);
+            } else if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) norm_value += std::abs(static_cast<float>(input_data[i]));
+            } else if (std::isinf(p) && std::signbit(p)) {
+                norm_value = std::numeric_limits<float>::infinity();
+                #pragma omp parallel for reduction(min:norm_value) if(n > ::tenzor::OmpThresholds::medium())
+                for (int64_t i = 0; i < n; i++) {
+                    float abs_val = std::abs(static_cast<float>(input_data[i]));
+                    if (abs_val < norm_value) norm_value = abs_val;
+                }
             } else if (std::isinf(p)) {
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
@@ -4481,6 +4556,37 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vecto
 // Mode kernel — sort then find longest run
 // ============================================================================
 
+namespace {
+// NaN-aware ordering/equality for mode_kernel's sort + run-length count.
+// Plain `<`/`==` are always false for NaN operands, which (a) makes the sort
+// comparator violate strict-weak-ordering when NaN is present -- undefined
+// behavior for std::sort, not just a wrong-but-deterministic answer -- and
+// (b) resets the run-length counter on every NaN-to-NaN comparison even when
+// NaNs do end up adjacent, hiding a genuine NaN-mode. `a != a` reliably
+// detects NaN for any IEEE-754 floating type; degrades to plain `<`/`==` for
+// integer T, where it is always false.
+template <typename T>
+bool mode_nan_aware_less(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = (a != a), nb = (b != b);
+        if (na || nb) return !na && nb;  // finite < NaN; NaN is never < anything
+        return a < b;
+    } else {
+        return a < b;
+    }
+}
+template <typename T>
+bool mode_nan_aware_eq(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) {
+        bool na = (a != a), nb = (b != b);
+        if (na || nb) return na && nb;
+        return a == b;
+    } else {
+        return a == b;
+    }
+}
+} // namespace
+
 auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor> {
     // Float16/BFloat16: widen to Float32 (exact for half values, so value
     // groupings/counts are preserved), compute mode, then narrow the VALUES back;
@@ -4575,10 +4681,13 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<
             // Sort by value with an index tie-break (ascending index within each
             // equal-value run) so the "last element of the longest run" is the
             // highest original index deterministically — matching the CUDA mode,
-            // which uses a stable sort.
+            // which uses a stable sort. NaN-aware so NaN operands don't violate
+            // strict-weak-ordering (UB for std::sort) and NaNs sort contiguously.
             std::sort(elems.begin(), elems.end(),
                 [](const auto& a, const auto& b) {
-                    return a.first < b.first || (a.first == b.first && a.second < b.second);
+                    if (mode_nan_aware_less(a.first, b.first)) return true;
+                    if (mode_nan_aware_less(b.first, a.first)) return false;
+                    return a.second < b.second;
                 });
 
             T best_val = elems[0].first;
@@ -4587,7 +4696,7 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<
             int64_t cur_count = 1;
 
             for (int64_t i = 1; i < dim_size; ++i) {
-                if (elems[i].first == elems[i - 1].first) {
+                if (mode_nan_aware_eq(elems[i].first, elems[i - 1].first)) {
                     cur_count++;
                 } else {
                     cur_count = 1;

@@ -1,50 +1,58 @@
 #version 450
 
-// SolveTriangular — solve AX = B where A is triangular.
-// Each invocation handles one column of B.
+// SolveTriangular — solve AX = B where A is triangular, batched.
+// Each invocation handles one column of B for one batch element:
+//   x = gl_GlobalInvocationID.x -> RHS column (0..M)
+//   y = gl_GlobalInvocationID.y -> batch index (0..batch), local_size_y == 1
+//     so gl_GlobalInvocationID.y == gl_WorkGroupID.y (one workgroup row per batch).
 // For upper triangular: back substitution
 // For lower triangular: forward substitution
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) readonly buffer MatA    { float A_data[]; };  // N x N triangular
-layout(binding = 1) readonly buffer MatB    { float B_data[]; };  // N x M (RHS)
-layout(binding = 2) buffer MatX              { float X_data[]; };  // N x M (solution)
+layout(binding = 0) readonly buffer MatA    { float A_data[]; };  // batch x N x N triangular
+layout(binding = 1) readonly buffer MatB    { float B_data[]; };  // batch x N x M (RHS)
+layout(binding = 2) buffer MatX              { float X_data[]; };  // batch x N x M (solution)
 
 layout(push_constant) uniform PushConstants {
     uint N;           // matrix dimension
     uint M;           // number of RHS columns
     uint upper;       // 1 = upper triangular, 0 = lower triangular
     uint unitriangular; // 1 = unit diagonal (diagonal is 1), 0 = use actual diagonal
+    uint batch;       // number of matrices in the batch
 } params;
 
 void main() {
     uint col = gl_GlobalInvocationID.x;
-    if (col >= params.M) return;
+    uint batch_idx = gl_GlobalInvocationID.y;
+    if (col >= params.M || batch_idx >= params.batch) return;
+
+    uint a_off = batch_idx * params.N * params.N;
+    uint b_off = batch_idx * params.N * params.M;
 
     if (params.upper != 0) {
         // Back substitution for upper triangular
         for (int i = int(params.N) - 1; i >= 0; i--) {
-            float sum = B_data[uint(i) * params.M + col];
+            float sum = B_data[b_off + uint(i) * params.M + col];
             for (uint j = uint(i) + 1; j < params.N; j++) {
-                sum -= A_data[uint(i) * params.N + j] * X_data[j * params.M + col];
+                sum -= A_data[a_off + uint(i) * params.N + j] * X_data[b_off + j * params.M + col];
             }
             if (params.unitriangular != 0) {
-                X_data[uint(i) * params.M + col] = sum;
+                X_data[b_off + uint(i) * params.M + col] = sum;
             } else {
-                X_data[uint(i) * params.M + col] = sum / A_data[uint(i) * params.N + uint(i)];
+                X_data[b_off + uint(i) * params.M + col] = sum / A_data[a_off + uint(i) * params.N + uint(i)];
             }
         }
     } else {
         // Forward substitution for lower triangular
         for (uint i = 0; i < params.N; i++) {
-            float sum = B_data[i * params.M + col];
+            float sum = B_data[b_off + i * params.M + col];
             for (uint j = 0; j < i; j++) {
-                sum -= A_data[i * params.N + j] * X_data[j * params.M + col];
+                sum -= A_data[a_off + i * params.N + j] * X_data[b_off + j * params.M + col];
             }
             if (params.unitriangular != 0) {
-                X_data[i * params.M + col] = sum;
+                X_data[b_off + i * params.M + col] = sum;
             } else {
-                X_data[i * params.M + col] = sum / A_data[i * params.N + i];
+                X_data[b_off + i * params.M + col] = sum / A_data[a_off + i * params.N + i];
             }
         }
     }

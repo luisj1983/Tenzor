@@ -15,6 +15,14 @@ layout(push_constant) uniform PushConstants {
     float e;
 } p;
 
+// Round-half-away-from-zero to match std::round / CUDA/ROCm/OneAPI round
+// semantics. GLSL's round() has implementation-defined 0.5 tie-breaking;
+// every other backend rounds ties away from zero, which matters here since
+// e.g. pow(2,-1) == 0.5 exactly. Mirrors pow_int32.comp.
+float round_half_away_f32(float x) {
+    return sign(x) * floor(abs(x) + 0.5);
+}
+
 uint pow_lane(uint rawb, bool sgn) {
     if (p.int_exp != 0u) {
         uint r = 1u;
@@ -22,7 +30,7 @@ uint pow_lane(uint rawb, bool sgn) {
         return r & 0xFFu;
     }
     float b = sgn ? float(int(rawb << 24) >> 24) : float(rawb);
-    float res = round(pow(b, p.e));
+    float res = round_half_away_f32(pow(b, p.e));
     return (sgn ? uint(int(res)) : uint(res)) & 0xFFu;
 }
 

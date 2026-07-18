@@ -91,429 +91,80 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
     return result;
 }
 
-// Transpose kernel - swap two dimensions
+// Transpose kernel - swap two dimensions. Metadata-only view sharing the
+// input's storage (the documented View contract, include/tenzor/core/
+// tensor.hpp:139-144, and what CPU/CUDA/ROCm/Vulkan all do for transpose)
+// instead of physically copying every element into a brand-new Tensor. This
+// mirrors reshape_kernel's storage-sharing pattern above: copy the
+// TensorImpl (shares the `storage` intrusive_ptr, copies shape/strides by
+// value), then swap the two dimensions' shape/stride entries in place. No
+// device kernel launch is needed at all — swapping two dims is O(1) metadata
+// work, not an O(n) element-wise copy.
 auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::queue& queue) -> Tensor {
-    auto shape_span = input.shape();
-    auto input_strides_span = input.strides();
-    const size_t ndim = shape_span.size();
+    (void)queue;
+    const int64_t ndim = input.ndim();
 
     // Handle negative dimensions
     if (dim0 < 0) dim0 += ndim;
     if (dim1 < 0) dim1 += ndim;
 
-    if (dim0 < 0 || dim0 >= static_cast<int64_t>(ndim) ||
-        dim1 < 0 || dim1 >= static_cast<int64_t>(ndim)) {
+    if (dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim) {
         throw std::invalid_argument("Transpose: invalid dimensions");
     }
 
-    if (ndim > 8) {
-        throw std::invalid_argument("oneapi transpose: tensor rank > 8 is unsupported (on-device stride arrays are fixed at 8 dims)");
-    }
-
-    // Convert spans to vectors
-    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-    std::vector<int64_t> in_actual_strides(input_strides_span.begin(), input_strides_span.end());
-
-    // Create output shape by swapping dimensions
-    std::vector<int64_t> out_shape = shape;
-    std::swap(out_shape[dim0], out_shape[dim1]);
-
-    Tensor output(out_shape, input.dtype(), input.device());
-
-    // Calculate output strides (always contiguous for output)
-    auto out_strides = calculate_strides(out_shape);
-
-    // For iterating, we need contiguous strides to decompose the flat index into coordinates
-    auto iter_strides = calculate_strides(shape);
-
-    const int64_t numel = input.numel();
-
-    // Convert to device-copyable arrays
-    int64_t shape_arr[8] = {0};
-    int64_t in_actual_strides_arr[8] = {0};  // Actual input strides (may be non-contiguous)
-    int64_t iter_strides_arr[8] = {0};        // For decomposing flat index into coordinates
-    int64_t out_strides_arr[8] = {0};
-    for (size_t i = 0; i < ndim && i < 8; ++i) {
-        shape_arr[i] = shape[i];
-        in_actual_strides_arr[i] = in_actual_strides[i];
-        iter_strides_arr[i] = iter_strides[i];
-        out_strides_arr[i] = out_strides[i];
-    }
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-
-        queue.parallel_for<TransposeKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            // Decompose flat output index into coordinates using contiguous strides
-            int64_t remaining = idx;
-            int64_t in_idx = 0;
-            int64_t out_idx = 0;
-
-            for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / iter_strides_arr[d];
-                remaining %= iter_strides_arr[d];
-
-                // Input index uses actual (possibly non-contiguous) strides
-                in_idx += coord * in_actual_strides_arr[d];
-
-                // Map coordinate to output dimension (swap dim0 and dim1)
-                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
-                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
-                out_idx += coord * out_strides_arr[out_d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
-
-        queue.parallel_for<TransposeKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            int64_t remaining = idx;
-            int64_t in_idx = 0;
-            int64_t out_idx = 0;
-
-            for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / iter_strides_arr[d];
-                remaining %= iter_strides_arr[d];
-
-                in_idx += coord * in_actual_strides_arr[d];
-
-                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
-                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
-                out_idx += coord * out_strides_arr[out_d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-
-        queue.parallel_for<TransposeKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            int64_t remaining = idx;
-            int64_t in_idx = 0;
-            int64_t out_idx = 0;
-
-            for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / iter_strides_arr[d];
-                remaining %= iter_strides_arr[d];
-
-                in_idx += coord * in_actual_strides_arr[d];
-
-                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
-                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
-                out_idx += coord * out_strides_arr[out_d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::BFloat16) {
-        // BFloat16 stored as uint16_t — pure copy, no conversion needed
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
-        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-
-        queue.parallel_for<TransposeKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            int64_t remaining = idx;
-            int64_t in_idx = 0;
-            int64_t out_idx = 0;
-
-            for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / iter_strides_arr[d];
-                remaining %= iter_strides_arr[d];
-
-                in_idx += coord * in_actual_strides_arr[d];
-
-                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
-                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
-                out_idx += coord * out_strides_arr[out_d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::UInt8) {
-        const uint8_t* in_ptr = get_data_ptr<const uint8_t>(input);
-        uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
-
-        queue.parallel_for<TransposeKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            int64_t remaining = idx;
-            int64_t in_idx = 0;
-            int64_t out_idx = 0;
-
-            for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / iter_strides_arr[d];
-                remaining %= iter_strides_arr[d];
-
-                in_idx += coord * in_actual_strides_arr[d];
-
-                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
-                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
-                out_idx += coord * out_strides_arr[out_d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::Bool) {
-        const bool* in_ptr = get_data_ptr<const bool>(input);
-        bool* out_ptr = get_data_ptr<bool>(output);
-
-        queue.parallel_for<TransposeKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            int64_t remaining = idx;
-            int64_t in_idx = 0;
-            int64_t out_idx = 0;
-
-            for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = remaining / iter_strides_arr[d];
-                remaining %= iter_strides_arr[d];
-
-                in_idx += coord * in_actual_strides_arr[d];
-
-                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
-                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
-                out_idx += coord * out_strides_arr[out_d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for transpose");
-    }
-
-    // Drain the queue: allocate() returns USM-shared host-accessible memory, so a
-    // host read of `output` before the in-order queue finishes the parallel_for
-    // would see stale data.
-    queue.wait_and_throw();
-    return output;
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) =
+        make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    std::swap(r_shape[dim0], r_shape[dim1]);
+    std::swap(r_strides[dim0], r_strides[dim1]);
+    return result;
 }
 
 // Permute kernel - reorder dimensions
 // IMPORTANT: Must handle non-contiguous inputs correctly by using actual strides
+// Permute kernel - reorder dimensions. Metadata-only view sharing the
+// input's storage (see transpose_kernel's comment above for the rationale
+// and the reshape_kernel storage-sharing pattern this mirrors) instead of
+// physically copying every element through a device kernel. The old rank>8
+// restriction only existed because the copy kernels below used fixed-size
+// `int64_t[8]` device-side coordinate/stride arrays; a pure metadata view has
+// no such limit, so it is dropped here.
 auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl::queue& queue) -> Tensor {
-    auto shape_span = input.shape();
-    auto input_strides_span = input.strides();
-    const size_t ndim = shape_span.size();
+    (void)queue;
+    const int64_t ndim = input.ndim();
 
-    if (dims.size() != ndim) {
+    if (static_cast<int64_t>(dims.size()) != ndim) {
         throw std::invalid_argument("Permute: number of dimensions must match");
     }
 
-    // The device kernels below declare a fixed `int64_t coords[8]` and fill it
-    // with an uncapped loop `for (d in [0,ndim)) coords[d] = ...`, and the host
-    // stride arrays (iter/in/out/perm) are 8 elements. A rank > 8 tensor would
-    // overrun those buffers (device-side coords[8] write past end). Guard it,
-    // mirroring transpose_kernel/strided_fill.
-    if (ndim > 8) {
-        throw std::invalid_argument("oneapi permute: tensor rank > 8 is unsupported (on-device coordinate/stride arrays are fixed at 8 dims)");
-    }
-
-    // Convert spans to vectors
-    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-    std::vector<int64_t> in_actual_strides(input_strides_span.begin(), input_strides_span.end());
+    auto shape_span = input.shape();
+    auto strides_span = input.strides();
 
     // Validate and handle negative dimensions
     std::vector<int64_t> perm_dims = dims;
     for (auto& d : perm_dims) {
         if (d < 0) d += ndim;
-        if (d < 0 || d >= static_cast<int64_t>(ndim)) {
+        if (d < 0 || d >= ndim) {
             throw std::invalid_argument("Permute: invalid dimension");
         }
     }
 
-    // Create output shape
-    std::vector<int64_t> out_shape(ndim);
-    for (size_t i = 0; i < ndim; ++i) {
-        out_shape[i] = shape[perm_dims[i]];
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) =
+        make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+
+    std::vector<int64_t> new_shape(ndim);
+    std::vector<int64_t> new_strides(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        new_shape[i] = shape_span[perm_dims[i]];
+        new_strides[i] = strides_span[perm_dims[i]];
     }
 
-    Tensor output(out_shape, input.dtype(), input.device());
-
-    // Calculate contiguous iteration strides for coordinate decomposition
-    auto iter_strides = calculate_strides(shape);
-    // Output is always contiguous
-    auto out_strides = calculate_strides(out_shape);
-
-    const int64_t numel = input.numel();
-
-    // Convert vectors to device-copyable arrays
-    int64_t iter_strides_arr[8] = {0};      // For decomposing flat index into coordinates
-    int64_t in_actual_strides_arr[8] = {0}; // Actual input strides (may be non-contiguous)
-    int64_t out_strides_arr[8] = {0};
-    int64_t perm_dims_arr[8] = {0};
-    for (size_t i = 0; i < ndim && i < 8; ++i) {
-        iter_strides_arr[i] = iter_strides[i];
-        in_actual_strides_arr[i] = in_actual_strides[i];
-        out_strides_arr[i] = out_strides[i];
-        perm_dims_arr[i] = perm_dims[i];
-    }
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-
-        queue.parallel_for<PermuteKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            // Compute multi-dimensional coordinates from flat index using iteration strides
-            int64_t coords[8];
-            int64_t temp = flat_idx;
-            for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / iter_strides_arr[d];
-                temp %= iter_strides_arr[d];
-            }
-
-            // Compute input index using ACTUAL strides (may be non-contiguous)
-            int64_t in_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_actual_strides_arr[d];
-            }
-
-            // Compute output index with permuted dimensions
-            int64_t out_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
-
-        queue.parallel_for<PermuteKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t coords[8];
-            int64_t temp = flat_idx;
-            for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / iter_strides_arr[d];
-                temp %= iter_strides_arr[d];
-            }
-
-            int64_t in_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_actual_strides_arr[d];
-            }
-
-            int64_t out_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-
-        queue.parallel_for<PermuteKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t coords[8];
-            int64_t temp = flat_idx;
-            for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / iter_strides_arr[d];
-                temp %= iter_strides_arr[d];
-            }
-
-            int64_t in_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_actual_strides_arr[d];
-            }
-
-            int64_t out_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::BFloat16) {
-        // BFloat16 stored as uint16_t — pure copy, no conversion needed
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
-        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-
-        queue.parallel_for<PermuteKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t coords[8];
-            int64_t temp = flat_idx;
-            for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / iter_strides_arr[d];
-                temp %= iter_strides_arr[d];
-            }
-
-            int64_t in_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_actual_strides_arr[d];
-            }
-
-            int64_t out_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::UInt8) {
-        const uint8_t* in_ptr = get_data_ptr<const uint8_t>(input);
-        uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
-
-        queue.parallel_for<PermuteKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t coords[8];
-            int64_t temp = flat_idx;
-            for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / iter_strides_arr[d];
-                temp %= iter_strides_arr[d];
-            }
-
-            int64_t in_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_actual_strides_arr[d];
-            }
-
-            int64_t out_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else if (input.dtype() == DType::Bool) {
-        const bool* in_ptr = get_data_ptr<const bool>(input);
-        bool* out_ptr = get_data_ptr<bool>(output);
-
-        queue.parallel_for<PermuteKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t coords[8];
-            int64_t temp = flat_idx;
-            for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / iter_strides_arr[d];
-                temp %= iter_strides_arr[d];
-            }
-
-            int64_t in_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_actual_strides_arr[d];
-            }
-
-            int64_t out_idx = 0;
-            for (size_t d = 0; d < ndim; ++d) {
-                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
-            }
-
-            out_ptr[out_idx] = in_ptr[in_idx];
-        });
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for permute");
-    }
-
-    // Drain the queue before the host reads the USM-shared output.
-    queue.wait_and_throw();
-    return output;
+    result.mutable_shape() = std::move(new_shape);
+    result.mutable_strides() = std::move(new_strides);
+    return result;
 }
 
 // Sentinel meaning "squeeze every size-1 axis". Must match the CPU reference
@@ -523,91 +174,78 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
 static constexpr int64_t SQUEEZE_ALL = std::numeric_limits<int64_t>::min();
 
 // Squeeze kernel - remove dimensions of size 1
+// Squeeze/unsqueeze are metadata-only views sharing the input's storage (the
+// documented View contract, include/tenzor/core/tensor.hpp:139-144, and what
+// CPU/CUDA/ROCm/Vulkan all do) instead of a full memcpy into a brand-new
+// Tensor. Mirrors reshape_kernel/transpose_kernel/permute_kernel above.
 auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
-    auto shape = input.shape();
+    (void)queue;
+    const int64_t ndim = input.ndim();
 
-    std::vector<int64_t> out_shape;
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) =
+        make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
     if (dim == SQUEEZE_ALL) {
         // Squeeze all dimensions of size 1
-        for (auto s : shape) {
-            if (s != 1) {
-                out_shape.push_back(s);
+        std::vector<int64_t> new_shape;
+        std::vector<int64_t> new_strides;
+        for (int64_t i = 0; i < ndim; ++i) {
+            if (input.shape()[i] != 1) {
+                new_shape.push_back(input.shape()[i]);
+                new_strides.push_back(input.strides()[i]);
             }
         }
+        if (new_shape.empty()) {
+            new_shape.push_back(1);
+            new_strides.push_back(1);
+        }
+        result.mutable_shape() = std::move(new_shape);
+        result.mutable_strides() = std::move(new_strides);
     } else {
-        // Squeeze specific dimension
-        if (dim < 0) dim += shape.size();
-        if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+        // Squeeze a specific dimension. Normalize negatives and validate range.
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
             throw std::invalid_argument("Squeeze: invalid dimension");
         }
-
-        if (shape[dim] != 1) {
-            throw std::invalid_argument("Squeeze: dimension must be size 1");
-        }
-
-        for (size_t i = 0; i < shape.size(); ++i) {
-            if (static_cast<int64_t>(i) != dim) {
-                out_shape.push_back(shape[i]);
-            }
+        // PyTorch/CPU/CUDA/ROCm leave a non-size-1 axis untouched rather than
+        // throwing — return an unchanged view.
+        if (input.shape()[dim] == 1) {
+            auto& r_shape = result.mutable_shape();
+            auto& r_strides = result.mutable_strides();
+            r_shape.erase(r_shape.begin() + dim);
+            r_strides.erase(r_strides.begin() + dim);
         }
     }
 
-    if (out_shape.empty()) {
-        out_shape.push_back(1);
-    }
-
-    // Squeeze is just a view change, copy data - works for all dtypes.
-    // The flat memcpy assumes a contiguous source, so a non-contiguous input view
-    // would be read at the wrong physical offsets — materialize contiguous first
-    // (mirrors unsqueeze_kernel/clone_kernel).
-    Tensor src = input.is_contiguous() ? input : contiguous_kernel(input, queue);
-    Tensor output(out_shape, input.dtype(), input.device());
-    const size_t bytes = src.numel() * src.dtype_size();
-    const void* in_ptr = src.data_ptr();
-    void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes).wait();
-
-    return output;
+    return result;
 }
 
 // Unsqueeze kernel - add dimension of size 1
 auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
-    auto shape = input.shape();
-    const size_t ndim = shape.size();
+    (void)queue;
+    const int64_t ndim = input.ndim();
 
-    // Handle negative dimension
+    // Handle negative dimension (valid range for the OUTPUT rank is [0, ndim])
     if (dim < 0) dim += ndim + 1;
-
-    if (dim < 0 || dim > static_cast<int64_t>(ndim)) {
+    if (dim < 0 || dim > ndim) {
         throw std::invalid_argument("Unsqueeze: invalid dimension");
     }
 
-    // Create output shape with new dimension
-    std::vector<int64_t> out_shape;
-    for (size_t i = 0; i < ndim; ++i) {
-        if (static_cast<int64_t>(i) == dim) {
-            out_shape.push_back(1);
-        }
-        out_shape.push_back(shape[i]);
-    }
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) =
+        make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
-    if (dim == static_cast<int64_t>(ndim)) {
-        out_shape.push_back(1);
-    }
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    r_shape.insert(r_shape.begin() + dim, 1);
 
-    // Unsqueeze only inserts a size-1 axis and must preserve element order. The
-    // flat memcpy assumes contiguous source, so a non-contiguous input view would
-    // be read at the wrong physical offsets — materialize contiguous first
-    // (mirrors squeeze_kernel/clone_kernel).
-    Tensor src = input.is_contiguous() ? input : contiguous_kernel(input, queue);
-    Tensor output(out_shape, input.dtype(), input.device());
-    const size_t bytes = src.numel() * src.dtype_size();
-    const void* in_ptr = src.data_ptr();
-    void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes).wait();
+    // Stride for the new size-1 axis: reuse the stride of the dimension it
+    // displaces (matches CPU/CUDA), or 1 when appended past the end.
+    int64_t new_stride = (dim < ndim) ? input.strides()[dim] : 1;
+    r_strides.insert(r_strides.begin() + dim, new_stride);
 
-    return output;
+    return result;
 }
 
 // Contiguous kernel - ensure tensor data is laid out contiguously
@@ -1328,6 +966,21 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, sycl::queue&
     if (dim < 0) dim += shape.size();
     int64_t dim_size = shape[dim];
     int64_t split_size = (dim_size + chunks - 1) / chunks;
+    // For a zero-size chunk dim, split_size collapses to 0, which split_kernel
+    // rejects (or treats as "no pieces"). PyTorch's chunk() on an empty dim
+    // returns `chunks` empty tensors (each carrying a 0 in the chunk dim)
+    // instead of an empty vector of 0 tensors. Matches CPU's chunk_kernel
+    // (src/backends/cpu/kernels/transform.cpp) and CUDA/ROCm/Vulkan's fixes.
+    if (split_size == 0) {
+        std::vector<Tensor> result;
+        result.reserve(static_cast<size_t>(chunks));
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[dim] = 0;
+        for (int64_t c = 0; c < chunks; ++c) {
+            result.emplace_back(out_shape, input.dtype(), input.device());
+        }
+        return result;
+    }
     return split_kernel(input, split_size, dim, queue);
 }
 
@@ -1886,6 +1539,33 @@ class CastBoolToF64;
 class CastI64ToF64;
 class CastF64ToI64;
 
+// Kernel name tag + launcher for direct (no-float-pivot) integer/bool casts.
+// Every pair among {Int8, UInt8, Int32, Int64, Bool} that lacks an explicit
+// case above previously fell through to the generic "src -> Float32 -> dst"
+// two-hop fallback further below, which both saturates (via the old
+// sycl::clamp on the Float32->Int8/UInt8 legs) AND silently loses precision
+// for any integer magnitude above 2^24 (Float32's mantissa limit) — e.g.
+// Int64 -> Int8 would first round the Int64 value to the nearest Float32,
+// corrupting values a true modular truncation would have handled exactly.
+// cast_direct() instead does a single raw static_cast<DstT>(src), matching
+// CPU's cast_cpu_raw / CUDA's / ROCm's static_cast<DstT>(src) semantics
+// exactly (numpy/PyTorch modular-truncation narrowing, no intermediate
+// float). Int16/UInt16/UInt32/UInt64 never reach this device path — the
+// "runtime_unsafe" host detour above already routes them through the same
+// exact-static_cast CPU path for an unrelated Intel runtime SEGV reason, so
+// they are already correct.
+template<typename SrcT, typename DstT>
+struct CastDirectTag {};
+
+template<typename SrcT, typename DstT>
+static void cast_direct(const Tensor& input, Tensor& output, int64_t numel, sycl::queue& queue) {
+    const SrcT* in = get_data_ptr<const SrcT>(input);
+    DstT* out = get_data_ptr<DstT>(output);
+    queue.parallel_for<CastDirectTag<SrcT, DstT>>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+        out[i] = static_cast<DstT>(in[i]);
+    });
+}
+
 auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue) -> Tensor {
     if (input_in.dtype() == target_dtype) {
         return clone_kernel(input_in, queue);
@@ -1901,8 +1581,13 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
     {
         auto runtime_unsafe = [](DType dt) {
             // UInt32 casts crash the same way (verified via SumDtypeGap.UInt32
-            // backtrace), so it takes the host detour too.
-            return dt == DType::Int16 || dt == DType::UInt16 || dt == DType::UInt32;
+            // backtrace), so it takes the host detour too. UInt64 crashes
+            // identically (verified via a plain UInt64->Float32 cast reaching
+            // the same "PLEASE submit a bug report" Intel runtime banner while
+            // fixing the real<->complex cast cross product finding, which
+            // recurses UInt64->Complex64 through a UInt64->Float32 two-hop).
+            return dt == DType::Int16 || dt == DType::UInt16 || dt == DType::UInt32 ||
+                   dt == DType::UInt64;
         };
         if (runtime_unsafe(input_in.dtype()) || runtime_unsafe(target_dtype)) {
             return input_in.to(Device::cpu()).to(target_dtype).to(input_in.device());
@@ -1962,8 +1647,20 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
     } else if (src == DType::Float32 && dst == DType::Int32) {
         const float* in = get_data_ptr<const float>(input);
         int32_t* out = get_data_ptr<int32_t>(output);
+        // Saturating conversion (NaN->0, +Inf/overflow->INT32_MAX,
+        // -Inf/-overflow->INT32_MIN), matching CUDA/ROCm/Vulkan's native ISA
+        // cvt behavior instead of a bare static_cast (UB for out-of-range/NaN
+        // input, garbage on this SYCL backend's raw conversion).
         queue.parallel_for<CastF32ToI32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            out[i] = static_cast<int32_t>(in[i]);
+            float v = in[i];
+            if (sycl::isnan(v)) { out[i] = 0; return; }
+            if (v >= static_cast<float>(std::numeric_limits<int32_t>::max())) {
+                out[i] = std::numeric_limits<int32_t>::max();
+            } else if (v <= static_cast<float>(std::numeric_limits<int32_t>::min())) {
+                out[i] = std::numeric_limits<int32_t>::min();
+            } else {
+                out[i] = static_cast<int32_t>(v);
+            }
         });
     } else if (src == DType::Int32 && dst == DType::Float32) {
         const int32_t* in = get_data_ptr<const int32_t>(input);
@@ -1974,8 +1671,17 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
     } else if (src == DType::Float32 && dst == DType::Int64) {
         const float* in = get_data_ptr<const float>(input);
         int64_t* out = get_data_ptr<int64_t>(output);
+        // Saturating conversion -- see the Float32->Int32 case above.
         queue.parallel_for<CastF32ToI64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            out[i] = static_cast<int64_t>(in[i]);
+            float v = in[i];
+            if (sycl::isnan(v)) { out[i] = 0; return; }
+            if (v >= static_cast<float>(std::numeric_limits<int64_t>::max())) {
+                out[i] = std::numeric_limits<int64_t>::max();
+            } else if (v <= static_cast<float>(std::numeric_limits<int64_t>::min())) {
+                out[i] = std::numeric_limits<int64_t>::min();
+            } else {
+                out[i] = static_cast<int64_t>(v);
+            }
         });
     } else if (src == DType::Int64 && dst == DType::Float32) {
         const int64_t* in = get_data_ptr<const int64_t>(input);
@@ -1986,8 +1692,12 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
     } else if (src == DType::Float32 && dst == DType::UInt8) {
         const float* in = get_data_ptr<const float>(input);
         uint8_t* out = get_data_ptr<uint8_t>(output);
+        // Raw modular-truncation cast (matches CPU/CUDA/ROCm/Vulkan's
+        // static_cast<DstT>(src) semantics, i.e. numpy/PyTorch's wrap/truncate
+        // behavior). sycl::clamp here previously SATURATED to [0,255] instead,
+        // silently diverging from every other backend for out-of-range values.
         queue.parallel_for<CastF32ToU8>(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            out[i] = static_cast<uint8_t>(sycl::clamp(in[i], 0.0f, 255.0f));
+            out[i] = static_cast<uint8_t>(in[i]);
         });
     } else if (src == DType::UInt8 && dst == DType::Float32) {
         const uint8_t* in = get_data_ptr<const uint8_t>(input);
@@ -1998,8 +1708,10 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
     } else if (src == DType::Float32 && dst == DType::Int8) {
         const float* in = get_data_ptr<const float>(input);
         int8_t* out = get_data_ptr<int8_t>(output);
+        // Raw modular-truncation cast — see the Float32->UInt8 case above for
+        // why sycl::clamp (saturating) is wrong here.
         queue.parallel_for<CastF32ToI8>(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            out[i] = static_cast<int8_t>(sycl::clamp(in[i], -128.0f, 127.0f));
+            out[i] = static_cast<int8_t>(in[i]);
         });
     } else if (src == DType::Int8 && dst == DType::Float32) {
         const int8_t* in = get_data_ptr<const int8_t>(input);
@@ -2047,8 +1759,17 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
     } else if (src == DType::Float64 && dst == DType::Int64) {
         const double* in = get_data_ptr<const double>(input);
         int64_t* out = get_data_ptr<int64_t>(output);
+        // Saturating conversion -- see the Float32->Int32 case above.
         queue.parallel_for<CastF64ToI64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
-            out[i] = static_cast<int64_t>(in[i]);
+            double v = in[i];
+            if (sycl::isnan(v)) { out[i] = 0; return; }
+            if (v >= static_cast<double>(std::numeric_limits<int64_t>::max())) {
+                out[i] = std::numeric_limits<int64_t>::max();
+            } else if (v <= static_cast<double>(std::numeric_limits<int64_t>::min())) {
+                out[i] = std::numeric_limits<int64_t>::min();
+            } else {
+                out[i] = static_cast<int64_t>(v);
+            }
         });
     } else if ((src == DType::FP8_E4M3 || src == DType::FP8_E5M2) && dst == DType::Float32) {
         // FP8 → Float32: device-side bit manipulation
@@ -2268,6 +1989,46 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
             }
         });
         queue.wait_and_throw();
+    } else if (src == DType::Int8 && dst == DType::UInt8) {
+        cast_direct<int8_t, uint8_t>(input, output, numel, queue);
+    } else if (src == DType::UInt8 && dst == DType::Int8) {
+        cast_direct<uint8_t, int8_t>(input, output, numel, queue);
+    } else if (src == DType::Int8 && dst == DType::Int32) {
+        cast_direct<int8_t, int32_t>(input, output, numel, queue);
+    } else if (src == DType::Int32 && dst == DType::Int8) {
+        cast_direct<int32_t, int8_t>(input, output, numel, queue);
+    } else if (src == DType::Int8 && dst == DType::Int64) {
+        cast_direct<int8_t, int64_t>(input, output, numel, queue);
+    } else if (src == DType::Int64 && dst == DType::Int8) {
+        cast_direct<int64_t, int8_t>(input, output, numel, queue);
+    } else if (src == DType::Int8 && dst == DType::Bool) {
+        cast_direct<int8_t, bool>(input, output, numel, queue);
+    } else if (src == DType::Bool && dst == DType::Int8) {
+        cast_direct<bool, int8_t>(input, output, numel, queue);
+    } else if (src == DType::UInt8 && dst == DType::Int32) {
+        cast_direct<uint8_t, int32_t>(input, output, numel, queue);
+    } else if (src == DType::Int32 && dst == DType::UInt8) {
+        cast_direct<int32_t, uint8_t>(input, output, numel, queue);
+    } else if (src == DType::UInt8 && dst == DType::Int64) {
+        cast_direct<uint8_t, int64_t>(input, output, numel, queue);
+    } else if (src == DType::Int64 && dst == DType::UInt8) {
+        cast_direct<int64_t, uint8_t>(input, output, numel, queue);
+    } else if (src == DType::UInt8 && dst == DType::Bool) {
+        cast_direct<uint8_t, bool>(input, output, numel, queue);
+    } else if (src == DType::Bool && dst == DType::UInt8) {
+        cast_direct<bool, uint8_t>(input, output, numel, queue);
+    } else if (src == DType::Int32 && dst == DType::Int64) {
+        cast_direct<int32_t, int64_t>(input, output, numel, queue);
+    } else if (src == DType::Int64 && dst == DType::Int32) {
+        cast_direct<int64_t, int32_t>(input, output, numel, queue);
+    } else if (src == DType::Int32 && dst == DType::Bool) {
+        cast_direct<int32_t, bool>(input, output, numel, queue);
+    } else if (src == DType::Bool && dst == DType::Int32) {
+        cast_direct<bool, int32_t>(input, output, numel, queue);
+    } else if (src == DType::Int64 && dst == DType::Bool) {
+        cast_direct<int64_t, bool>(input, output, numel, queue);
+    } else if (src == DType::Bool && dst == DType::Int64) {
+        cast_direct<bool, int64_t>(input, output, numel, queue);
     } else if (src == DType::Float32 && dst == DType::Complex64) {
         // Real → complex: fill imaginary part with zeros. Complex64
         // storage is interleaved (re, im) float pairs.
@@ -2333,6 +2094,15 @@ auto cast_kernel(const Tensor& input_in, DType target_dtype, sycl::queue& queue)
             out[2 * k]     = static_cast<double>(in[k]);
             out[2 * k + 1] = 0.0;
         });
+    } else if (src == DType::Complex128) {
+        // Complex128's only direct real pairing above is Float64, not Float32
+        // (see the `src == DType::Complex128 && dst == DType::Float64` case).
+        // The generic Float32-pivot two-hop below would recurse into
+        // cast_kernel(Complex128 input, Float32) -- the exact same unhandled
+        // (Complex128, dst) pair -- infinitely, crashing via stack overflow.
+        // Pivot through Float64 (Complex128's real direct partner) instead.
+        Tensor as_f64 = cast_kernel(input, DType::Float64, queue);
+        return cast_kernel(as_f64, target_dtype, queue);
     } else {
         // Two-hop: src -> Float32 -> dst
         if (src != DType::Float32) {
@@ -2557,7 +2327,13 @@ auto to_memory_format_kernel(const Tensor& input, int format_int, sycl::queue& q
         throw std::runtime_error("to_memory_format: ChannelsLast requires 4D tensor");
     }
     std::vector<int64_t> perm_dims = {0, 2, 3, 1};
-    return permute_kernel(input, perm_dims, queue);
+    // permute_kernel now returns a metadata-only view (see its comment above)
+    // sharing the ORIGINAL NCHW-contiguous storage. to_memory_format's whole
+    // point is to produce data that is actually laid out in the requested
+    // physical order, not merely a differently-strided view of the same
+    // bytes — force materialization so this still behaves like a genuine
+    // memory-format conversion instead of silently becoming a no-op copy.
+    return contiguous_kernel(permute_kernel(input, perm_dims, queue), queue);
 }
 
 // ============================================================================

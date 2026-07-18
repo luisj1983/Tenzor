@@ -2,6 +2,14 @@
 
 // Convert CSR sparse matrix to dense (row-major)
 // One workgroup per row: zero the row, then scatter non-zero values
+//
+// Duplicate (row,col) entries within a single CSR row are summed (matching
+// CPU/CUDA/ROCm's SparseTensor::to_dense() scatter_add semantics), not
+// overwritten. Distinct threads/invocations in the same workgroup can target
+// the same dense output element for such duplicates, so the write must be
+// atomic — a plain read-modify-write here would be a data race.
+#extension GL_EXT_shader_atomic_float : enable
+
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
@@ -30,6 +38,9 @@ void main() {
     uint row_end = uint(row_offsets[row + 1]);
     for (uint i = row_start + tid; i < row_end; i += gl_WorkGroupSize.x) {
         uint col = uint(col_indices[i]);
-        dense[row * n_cols + col] = values[i];
+        // Accumulate rather than overwrite: duplicate column entries within
+        // this row must sum, and different invocations may race on the same
+        // (row,col) slot.
+        atomicAdd(dense[row * n_cols + col], values[i]);
     }
 }

@@ -584,10 +584,17 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t N_in = shape[dim];
     int64_t N_out_complex = n / 2 + 1;
 
+    // rocFFT's simple plan interface requires the FFT dimension to be
+    // innermost. Rather than relying solely on the op-layer's
+    // transpose-before-dispatch trick (src/ops/fft.cpp rfft(), an unenforced,
+    // comment-only contract that JIT-trace replay can bypass — see
+    // src/jit/graph.cpp OpId::RFFT dispatch), honor arbitrary axes directly
+    // here too: transpose the target axis to last, recurse, transpose back.
+    // Matches CPU/CUDA/OneAPI/Vulkan's arbitrary-axis support.
     if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "rocFFT rfft: only last-dimension FFT is supported on ROCm. "
-            "The dispatch layer should decompose non-last-dim rfft.");
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = rocm_rfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
     }
 
     // Prepare real input buffer (padded or truncated to length n)
@@ -715,10 +722,17 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
 
+    // rocFFT's simple plan interface requires the FFT dimension to be
+    // innermost. Rather than relying solely on the op-layer's
+    // transpose-before-dispatch trick (src/ops/fft.cpp irfft(), an unenforced,
+    // comment-only contract that JIT-trace replay can bypass — see
+    // src/jit/graph.cpp OpId::IRFFT dispatch), honor arbitrary axes directly
+    // here too: transpose the target axis to last, recurse, transpose back.
+    // Matches CPU/CUDA/OneAPI/Vulkan's arbitrary-axis support.
     if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "rocFFT irfft: only last-dimension IRFFT is supported on ROCm. "
-            "The dispatch layer should decompose non-last-dim irfft.");
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = rocm_irfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
     }
 
     int64_t N_in = shape[dim];
@@ -1512,7 +1526,7 @@ __global__ void pointwise_complex_mul_kernel(T* a_buf, const T* B_buf,
     a_buf[a_base + 2 * k + 1] = a_re * b_im + a_im * b_re;
 }
 
-/// Extract Bluestein result (real input): out[b,k,inner] = a[s][k] * conj(chirp[k])
+/// Extract Bluestein result (real input): out[b,k,inner] = a[s][k] * chirp[k]
 template<typename T>
 __global__ void bluestein_extract_real_kernel(T* d_out, const T* a_buf, const T* chirp,
                                               int64_t N, int64_t M, int64_t total_slices,
@@ -1528,8 +1542,13 @@ __global__ void bluestein_extract_real_kernel(T* d_out, const T* a_buf, const T*
     int64_t a_base = s * 2 * M;
     T a_re = a_buf[a_base + 2 * k];
     T a_im = a_buf[a_base + 2 * k + 1];
+    // Bluestein: X[k] = chirp[k] * (a conv b)[k] -- the extraction multiply
+    // uses the plain chirp, not its conjugate. b_buf was already built from
+    // conj(chirp) (build_b_kernel/build_b_wrap_kernel above), so conjugating
+    // here too cancelled that and left a spurious exp(i*2*pi*k^2/N) phase on
+    // every output bin. Matches the CUDA fix (cuda/kernels/fft.cu).
     T c_re = chirp[2 * k];
-    T c_im = -chirp[2 * k + 1]; // conj
+    T c_im = chirp[2 * k + 1];
     int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
     d_out[out_idx]     = a_re * c_re - a_im * c_im;
     d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
@@ -1551,8 +1570,13 @@ __global__ void bluestein_extract_complex_kernel(T* d_out, const T* a_buf, const
     int64_t a_base = s * 2 * M;
     T a_re = a_buf[a_base + 2 * k];
     T a_im = a_buf[a_base + 2 * k + 1];
+    // Bluestein: X[k] = chirp[k] * (a conv b)[k] -- the extraction multiply
+    // uses the plain chirp, not its conjugate. b_buf was already built from
+    // conj(chirp) (build_b_kernel/build_b_wrap_kernel above), so conjugating
+    // here too cancelled that and left a spurious exp(i*2*pi*k^2/N) phase on
+    // every output bin. Matches the CUDA fix (cuda/kernels/fft.cu).
     T c_re = chirp[2 * k];
-    T c_im = -chirp[2 * k + 1]; // conj
+    T c_im = chirp[2 * k + 1];
     int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
     d_out[out_idx]     = a_re * c_re - a_im * c_im;
     d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
@@ -2144,10 +2168,13 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t N_in = shape[dim];
     int64_t N_out_complex = n / 2 + 1;
 
+    // Honor arbitrary axes directly here too (mirrors the rocFFT build above
+    // and CPU/CUDA/OneAPI/Vulkan's arbitrary-axis support): transpose the
+    // target axis to last, recurse, transpose back.
     if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "rocm native rfft: only last-dimension FFT is supported. "
-            "The dispatch layer should decompose non-last-dim rfft.");
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = rocm_rfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
     }
 
     // Prepare real input buffer (padded or truncated to length n)
@@ -2339,10 +2366,13 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);
 
+    // Honor arbitrary axes directly here too (mirrors the rocFFT build above
+    // and CPU/CUDA/OneAPI/Vulkan's arbitrary-axis support): transpose the
+    // target axis to last, recurse, transpose back.
     if (dim != ndim - 1) {
-        throw std::runtime_error(
-            "rocm native irfft: only last-dimension IRFFT is supported. "
-            "The dispatch layer should decompose non-last-dim irfft.");
+        Tensor input_t = input.transpose(dim, ndim - 1).contiguous();
+        Tensor result_t = rocm_irfft_kernel(input_t, ndim - 1, n, norm, stream);
+        return result_t.transpose(dim, ndim - 1).contiguous();
     }
 
     int64_t N_in = shape[dim];  // n/2 + 1 complex elements

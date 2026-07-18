@@ -23,6 +23,13 @@ void main() {
     float bin_width = range[2];
 
     float val = input_data[idx];
+    // NaN: CPU explicitly skips NaN entries (std::isnan(val) -> continue).
+    // Without this check NaN falls through the range test below (both
+    // comparisons are false for NaN) into uint((val-min_val)/bin_width), and
+    // converting a NaN float to uint is GLSL UB. `val != val` is a reliable
+    // NaN test in shaders (see reduction.comp: GLSL's isnan() builtin is
+    // driver-flaky, so avoid it for a correctness-critical check).
+    if (val != val) return;
     if (val < min_val || val > max_val) return;
     uint bin = uint((val - min_val) / bin_width);
     if (bin >= params.num_bins) bin = params.num_bins - 1;

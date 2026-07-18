@@ -168,6 +168,58 @@ TEST_P(ExtendedParity, Cumprod) {
     }, {input}, 1e-5f, 1e-7f, "Cumprod");
 }
 
+// Regression: direct dispatch<OpId::CumSum/CumProd> with dim=-1 bypasses the
+// front-door tenzor::cumsum()/cumprod() (which normalize negative dims before
+// dispatch) -- ROCm's own kernel indexed shape[-1] directly with no
+// normalization (undefined behavior), unlike CPU/CUDA/OneAPI/Vulkan.
+TEST_P(ExtendedParity, CumsumNegativeDim) {
+    auto input = randn({16, 8}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(-1));
+        std::vector<Tensor> ins = {inputs[0]};
+        return dispatch<OpId::CumSum>(ins, attrs)[0];
+    }, {input}, 1e-5f, 1e-7f, "CumsumNegativeDim");
+}
+
+TEST_P(ExtendedParity, CumprodNegativeDim) {
+    auto input = full({8, 4}, 0.9f, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(-1));
+        std::vector<Tensor> ins = {inputs[0]};
+        return dispatch<OpId::CumProd>(ins, attrs)[0];
+    }, {input}, 1e-5f, 1e-7f, "CumprodNegativeDim");
+}
+
+// Regression: direct dispatch<OpId::CumSum/CumProd> with Float16 bypasses the
+// front-door tenzor::cumsum()/cumprod() (which widen Float16/BFloat16 to
+// Float32 before dispatch) -- ROCm's own kernel threw "unsupported dtype" for
+// Float16, unlike CPU/CUDA/OneAPI/Vulkan (all widen inline).
+TEST_P(ExtendedParity, CumsumFloat16) {
+    auto input = randn({16, 8}, DType::Float16, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(1));
+        std::vector<Tensor> ins = {inputs[0]};
+        return dispatch<OpId::CumSum>(ins, attrs)[0];
+    }, {input}, 1e-2f, 1e-3f, "CumsumFloat16");
+}
+
+TEST_P(ExtendedParity, CumprodFloat16) {
+    auto input = full({8, 4}, 0.9f, DType::Float16, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Dim, int64_t(1));
+        std::vector<Tensor> ins = {inputs[0]};
+        return dispatch<OpId::CumProd>(ins, attrs)[0];
+    }, {input}, 1e-2f, 1e-3f, "CumprodFloat16");
+}
+
 // ============================================================================
 // Advanced Operations
 // ============================================================================

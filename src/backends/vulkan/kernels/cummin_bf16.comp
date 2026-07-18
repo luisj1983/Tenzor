@@ -1,0 +1,64 @@
+#version 450
+
+// Cumulative Minimum along a dimension — BFloat16 variant.
+// See cummax_bf16.comp for the packed uint32 layout rationale (2 bfloat16
+// elements per word, matching cumsum_bf16.comp's convention).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input   { uint input_data[]; };
+layout(binding = 1) buffer Values  { uint values_data[]; };
+layout(binding = 2) buffer Indices { int  indices_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;
+    uint reduce_size;
+    uint inner_size;
+} params;
+
+float readBF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float(uintBitsToFloat(bits << 16));
+}
+
+void writeBF16(uint flat_idx, float val) {
+    uint word_idx = flat_idx / 2;
+    uint half_offset = (flat_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(float(val)) + 0x7FFFu + ((floatBitsToUint(float(val)) >> 16) & 1u)) >> 16);
+    uint mask = 0xFFFFu << half_offset;
+
+    uint old_word = values_data[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(values_data[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
+    }
+}
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    float running = readBF16(base);
+    int   ri = 0;
+    writeBF16(base, running);
+    indices_data[base] = 0;
+
+    for (uint i = 1; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        float val = readBF16(idx);
+        if (val < running) {
+            running = val;
+            ri = int(i);
+        }
+        writeBF16(idx, running);
+        indices_data[idx] = ri;
+    }
+}

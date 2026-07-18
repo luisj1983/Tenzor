@@ -7,6 +7,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <complex>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/sparse/sparse_tensor.hpp>
 #include <tenzor/sparse/sparse_ops.hpp>
@@ -397,6 +398,197 @@ TEST_P(SparseParity, SparseTriangularSolve_Matrix) {
             EXPECT_TENSORS_CLOSE(ref, X.to(Device::cpu()), 1e-3f, 1e-5f);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "sparse_triangular_solve_matrix failed on "
+                      << backend_name(backends[i]) << ": " << e.what()
+                      << std::endl;
+        }
+    }
+}
+
+// ============================================================================
+// Sparse triangular solve — Complex64/Complex128 parity
+// ============================================================================
+// Same lower-triangular nonzero pattern as the Float32 tests above:
+// [ (0,0)         0            0         0    ]
+// [ (1,0)      (1,1)           0         0    ]
+// [ (2,0)      (2,1)        (2,2)        0    ]
+// [   0           0            0       (3,3)  ]
+// Built directly via SparseTensor::sparse_csr (rather than through
+// to_sparse(dense)) so these tests exercise SparseTrsv/SparseTrsm's own
+// complex-dtype dispatch without also depending on DenseToSparse's complex
+// support, which is a separate code path and out of scope here.
+
+static auto make_complex64_lower_triangular_csr() -> SparseTensor {
+    auto crow = zeros({5}, DType::Int64, Device::cpu());
+    auto* cp = crow.data<int64_t>();
+    cp[0] = 0; cp[1] = 1; cp[2] = 3; cp[3] = 6; cp[4] = 7;
+
+    auto cols = zeros({7}, DType::Int64, Device::cpu());
+    auto* clp = cols.data<int64_t>();
+    clp[0] = 0;                    // row 0
+    clp[1] = 0; clp[2] = 1;        // row 1
+    clp[3] = 0; clp[4] = 1; clp[5] = 2;  // row 2
+    clp[6] = 3;                    // row 3
+
+    auto vals = zeros({7}, DType::Complex64, Device::cpu());
+    auto* vp = vals.data<std::complex<float>>();
+    vp[0] = {2.0f, 0.0f};    // (0,0) diag
+    vp[1] = {1.0f, 0.5f};    // (1,0)
+    vp[2] = {3.0f, -1.0f};   // (1,1) diag
+    vp[3] = {0.5f, 0.25f};   // (2,0)
+    vp[4] = {1.5f, -0.5f};   // (2,1)
+    vp[5] = {4.0f, 1.0f};    // (2,2) diag
+    vp[6] = {5.0f, -2.0f};   // (3,3) diag
+
+    return SparseTensor::sparse_csr(crow, cols, vals, {4, 4});
+}
+
+static auto make_complex128_lower_triangular_csr() -> SparseTensor {
+    auto crow = zeros({5}, DType::Int64, Device::cpu());
+    auto* cp = crow.data<int64_t>();
+    cp[0] = 0; cp[1] = 1; cp[2] = 3; cp[3] = 6; cp[4] = 7;
+
+    auto cols = zeros({7}, DType::Int64, Device::cpu());
+    auto* clp = cols.data<int64_t>();
+    clp[0] = 0;
+    clp[1] = 0; clp[2] = 1;
+    clp[3] = 0; clp[4] = 1; clp[5] = 2;
+    clp[6] = 3;
+
+    auto vals = zeros({7}, DType::Complex128, Device::cpu());
+    auto* vp = vals.data<std::complex<double>>();
+    vp[0] = {2.0, 0.0};
+    vp[1] = {1.0, 0.5};
+    vp[2] = {3.0, -1.0};
+    vp[3] = {0.5, 0.25};
+    vp[4] = {1.5, -0.5};
+    vp[5] = {4.0, 1.0};
+    vp[6] = {5.0, -2.0};
+
+    return SparseTensor::sparse_csr(crow, cols, vals, {4, 4});
+}
+
+TEST_P(SparseParity, SparseTriangularSolve_Complex64) {
+    auto L_sparse = make_complex64_lower_triangular_csr();
+    auto b_dense = zeros({4}, DType::Complex64, Device::cpu());
+    auto* bp = b_dense.data<std::complex<float>>();
+    bp[0] = {1.0f, 1.0f};
+    bp[1] = {2.0f, 0.0f};
+    bp[2] = {0.0f, 3.0f};
+    bp[3] = {-1.0f, 2.0f};
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity (complex64)");
+
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
+    Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, b_dense, false);
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto L_sp = L_sparse.to(backends[i]);
+            auto x = tenzor::sparse::sparse_triangular_solve(
+                L_sp, b_dense.to(backends[i]), false);
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("sparse_triangular_solve complex64 on ")
+                         + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, x.to(Device::cpu()), 1e-3f, 1e-5f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "sparse_triangular_solve (complex64) failed on "
+                      << backend_name(backends[i]) << ": " << e.what()
+                      << std::endl;
+        }
+    }
+}
+
+TEST_P(SparseParity, SparseTriangularSolve_Complex64_Matrix) {
+    auto L_sparse = make_complex64_lower_triangular_csr();
+    auto B_dense = zeros({4, 2}, DType::Complex64, Device::cpu());
+    auto* bp = B_dense.data<std::complex<float>>();
+    bp[0] = {1.0f, 1.0f};   bp[1] = {0.0f, 1.0f};
+    bp[2] = {2.0f, 0.0f};   bp[3] = {1.0f, -1.0f};
+    bp[4] = {0.0f, 3.0f};   bp[5] = {2.0f, 2.0f};
+    bp[6] = {-1.0f, 2.0f};  bp[7] = {-2.0f, 0.0f};
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity (complex64 matrix)");
+
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
+    Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, B_dense, false);
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto L_sp = L_sparse.to(backends[i]);
+            auto X = tenzor::sparse::sparse_triangular_solve(
+                L_sp, B_dense.to(backends[i]), false);
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("sparse_triangular_solve_matrix complex64 on ")
+                         + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, X.to(Device::cpu()), 1e-3f, 1e-5f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "sparse_triangular_solve_matrix (complex64) failed on "
+                      << backend_name(backends[i]) << ": " << e.what()
+                      << std::endl;
+        }
+    }
+}
+
+TEST_P(SparseParity, SparseTriangularSolve_Complex128) {
+    auto L_sparse = make_complex128_lower_triangular_csr();
+    auto b_dense = zeros({4}, DType::Complex128, Device::cpu());
+    auto* bp = b_dense.data<std::complex<double>>();
+    bp[0] = {1.0, 1.0};
+    bp[1] = {2.0, 0.0};
+    bp[2] = {0.0, 3.0};
+    bp[3] = {-1.0, 2.0};
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity (complex128)");
+
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
+    Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, b_dense, false);
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto L_sp = L_sparse.to(backends[i]);
+            auto x = tenzor::sparse::sparse_triangular_solve(
+                L_sp, b_dense.to(backends[i]), false);
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("sparse_triangular_solve complex128 on ")
+                         + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, x.to(Device::cpu()), 1e-9f, 1e-10f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "sparse_triangular_solve (complex128) failed on "
+                      << backend_name(backends[i]) << ": " << e.what()
+                      << std::endl;
+        }
+    }
+}
+
+TEST_P(SparseParity, SparseTriangularSolve_Complex128_Matrix) {
+    auto L_sparse = make_complex128_lower_triangular_csr();
+    auto B_dense = zeros({4, 2}, DType::Complex128, Device::cpu());
+    auto* bp = B_dense.data<std::complex<double>>();
+    bp[0] = {1.0, 1.0};   bp[1] = {0.0, 1.0};
+    bp[2] = {2.0, 0.0};   bp[3] = {1.0, -1.0};
+    bp[4] = {0.0, 3.0};   bp[5] = {2.0, 2.0};
+    bp[6] = {-1.0, 2.0};  bp[7] = {-2.0, 0.0};
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity (complex128 matrix)");
+
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
+    Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, B_dense, false);
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto L_sp = L_sparse.to(backends[i]);
+            auto X = tenzor::sparse::sparse_triangular_solve(
+                L_sp, B_dense.to(backends[i]), false);
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("sparse_triangular_solve_matrix complex128 on ")
+                         + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, X.to(Device::cpu()), 1e-9f, 1e-10f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "sparse_triangular_solve_matrix (complex128) failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }

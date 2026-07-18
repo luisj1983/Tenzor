@@ -1574,6 +1574,46 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
 //  TENZOR_HAS_ONEMKL` block so they are available to both this fallback
 //  branch AND to `linalg_eig_qr_kernel` which is always compiled.)
 
+// Forward declarations: linalg_inv_kernel/linalg_solve_kernel below are
+// implemented in terms of the genuinely hand-rolled LU factor/solve further
+// down in this file (defined later, hence the forward declaration).
+auto linalg_lu_kernel(const Tensor& A, sycl::queue& queue)
+    -> std::tuple<Tensor, Tensor, Tensor>;
+auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                            const Tensor& B, sycl::queue& queue) -> Tensor;
+// linalg_inv_kernel (below) calls linalg_solve_kernel (defined right after
+// it) before the compiler has seen its declaration.
+auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -> Tensor;
+
+namespace {
+// linalg_lu_solve_kernel expects a single combined LU buffer (LAPACK getrf
+// storage convention: strict-lower triangle holds L's multipliers, upper
+// triangle incl. diagonal holds U), but linalg_lu_kernel returns L and U as
+// separate tensors. Recombine them with one elementwise SYCL pass.
+Tensor pack_lu(const Tensor& L, const Tensor& U, sycl::queue& queue) {
+    auto shape = L.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t n = shape[ndim - 1];
+    Tensor packed(std::vector<int64_t>(shape.begin(), shape.end()), L.dtype(), L.device());
+    int64_t total = L.numel();
+
+    auto launch = [&](auto* l_ptr, auto* u_ptr, auto* p_ptr) {
+        queue.parallel_for(sycl::range<1>(static_cast<size_t>(total)), [=](sycl::id<1> idx) {
+            int64_t flat = static_cast<int64_t>(idx[0]);
+            int64_t i = (flat % (n * n)) / n;
+            int64_t j = flat % n;
+            p_ptr[flat] = (i > j) ? l_ptr[flat] : u_ptr[flat];
+        }).wait();
+    };
+    if (L.dtype() == DType::Float32) {
+        launch(L.data<float>(), U.data<float>(), packed.data<float>());
+    } else {
+        launch(L.data<double>(), U.data<double>(), packed.data<double>());
+    }
+    return packed;
+}
+} // namespace
+
 // ============================================================================
 // Determinant
 // ============================================================================
@@ -1683,67 +1723,31 @@ auto linalg_det_kernel(const Tensor& A, sycl::queue& queue) -> Tensor {
 // ============================================================================
 
 auto linalg_inv_kernel(const Tensor& input_in, sycl::queue& queue) -> Tensor {
-    // Float16 / BFloat16: widen to Float32, compute, narrow back (oneMKL getrf
-    // is not overloaded for half precision). Mirrors linalg_det_kernel.
+    // Float16 / BFloat16: widen to Float32, compute, narrow back. Mirrors
+    // linalg_det_kernel. (linalg_lu_kernel/linalg_solve_kernel below also
+    // widen internally, but doing it here too avoids constructing an
+    // unnecessary half-precision identity matrix.)
     if (input_in.dtype() == DType::Float16 || input_in.dtype() == DType::BFloat16) {
         const DType orig_dtype = input_in.dtype();
         return linalg_inv_kernel(input_in.to(DType::Float32), queue).to(orig_dtype);
     }
 
-    // oneMKL repacks input into a col-major device buffer via get_data_ptr(),
-    // which assumes a contiguous source; a non-contiguous input would be read
-    // with the wrong layout. Materialize a contiguous copy first.
     Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape = input.shape();
-    int64_t n = shape[shape.size() - 1];
-    // Support leading batch dims: invert each n x n block independently and
-    // return a tensor of the full input shape (previously only the first matrix
-    // was inverted and a rank-2 {n,n} tensor returned).
-    std::vector<int64_t> out_shape(shape.begin(), shape.end());
-    int64_t nbatch = (n > 0) ? input.numel() / (n * n) : 0;
-    Tensor output(out_shape, input.dtype(), input.device());
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t n = shape[ndim - 1];
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_base = get_data_ptr<const float>(input);
-        float* out_base = get_data_ptr<float>(output);
-        SyclDeviceBuffer<float> d_a(n * n, queue);
-        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
-        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
-        SyclDeviceBuffer<float> scratch_rf(sp_rf, queue);
-        auto sp_ri = ::oneapi::mkl::lapack::getri_scratchpad_size<float>(queue, n, n);
-        SyclDeviceBuffer<float> scratch_ri(sp_ri, queue);
-
-        for (int64_t bb = 0; bb < nbatch; ++bb) {
-            row_to_col_major<float, SyclTransposeInvF32>(
-                d_a.get(), in_base + bb * n * n, n, n, queue);
-            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
-            ::oneapi::mkl::lapack::getri(queue, n, d_a.get(), n, d_ipiv.get(), scratch_ri.get(), sp_ri).wait();
-            col_to_row_major<float, SyclTransposeInvBackF32>(
-                out_base + bb * n * n, d_a.get(), n, n, queue);
-        }
-        return output;
-    } else if (input.dtype() == DType::Float64) {
-        const double* in_base = get_data_ptr<const double>(input);
-        double* out_base = get_data_ptr<double>(output);
-        SyclDeviceBuffer<double> d_a(n * n, queue);
-        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
-        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
-        SyclDeviceBuffer<double> scratch_rf(sp_rf, queue);
-        auto sp_ri = ::oneapi::mkl::lapack::getri_scratchpad_size<double>(queue, n, n);
-        SyclDeviceBuffer<double> scratch_ri(sp_ri, queue);
-
-        for (int64_t bb = 0; bb < nbatch; ++bb) {
-            row_to_col_major<double, SyclTransposeInvF64>(
-                d_a.get(), in_base + bb * n * n, n, n, queue);
-            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
-            ::oneapi::mkl::lapack::getri(queue, n, d_a.get(), n, d_ipiv.get(), scratch_ri.get(), sp_ri).wait();
-            col_to_row_major<double, SyclTransposeInvBackF64>(
-                out_base + bb * n * n, d_a.get(), n, n, queue);
-        }
-        return output;
-    } else {
-        throw std::runtime_error("linalg_inv: only Float32 and Float64 supported");
+    // inv(A) = solve(A, I) -- avoids reimplementing getri's explicit-inverse
+    // algorithm; the native fallback has no oneMKL to call into. Build a
+    // batched identity matching A's leading batch dims (mirrors CUDA's own
+    // native-fallback linalg_householder_kernel batching pattern).
+    Tensor I = tenzor::eye(n, std::nullopt, input.dtype(), input.device());
+    if (ndim > 2) {
+        std::vector<int64_t> eye_shape(shape.begin(), shape.end());
+        I = tenzor::expand(I, std::move(eye_shape));
+        I = I.contiguous();
     }
+    return linalg_solve_kernel(input, I, queue);
 }
 
 // ============================================================================
@@ -1756,77 +1760,30 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -
         const DType orig_dtype = A.dtype();
         return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), queue).to(orig_dtype);
     }
-    // row_to_col_major reads via raw pointer and ignores strides, so views
-    // (e.g. A.transpose(-1,-2)) produce wrong results unless forced contiguous.
-    auto A_cont = A.contiguous();
-    auto B_cont = B.contiguous();
-    auto a_shape = A_cont.shape();
+    auto a_shape = A.shape();
+    auto b_shape = B.shape();
     int64_t n = a_shape[a_shape.size() - 1];
-    auto b_shape = B_cont.shape();
     int64_t nrhs = (b_shape.size() > 1) ? b_shape[b_shape.size() - 1] : 1;
-
-    // Support leading batch dims: solve each (n x n, n x nrhs) system independently
-    // (previously only the first system was solved, leaving the rest of the output
-    // uninitialised). A and B must share the same batch count.
-    int64_t nbatch = (n > 0) ? A_cont.numel() / (n * n) : 0;
-    int64_t nbatch_b = (n > 0 && nrhs > 0) ? B_cont.numel() / (n * nrhs) : 0;
+    int64_t nbatch = (n > 0) ? A.numel() / (n * n) : 0;
+    int64_t nbatch_b = (n > 0 && nrhs > 0) ? B.numel() / (n * nrhs) : 0;
     if (nbatch_b != nbatch) {
         throw std::invalid_argument(
             "linalg_solve: batch count of A (" + std::to_string(nbatch) +
             ") does not match batch count of B (" + std::to_string(nbatch_b) + ")");
     }
-    std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
-    Tensor output(out_shape, A_cont.dtype(), A_cont.device());
 
-    if (A_cont.dtype() == DType::Float32) {
-        const float* a_base = get_data_ptr<const float>(A_cont);
-        const float* b_base = get_data_ptr<const float>(B_cont);
-        float* out_base = get_data_ptr<float>(output);
-        SyclDeviceBuffer<float> d_a(n * n, queue);
-        SyclDeviceBuffer<float> d_b(n * nrhs, queue);
-        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
-        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
-        SyclDeviceBuffer<float> scratch_rf(sp_rf, queue);
-        auto sp_rs = ::oneapi::mkl::lapack::getrs_scratchpad_size<float>(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, n, n);
-        SyclDeviceBuffer<float> scratch_rs(sp_rs, queue);
-
-        for (int64_t bb = 0; bb < nbatch; ++bb) {
-            row_to_col_major<float, SyclTransposeSolveAF32>(
-                d_a.get(), a_base + bb * n * n, n, n, queue);
-            row_to_col_major<float, SyclTransposeSolveBF32>(
-                d_b.get(), b_base + bb * n * nrhs, n, nrhs, queue);
-            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
-            ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
-            col_to_row_major<float, SyclTransposeSolveBackF32>(
-                out_base + bb * n * nrhs, d_b.get(), n, nrhs, queue);
-        }
-        return output;
-    } else if (A_cont.dtype() == DType::Float64) {
-        const double* a_base = get_data_ptr<const double>(A_cont);
-        const double* b_base = get_data_ptr<const double>(B_cont);
-        double* out_base = get_data_ptr<double>(output);
-        SyclDeviceBuffer<double> d_a(n * n, queue);
-        SyclDeviceBuffer<double> d_b(n * nrhs, queue);
-        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
-        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
-        SyclDeviceBuffer<double> scratch_rf(sp_rf, queue);
-        auto sp_rs = ::oneapi::mkl::lapack::getrs_scratchpad_size<double>(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, n, n);
-        SyclDeviceBuffer<double> scratch_rs(sp_rs, queue);
-
-        for (int64_t bb = 0; bb < nbatch; ++bb) {
-            row_to_col_major<double, SyclTransposeSolveAF64>(
-                d_a.get(), a_base + bb * n * n, n, n, queue);
-            row_to_col_major<double, SyclTransposeSolveBF64>(
-                d_b.get(), b_base + bb * n * nrhs, n, nrhs, queue);
-            ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
-            ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
-            col_to_row_major<double, SyclTransposeSolveBackF64>(
-                out_base + bb * n * nrhs, d_b.get(), n, nrhs, queue);
-        }
-        return output;
-    } else {
-        throw std::runtime_error("linalg_solve: only Float32 and Float64 supported");
-    }
+    // solve(A, B) = lu_solve(lu_factor(A), B). No oneMKL getrf/getrs to call
+    // into in this build config, so compose from the already hand-rolled LU
+    // primitives further down this file instead of reimplementing them.
+    auto [L, U, P] = linalg_lu_kernel(A, queue);
+    Tensor LU = pack_lu(L, U, queue);
+    // linalg_lu_solve_kernel requires B with an explicit trailing nrhs dim;
+    // a 1D B (single right-hand side) needs reshaping to (n, 1) first, then
+    // squeezing back to match the input rank on return.
+    bool b_is_1d = (b_shape.size() < 2);
+    Tensor b_work = b_is_1d ? B.reshape({n, 1}) : B;
+    Tensor result = linalg_lu_solve_kernel(LU, P, b_work, queue);
+    return b_is_1d ? result.reshape({n}) : result;
 }
 
 // ============================================================================
@@ -3482,6 +3439,47 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
 
     auto ld_cont = LD.contiguous();
     auto work_b = B.contiguous().clone();
+
+    // The LDL^T solve kernel has no error-reporting path back to the host, so
+    // an exactly-zero D-block pivot (a singular factor) would silently
+    // produce Inf/NaN instead of throwing (matches CPU/CUDA/ROCm, which all
+    // detect this via the same pivot-block decoding and throw). Validate
+    // host-side before ever enqueueing the kernel.
+    {
+        Tensor ld_host = ld_cont.to(Device::cpu());
+        Tensor piv_host = pivots.contiguous().to(Device::cpu());
+        const int32_t* piv_ptr = piv_host.data<int32_t>();
+        auto check_batch = [&](auto* ld_ptr) {
+            for (int64_t bidx = 0; bidx < nbatch; ++bidx) {
+                auto* ld_mat = ld_ptr + bidx * n * n;
+                const int32_t* piv_mat = piv_ptr + bidx * n;
+                for (int64_t k = 0; k < n; ) {
+                    int32_t p = piv_mat[k];
+                    if (p > 0) {
+                        if (ld_mat[k * n + k] == 0) {
+                            throw std::runtime_error(
+                                "linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+                        }
+                        k++;
+                    } else {
+                        auto d11 = ld_mat[k * n + k];
+                        auto d21 = ld_mat[(k + 1) * n + k];
+                        auto d22 = ld_mat[(k + 1) * n + (k + 1)];
+                        if (d11 * d22 - d21 * d21 == 0) {
+                            throw std::runtime_error(
+                                "linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+                        }
+                        k += 2;
+                    }
+                }
+            }
+        };
+        if (original_dtype == DType::Float64) {
+            check_batch(ld_host.data<double>());
+        } else {
+            check_batch(ld_host.data<float>());
+        }
+    }
 
     auto launch = [&](auto* ld_ptr, auto* b_ptr) {
         using T = std::remove_pointer_t<decltype(ld_ptr)>;

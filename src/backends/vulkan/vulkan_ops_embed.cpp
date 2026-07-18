@@ -286,6 +286,37 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
     int64_t num_offsets_raw = offsets.numel();
     int64_t num_bags = include_last_offset ? (num_offsets_raw - 1) : num_offsets_raw;
 
+    // Pre-validate offsets host-side before any shader dispatch. Per-bag
+    // [start, end) bounds are derived from offsets and indexed directly into
+    // the embeddings buffer in the shader with no on-device bounds checking;
+    // a malformed offset (negative, non-monotonic, or exceeding the
+    // embedding table length) would cause an out-of-bounds shader read (and
+    // an OOB write of the argmax buffer in max mode). Mirrors the CPU
+    // reference (nn_kernels.cpp) and OneAPI's embedding_bag_forward_kernel.
+    if (num_bags > 0) {
+        Tensor offsets_host = offsets_packed.to(Device::cpu());
+        auto read_offset = [&](int64_t i) -> int64_t {
+            if (offsets.dtype() == DType::Int64) {
+                return offsets_host.data<int64_t>()[i];
+            }
+            return static_cast<int64_t>(offsets_host.data<int32_t>()[i]);
+        };
+        int64_t prev = 0;
+        for (int64_t bag = 0; bag < num_bags; ++bag) {
+            int64_t start = read_offset(bag);
+            int64_t end = (bag + 1 < num_offsets_raw) ? read_offset(bag + 1) : total_rows;
+            if (start < prev || start > total_rows ||
+                end < start || end > total_rows) {
+                throw std::out_of_range(
+                    "embedding_bag_forward: offset out of range or non-monotonic "
+                    "at bag " + std::to_string(bag) + " ([" +
+                    std::to_string(start) + ", " + std::to_string(end) +
+                    ") not within [0, " + std::to_string(total_rows) + "])");
+            }
+            prev = start;
+        }
+    }
+
     // Convert mode string to int
     uint32_t mode_int = 0;  // sum
     if (mode == "mean") mode_int = 1;

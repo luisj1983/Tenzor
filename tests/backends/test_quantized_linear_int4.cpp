@@ -336,3 +336,73 @@ TEST(QuantizedLinearInt4Cuda, DispatchMatchesCpuKernel) {
     for (size_t i = 0; i < ref.size(); ++i)
         EXPECT_NEAR(ref[i], op[i], 1e-3f) << "int4 quant linear elem " << i;
 }
+
+// The INT4 CUDA kernel used to read AttrKey::InputZeroPoint via the dispatch
+// registry but never pass it through to quantized_linear_int4_cuda /
+// quantized_linear_int4_cuda_kernel, so asymmetric activation quantization
+// was silently treated as symmetric (zp=0) -- the -input_zp*sum_w correction
+// term (a fix already made for CPU's fused_qlinear_dequant) was dropped on
+// CUDA. Uses a nonzero input_zp and compares against a hand-computed
+// reference that applies the correction directly (INT4 weights are
+// symmetric, so no weight-side zero-point term is needed).
+TEST(QuantizedLinearInt4Cuda, AsymmetricInputZeroPointMatchesReference) {
+    using namespace tenzor;
+    initialize();
+    bool has_cuda = false;
+    try { auto t = zeros({1}, DType::Float32, Device::cuda(0)); (void)t; has_cuda = true; }
+    catch (...) {}
+    if (!has_cuda) GTEST_SKIP();
+
+    const int64_t B = 3, K = 32, O = 8, PK = K / 2;
+    const int32_t input_zp = 5;  // nonzero asymmetric activation zero-point
+    std::vector<int8_t> input(static_cast<size_t>(B * K));
+    for (int64_t i = 0; i < B * K; ++i) input[i] = static_cast<int8_t>((i % 17) - 8);
+    std::vector<int8_t> weights(static_cast<size_t>(O * K));
+    for (int64_t i = 0; i < O * K; ++i) weights[i] = static_cast<int8_t>((i % 15) - 7);
+
+    std::vector<uint8_t> packed(static_cast<size_t>(O * PK));
+    for (int64_t o = 0; o < O; ++o)
+        for (int64_t p = 0; p < PK; ++p)
+            packed[o * PK + p] = pack_pair(weights[o * K + 2 * p], weights[o * K + 2 * p + 1]);
+
+    const float in_scale = 0.05f, w_scale = 0.03f, out_scale = 1.0f;
+    const float combined_scale = in_scale * w_scale / out_scale;
+
+    // Hand-computed reference: sum(q_i*q_w) - input_zp*sum_w (INT4 weights are
+    // symmetric so there is no weight-side zero-point term).
+    std::vector<float> ref(static_cast<size_t>(B * O), 0.0f);
+    for (int64_t b = 0; b < B; ++b) {
+        for (int64_t o = 0; o < O; ++o) {
+            int64_t acc = 0;
+            int64_t sum_w = 0;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += static_cast<int64_t>(input[b * K + k]) *
+                       static_cast<int64_t>(weights[o * K + k]);
+                sum_w += weights[o * K + k];
+            }
+            int64_t corrected = acc - static_cast<int64_t>(input_zp) * sum_w;
+            ref[b * O + o] = static_cast<float>(corrected) * combined_scale;
+        }
+    }
+
+    Tensor in_t({B, K}, DType::Int8, Device::cpu());
+    std::memcpy(in_t.data_ptr(), input.data(), static_cast<size_t>(B * K));
+    Tensor w_t({O, PK}, DType::QInt4x2, Device::cpu());
+    std::memcpy(w_t.data_ptr(), packed.data(), static_cast<size_t>(O * PK));
+
+    auto in_cuda = in_t.to(Device::cuda(0));
+    auto w_cuda = w_t.to(Device::cuda(0));
+    OpAttributes attrs;
+    attrs.set(AttrKey::InputScale,     static_cast<double>(in_scale));
+    attrs.set(AttrKey::WeightScaleQ,   static_cast<double>(w_scale));
+    attrs.set(AttrKey::OutputScale,    static_cast<double>(out_scale));
+    attrs.set(AttrKey::InputZeroPoint, static_cast<int64_t>(input_zp));
+    std::vector<Tensor> ins = {in_cuda, w_cuda};
+    Tensor out = dispatch(OpId::QuantizedLinear, ins, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(out.numel(), static_cast<int64_t>(ref.size()));
+    const float* op = out.data<float>();
+    for (size_t i = 0; i < ref.size(); ++i)
+        EXPECT_NEAR(ref[i], op[i], 1e-3f)
+            << "int4 quant linear (asymmetric input zp) elem " << i;
+}

@@ -92,15 +92,37 @@ void check_rocsolver_info(rocblas_int* d_info, const std::string& op_name) {
     }
 }
 
-/// Validate only the *argument* status (negative info) of a getrf call.
-/// Unlike check_rocsolver_info, a positive info (singular factor) is tolerated:
-/// callers like det() treat a zero pivot as a legitimate det == 0 result.
-void check_rocsolver_getrf_arg(rocblas_int* d_info, const std::string& op_name) {
-    rocblas_int h_info = 0;
-    HIP_CHECK_LINALG(hipMemcpy(&h_info, d_info, sizeof(rocblas_int), hipMemcpyDeviceToHost));
-    if (h_info < 0) {
-        throw std::runtime_error("linalg::" + op_name + ": invalid argument to getrf (info=" +
-                                 std::to_string(h_info) + ")");
+/// Batched counterpart of check_rocsolver_info: the *_strided_batched family
+/// writes one rocblas_int per batch entry (not a single scalar), so the whole
+/// array must be copied back and every entry checked.
+void check_rocsolver_info_batched(rocblas_int* d_info, int64_t nbatch, const std::string& op_name) {
+    std::vector<rocblas_int> h_info(static_cast<size_t>(nbatch), 0);
+    HIP_CHECK_LINALG(hipMemcpy(h_info.data(), d_info, nbatch * sizeof(rocblas_int),
+                               hipMemcpyDeviceToHost));
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] < 0) {
+            throw std::runtime_error("linalg::" + op_name + ": invalid argument (info=" +
+                                     std::to_string(h_info[b]) + ")");
+        } else if (h_info[b] > 0) {
+            throw std::runtime_error("linalg::" + op_name + ": computation failed (info=" +
+                                     std::to_string(h_info[b]) + ")");
+        }
+    }
+}
+
+/// Validate only the *argument* status (negative info) of a
+/// getrf_strided_batched call — a positive info (singular factor per batch
+/// entry) is tolerated, since callers like det() treat a zero pivot as a
+/// legitimate det == 0 result.
+void check_rocsolver_getrf_arg_batched(rocblas_int* d_info, int64_t nbatch, const std::string& op_name) {
+    std::vector<rocblas_int> h_info(static_cast<size_t>(nbatch), 0);
+    HIP_CHECK_LINALG(hipMemcpy(h_info.data(), d_info, nbatch * sizeof(rocblas_int),
+                               hipMemcpyDeviceToHost));
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] < 0) {
+            throw std::runtime_error("linalg::" + op_name + ": invalid argument to getrf (info=" +
+                                     std::to_string(h_info[b]) + ")");
+        }
     }
 }
 
@@ -363,28 +385,33 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     if (nbatch == 0) return result;
     auto handle = RocSOLVERHandlePool::get(stream);
 
-    // Allocate pivot array on device via RAII (ScratchBuffer) so a throwing
-    // ROCBLAS_CHECK_LINALG / getrf-arg check unwinds without leaking it.
+    // Allocate pivot array + one info-per-batch-entry on device via RAII
+    // (ScratchBuffer) so a throwing ROCBLAS_CHECK_LINALG / getrf-arg check
+    // unwinds without leaking them. getrf_strided_batched factorizes the
+    // whole batch in a single rocSOLVER call instead of one host-side call
+    // per batch element.
     size_t ipiv_bytes = nbatch * n * sizeof(rocblas_int);
     ScratchBuffer d_ipiv_buf(ipiv_bytes);
     auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
-    DeviceInfo d_info;
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
+
+    const rocblas_int rn = static_cast<rocblas_int>(n);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(n);
+    const rocblas_stride strideP = static_cast<rocblas_stride>(n);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
 
     if (A.dtype() == DType::Float32) {
         float* data = work.data<float>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* mat = data + b * n * n;
-            rocblas_int* piv = d_ipiv + b * n;
-
-            // rocSOLVER manages workspace internally
-            ROCBLAS_CHECK_LINALG(rocsolver_sgetrf(handle, n, n, mat, n, piv, d_info.ptr));
-            // Validate the factorization status. NOTE: a *positive* info means a
-            // zero pivot (singular matrix), which is a legitimate det == 0 case
-            // handled correctly by det_from_lu — so only a *negative* info
-            // (invalid argument) is an error here.
-            check_rocsolver_getrf_arg(d_info.ptr, "det");
-        }
+        // rocSOLVER manages workspace internally
+        ROCBLAS_CHECK_LINALG(rocsolver_sgetrf_strided_batched(
+            handle, rn, rn, data, rn, strideA, d_ipiv, strideP, d_info, rbatch));
+        // Validate the factorization status. NOTE: a *positive* info means a
+        // zero pivot (singular matrix), which is a legitimate det == 0 case
+        // handled correctly by det_from_lu — so only a *negative* info
+        // (invalid argument) is an error here.
+        check_rocsolver_getrf_arg_batched(d_info, nbatch, "det");
 
         int threads = 256;
         int blocks = (nbatch + threads - 1) / threads;
@@ -393,13 +420,9 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     } else {
         double* data = work.data<double>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* mat = data + b * n * n;
-            rocblas_int* piv = d_ipiv + b * n;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dgetrf(handle, n, n, mat, n, piv, d_info.ptr));
-            check_rocsolver_getrf_arg(d_info.ptr, "det");  // negative-info only (see f32 path)
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dgetrf_strided_batched(
+            handle, rn, rn, data, rn, strideA, d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_getrf_arg_batched(d_info, nbatch, "det");  // negative-info only (see f32 path)
 
         int threads = 256;
         int blocks = (nbatch + threads - 1) / threads;
@@ -408,7 +431,7 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    // d_ipiv is freed by ScratchBuffer's destructor at scope exit.
+    // d_ipiv/d_info are freed by ScratchBuffer's destructor at scope exit.
     return result;
 }
 
@@ -429,11 +452,21 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     int64_t nbatch = batch_size(work);
     auto handle = RocSOLVERHandlePool::get(stream);
 
-    size_t ipiv_bytes = n * sizeof(rocblas_int);
+    // Pivots + one info-per-batch-entry, sized for the whole batch so a
+    // single getrf_strided_batched/getrs_strided_batched call factorizes and
+    // solves all batch entries in one rocSOLVER dispatch instead of nbatch
+    // host-side round trips.
+    size_t ipiv_bytes = static_cast<size_t>(nbatch) * n * sizeof(rocblas_int);
     // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
     ScratchBuffer d_ipiv_buf(ipiv_bytes);
     auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
-    DeviceInfo d_info;
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
+
+    const rocblas_int rn = static_cast<rocblas_int>(n);
+    const rocblas_stride stride_mat = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(n);
+    const rocblas_stride strideP = static_cast<rocblas_stride>(n);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
 
     // Create identity matrix on device for getrs-based inversion
     auto identity = zeros(to_vec(work.shape()), A.dtype(), A.device());
@@ -451,16 +484,14 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
             HIP_CHECK_LINALG(hipGetLastError());
         }
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* mat = data + b * n * n;
-            float* id_mat = id_data + b * n * n;
+        ROCBLAS_CHECK_LINALG(rocsolver_sgetrf_strided_batched(
+            handle, rn, rn, data, rn, stride_mat, d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "inv");
 
-            ROCBLAS_CHECK_LINALG(rocsolver_sgetrf(handle, n, n, mat, n, d_ipiv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "inv");
-
-            ROCBLAS_CHECK_LINALG(rocsolver_sgetrs(handle, rocblas_operation_none, n, n,
-                mat, n, d_ipiv, id_mat, n));
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_sgetrs_strided_batched(
+            handle, rocblas_operation_none, rn, rn,
+            data, rn, stride_mat, d_ipiv, strideP,
+            id_data, rn, stride_mat, rbatch));
     } else {
         double* data = work.data<double>();
         double* id_data = identity.data<double>();
@@ -474,20 +505,18 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
             HIP_CHECK_LINALG(hipGetLastError());
         }
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* mat = data + b * n * n;
-            double* id_mat = id_data + b * n * n;
+        ROCBLAS_CHECK_LINALG(rocsolver_dgetrf_strided_batched(
+            handle, rn, rn, data, rn, stride_mat, d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "inv");
 
-            ROCBLAS_CHECK_LINALG(rocsolver_dgetrf(handle, n, n, mat, n, d_ipiv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "inv");
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dgetrs(handle, rocblas_operation_none, n, n,
-                mat, n, d_ipiv, id_mat, n));
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dgetrs_strided_batched(
+            handle, rocblas_operation_none, rn, rn,
+            data, rn, stride_mat, d_ipiv, strideP,
+            id_data, rn, stride_mat, rbatch));
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    // d_ipiv freed by ScratchBuffer destructor at scope exit.
+    // d_ipiv/d_info freed by ScratchBuffer destructor at scope exit.
     return identity;
 }
 
@@ -522,44 +551,52 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
 
     auto handle = RocSOLVERHandlePool::get(stream);
 
-    size_t ipiv_bytes = n * sizeof(rocblas_int);
+    // Pivots + one info-per-batch-entry, sized for the whole batch so a
+    // single getrf_strided_batched/getrs_strided_batched call factorizes and
+    // solves all batch entries in one rocSOLVER dispatch instead of nbatch
+    // host-side round trips.
+    size_t ipiv_bytes = static_cast<size_t>(nbatch) * n * sizeof(rocblas_int);
     // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
     ScratchBuffer d_ipiv_buf(ipiv_bytes);
     auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
-    DeviceInfo d_info;
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
+
+    const rocblas_int rn = static_cast<rocblas_int>(n);
+    const rocblas_int rnrhs = static_cast<rocblas_int>(nrhs);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(n);
+    const rocblas_stride strideB = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(nrhs);
+    const rocblas_stride strideP = static_cast<rocblas_stride>(n);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
 
     if (A.dtype() == DType::Float32) {
         float* a_data = work_a.data<float>();
         float* b_data = work_b.data<float>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* a_mat = a_data + b * n * n;
-            float* b_mat = b_data + b * n * nrhs;
+        ROCBLAS_CHECK_LINALG(rocsolver_sgetrf_strided_batched(
+            handle, rn, rn, a_data, rn, strideA, d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "solve");
 
-            ROCBLAS_CHECK_LINALG(rocsolver_sgetrf(handle, n, n, a_mat, n, d_ipiv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "solve");
-
-            ROCBLAS_CHECK_LINALG(rocsolver_sgetrs(handle, rocblas_operation_none, n, nrhs,
-                a_mat, n, d_ipiv, b_mat, n));
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_sgetrs_strided_batched(
+            handle, rocblas_operation_none, rn, rnrhs,
+            a_data, rn, strideA, d_ipiv, strideP,
+            b_data, rn, strideB, rbatch));
     } else {
         double* a_data = work_a.data<double>();
         double* b_data = work_b.data<double>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* a_mat = a_data + b * n * n;
-            double* b_mat = b_data + b * n * nrhs;
+        ROCBLAS_CHECK_LINALG(rocsolver_dgetrf_strided_batched(
+            handle, rn, rn, a_data, rn, strideA, d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "solve");
 
-            ROCBLAS_CHECK_LINALG(rocsolver_dgetrf(handle, n, n, a_mat, n, d_ipiv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "solve");
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dgetrs(handle, rocblas_operation_none, n, nrhs,
-                a_mat, n, d_ipiv, b_mat, n));
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dgetrs_strided_batched(
+            handle, rocblas_operation_none, rn, rnrhs,
+            a_data, rn, strideA, d_ipiv, strideP,
+            b_data, rn, strideB, rbatch));
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    // d_ipiv freed by ScratchBuffer destructor at scope exit.
+    // d_ipiv/d_info freed by ScratchBuffer destructor at scope exit.
     return tenzor::transpose(work_b, -1, -2).contiguous();
 }
 
@@ -600,24 +637,27 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
     // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
     ScratchBuffer d_ipiv_buf(ipiv_bytes);
     auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
-    DeviceInfo d_info;
+    // One info-per-batch-entry (rather than a single reused scalar) so the
+    // whole batch can be factorized with a single getrf_strided_batched
+    // call instead of nbatch host-side rocsolver_?getrf round trips.
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
+
+    const rocblas_int rn = static_cast<rocblas_int>(n);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(n);
+    const rocblas_stride strideP = static_cast<rocblas_stride>(n);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
 
     if (original_dtype == DType::Float32) {
         float* data = a_t.data<float>();
-        for (int64_t b = 0; b < nbatch; ++b) {
-            float* mat = data + b * n * n;
-            rocblas_int* piv = d_ipiv + b * n;
-            ROCBLAS_CHECK_LINALG(rocsolver_sgetrf(handle, n, n, mat, n, piv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "lu");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_sgetrf_strided_batched(
+            handle, rn, rn, data, rn, strideA, d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "lu");
     } else {
         double* data = a_t.data<double>();
-        for (int64_t b = 0; b < nbatch; ++b) {
-            double* mat = data + b * n * n;
-            rocblas_int* piv = d_ipiv + b * n;
-            ROCBLAS_CHECK_LINALG(rocsolver_dgetrf(handle, n, n, mat, n, piv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "lu");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dgetrf_strided_batched(
+            handle, rn, rn, data, rn, strideA, d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "lu");
     }
 
     // Step 2: transpose the column-major packed factors back to row-major
@@ -653,7 +693,7 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
         nbatch * n * sizeof(int32_t), hipMemcpyDeviceToDevice, stream));
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    // d_ipiv freed by ScratchBuffer destructor at scope exit.
+    // d_ipiv/d_info freed by ScratchBuffer destructor at scope exit.
     return {L, U, pivots_out};
 }
 
@@ -809,8 +849,13 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     auto S = zeros(s_shape, A.dtype(), A.device());
     auto Vt = zeros(vt_shape, A.dtype(), A.device());
 
+    // Empty batch: gesvd_strided_batched with batch_count==0 still requires
+    // valid (non-null) E/info pointers on some rocSOLVER builds; U/S/Vt are
+    // already the (empty) correctly-shaped results, so return them as-is
+    // (matches det's nbatch==0 short-circuit above).
+    if (nbatch == 0) return {U, S, Vt};
+
     auto handle = RocSOLVERHandlePool::get(stream);
-    DeviceInfo d_info;
 
     // rocSOLVER uses column-major; we use row-major. For row-major A (m x n),
     // rocSOLVER sees A^T (n x m) in column-major. SVD(A^T) = V S U^T,
@@ -819,10 +864,19 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     rocblas_svect left_svect = full_matrices ? rocblas_svect_all : rocblas_svect_singular;
     rocblas_svect right_svect = full_matrices ? rocblas_svect_all : rocblas_svect_singular;
 
-    // Allocate E (superdiagonal) on device — required by rocSOLVER gesvd
-    size_t e_bytes = (k > 1 ? k - 1 : 1) * (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
+    // Allocate E (superdiagonal) on device — required by rocSOLVER gesvd.
+    // rocSOLVER 3.35.0 (see rocsolver-version.h) exposes
+    // s/dgesvd_strided_batched, so the whole batch is factorized with a
+    // single rocSOLVER call instead of nbatch host-side round trips (mirrors
+    // the getrf/potrf/sytrf/syevd_strided_batched conversions above). E and
+    // info are sized per-batch-entry and freed via RAII on any
+    // exception/return path.
+    size_t e_bytes = static_cast<size_t>(nbatch) * (k > 1 ? k - 1 : 1) *
+        (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
     ScratchBuffer e_guard(e_bytes);  // RAII: freed on any exception/return path
     void* d_e = e_guard.ptr;
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
 
     // rocSOLVER gesvd leading-dimension rules (col-major), with m',n' = rocSOLVER
     // arguments (= our swapped n_cols, m):
@@ -838,6 +892,13 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     int ldu_arg  = full_matrices ? n_cols : k;  // rocSOLVER "U" leading dim
     int ldvt_arg = full_matrices ? m      : k;  // rocSOLVER "V^T" leading dim
 
+    const rocblas_int rn_cols = static_cast<rocblas_int>(n_cols);
+    const rocblas_int rm = static_cast<rocblas_int>(m);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(m) * static_cast<rocblas_stride>(n_cols);
+    const rocblas_stride strideS = static_cast<rocblas_stride>(k);
+    const rocblas_stride strideE = static_cast<rocblas_stride>(k > 1 ? k - 1 : 1);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
+
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* s_data = S.data<float>();
@@ -847,25 +908,18 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
         int64_t u_stride = full_matrices ? m * m : m * k;
         int64_t vt_stride = full_matrices ? n_cols * n_cols : k * n_cols;
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* a_mat = a_data + b * m * n_cols;
-            float* s_vec = s_data + b * k;
-            float* u_mat = u_data + b * u_stride;
-            float* vt_mat = vt_data + b * vt_stride;
-
-            // For row-major: we pass n_cols as m and m as n to treat as col-major A^T
-            // Then U output is actually Vt, and Vt output is actually U
-            ROCBLAS_CHECK_LINALG(rocsolver_sgesvd(handle, left_svect, right_svect,
-                n_cols, m,  // swapped: col-major sees our row-major as transposed
-                a_mat, n_cols,  // lda = n_cols (stride between columns in row-major)
-                s_vec,
-                vt_mat, ldu_arg,   // "U" output -> our Vt
-                u_mat, ldvt_arg,   // "V^T" output -> our U
-                static_cast<float*>(d_e),
-                rocblas_outofplace,
-                d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "svd");
-        }
+        // For row-major: we pass n_cols as m and m as n to treat as col-major A^T.
+        // Then U output is actually Vt, and Vt output is actually U (see comment above).
+        ROCBLAS_CHECK_LINALG(rocsolver_sgesvd_strided_batched(handle, left_svect, right_svect,
+            rn_cols, rm,      // swapped: col-major sees our row-major as transposed
+            a_data, rn_cols, strideA,   // lda = n_cols (stride between columns in row-major)
+            s_data, strideS,
+            vt_data, ldu_arg, static_cast<rocblas_stride>(vt_stride),    // "U" output -> our Vt
+            u_data, ldvt_arg, static_cast<rocblas_stride>(u_stride),     // "V^T" output -> our U
+            static_cast<float*>(d_e), strideE,
+            rocblas_outofplace,
+            d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "svd");
     } else {
         double* a_data = work.data<double>();
         double* s_data = S.data<double>();
@@ -875,23 +929,16 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
         int64_t u_stride = full_matrices ? m * m : m * k;
         int64_t vt_stride = full_matrices ? n_cols * n_cols : k * n_cols;
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* a_mat = a_data + b * m * n_cols;
-            double* s_vec = s_data + b * k;
-            double* u_mat = u_data + b * u_stride;
-            double* vt_mat = vt_data + b * vt_stride;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dgesvd(handle, left_svect, right_svect,
-                n_cols, m,
-                a_mat, n_cols,
-                s_vec,
-                vt_mat, ldu_arg,
-                u_mat, ldvt_arg,
-                static_cast<double*>(d_e),
-                rocblas_outofplace,
-                d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "svd");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dgesvd_strided_batched(handle, left_svect, right_svect,
+            rn_cols, rm,
+            a_data, rn_cols, strideA,
+            s_data, strideS,
+            vt_data, ldu_arg, static_cast<rocblas_stride>(vt_stride),
+            u_data, ldvt_arg, static_cast<rocblas_stride>(u_stride),
+            static_cast<double*>(d_e), strideE,
+            rocblas_outofplace,
+            d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "svd");
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
@@ -939,37 +986,63 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
     auto Q = zeros(q_shape, A.dtype(), A.device());
     auto R = zeros(r_shape, A.dtype(), A.device());
 
+    // Empty batch: geqrf_strided_batched with batch_count==0 still requires
+    // a valid (non-null) tau pointer on some rocSOLVER builds; Q/R are
+    // already the (empty) correctly-shaped results, so return them as-is
+    // (matches det's nbatch==0 short-circuit above).
+    if (nbatch == 0) return {Q, R};
+
     auto handle = RocSOLVERHandlePool::get(stream);
+
+    // geqrf_strided_batched factorizes the whole batch in a single rocSOLVER
+    // call instead of nbatch host-side round trips. orgqr has no batched or
+    // strided_batched entry point in rocSOLVER (checked against the
+    // rocsolver-functions.h shipped with this build, rocSOLVER 3.35.0 —
+    // only rocsolver_s/dorgqr exist, no _batched/_strided_batched variants),
+    // so the Q-formation step below stays a per-batch loop; the extract_r /
+    // copy_q_columns kernel launches are still consolidated to one launch
+    // each over the whole batch (both already support an nbatch parameter).
+    const rocblas_int rm = static_cast<rocblas_int>(m);
+    const rocblas_int rn_cols = static_cast<rocblas_int>(n_cols);
+    const rocblas_int rk = static_cast<rocblas_int>(k);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(m) * static_cast<rocblas_stride>(n_cols);
+    const rocblas_stride strideP = static_cast<rocblas_stride>(k);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
 
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* q_data = Q.data<float>();
         float* r_data = R.data<float>();
 
-        size_t tau_bytes = k * sizeof(float);
+        size_t tau_bytes = static_cast<size_t>(nbatch) * k * sizeof(float);
         // RAII scratch so a throwing rocSOLVER call frees the tau buffer.
         ScratchBuffer d_tau_buf(tau_bytes);
         auto* d_tau = static_cast<float*>(d_tau_buf.ptr);
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* a_mat = a_data + b * m * n_cols;
+        ROCBLAS_CHECK_LINALG(rocsolver_sgeqrf_strided_batched(
+            handle, rm, rn_cols, a_data, rm, strideA, d_tau, strideP, rbatch));
 
-            ROCBLAS_CHECK_LINALG(rocsolver_sgeqrf(handle, m, n_cols,
-                a_mat, m, d_tau));
-
+        if (nbatch > 0) {
             int threads = 256;
-            int total_r = k * n_cols;
+            int total_r = static_cast<int>(nbatch * k * n_cols);
             int blocks = (total_r + threads - 1) / threads;
             extract_r_f32<<<blocks, threads, 0, stream>>>(
-                a_mat, r_data + b * k * n_cols, m, n_cols, k, 1);
+                a_data, r_data, m, n_cols, k, nbatch);
+        }
 
-            ROCBLAS_CHECK_LINALG(rocsolver_sorgqr(handle, m, k, k,
-                a_mat, m, d_tau));
+        for (int64_t b = 0; b < nbatch; b++) {
+            float* a_mat = a_data + b * m * n_cols;
+            float* tau_vec = d_tau + b * k;
+            ROCBLAS_CHECK_LINALG(rocsolver_sorgqr(handle, rm, rk, rk,
+                a_mat, rm, tau_vec));
+        }
 
-            int total_q = m * k;
-            blocks = (total_q + threads - 1) / threads;
+        if (nbatch > 0) {
+            int threads = 256;
+            int total_q = static_cast<int>(nbatch * m * k);
+            int blocks = (total_q + threads - 1) / threads;
             copy_q_columns_f32<<<blocks, threads, 0, stream>>>(
-                a_mat, q_data + b * m * k, m, n_cols, k, 1);
+                a_data, q_data, m, n_cols, k, nbatch);
         }
 
         // d_tau freed by ScratchBuffer destructor at scope exit.
@@ -978,30 +1051,35 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         double* q_data = Q.data<double>();
         double* r_data = R.data<double>();
 
-        size_t tau_bytes = k * sizeof(double);
+        size_t tau_bytes = static_cast<size_t>(nbatch) * k * sizeof(double);
         // RAII scratch so a throwing rocSOLVER call frees the tau buffer.
         ScratchBuffer d_tau_buf(tau_bytes);
         auto* d_tau = static_cast<double*>(d_tau_buf.ptr);
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* a_mat = a_data + b * m * n_cols;
+        ROCBLAS_CHECK_LINALG(rocsolver_dgeqrf_strided_batched(
+            handle, rm, rn_cols, a_data, rm, strideA, d_tau, strideP, rbatch));
 
-            ROCBLAS_CHECK_LINALG(rocsolver_dgeqrf(handle, m, n_cols,
-                a_mat, m, d_tau));
-
+        if (nbatch > 0) {
             int threads = 256;
-            int total_r = k * n_cols;
+            int total_r = static_cast<int>(nbatch * k * n_cols);
             int blocks = (total_r + threads - 1) / threads;
             extract_r_f64<<<blocks, threads, 0, stream>>>(
-                a_mat, r_data + b * k * n_cols, m, n_cols, k, 1);
+                a_data, r_data, m, n_cols, k, nbatch);
+        }
 
-            ROCBLAS_CHECK_LINALG(rocsolver_dorgqr(handle, m, k, k,
-                a_mat, m, d_tau));
+        for (int64_t b = 0; b < nbatch; b++) {
+            double* a_mat = a_data + b * m * n_cols;
+            double* tau_vec = d_tau + b * k;
+            ROCBLAS_CHECK_LINALG(rocsolver_dorgqr(handle, rm, rk, rk,
+                a_mat, rm, tau_vec));
+        }
 
-            int total_q = m * k;
-            blocks = (total_q + threads - 1) / threads;
+        if (nbatch > 0) {
+            int threads = 256;
+            int total_q = static_cast<int>(nbatch * m * k);
+            int blocks = (total_q + threads - 1) / threads;
             copy_q_columns_f64<<<blocks, threads, 0, stream>>>(
-                a_mat, q_data + b * m * k, m, n_cols, k, 1);
+                a_data, q_data, m, n_cols, k, nbatch);
         }
 
         // d_tau freed by ScratchBuffer destructor at scope exit.
@@ -1038,45 +1116,58 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     w_shape.push_back(n);
     auto W = zeros(w_shape, A.dtype(), A.device());
 
+    // Empty batch: syevd_strided_batched with batch_count==0 still requires
+    // a valid (non-null) info/E pointer on some rocSOLVER builds; work is
+    // already the (empty) correctly-shaped V result once transposed, so
+    // skip the rocSOLVER call entirely (matches det's nbatch==0
+    // short-circuit above).
+    if (nbatch == 0) {
+        auto V0 = tenzor::transpose(work, -2, -1).contiguous();
+        return {W, V0};
+    }
+
     auto handle = RocSOLVERHandlePool::get(stream);
-    DeviceInfo d_info;
 
     // syevd computes eigenvalues and eigenvectors of symmetric matrix
     rocblas_evect evect = rocblas_evect_original;
     rocblas_fill uplo = rocblas_fill_upper;
 
-    // Allocate E (off-diagonal) on device — required by rocSOLVER syevd.
-    // RAII via ScratchBuffer so it is released on any exception/return path
-    // (e.g. the check_rocsolver_info throws in the per-batch loop below),
-    // matching the SVD path's e_guard.
-    size_t e_bytes = (n > 1 ? n - 1 : 1) * (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
+    // rocSOLVER 3.35.0 (this build's version — see rocsolver-version.h)
+    // exposes ssyevd_strided_batched/dsyevd_strided_batched, so the whole
+    // batch is factorized with a single rocSOLVER call instead of nbatch
+    // host-side round trips (mirrors the getrf/potrf/sytrf_strided_batched
+    // conversions above). One info/E-block per batch entry, sized for the
+    // whole batch; RAII via ScratchBuffer so a throwing rocSOLVER call
+    // frees them on any exception/return path.
+    size_t e_bytes = static_cast<size_t>(nbatch) * (n > 1 ? n - 1 : 1) *
+        (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
     ScratchBuffer e_guard(e_bytes);
     void* d_e = e_guard.ptr;
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
+
+    const rocblas_int rn = static_cast<rocblas_int>(n);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(n);
+    const rocblas_stride strideD = static_cast<rocblas_stride>(n);
+    const rocblas_stride strideE = static_cast<rocblas_stride>(n > 1 ? n - 1 : 1);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
 
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* w_data = W.data<float>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* mat = a_data + b * n * n;
-            float* w_vec = w_data + b * n;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_ssyevd(handle, evect, uplo,
-                n, mat, n, w_vec, static_cast<float*>(d_e), d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "eigh");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_ssyevd_strided_batched(
+            handle, evect, uplo, rn, a_data, rn, strideA,
+            w_data, strideD, static_cast<float*>(d_e), strideE, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "eigh");
     } else {
         double* a_data = work.data<double>();
         double* w_data = W.data<double>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* mat = a_data + b * n * n;
-            double* w_vec = w_data + b * n;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dsyevd(handle, evect, uplo,
-                n, mat, n, w_vec, static_cast<double*>(d_e), d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "eigh");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dsyevd_strided_batched(
+            handle, evect, uplo, rn, a_data, rn, strideA,
+            w_data, strideD, static_cast<double*>(d_e), strideE, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "eigh");
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
@@ -1957,8 +2048,21 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
+    // Empty batch: potrf_strided_batched with batch_count==0 still requires
+    // a valid (non-null) info pointer on some rocSOLVER builds, and a
+    // zero-grid zero_triangle launch would be rejected by HIP; work is
+    // already the (empty) correctly-shaped result, so return it as-is
+    // (matches det's nbatch==0 short-circuit above).
+    if (nbatch == 0) return work;
+
     auto handle = RocSOLVERHandlePool::get(stream);
-    DeviceInfo d_info;
+
+    // One info-per-batch-entry so the whole batch can be factorized with a
+    // single potrf_strided_batched call instead of nbatch host-side
+    // rocsolver_?potrf round trips (mirrors the getrf_strided_batched
+    // conversion used by det/inv/solve/lu above).
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
 
     // rocSOLVER operates column-major; Tenzor is row-major. A is symmetric
     // so A_col == A_row, but the output triangle is inverted between
@@ -1967,14 +2071,16 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     // triangle.
     rocblas_fill uplo_mode = upper ? rocblas_fill_lower : rocblas_fill_upper;
 
+    const rocblas_int rn = static_cast<rocblas_int>(n);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(n);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
+
     if (A.dtype() == DType::Float32) {
         float* data = work.data<float>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* mat = data + b * n * n;
-            ROCBLAS_CHECK_LINALG(rocsolver_spotrf(handle, uplo_mode, n, mat, n, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "cholesky");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_spotrf_strided_batched(
+            handle, uplo_mode, rn, data, rn, strideA, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "cholesky");
 
         // Zero out the other triangle
         int total = nbatch * n * n;
@@ -1984,11 +2090,9 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     } else {
         double* data = work.data<double>();
 
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* mat = data + b * n * n;
-            ROCBLAS_CHECK_LINALG(rocsolver_dpotrf(handle, uplo_mode, n, mat, n, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "cholesky");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dpotrf_strided_batched(
+            handle, uplo_mode, rn, data, rn, strideA, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "cholesky");
 
         int total = nbatch * n * n;
         int threads = 256;
@@ -2196,6 +2300,18 @@ auto linalg_ldl_factor_kernel(const Tensor& A, hipStream_t stream)
 
     // rocSOLVER expects column-major; transpose row-major -> column-major
     auto work = tenzor::transpose(A, -2, -1).contiguous();
+
+    // Empty batch: sytrf_strided_batched with batch_count==0 still requires
+    // a valid (non-null) info/ipiv pointer on some rocSOLVER builds; work is
+    // already the (empty) correctly-shaped LD result, so transpose it back
+    // and return alongside an empty pivot tensor (matches det's nbatch==0
+    // short-circuit above).
+    if (nbatch == 0) {
+        auto LD_empty = tenzor::transpose(work, -2, -1).contiguous();
+        auto piv_empty = tenzor::zeros(piv_shape, DType::Int32, A.device());
+        return {LD_empty, piv_empty};
+    }
+
     auto handle = RocSOLVERHandlePool::get(stream);
 
     // Allocate pivots on device
@@ -2203,28 +2319,29 @@ auto linalg_ldl_factor_kernel(const Tensor& A, hipStream_t stream)
     // RAII scratch so a throwing rocSOLVER call frees the pivot buffer.
     ScratchBuffer d_ipiv_buf(piv_bytes);
     auto* d_ipiv = static_cast<rocblas_int*>(d_ipiv_buf.ptr);
-    DeviceInfo d_info;
+    // One info-per-batch-entry so the whole batch can be factorized with a
+    // single sytrf_strided_batched call instead of nbatch host-side
+    // rocsolver_?sytrf round trips (mirrors getrf/potrf_strided_batched above).
+    ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
+    auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
+
+    const rocblas_int rn = static_cast<rocblas_int>(n);
+    const rocblas_stride strideA = static_cast<rocblas_stride>(n) * static_cast<rocblas_stride>(n);
+    const rocblas_stride strideP = static_cast<rocblas_stride>(n);
+    const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
 
     if (original_dtype == DType::Float32) {
         float* data = work.data<float>();
-        for (int64_t b = 0; b < nbatch; ++b) {
-            float* mat = data + b * n * n;
-            rocblas_int* piv = d_ipiv + b * n;
-            ROCBLAS_CHECK_LINALG(rocsolver_ssytrf(handle,
-                rocblas_fill_lower, static_cast<rocblas_int>(n),
-                mat, static_cast<rocblas_int>(n), piv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "ldl_factor");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_ssytrf_strided_batched(
+            handle, rocblas_fill_lower, rn, data, rn, strideA,
+            d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "ldl_factor");
     } else {
         double* data = work.data<double>();
-        for (int64_t b = 0; b < nbatch; ++b) {
-            double* mat = data + b * n * n;
-            rocblas_int* piv = d_ipiv + b * n;
-            ROCBLAS_CHECK_LINALG(rocsolver_dsytrf(handle,
-                rocblas_fill_lower, static_cast<rocblas_int>(n),
-                mat, static_cast<rocblas_int>(n), piv, d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "ldl_factor");
-        }
+        ROCBLAS_CHECK_LINALG(rocsolver_dsytrf_strided_batched(
+            handle, rocblas_fill_lower, rn, data, rn, strideA,
+            d_ipiv, strideP, d_info, rbatch));
+        check_rocsolver_info_batched(d_info, nbatch, "ldl_factor");
     }
 
     // Transpose back to row-major
@@ -2251,7 +2368,8 @@ __global__ void ldl_solve_bk_kernel(
     const T* __restrict__ ld_data,
     const int* __restrict__ pivots,
     T* __restrict__ b_data,
-    int n, int nrhs)
+    int n, int nrhs,
+    int* __restrict__ singular_flag)
 {
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
@@ -2317,11 +2435,18 @@ __global__ void ldl_solve_bk_kernel(
             int p = batch_piv[k];
             if (p > 0) {
                 T d = LD[k * n + k];
+                // LAPACK's sytrf/sytrs convention: an exactly-zero pivot means
+                // the LDL^T factor is singular. Flag it so the host throws
+                // (matches Inv/Solve/Cholesky in this file, which check
+                // rocSOLVER/native info for exactly this class of failure)
+                // instead of silently returning Inf/NaN.
+                if (d == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++) B[k * nrhs + j] /= d;
                 k++;
             } else {
                 T d11 = LD[k * n + k], d21 = LD[(k+1) * n + k], d22 = LD[(k+1) * n + (k+1)];
                 T det = d11 * d22 - d21 * d21;
+                if (det == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++) {
                     T y0 = B[k * nrhs + j], y1 = B[(k+1) * nrhs + j];
                     B[k * nrhs + j]     = (d22 * y0 - d21 * y1) / det;
@@ -2412,21 +2537,39 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
     int threads = std::min(static_cast<int>(n), 128);
     if (threads < 1) threads = 1;
 
+    // Device-side singular-factor flag: an exactly-zero D-block pivot means
+    // the LDL^T factor is singular; the host raises a catchable error after
+    // synchronizing instead of silently returning Inf/NaN (matches Inv/Solve/
+    // Cholesky in this file, which check rocSOLVER/native info for the same
+    // class of failure).
+    int* d_singular = nullptr;
+    HIP_CHECK_LINALG(hipMalloc(&d_singular, sizeof(int)));
+    HIP_CHECK_LINALG(hipMemsetAsync(d_singular, 0, sizeof(int), stream));
+
     if (original_dtype == DType::Float32) {
         size_t smem = (n * n + n * nrhs) * sizeof(float);
         ldl_solve_bk_kernel<float><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<float>(), pivots.data<int32_t>(),
-            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         HIP_CHECK_LINALG(hipGetLastError());
     } else {
         size_t smem = (n * n + n * nrhs) * sizeof(double);
         ldl_solve_bk_kernel<double><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<double>(), pivots.data<int32_t>(),
-            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         HIP_CHECK_LINALG(hipGetLastError());
     }
 
+    int host_singular = 0;
+    HIP_CHECK_LINALG(hipMemcpyAsync(&host_singular, d_singular, sizeof(int),
+                                     hipMemcpyDeviceToHost, stream));
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    HIP_CHECK_LINALG(hipFree(d_singular));
+    if (host_singular != 0) {
+        throw std::runtime_error("linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+    }
     // Restore the original 1D shape for a 1D RHS.
     if (b_is_1d) {
         return work_b.reshape({n});
@@ -2536,8 +2679,10 @@ auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "../hip_buffer.hpp"
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <stdexcept>
@@ -2545,6 +2690,19 @@ auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
 #include <string>
 #include <cmath>
 #include <tuple>
+
+// Forward-declare the tensor math entry points linalg_householder_kernel
+// needs — pulling the full math.hpp into this HIP translation unit makes
+// tenzor::sqrt/abs overloads visible to device code and poisons unqualified
+// sqrt() calls in the shared-memory fallback kernels below (mirrors the
+// rocSOLVER branch's identical forward-declare block above).
+namespace tenzor {
+auto add(const Tensor& a, const Tensor& b) -> Tensor;
+auto sub(const Tensor& a, const Tensor& b) -> Tensor;
+auto mul(const Tensor& a, const Tensor& b) -> Tensor;
+auto mul(const Tensor& a, double scalar) -> Tensor;
+auto matmul(const Tensor& a, const Tensor& b) -> Tensor;
+}
 
 namespace tenzor {
 auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
@@ -3148,7 +3306,8 @@ template<typename T>
 __global__ void eigh_kernel(
     T* __restrict__ data,
     T* __restrict__ eigenvalues_out,
-    int n, int max_iterations)
+    int n, int max_iterations,
+    int* __restrict__ info_out)
 {
     constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
     constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
@@ -3278,8 +3437,15 @@ __global__ void eigh_kernel(
 
     // Step 2: QL iteration with implicit Wilkinson shifts on tridiagonal matrix
     if (tid == 0) {
+        // Track per-l convergence so a fixed sweep cap that is exhausted
+        // without the off-diagonal terms dropping below eps is reported back
+        // to the host instead of silently yielding a wrong eigendecomposition
+        // (mirrors the rocSOLVER branch's check_rocsolver_info after
+        // ssyevd/dsyevd).
+        int fail_count = 0;
         for (int l = 0; l < n; l++) {
             int iter = 0;
+            bool l_converged = false;
             while (iter < max_iterations) {
                 // Find small subdiagonal element
                 int m_idx = l;
@@ -3291,7 +3457,7 @@ __global__ void eigh_kernel(
                     }
                     m_idx = i + 1;
                 }
-                if (m_idx == l) break;  // converged
+                if (m_idx == l) { l_converged = true; break; }  // converged
 
                 // Wilkinson shift
                 T g = (d[l + 1] - d[l]) / (T(2) * e[l]);
@@ -3337,7 +3503,9 @@ __global__ void eigh_kernel(
                 e[m_idx] = T(0);
                 iter++;
             }
+            if (!l_converged) fail_count++;
         }
+        if (info_out) info_out[batch_idx] = fail_count;
     }
     __syncthreads();
 
@@ -3364,7 +3532,8 @@ __global__ void svd_kernel(
     T* __restrict__ Vt_out,
     int m, int n_cols, int k,
     bool full_matrices,
-    int max_iterations)
+    int max_iterations,
+    int* __restrict__ info_out)
 {
     constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
     constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
@@ -3535,7 +3704,15 @@ __global__ void svd_kernel(
         // Extract bidiagonal elements: diagonal d[0..k-1], superdiagonal e[0..k-2]
         // Reuse scratch area + some of A for temporary storage
         // We'll work in-place on A's diagonal/superdiagonal
-        for (int iter = 0; iter < max_iterations * k; iter++) {
+        //
+        // Track whether the sweep budget (max_iterations * k) was exhausted
+        // without the superdiagonal terms dropping below eps, so a fixed cap
+        // that fails to converge is reported back to the host instead of
+        // silently yielding wrong singular values (mirrors the rocSOLVER
+        // branch's check_rocsolver_info after sgesvd/dgesvd).
+        int iter = 0;
+        int total_iterations = max_iterations * k;
+        for (; iter < total_iterations; iter++) {
             // Find active range [p, q] where e[i] != 0
             int q = k - 1;
             while (q > 0 && fabs(A[(q - 1) * n_cols + q]) < eps * (fabs(A[(q - 1) * n_cols + (q - 1)]) + fabs(A[q * n_cols + q]))) {
@@ -3626,6 +3803,13 @@ __global__ void svd_kernel(
                 }
             }
         }
+
+        // If the loop ran out its full iteration budget without ever hitting
+        // the q == 0 early-out above, the bidiagonal QR sweep did not
+        // converge — report it instead of silently emitting the
+        // partially-converged A/U/Vt state as if it were correct.
+        bool svd_converged = (total_iterations == 0) || (iter < total_iterations);
+        if (info_out) info_out[batch_idx] = svd_converged ? 0 : 1;
 
         // Make singular values positive (flip sign of U column if needed)
         for (int i = 0; i < k; i++) {
@@ -4560,6 +4744,17 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     auto S = zeros(s_shape, A.dtype(), A.device());
     auto Vt = zeros(vt_shape, A.dtype(), A.device());
 
+    // Per-batch convergence flag: 0 if the bidiagonal QR sweep converged
+    // within its 30*max(m,n) iteration budget, 1 if the cap was hit first.
+    // Without this the native fallback silently returns wrong singular
+    // values/vectors on non-convergent input, diverging from the rocSOLVER
+    // branch which checks rocSOLVER's info after sgesvd/dgesvd.
+    // RAII so d_info frees on every exit path, including the
+    // HIP_CHECK_LINALG throws after the kernel launches below.
+    HipBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(int));
+    int* d_info = d_info_buf.as<int>();
+    HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
+
     if (A.dtype() == DType::Float32) {
         check_size_limit<float>(std::max(m, n_cols), "svd");
         // Shared memory: A[m*n] + U[m*m] + Vt[n*n] + scratch[4]
@@ -4568,7 +4763,7 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
         if (threads < 1) threads = 1;
         svd_kernel<float><<<nbatch, threads, smem, stream>>>(
             work.data<float>(), U.data<float>(), S.data<float>(), Vt.data<float>(),
-            m, n_cols, k, full_matrices, 30 * std::max(m, n_cols));
+            m, n_cols, k, full_matrices, 30 * std::max(m, n_cols), d_info);
         HIP_CHECK_LINALG(hipGetLastError());
     } else {
         check_size_limit<double>(std::max(m, n_cols), "svd");
@@ -4577,11 +4772,26 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
         if (threads < 1) threads = 1;
         svd_kernel<double><<<nbatch, threads, smem, stream>>>(
             work.data<double>(), U.data<double>(), S.data<double>(), Vt.data<double>(),
-            m, n_cols, k, full_matrices, 30 * std::max(m, n_cols));
+            m, n_cols, k, full_matrices, 30 * std::max(m, n_cols), d_info);
         HIP_CHECK_LINALG(hipGetLastError());
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    hipError_t copy_err = hipMemcpy(h_info.data(), d_info,
+                                    nbatch * sizeof(int), hipMemcpyDeviceToHost);
+    // d_info freed by its HipBuffer guard on scope exit.
+    HIP_CHECK_LINALG(copy_err);
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg::svd: computation failed (info=" +
+                std::to_string(h_info[b]) +
+                ") — singular value algorithm did not converge");
+        }
+    }
+
     return {U, S, Vt};
 }
 
@@ -4669,6 +4879,17 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     w_shape.push_back(n);
     auto W = zeros(w_shape, A.dtype(), A.device());
 
+    // Per-batch convergence flag: number of eigenvalues whose QL sweep hit
+    // the 30*n iteration cap without the off-diagonal terms dropping below
+    // eps. Without this the native fallback silently returns a wrong
+    // eigendecomposition on non-convergent input, diverging from the
+    // rocSOLVER branch which checks rocSOLVER's info after ssyevd/dsyevd.
+    // RAII so d_info frees on every exit path, including the
+    // HIP_CHECK_LINALG throws after the kernel launches below.
+    HipBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(int));
+    int* d_info = d_info_buf.as<int>();
+    HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
+
     if (A.dtype() == DType::Float32) {
         check_size_limit<float>(n, "eigh");
         // Shared memory: A[n*n] + Q[n*n] + d[n] + e[n] + scratch[4]
@@ -4676,7 +4897,7 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
         int threads = min(static_cast<int>(n), 128);
         if (threads < 1) threads = 1;
         eigh_kernel<float><<<nbatch, threads, smem, stream>>>(
-            work.data<float>(), W.data<float>(), n, 30 * n);
+            work.data<float>(), W.data<float>(), n, 30 * n, d_info);
         HIP_CHECK_LINALG(hipGetLastError());
     } else {
         check_size_limit<double>(n, "eigh");
@@ -4684,11 +4905,26 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
         int threads = min(static_cast<int>(n), 128);
         if (threads < 1) threads = 1;
         eigh_kernel<double><<<nbatch, threads, smem, stream>>>(
-            work.data<double>(), W.data<double>(), n, 30 * n);
+            work.data<double>(), W.data<double>(), n, 30 * n, d_info);
         HIP_CHECK_LINALG(hipGetLastError());
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    hipError_t copy_err = hipMemcpy(h_info.data(), d_info,
+                                    nbatch * sizeof(int), hipMemcpyDeviceToHost);
+    // d_info freed by its HipBuffer guard on scope exit.
+    HIP_CHECK_LINALG(copy_err);
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg::eigh: computation failed (info=" +
+                std::to_string(h_info[b]) +
+                ") — eigenvalue algorithm did not converge");
+        }
+    }
+
     return {W, work};
 }
 
@@ -4888,7 +5124,28 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
         nbatch * n * sizeof(int), hipMemcpyDeviceToDevice, stream));
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+
+    // Inspect the per-batch info written by lu_kernel. A value > 0 is the
+    // 1-based index of the first zero pivot (singular matrix); negative values
+    // encode the determinant sign and must NOT be treated as an error. Without
+    // this check a downstream lu_solve_kernel/lu_inv_kernel call on the
+    // unchecked factor divides by a zero diagonal and silently returns
+    // Inf/NaN, diverging from rocSOLVER (check_rocsolver_info) and the CPU
+    // backend which both raise. Mirrors the fallback cholesky/inv/solve info
+    // checks in this same file.
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    hipError_t copy_err = hipMemcpy(h_info.data(), d_info,
+                                    nbatch * sizeof(int), hipMemcpyDeviceToHost);
     // d_pivots/d_info freed by their HipBuffer guards on scope exit.
+    HIP_CHECK_LINALG(copy_err);
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg::lu: computation failed (info=" +
+                std::to_string(h_info[b]) + ") — matrix is singular");
+        }
+    }
+
     return {L, U, pivots_out};
 }
 
@@ -5454,7 +5711,8 @@ __global__ void ldl_bk_solve_kernel(
     const T* __restrict__ ld_data,
     const int* __restrict__ pivots,
     T* __restrict__ b_data,
-    int n, int nrhs)
+    int n, int nrhs,
+    int* __restrict__ singular_flag)
 {
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
@@ -5520,11 +5778,18 @@ __global__ void ldl_bk_solve_kernel(
             int p = batch_piv[k];
             if (p > 0) {
                 T d = LD[k * n + k];
+                // LAPACK's sytrf/sytrs convention: an exactly-zero pivot means
+                // the LDL^T factor is singular. Flag it so the host throws
+                // (matches Inv/Solve/Cholesky in this file, which check
+                // rocSOLVER/native info for exactly this class of failure)
+                // instead of silently returning Inf/NaN.
+                if (d == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++) B[k * nrhs + j] /= d;
                 k++;
             } else {
                 T d11 = LD[k * n + k], d21 = LD[(k+1) * n + k], d22 = LD[(k+1) * n + (k+1)];
                 T det = d11 * d22 - d21 * d21;
+                if (det == T(0)) *singular_flag = 1;
                 for (int j = 0; j < nrhs; j++) {
                     T y0 = B[k * nrhs + j], y1 = B[(k+1) * nrhs + j];
                     B[k * nrhs + j]     = (d22 * y0 - d21 * y1) / det;
@@ -5664,23 +5929,41 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
     int threads = std::min(static_cast<int>(n), 128);
     if (threads < 1) threads = 1;
 
+    // Device-side singular-factor flag: an exactly-zero D-block pivot means
+    // the LDL^T factor is singular; the host raises a catchable error after
+    // synchronizing instead of silently returning Inf/NaN (matches Inv/Solve/
+    // Cholesky in this file, which check rocSOLVER/native info for the same
+    // class of failure).
+    int* d_singular = nullptr;
+    HIP_CHECK_LINALG(hipMalloc(&d_singular, sizeof(int)));
+    HIP_CHECK_LINALG(hipMemsetAsync(d_singular, 0, sizeof(int), stream));
+
     if (original_dtype == DType::Float32) {
         check_size_limit<float>(n, "ldl_solve");
         size_t smem = (n * n + n * nrhs) * sizeof(float);
         ldl_bk_solve_kernel<float><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<float>(), pivots.data<int32_t>(),
-            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         HIP_CHECK_LINALG(hipGetLastError());
     } else {
         check_size_limit<double>(n, "ldl_solve");
         size_t smem = (n * n + n * nrhs) * sizeof(double);
         ldl_bk_solve_kernel<double><<<nbatch, threads, smem, stream>>>(
             ld_cont.data<double>(), pivots.data<int32_t>(),
-            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs));
+            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs),
+            d_singular);
         HIP_CHECK_LINALG(hipGetLastError());
     }
 
+    int host_singular = 0;
+    HIP_CHECK_LINALG(hipMemcpyAsync(&host_singular, d_singular, sizeof(int),
+                                     hipMemcpyDeviceToHost, stream));
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    HIP_CHECK_LINALG(hipFree(d_singular));
+    if (host_singular != 0) {
+        throw std::runtime_error("linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+    }
     // Restore the original 1D shape for a 1D RHS.
     if (b_is_1d) {
         return work_b.reshape({n});

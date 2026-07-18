@@ -1,0 +1,51 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+// Sparse + Dense (Int64): result = sparse + dense (result is dense).
+// The output buffer must be pre-filled with dense matrix values before dispatch.
+// One workgroup per row, threads handle a subset of nonzeros in that row.
+//
+// A row's nonzeros are striped across threads in the workgroup, so two
+// threads can land on the same output column within a row (duplicate CSR
+// entries); accumulation must be atomic. Plain atomicAdd on a 64-bit buffer
+// slot is not universally available, so this uses a CAS loop (mirrors
+// index_add_i64.comp). Only dispatched when the device advertises
+// VK_KHR_shader_atomic_int64 (hasAtomicInt64) — see dispatchSparseAdd.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { int64_t values[]; };
+layout(set = 0, binding = 3) buffer Output              { uint64_t output_data[]; };  // uint64_t for CAS atomics
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+// int64 and uint64 share the same bit layout; reinterpret freely.
+void atomicAddI64(uint pos, int64_t val) {
+    uint64_t old_bits = output_data[pos];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        int64_t old_val = int64_t(old_bits);
+        uint64_t new_bits = uint64_t(old_val + val);
+        uint64_t result = atomicCompSwap(output_data[pos], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    uint row_start = uint(row_offsets[row]);
+    uint row_end = uint(row_offsets[row + 1]);
+
+    for (uint i = row_start + tid; i < row_end; i += gl_WorkGroupSize.x) {
+        uint col = uint(col_indices[i]);
+        atomicAddI64(row * n_cols + col, values[i]);
+    }
+}

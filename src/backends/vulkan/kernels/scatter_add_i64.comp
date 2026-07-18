@@ -1,0 +1,70 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ScatterAdd (Int64/UInt64): atomically accumulates int64 source values into
+// output along a dimension via a 64-bit CAS loop, so Int64/UInt64 accumulation
+// keeps its full 64-bit range instead of being narrowed/rounded through Int32
+// (which silently truncates magnitudes > 2^31-1). Mirrors index_add_i64.comp
+// and scatter_add_f64.comp's CAS-loop pattern combined with scatter_add_i32's
+// per-dim index/self stride decode.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Src { int64_t src_data[]; };      // Source values
+layout(binding = 1) buffer Index { int idx_data[]; };        // Index tensor (Int32)
+layout(binding = 2) buffer Output { uint64_t out_data[]; };  // uint64_t for CAS atomics
+
+// Per-dim decode (matches CPU scatter_add_kernel): decode the flat index
+// position with the INDEX tensor's contiguous strides, recompose onto SELF
+// strides (index value substitutes the coord on the scatter dim).
+layout(push_constant) uniform PushConstants {
+    uint n;                 // index.numel()
+    uint ndim;              // <= 8
+    uint dim;               // normalized scatter dim
+    uint dim_size;          // self_shape[dim] (wrap + bounds)
+    uvec4 index_strides0;   // INDEX contiguous strides, dims 0..3
+    uvec4 index_strides1;   // dims 4..7
+    uvec4 self_strides0;    // SELF contiguous strides, dims 0..3
+    uvec4 self_strides1;    // dims 4..7
+} params;
+
+uint idxStride(uint d)  { return (d < 4u) ? params.index_strides0[d] : params.index_strides1[d - 4u]; }
+uint selfStride(uint d) { return (d < 4u) ? params.self_strides0[d]  : params.self_strides1[d - 4u]; }
+
+// int64 and uint64 share the same bit layout; reinterpret freely.
+void atomicAddI64(uint pos, int64_t val) {
+    uint64_t old_bits = out_data[pos];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        int64_t old_val = int64_t(old_bits);
+        uint64_t new_bits = uint64_t(old_val + val);
+        uint64_t result = atomicCompSwap(out_data[pos], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n) return;
+
+    int dest_dim_idx = idx_data[i];
+    // Normalize negative indices like the CPU reference (idx += dim_size) before the
+    // bounds check, so a valid negative index wraps instead of being silently dropped.
+    if (dest_dim_idx < 0) dest_dim_idx += int(params.dim_size);
+
+    if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;
+
+    uint temp = i;
+    uint out_idx = 0u;
+    for (uint d = 0u; d < params.ndim; ++d) {
+        uint coord = temp / idxStride(d);
+        temp = temp % idxStride(d);
+        if (d == params.dim) {
+            out_idx += uint(dest_dim_idx) * selfStride(d);
+        } else {
+            out_idx += coord * selfStride(d);
+        }
+    }
+
+    atomicAddI64(out_idx, src_data[i]);
+}

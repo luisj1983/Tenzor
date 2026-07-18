@@ -289,4 +289,89 @@ TEST_P(DeformableConv2dTest, BackwardParityVsCPU) {
         << "mask gradient diverges";
 }
 
+// DeformableConv2dForward/BackwardInput/BackwardWeight called .data<T>() on
+// input/offset/weight/bias/mask/grad_output with no .contiguous() guard on
+// CUDA/ROCm/OneAPI (CPU and Vulkan already guarded). Build input/offset/mask
+// with H and W swapped, then transpose(2,3) to get a genuinely
+// non-contiguous [N,C,H,W] view -- matches the failure scenario exactly
+// ("a non-contiguous input/offset view, e.g. a channel slice or permute").
+TEST_P(DeformableConv2dTest, ForwardBackwardNonContiguousMatchesCPU) {
+    if (device.type == Device::Type::CPU) {
+        GTEST_SKIP() << "CPU is the parity reference; CPU-vs-CPU parity is meaningless";
+    }
+
+    const int64_t in_ch = 2, out_ch = 4, k = 3;
+
+    // Tensor::clone() always contiguifies its source, so it can't be used to
+    // duplicate a non-contiguous tensor without destroying the very
+    // property under test. Instead: build a CONTIGUOUS base with H/W
+    // swapped, transfer THAT (still contiguous, so .to() is a plain copy)
+    // to the device, then transpose(2,3) independently on each side. Both
+    // sides end up with genuinely non-contiguous, independently-stored
+    // [N,C,H,W] views over identical values.
+    auto input_base  = randn({1, in_ch, 6, 6}, DType::Float32, Device::cpu());
+    auto offset_base = tenzor::mul(randn({1, 2 * k * k, 6, 6}, DType::Float32, Device::cpu()),
+                                    tenzor::full({}, 0.2, DType::Float32, Device::cpu()));
+    auto mask_base   = ones({1, k * k, 6, 6}, DType::Float32, Device::cpu());
+
+    auto input_t_cpu  = input_base.transpose(2, 3);
+    auto offset_t_cpu = offset_base.transpose(2, 3);
+    auto mask_t_cpu   = mask_base.transpose(2, 3);
+    ASSERT_FALSE(input_t_cpu.is_contiguous());
+    ASSERT_FALSE(offset_t_cpu.is_contiguous());
+    ASSERT_FALSE(mask_t_cpu.is_contiguous());
+
+    auto input_t_dev  = input_base.to(device).transpose(2, 3);
+    auto offset_t_dev = offset_base.to(device).transpose(2, 3);
+    auto mask_t_dev   = mask_base.to(device).transpose(2, 3);
+    ASSERT_FALSE(input_t_dev.is_contiguous());
+    ASSERT_FALSE(offset_t_dev.is_contiguous());
+    ASSERT_FALSE(mask_t_dev.is_contiguous());
+
+    nn::DeformableConv2d dcn_cpu(in_ch, out_ch, k, 1, 1);
+
+    auto in_cpu = Variable(input_t_cpu, true);
+    auto off_cpu = Variable(offset_t_cpu, true);
+    auto msk_cpu = Variable(mask_t_cpu, true);
+    auto out_cpu = dcn_cpu.forward(in_cpu, off_cpu, msk_cpu);
+    tenzor::sum(out_cpu).backward();
+
+    nn::DeformableConv2d dcn_dev(in_ch, out_ch, k, 1, 1);
+    dcn_dev.load_state_dict(dcn_cpu.state_dict());
+    dcn_dev.to(device);
+
+    auto in_dev = Variable(input_t_dev, true);
+    auto off_dev = Variable(offset_t_dev, true);
+    auto msk_dev = Variable(mask_t_dev, true);
+    auto out_dev = dcn_dev.forward(in_dev, off_dev, msk_dev);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    auto diff = [](const Tensor& a, const Tensor& b) {
+        auto ac = a.to(Device::cpu());
+        auto bc = b.to(Device::cpu());
+        float m = 0;
+        auto* ap = ac.data<float>();
+        auto* bp = bc.data<float>();
+        for (int64_t i = 0; i < ac.numel(); ++i) {
+            float e = std::fabs(ap[i] - bp[i]);
+            if (e > m) m = e;
+        }
+        return m;
+    };
+
+    EXPECT_LT(diff(out_cpu.tensor(), out_dev.tensor()), 1e-4f)
+        << "DeformableConv2d forward diverges on non-contiguous input";
+
+    EXPECT_GRAD_FLOWS(in_cpu);
+    EXPECT_GRAD_FLOWS(in_dev);
+    EXPECT_LT(diff(in_cpu.grad().value(), in_dev.grad().value()), 1e-3f)
+        << "input gradient diverges on non-contiguous input";
+
+    EXPECT_GRAD_FLOWS(off_cpu);
+    EXPECT_GRAD_FLOWS(off_dev);
+    EXPECT_LT(diff(off_cpu.grad().value(), off_dev.grad().value()), 1e-3f)
+        << "offset gradient diverges on non-contiguous input";
+}
+
 INSTANTIATE_BACKEND_TESTS(DeformableConv2dTest);

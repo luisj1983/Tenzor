@@ -176,6 +176,61 @@ TEST_P(IndexingParity, MaskedSelect) {
     }
 }
 
+// Regression: ROCm's masked_select_hip/masked_fill_hip launched with a
+// zero-block grid on an empty input, which HIP rejects with "invalid
+// configuration argument" instead of returning an empty tensor like
+// CPU/CUDA/OneAPI/Vulkan.
+TEST_P(IndexingParity, MaskedFill_EmptyInput) {
+    auto input = zeros({0}, DType::Float32, device);
+    auto mask = zeros({0}, DType::Bool, device);
+
+    Tensor out;
+    EXPECT_NO_THROW({
+        out = masked_fill(input, mask, -1.0f);
+        device.synchronize();
+    }) << "Failed on " << device.to_string();
+    EXPECT_EQ(out.numel(), 0);
+}
+
+TEST_P(IndexingParity, MaskedSelect_EmptyInput) {
+    auto input = zeros({0}, DType::Float32, device);
+    auto mask = zeros({0}, DType::Bool, device);
+
+    Tensor out;
+    EXPECT_NO_THROW({
+        out = masked_select(input, mask);
+        device.synchronize();
+    }) << "Failed on " << device.to_string();
+    EXPECT_EQ(out.numel(), 0);
+}
+
+// Regression: where()'s condition dtype contract diverged across backends --
+// CPU/CUDA restrict to Bool or a floating dtype (documented deliberate
+// design); ROCm/Vulkan/OneAPI silently accepted any dtype (e.g. Int32) via a
+// generic cast. All 5 backends must now agree: reject Int32, accept Float16.
+TEST_P(IndexingParity, Where_IntConditionThrows) {
+    auto cond = zeros({4}, DType::Int32, device);
+    auto x = ones({4}, DType::Float32, device);
+    auto y = zeros({4}, DType::Float32, device);
+
+    EXPECT_THROW({
+        auto out = where(cond, x, y);
+        device.synchronize();
+    }, std::exception) << "Failed on " << device.to_string();
+}
+
+TEST_P(IndexingParity, Where_Float16Condition) {
+    auto cond = ones({4}, DType::Float16, device);
+    auto x = ones({4}, DType::Float32, device);
+    auto y = zeros({4}, DType::Float32, device);
+
+    Tensor out;
+    EXPECT_NO_THROW({
+        out = where(cond, x, y);
+        device.synchronize();
+    }) << "Failed on " << device.to_string();
+}
+
 TEST_P(IndexingParity, Where) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
@@ -223,6 +278,21 @@ TEST_P(IndexingParity, Take) {
     }, {input, idx}, 0, 0, "Take");
 }
 
+// Regression: CUDA/ROCm's take_hip/take_kernel flattened the output to 1D
+// {indices_size} regardless of the index tensor's actual shape, while
+// CPU/OneAPI/Vulkan preserve indices.shape(). A 2D index must produce a 2D
+// output on every backend.
+TEST_P(IndexingParity, Take_PreservesIndexShape) {
+    auto input = zeros({32}, DType::Float32, device);
+    auto idx = zeros({2, 3}, DType::Int64, device);
+
+    auto out = take(input, idx);
+    device.synchronize();
+    EXPECT_EQ(out.ndim(), 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(out.shape()[0], 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(out.shape()[1], 3) << "Failed on " << device.to_string();
+}
+
 TEST_P(IndexingParity, Put) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
@@ -238,6 +308,141 @@ TEST_P(IndexingParity, Put) {
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return put(inputs[0], inputs[1], inputs[2]);
     }, {input, idx, source}, 0, 0, "Put");
+}
+
+// Regression: Put's dtype coverage diverged sharply from CPU, whose
+// accumulate=false path is a dtype-agnostic memcpy supporting every dtype.
+// CUDA threw for Bool/Int16/UInt16/UInt32/UInt64/Complex64/Complex128; ROCm
+// threw for Int8/UInt8/Bool; OneAPI was narrowest (only Float32/64/Int32/64,
+// throwing even for Float16). put(accumulate=false) -- the only accumulate
+// mode reachable via the public API, since accumulate=true is dispatch
+// -attribute-gated and not exposed by this free function -- must now succeed
+// for every dtype on every backend, matching CPU.
+TEST_P(IndexingParity, Put_FullDtypeCoverageOverwrite) {
+    for (DType dt : {DType::Int8, DType::UInt8, DType::Bool, DType::Int16, DType::UInt16,
+                      DType::UInt32, DType::UInt64, DType::Float16, DType::BFloat16,
+                      DType::Complex64, DType::Complex128}) {
+        auto input = zeros({8}, dt, device);
+        auto idx = zeros({2}, DType::Int64, device);
+        {
+            Tensor idx_cpu = idx.to(Device::cpu());
+            idx_cpu.data<int64_t>()[0] = 1;
+            idx_cpu.data<int64_t>()[1] = 3;
+            idx = idx_cpu.to(device);
+        }
+        auto source = ones({2}, dt, device);
+
+        Tensor out;
+        EXPECT_NO_THROW({
+            out = put(input, idx, source);
+            device.synchronize();
+        }) << "Failed on " << device.to_string() << " dtype " << dtype_name(dt);
+    }
+}
+
+// Regression: [MEMORY CORRUPTION] Vulkan's dispatchPut had no dtype-widening
+// path for Int8/UInt8/Int16/UInt16/Bool, unlike its siblings dispatchTake and
+// dispatchIndexSelect. The generic put/put_f64 shaders address their buffers
+// as 4-byte/8-byte words with no dedicated sub-4-byte-width shader, so an
+// unwidened Int8/UInt8/Bool put addressed the buffer at 4x the correct byte
+// offset (2x for Int16/UInt16) -- writing into an UNRELATED buffer region
+// instead of the intended element. Put_FullDtypeCoverageOverwrite above only
+// checks that these dtypes don't throw, which a wrong-location write would
+// still pass; this test verifies the actual VALUES land in the right slots
+// and nowhere else.
+TEST_P(IndexingParity, Put_SmallDtypeWritesCorrectLocation) {
+    for (DType dt : {DType::Int8, DType::UInt8, DType::Bool, DType::Int16, DType::UInt16}) {
+        auto input = zeros({8}, dt, device);
+        auto idx = zeros({2}, DType::Int64, device);
+        {
+            Tensor idx_cpu = idx.to(Device::cpu());
+            idx_cpu.data<int64_t>()[0] = 2;
+            idx_cpu.data<int64_t>()[1] = 5;
+            idx = idx_cpu.to(device);
+        }
+        auto source = ones({2}, dt, device);
+
+        auto out = put(input, idx, source);
+        device.synchronize();
+        auto out_cpu = out.to(Device::cpu()).to(DType::Int64).contiguous();
+        const int64_t* d = out_cpu.data<int64_t>();
+        for (int64_t i = 0; i < 8; ++i) {
+            int64_t expected = (i == 2 || i == 5) ? 1 : 0;
+            EXPECT_EQ(d[i], expected)
+                << "Failed on " << device.to_string() << " dtype " << dtype_name(dt)
+                << " at index " << i;
+        }
+    }
+}
+
+TEST_P(IndexingParity, Put_OutOfRangeIndexThrows) {
+    auto input = zeros({8}, DType::Float32, device);
+    auto idx = zeros({1}, DType::Int64, device);
+    {
+        Tensor idx_cpu = idx.to(Device::cpu());
+        idx_cpu.data<int64_t>()[0] = 100;  // out of range for an 8-element tensor
+        idx = idx_cpu.to(device);
+    }
+    auto source = ones({1}, DType::Float32, device);
+
+    EXPECT_THROW({
+        auto out = put(input, idx, source);
+        device.synchronize();
+    }, std::out_of_range) << "Failed on " << device.to_string();
+}
+
+// Regression: gather_kernel silently `continue`s past an out-of-range index,
+// leaving that output slot as uninitialized device memory instead of
+// throwing like CPU. Every backend must raise on an OOB gather index.
+TEST_P(IndexingParity, Gather_OutOfRangeIndexThrows) {
+    auto input = zeros({8}, DType::Float32, device);
+    auto idx = zeros({1}, DType::Int64, device);
+    {
+        Tensor idx_cpu = idx.to(Device::cpu());
+        idx_cpu.data<int64_t>()[0] = 100;  // out of range for an 8-element tensor
+        idx = idx_cpu.to(device);
+    }
+
+    EXPECT_THROW({
+        auto out = gather(input, 0, idx);
+        device.synchronize();
+    }, std::exception) << "Failed on " << device.to_string();
+}
+
+// Regression: index_select_kernel silently `continue`s past an out-of-range
+// index, leaving that output slot uninitialized instead of throwing.
+TEST_P(IndexingParity, IndexSelect_OutOfRangeIndexThrows) {
+    auto input = zeros({8}, DType::Float32, device);
+    auto idx = zeros({1}, DType::Int64, device);
+    {
+        Tensor idx_cpu = idx.to(Device::cpu());
+        idx_cpu.data<int64_t>()[0] = 100;  // out of range for an 8-element tensor
+        idx = idx_cpu.to(device);
+    }
+
+    EXPECT_THROW({
+        auto out = index_select(input, 0, idx);
+        device.synchronize();
+    }, std::exception) << "Failed on " << device.to_string();
+}
+
+// Regression: scatter_kernel bounds-checks but silently skips the write on an
+// out-of-range index, leaving the output at its prior value instead of
+// throwing.
+TEST_P(IndexingParity, Scatter_OutOfRangeIndexThrows) {
+    auto input = zeros({8}, DType::Float32, device);
+    auto idx = zeros({1}, DType::Int64, device);
+    {
+        Tensor idx_cpu = idx.to(Device::cpu());
+        idx_cpu.data<int64_t>()[0] = 100;  // out of range for an 8-element tensor
+        idx = idx_cpu.to(device);
+    }
+    auto src = ones({1}, DType::Float32, device);
+
+    EXPECT_THROW({
+        auto out = scatter(input, 0, idx, src);
+        device.synchronize();
+    }, std::exception) << "Failed on " << device.to_string();
 }
 
 TEST_P(IndexingParity, Nonzero) {

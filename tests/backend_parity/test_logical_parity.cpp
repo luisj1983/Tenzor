@@ -102,6 +102,77 @@ TEST_P(LogicalParity, DeMorgan) {
     }, std::vector<Tensor>{a, b}, device, 0.0f, 0.0f, "DeMorgan_RHS");
 }
 
+// ----------------------------------------------------------------------------
+// CPU-only: to_bool_value() dtype coverage regression. The default branch
+// used to reinterpret ANY unhandled dtype's storage as float32 (e.g. int16
+// read 2 bytes-per-element as if it were 4 bytes-per-element float), instead
+// of either correctly converting or throwing like CUDA's equivalent does.
+// Now every registered dtype has an exact case (Int16/UInt16/UInt32/UInt64/
+// Complex64/Complex128 included) and only a truly unknown dtype throws.
+// ----------------------------------------------------------------------------
+TEST(LogicalToBoolValueDtypeCoverageCpu, Int16NonzeroIsTrue) {
+    auto a = zeros({4}, DType::Int16, Device::cpu());
+    a.data<int16_t>()[0] = 0; a.data<int16_t>()[1] = 5;
+    a.data<int16_t>()[2] = -3; a.data<int16_t>()[3] = 0;
+    auto b = tenzor::ones({4}, DType::Int16, Device::cpu());
+    auto result = logical_and(a, b).contiguous();
+    auto* out = result.data<bool>();
+    EXPECT_FALSE(out[0]);
+    EXPECT_TRUE(out[1]);
+    EXPECT_TRUE(out[2]);
+    EXPECT_FALSE(out[3]);
+}
+
+TEST(LogicalToBoolValueDtypeCoverageCpu, UInt16NonzeroIsTrue) {
+    auto a = zeros({3}, DType::UInt16, Device::cpu());
+    a.data<uint16_t>()[0] = 0; a.data<uint16_t>()[1] = 65535; a.data<uint16_t>()[2] = 1;
+    auto result = logical_not(a).contiguous();
+    auto* out = result.data<bool>();
+    EXPECT_TRUE(out[0]);
+    EXPECT_FALSE(out[1]);
+    EXPECT_FALSE(out[2]);
+}
+
+TEST(LogicalToBoolValueDtypeCoverageCpu, UInt32NonzeroIsTrue) {
+    auto a = zeros({2}, DType::UInt32, Device::cpu());
+    a.data<uint32_t>()[0] = 0; a.data<uint32_t>()[1] = 42;
+    auto result = logical_not(a).contiguous();
+    auto* out = result.data<bool>();
+    EXPECT_TRUE(out[0]);
+    EXPECT_FALSE(out[1]);
+}
+
+TEST(LogicalToBoolValueDtypeCoverageCpu, UInt64NonzeroIsTrue) {
+    auto a = zeros({2}, DType::UInt64, Device::cpu());
+    a.data<uint64_t>()[0] = 0; a.data<uint64_t>()[1] = 7;
+    auto result = logical_not(a).contiguous();
+    auto* out = result.data<bool>();
+    EXPECT_TRUE(out[0]);
+    EXPECT_FALSE(out[1]);
+}
+
+TEST(LogicalToBoolValueDtypeCoverageCpu, Complex64NonzeroIfEitherComponentNonzero) {
+    auto a = zeros({3}, DType::Complex64, Device::cpu());
+    a.data<std::complex<float>>()[0] = {0.0f, 0.0f};  // zero -> false
+    a.data<std::complex<float>>()[1] = {0.0f, 2.0f};  // nonzero imag -> true
+    a.data<std::complex<float>>()[2] = {3.0f, 0.0f};  // nonzero real -> true
+    auto result = logical_not(a).contiguous();
+    auto* out = result.data<bool>();
+    EXPECT_TRUE(out[0]);
+    EXPECT_FALSE(out[1]);
+    EXPECT_FALSE(out[2]);
+}
+
+TEST(LogicalToBoolValueDtypeCoverageCpu, Complex128NonzeroIfEitherComponentNonzero) {
+    auto a = zeros({2}, DType::Complex128, Device::cpu());
+    a.data<std::complex<double>>()[0] = {0.0, 0.0};
+    a.data<std::complex<double>>()[1] = {0.0, -1.5};
+    auto result = logical_not(a).contiguous();
+    auto* out = result.data<bool>();
+    EXPECT_TRUE(out[0]);
+    EXPECT_FALSE(out[1]);
+}
+
 INSTANTIATE_BACKEND_TESTS(LogicalParity);
 
 

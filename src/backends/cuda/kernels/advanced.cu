@@ -1289,6 +1289,9 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim,
     if (normalized_dim < 0) normalized_dim += ndim;
 
     const int64_t dim_size = shape[normalized_dim];
+    if (dim_size == 0) {
+        throw std::invalid_argument("median: cannot reduce over a zero-size dimension");
+    }
     const int64_t mid = (dim_size - 1) / 2;  // lower median for even sizes
 
     // Compute output shape
@@ -1414,6 +1417,20 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim,
 // ============================================================================
 
 template<typename T>
+__device__ __forceinline__ bool mode_nan_aware_eq(T a, T b) {
+    // NaN-aware equality: two NaNs count as equal for run-length purposes
+    // (matching the preceding sort, which groups all NaNs contiguously via
+    // a NaN-aware comparator). Plain `a == b` is always false for NaN==NaN
+    // (IEEE-754), which would reset the run-length counter on every
+    // NaN-to-NaN comparison and hide a genuine NaN-mode. Degrades to plain
+    // `a == b` for integer T, where `a != a` is always false.
+    bool an = (a != a);
+    bool bn = (b != b);
+    if (an || bn) return an && bn;
+    return a == b;
+}
+
+template<typename T>
 __global__ void find_mode_kernel(const T* __restrict__ sorted_vals,
                                  const int64_t* __restrict__ sorted_idx,
                                  T* __restrict__ out_vals,
@@ -1429,7 +1446,7 @@ __global__ void find_mode_kernel(const T* __restrict__ sorted_vals,
         int64_t cur_count = 1;
 
         for (int64_t i = 1; i < dim_size; ++i) {
-            if (sorted_vals[i] == sorted_vals[i - 1]) {
+            if (mode_nan_aware_eq(sorted_vals[i], sorted_vals[i - 1])) {
                 cur_count++;
             } else {
                 cur_count = 1;
@@ -1471,6 +1488,9 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim,
     if (normalized_dim < 0) normalized_dim += ndim;
 
     const int64_t dim_size = shape[normalized_dim];
+    if (dim_size == 0) {
+        throw std::invalid_argument("mode: cannot reduce over a zero-size dimension");
+    }
 
     // Compute output shape
     std::vector<int64_t> output_shape(shape.begin(), shape.end());
@@ -1825,13 +1845,51 @@ __global__ void exponential_sample_kernel_impl(const float* rate, float* output,
     }
 }
 
+// The Exponential distribution is only defined for rate > 0 (rate==0 gives an
+// undefined +Inf-mean distribution; rate<0 has no valid support at all).
+// Every thread independently flags its own element into a single atomic int
+// (no reduction-tree ordering to worry about, so NaN is always caught,
+// unlike a generic min-reduction where NaN propagation depends on pairing
+// order). The host reads that one scalar back and throws before ever
+// dispatching the sampler, instead of silently emitting +Inf (rate==0) or a
+// mathematically invalid negative sample (rate<0).
+__global__ void exponential_validate_rate_kernel(const float* rate, int64_t n,
+                                                  int* invalid_flag) {
+    TENZOR_CUDA_KERNEL_LOOP(tid, n) {
+        if (!(rate[tid] > 0.0f)) {
+            atomicExch(invalid_flag, 1);
+        }
+    }
+}
+
 auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tensor {
     auto input = rate.contiguous();
     if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
 
+    int64_t n = input.numel();
+    if (n > 0) {
+        // O(1) host<->device sync regardless of tensor size: one small
+        // scratch allocation, one kernel launch, one scalar readback — not an
+        // elementwise CPU round-trip.
+        backend::CachedMemoryGuard flag_guard(sizeof(int));
+        int* d_flag = static_cast<int*>(flag_guard.get());
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(d_flag, 0, sizeof(int), stream));
+        int vthreads = 256;
+        int vblocks = compute_grid_size(n, vthreads);
+        exponential_validate_rate_kernel<<<vblocks, vthreads, 0, stream>>>(
+            input.data<float>(), n, d_flag);
+        int h_flag = 0;
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(&h_flag, d_flag, sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (h_flag != 0) {
+            throw std::invalid_argument(
+                "exponential: rate must be > 0 (got a non-positive or NaN rate)");
+        }
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto result = Tensor(shape_vec, DType::Float32, input.device());
-    int64_t n = input.numel();
     if (n == 0) return result;
 
     int threads = 256;
@@ -1903,6 +1961,12 @@ __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* bet
 
 auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
                          cudaStream_t stream) -> Tensor {
+    // Preserve the caller's dtype: sampling runs in Float32 for RNG, but
+    // gamma(Float64/BFloat16, ...) must return that dtype — matches the
+    // widen-compute-narrow pattern normal_sample_kernel/bernoulli_kernel
+    // already use in this file (was previously always Float32 regardless of
+    // input dtype).
+    const DType orig_dtype = concentration.dtype();
     auto a = concentration.contiguous();
     if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
     auto b = rate.contiguous();
@@ -1911,7 +1975,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
     std::vector<int64_t> shape_vec(a.shape().begin(), a.shape().end());
     auto result = Tensor(shape_vec, DType::Float32, a.device());
     int64_t n = a.numel();
-    if (n == 0) return result;
+    if (n == 0) return (orig_dtype == DType::Float32) ? result : result.to(orig_dtype);
 
     int threads = 256;
     int blocks_n = compute_grid_size(n, threads);
@@ -1920,7 +1984,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
 
     gamma_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         a.data<float>(), b.data<float>(), result.data<float>(), n, seed);
-    return result;
+    return (orig_dtype == DType::Float32) ? result : result.to(orig_dtype);
 }
 
 // ============================================================================
@@ -2565,6 +2629,20 @@ struct AdvancedIndexMeta {
     int is_indexed[MAX_INDEX_DIMS];    // 1 if dim is indexed, 0 if full-slice
 };
 
+namespace {
+// Raw same-size PODs for dtype-agnostic gather/put: the gather/put kernels
+// below only ever do a whole-element `dst[i] = src[i]` assignment (no
+// arithmetic, no comparisons), so any trivially-copyable type of the right
+// byte width reproduces CPU's dtype-agnostic memcpy semantics
+// (cpu_kernel_registry.cpp's AdvancedIndexPut) exactly -- this is how
+// Bool/Int8/UInt8/Int16/UInt16/UInt32/UInt64/Complex64/Complex128 get gather/
+// put support without a bespoke kernel instantiation per dtype.
+struct Bytes1 { uint8_t b[1]; };
+struct Bytes2 { uint8_t b[2]; };
+struct Bytes8 { uint8_t b[8]; };
+struct Bytes16 { uint8_t b[16]; };
+}  // namespace
+
 template<typename T>
 __global__ void advanced_index_gather_kernel(
     const T* __restrict__ src,
@@ -2898,6 +2976,16 @@ auto advanced_index_cuda_kernel(
         return launch_advanced_index_gather<__half>(src, idx_ptrs.data(), num_indices, stream);
     } else if (src.dtype() == DType::BFloat16) {
         return launch_advanced_index_gather<__nv_bfloat16>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Bool || src.dtype() == DType::Int8 || src.dtype() == DType::UInt8) {
+        return launch_advanced_index_gather<Bytes1>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int16 || src.dtype() == DType::UInt16) {
+        return launch_advanced_index_gather<Bytes2>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt32) {
+        return launch_advanced_index_gather<int32_t>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt64 || src.dtype() == DType::Complex64) {
+        return launch_advanced_index_gather<Bytes8>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Complex128) {
+        return launch_advanced_index_gather<Bytes16>(src, idx_ptrs.data(), num_indices, stream);
     }
     throw std::runtime_error("AdvancedIndex CUDA: unsupported dtype");
 }
@@ -2920,6 +3008,16 @@ auto advanced_index_put_cuda_kernel(
         return launch_advanced_index_put<__half>(src, values, idx_ptrs.data(), num_indices, stream);
     } else if (src.dtype() == DType::BFloat16) {
         return launch_advanced_index_put<__nv_bfloat16>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Bool || src.dtype() == DType::Int8 || src.dtype() == DType::UInt8) {
+        return launch_advanced_index_put<Bytes1>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int16 || src.dtype() == DType::UInt16) {
+        return launch_advanced_index_put<Bytes2>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt32) {
+        return launch_advanced_index_put<int32_t>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::UInt64 || src.dtype() == DType::Complex64) {
+        return launch_advanced_index_put<Bytes8>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Complex128) {
+        return launch_advanced_index_put<Bytes16>(src, values, idx_ptrs.data(), num_indices, stream);
     }
     throw std::runtime_error("AdvancedIndexPut CUDA: unsupported dtype");
 }
@@ -4281,7 +4379,9 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
             out_shape.push_back(shape[i]);
         }
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/ROCm/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor values(out_shape, dtype, device);
     Tensor indices_out(out_shape, DType::Int64, device);
@@ -4376,6 +4476,39 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
 
+    if (dim_size == 0) {
+        // A zero-length reduction axis has no values to interpolate; emit
+        // NaN instead of indexing the empty slice -- quantile_kernel_impl's
+        // pos=q*(dim_size-1) would be negative and hi=dim_size-1=-1, reading
+        // sorted_input at a negative-derived offset. Matches CPU's
+        // quantile_impl (src/backends/cpu/kernels/advanced.cpp).
+        std::vector<int64_t> out_shape;
+        for (int64_t i = 0; i < ndim; ++i) {
+            if (i == dim) {
+                if (keepdim) out_shape.push_back(1);
+            } else {
+                out_shape.push_back(shape[i]);
+            }
+        }
+        // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+        // matching CPU/ROCm/OneAPI/Vulkan's convention -- do not force a
+        // size-1 dim.
+        Tensor output(out_shape, dtype, device);
+        if (dtype == DType::Float32) {
+            std::vector<float> nan_fill(output.numel(), std::numeric_limits<float>::quiet_NaN());
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data<float>(), nan_fill.data(),
+                nan_fill.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
+        } else if (dtype == DType::Float64) {
+            std::vector<double> nan_fill(output.numel(), std::numeric_limits<double>::quiet_NaN());
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data<double>(), nan_fill.data(),
+                nan_fill.size() * sizeof(double), cudaMemcpyHostToDevice, stream));
+        } else {
+            throw std::runtime_error("quantile CUDA: unsupported dtype (need float)");
+        }
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+        return output;
+    }
+
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
     int64_t inner_size = 1;
@@ -4463,7 +4596,9 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
             out_shape.push_back(shape[i]);
         }
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/ROCm/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor output(out_shape, dtype, device);
     int grid_q = std::min(static_cast<int>((total_slices + block - 1) / block), 65535);
@@ -4540,8 +4675,10 @@ auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim
 {
     // Float16/BFloat16: widen to Float32 for the computation and narrow the
     // result back, matching CPU's nanquantile_kernel (advanced.cpp) exactly.
-    // nanmedian_kernel is implemented as nanquantile_kernel(x, 0.5, ...), so
-    // it inherits this fix automatically.
+    // NOTE: nanmedian_kernel has its own dedicated kernel (see below) -- it
+    // does NOT delegate here, because nanquantile(q=0.5) linearly
+    // interpolates between the two middle values while nanmedian must return
+    // the exact lower median with no interpolation.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig = input.dtype();
         Tensor out_f32 = nanquantile_kernel(input.to(DType::Float32), q, dim, keepdim, stream);
@@ -4570,7 +4707,9 @@ auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim
             out_shape.push_back(shape[i]);
         }
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/ROCm/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor output(out_shape, dtype, device);
     int block = 256;
@@ -4603,14 +4742,127 @@ auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim
 }
 
 // ============================================================================
-// Nanmedian kernel — NaN-ignoring median
+// Nanmedian kernel — NaN-ignoring LOWER median (no interpolation)
 // ============================================================================
+//
+// F-NANMEDIAN: this must NOT delegate to nanquantile_kernel(q=0.5), which
+// linearly interpolates between the two middle values (e.g.
+// nanmedian([1,2,3,4]) would give 2.5). PyTorch/CPU nanmedian semantics pick
+// the lower median with no interpolation -- index (count-1)/2 of the sorted
+// non-NaN values (matches CPU's nanmedian_impl in
+// src/backends/cpu/kernels/advanced.cpp exactly, and this file's own
+// median_kernel above). A single global k-th-selection kernel (like
+// kthvalue_kernel_impl) doesn't fit here because the target rank
+// (count-1)/2 depends on each slice's NaN-filtered count, which varies per
+// slice -- so this mirrors nanquantile_kernel_impl's per-slice NaN-filter +
+// sort structure instead, just swapping the final interpolation step for a
+// direct index.
+template<typename T>
+__global__ void nanmedian_kernel_impl(
+    const T* __restrict__ input, T* __restrict__ output,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices,
+    T* __restrict__ workspace)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_slices) return;
+
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
+
+    // Collect non-NaN values
+    T* ws = workspace + idx * dim_size;
+    int64_t count = 0;
+    for (int64_t i = 0; i < dim_size; ++i) {
+        T val = input[outer * dim_size * inner_size + i * inner_size + inner];
+        if (!::isnan(float(val))) {
+            ws[count++] = val;
+        }
+    }
+
+    if (count == 0) {
+        output[idx] = static_cast<T>(NAN);
+        return;
+    }
+
+    // Simple insertion sort for the non-NaN values (mirrors
+    // nanquantile_kernel_impl; dim_size is expected to be small enough that
+    // this per-slice O(count^2) sort is not the bottleneck).
+    for (int64_t i = 1; i < count; ++i) {
+        T key = ws[i];
+        int64_t j = i - 1;
+        while (j >= 0 && ws[j] > key) {
+            ws[j + 1] = ws[j];
+            --j;
+        }
+        ws[j + 1] = key;
+    }
+
+    // Lower median, no interpolation: index (count-1)/2, matching CPU's
+    // nanmedian_impl and PyTorch (nanmedian([1,2,3,4]) -> 2, not 2.5).
+    output[idx] = ws[(count - 1) / 2];
+}
 
 auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim,
                       cudaStream_t stream) -> Tensor
 {
-    // nanmedian is nanquantile with q=0.5
-    return nanquantile_kernel(input, 0.5, dim, keepdim, stream);
+    // Float16/BFloat16: widen to Float32, compute, narrow the result back.
+    // Matches CPU's nanmedian_kernel (advanced.cpp).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor out_f32 = nanmedian_kernel(input.to(DType::Float32), dim, keepdim, stream);
+        return out_f32.to(orig);
+    }
+
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // Normalize (see kthvalue_kernel for rationale)
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/ROCm/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
+
+    Tensor output(out_shape, dtype, device);
+    int block = 256;
+    int grid = std::min(static_cast<int>((total_slices + block - 1) / block), 65535);
+
+    switch (dtype) {
+        case DType::Float32: {
+            backend::CachedMemoryGuard ws_guard(total_slices * dim_size * sizeof(float));
+            nanmedian_kernel_impl<float><<<grid, block, 0, stream>>>(
+                input_cont.data<float>(), output.data<float>(), dim_size, inner_size,
+                total_slices, static_cast<float*>(ws_guard.get()));
+            break;
+        }
+        case DType::Float64: {
+            backend::CachedMemoryGuard ws_guard(total_slices * dim_size * sizeof(double));
+            nanmedian_kernel_impl<double><<<grid, block, 0, stream>>>(
+                input_cont.data<double>(), output.data<double>(), dim_size, inner_size,
+                total_slices, static_cast<double*>(ws_guard.get()));
+            break;
+        }
+        default:
+            throw std::runtime_error("nanmedian CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
 }
 
 // ============================================================================
@@ -5138,7 +5390,9 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
     for (int64_t d = 0; d < ndim; d++) {
         if (d != dim) out_shape.push_back(shape[d]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
+    // Empty out_shape (1-D input, keepdim=false) is a true 0-dim scalar,
+    // matching CPU/ROCm/OneAPI/Vulkan's convention -- do not force a size-1
+    // dim.
 
     Tensor result(out_shape, compute_dtype, y.device());
     int64_t total = outer * inner;
@@ -5614,6 +5868,17 @@ auto histogramdd_kernel(const Tensor& input,
         int64_t nb = bins[sd];
         double fmin = ranges[sd].first;
         double fmax = ranges[sd].second;
+        // A caller-supplied degenerate range (fmin >= fmax) yields step<=0, so
+        // (v - fmin)/step at bin time is NaN/Inf (silently clamped afterward,
+        // but the bin assignment would be unspecified). The auto-range path
+        // already widens an equal-bounds interval by +-0.5 above; reuse that
+        // same widening here — matches CPU's histogramdd_kernel
+        // (src/backends/cpu/kernels/reduction.cpp) so step stays strictly
+        // positive.
+        if (fmin >= fmax) {
+            fmin -= 0.5;
+            fmax += 0.5;
+        }
         double step = (fmax - fmin) / static_cast<double>(nb);
         dim_min[sd] = fmin;
         dim_step[sd] = step;

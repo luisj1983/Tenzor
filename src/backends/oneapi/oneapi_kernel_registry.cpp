@@ -464,7 +464,7 @@ namespace oneapi {
     auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue& queue) -> Tensor;
     auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, sycl::queue& queue) -> Tensor;
     auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, sycl::queue& queue) -> Tensor;
-    auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, float value, sycl::queue& queue) -> Tensor;
+    auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, double value, sycl::queue& queue) -> Tensor;
     auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, const std::string& reduce, bool include_self, sycl::queue& queue) -> Tensor;
     auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim, sycl::queue& queue) -> Tensor;
     auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor& source, sycl::queue& queue) -> Tensor;
@@ -2193,7 +2193,19 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto input_4d = inputs[1].unsqueeze(2);
             auto weight_4d = inputs[2].unsqueeze(2);
             std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-            const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            // Conv2dBackwardInput never sees the actual input tensor -- it
+            // reads its target shape from AttrKey::InputShape.
+            // conv1d_to_conv2d_attrs() only projects Stride/Padding/Dilation
+            // and leaves InputShape untouched, so a 1-D caller's (3-D, or
+            // absent) InputShape is not valid here; without setting the real
+            // 4-D shape the nested kernel reads an empty/garbage list.
+            // Previously unreachable (nn::Conv1d never dispatched this
+            // OpId) -- derive the 4-D shape locally from the already-
+            // unsqueezed input tensor, mirroring what CPU's
+            // Conv1dBackwardInput kernel already does via inputs[1].shape().
+            conv2d_attrs.set(AttrKey::InputShape,
+                ::tenzor::backend::attrs::shape_to_attr_string(input_4d.shape()));
             auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, conv2d_attrs);
             return {result[0].squeeze(2)};
         });
@@ -2204,7 +2216,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto input_4d = inputs[1].unsqueeze(2);
             auto weight_4d = inputs[2].unsqueeze(2);
             std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
-            const auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            auto conv2d_attrs = ::tenzor::backend::attrs::conv1d_to_conv2d_attrs(attrs);
+            // Same fix as Conv1dBackwardInput above, for WeightShape.
+            conv2d_attrs.set(AttrKey::WeightShape,
+                ::tenzor::backend::attrs::shape_to_attr_string(weight_4d.shape()));
             auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, conv2d_attrs);
             return {result[0].squeeze(2)};
         });
@@ -3050,8 +3065,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             Tensor loss = oneapi::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction, q);
             // When the caller requests gradients, also return grad_logits
             // (matches the CPU contract {loss, grad_logits}); grad preserves the
-            // logits shape + dtype.
-            if (attrs.get_bool(AttrKey::ComputeGrad, false)) {
+            // logits shape + dtype. Default true — matches CPU/CUDA/ROCm/Vulkan
+            // (docs/internals/attention-contract.md:158); an unset ComputeGrad
+            // must not change the returned output COUNT between backends.
+            if (attrs.get_bool(AttrKey::ComputeGrad, true)) {
                 Tensor grad = oneapi::fused_softmax_cross_entropy_grad_kernel(inputs[0], inputs[1], reduction, q);
                 return {loss, grad};
             }
@@ -3992,7 +4009,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             oneapi::batchnorm2d_update_running_stats(
                 running_mean, running_var, mean, running_var_in, momentum, queue);
 
-            return {output, mean, variance, running_mean, running_var};
+            // Dispatch contract (matches CPU fused_ops.cpp, CUDA cuda_kernel_registry.cpp,
+            // and Vulkan vulkan_kernel_registry.cpp): {output, updated_running_mean,
+            // updated_running_var, saved_batch_mean, saved_inv_var}. The 5th output must
+            // be invstd = 1/sqrt(var + eps), not raw variance, to match what
+            // BatchNorm2dBackward and the JVP rule expect.
+            Tensor saved_inv_var = tenzor::rsqrt(tenzor::add(variance, static_cast<double>(epsilon)));
+            return {output, running_mean, running_var, mean, saved_inv_var};
         });
 
     // =========================================================================
@@ -5393,6 +5416,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // M and K are required; default-0 would silently produce wrong shapes
+            // (matches CPU's identical-purpose guard).
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMM: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
@@ -5402,6 +5433,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
     table.register_single_output_kernel(OpId::SparseSpMV,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // M and K are required; default-0 would silently produce wrong shapes
+            // (matches CPU's identical-purpose guard).
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMV: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
@@ -5864,7 +5903,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::IndexFill,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-            float value = attrs.get_float(AttrKey::Value, 0.0f);
+            // Keep the fill value as double throughout (matches CPU/ROCm); narrowing to
+            // float here would truncate precision before it ever reaches the kernel,
+            // independent of the destination tensor's own dtype.
+            double value = attrs.get_float(AttrKey::Value, 0.0);
             return {oneapi::index_fill_kernel(inputs[0], dim, inputs[1], value, get_q(inputs))};
         });
 
@@ -6196,6 +6238,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // The OneAPI unique_consecutive_kernel has no dim-scoped path and always
+        // operates on the flattened tensor. Silently ignoring a requested dim would
+        // return a different result than the dim-scoped API advertises, so reject it
+        // with a clear error instead of flattening behind the caller's back —
+        // matching CPU's and CUDA's identical clean-error contract. (Adding a real
+        // dim-scoped kernel is a larger change.)
+        if (attrs.has(AttrKey::Dim)) {
+            throw std::runtime_error(
+                "unique_consecutive with dim is not supported on the OneAPI backend "
+                "(only the flattened form is implemented); omit dim to flatten.");
+        }
         bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);
         auto [unique_vals, inverse, counts] = oneapi::unique_consecutive_kernel(
             inputs[0], return_inverse, get_q(inputs));
@@ -6482,7 +6535,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
             int64_t total_len = shape[0];
-            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            // D must be the product of ALL trailing dims (shape[1:]), not
+            // just shape[1]: for rank>=3 values (e.g. [total_len,H,W]),
+            // using shape[1] alone (H) only touches H of the H*W elements
+            // per row and misindexes every row after the first. Matches
+            // CPU (product of all trailing dims) and CUDA (numel()/total_len).
+            int64_t D = 1;
+            for (size_t _d = 1; _d < shape.size(); ++_d) D *= shape[_d];
             int64_t B = offsets.numel() - 1;
 
             Tensor output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()),
@@ -6546,7 +6605,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
             int64_t total_len = shape[0];
-            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            // D must be the product of ALL trailing dims (shape[1:]), not
+            // just shape[1]: for rank>=3 values (e.g. [total_len,H,W]),
+            // using shape[1] alone (H) only touches H of the H*W elements
+            // per row and misindexes every row after the first. Matches
+            // CPU (product of all trailing dims) and CUDA (numel()/total_len).
+            int64_t D = 1;
+            for (size_t _d = 1; _d < shape.size(); ++_d) D *= shape[_d];
             int64_t B = offsets.numel() - 1;
 
             Tensor output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()),
@@ -6612,11 +6677,24 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
-            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            // D must be the product of ALL trailing dims (shape[1:]), not
+            // just shape[1]: for rank>=3 values (e.g. [total_len,H,W]),
+            // using shape[1] alone (H) only touches H of the H*W elements
+            // per row and misindexes every row after the first. Matches
+            // CPU (product of all trailing dims) and CUDA (numel()/total_len).
+            int64_t D = 1;
+            for (size_t _d = 1; _d < shape.size(); ++_d) D *= shape[_d];
             int64_t B = offsets.numel() - 1;
 
-            // Output: one row per batch element, shape [B, D]
-            Tensor output = tenzor::zeros({B, D}, values.dtype(), values.device());
+            // Output shape must be rank-preserving [B, ...trailing dims],
+            // matching CPU, not flattened [B, D]: NestedSumBackward
+            // broadcasts the gradient back to [total_len, ...trailing dims]
+            // using this tensor's own shape. D (the flat per-row stride the
+            // kernel below uses) is unaffected.
+            std::vector<int64_t> out_shape;
+            out_shape.push_back(B);
+            for (size_t _d = 1; _d < shape.size(); ++_d) out_shape.push_back(shape[_d]);
+            Tensor output = tenzor::zeros(out_shape, values.dtype(), values.device());
             auto& queue = oneapi_internal::get_queue(values.device().index);
 
             const int64_t* off_ptr = offsets.data<int64_t>();
@@ -6665,11 +6743,24 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const Tensor& values = inputs[0];
             const Tensor& offsets = inputs[1];
             auto shape = values.shape();
-            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            // D must be the product of ALL trailing dims (shape[1:]), not
+            // just shape[1]: for rank>=3 values (e.g. [total_len,H,W]),
+            // using shape[1] alone (H) only touches H of the H*W elements
+            // per row and misindexes every row after the first. Matches
+            // CPU (product of all trailing dims) and CUDA (numel()/total_len).
+            int64_t D = 1;
+            for (size_t _d = 1; _d < shape.size(); ++_d) D *= shape[_d];
             int64_t B = offsets.numel() - 1;
 
-            // Output: one row per batch element, shape [B, D]
-            Tensor output = tenzor::zeros({B, D}, values.dtype(), values.device());
+            // Output shape must be rank-preserving [B, ...trailing dims],
+            // matching CPU, not flattened [B, D]: NestedMeanBackward
+            // broadcasts the gradient back to [total_len, ...trailing dims]
+            // using this tensor's own shape. D (the flat per-row stride the
+            // kernel below uses) is unaffected.
+            std::vector<int64_t> out_shape;
+            out_shape.push_back(B);
+            for (size_t _d = 1; _d < shape.size(); ++_d) out_shape.push_back(shape[_d]);
+            Tensor output = tenzor::zeros(out_shape, values.dtype(), values.device());
             auto& queue = oneapi_internal::get_queue(values.device().index);
 
             const float* vals_ptr = values.data<float>();
@@ -6725,8 +6816,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             const Tensor& gamma = inputs[2];  // weight [D]
             const Tensor& beta = inputs[3];   // bias [D]
             auto shape = values.shape();
-            int64_t total_rows = shape[0];
+            // total_rows must be the product of ALL leading dims (numel()/D),
+            // not just shape[0]: for rank>=3 values (e.g. [total_len,H,D]),
+            // shape[0] alone (total_len) leaves the H-1 other row-blocks per
+            // position completely unwritten (uninitialized output), matching
+            // CPU's total_rows = numel()/D convention.
             int64_t D = shape.back();
+            int64_t total_rows = (D > 0) ? values.numel() / D : 0;
             float eps = attrs.get_float(AttrKey::Eps, 1e-5f);
 
             // Output same shape as values — every row is independently normalized
@@ -6826,7 +6922,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t B = offsets.numel() - 1;
             int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);
             float padding_value = attrs.get_float(AttrKey::PaddingValue, 0.0f);
-            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            // D must be the product of ALL trailing dims (shape[1:]), not
+            // just shape[1]: for rank>=3 values (e.g. [total_len,H,W]),
+            // using shape[1] alone (H) only touches H of the H*W elements
+            // per row and misindexes every row after the first. Matches
+            // CPU (product of all trailing dims) and CUDA (numel()/total_len).
+            int64_t D = 1;
+            for (size_t _d = 1; _d < shape.size(); ++_d) D *= shape[_d];
 
             auto padded = tenzor::full({B, max_len, D}, padding_value, values.dtype(), values.device());
             auto& queue = oneapi_internal::get_queue(values.device().index);

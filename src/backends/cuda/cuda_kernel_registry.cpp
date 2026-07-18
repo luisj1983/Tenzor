@@ -1109,7 +1109,7 @@ namespace nn::quantization::kernels {
         const int8_t* input, const uint8_t* weight_packed, const float* bias,
         float* output, int64_t batch_size, int64_t in_features, int64_t out_features,
         float input_scale, float weight_scale, float output_scale, cudaStream_t stream,
-        const float* weight_scales = nullptr
+        const float* weight_scales = nullptr, int32_t input_zp = 0
     ) -> void;
 
     auto quantized_conv2d_cuda(
@@ -1741,27 +1741,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, indices, input, output]
-        // M12: mirror MaxPool2dForward's Float64 bypass. cuDNN's backward
-        // re-derives the argmax by comparing output to input internally in
-        // single precision (same limitation as its forward selection), so a
-        // near-tie at F32 precision but distinguishable in true double bits
-        // can scatter the gradient to a different position than forward's
-        // native double-precision argmax (recorded in `indices`). The native
-        // kernel below is a pure index-based scatter using those indices, so
-        // it reproduces forward's exact selection regardless of dtype.
-        if (inputs[0].dtype() == DType::Float64) {
-            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            return cuda::maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
-        }
-        const auto kernel_size = ::tenzor::backend::attrs::kernel_size_2d(attrs);
-        const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
-            AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
-        const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
-        return cuda::cudnn_maxpool2d_backward(inputs[0], inputs[2], inputs[3],
-            kernel_size[0], kernel_size[1],
-            stride[0], stride[1],
-            padding[0], padding[1],
-            get_cuda_stream(attrs));
+        // Always use the native index-based backward kernel, never
+        // cudnnPoolingBackward: cuDNN re-derives the argmax internally by
+        // comparing output to input in its own (not NaN-aware) pass, which
+        // can disagree with forward's saved `indices` on a NaN-containing
+        // or exactly-tied pooling window -- silently scattering the
+        // gradient to a different position than forward actually selected.
+        // The native kernel is a pure index-based scatter using the indices
+        // forward already saved, so it always reproduces forward's exact
+        // selection (regardless of dtype), matching every other backend
+        // (CPU/ROCm/OneAPI/Vulkan, all of which replay forward's indices)
+        // and this path's own former Float64-only bypass, now unconditional.
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, input]
@@ -2103,7 +2095,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // Causal mask applied inline in flash_attention_v2_kernel (audit C1).
         // Philox dropout applied inline (audit M4 follow-up). seed/offset
         // returned only when dropout fires so backward can replay.
-        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        // Scale defaults to 1/sqrt(head_dim) (mathematically-correct scaled
+        // dot-product attention), not an unscaled 1.0 — matches OneAPI's
+        // registration and the docs/internals/attention-contract.md formula.
+        int64_t head_dim_for_scale = inputs[0].shape().back();
+        float default_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_for_scale));
+        float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, default_scale));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
         bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
@@ -4779,7 +4776,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             nn::quantization::kernels::quantized_linear_int4_cuda(
                 in4, wt4, bias4, output.data<float>(),
                 batch_size, in_features, out_features,
-                input_scale, weight_scale, output_scale, stream, wscale4);
+                input_scale, weight_scale, output_scale, stream, wscale4, input_zp);
             return output;
         }
 
@@ -4958,6 +4955,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // same pattern the cuSPARSE-absent fallback has always used.
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMM: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);
@@ -4967,6 +4971,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M).
     table.register_single_output_kernel(OpId::SparseSpMV,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseSpMV: required attributes M and K not provided. "
+                    "Set AttrKey::M (rows of sparse matrix) and AttrKey::K (cols) "
+                    "in the OpAttributes before dispatching.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K}, /*validate=*/false);

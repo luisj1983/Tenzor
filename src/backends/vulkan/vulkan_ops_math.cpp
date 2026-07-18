@@ -1407,6 +1407,34 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     Tensor input = (input_orig.is_contiguous() && input_orig.offset() == 0) ? input_orig : dispatchContiguous(input_orig);
     // Special case: handle empty tensors
     if (input.numel() == 0) {
+        // max/min have no identity element (unlike sum=0/mean=0/prod=1): matches
+        // CPU/CUDA/ROCm/OneAPI, which throw instead of silently returning
+        // +/-infinity, but ONLY when there is actually something to throw about
+        // -- i.e. the specifically-requested dim is the empty one AND the
+        // output itself would be non-empty (checked via input_shape[dim], NOT
+        // numel()==0 alone -- numel() can be 0 merely because some OTHER dim
+        // is empty, in which case output is also empty and there is nothing
+        // to throw about, matching CPU exactly).
+        if (op_name == "max" || op_name == "min") {
+            auto shape_for_check = input.shape();
+            const int64_t ndim_for_check = static_cast<int64_t>(shape_for_check.size());
+            bool should_throw = false;
+            if (dim == INT64_MIN) {
+                should_throw = true;  // genuine full-reduction of an empty tensor
+            } else {
+                int64_t d = dim < 0 ? dim + ndim_for_check : dim;
+                if (d >= 0 && d < ndim_for_check && shape_for_check[d] == 0) {
+                    int64_t out_sz = 1;
+                    for (int64_t i = 0; i < ndim_for_check; ++i) {
+                        if (i != d) out_sz *= shape_for_check[i];
+                    }
+                    should_throw = (out_sz > 0);
+                }
+            }
+            if (should_throw) {
+                throw std::invalid_argument(op_name + ": cannot reduce over a zero-size dimension");
+            }
+        }
         // For empty tensors, return identity value
         // sum: 0, mean: 0, max: -inf, min: +inf
         // dispatchFull narrows the value to the target dtype; casting a float
@@ -1450,6 +1478,14 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
             } else {
                 identity_value = std::numeric_limits<double>::infinity();
             }
+        } else if (op_name == "mean") {
+            // Mean of zero elements is mathematically 0/0 -- produce NaN
+            // explicitly and deterministically, matching CPU (mean is a
+            // float-only op there, so no integer-dtype identity is needed)
+            // and CUDA's mean_kernel. Sum-of-empty legitimately stays 0.0
+            // (the generic identity_value default above), which is correct
+            // and must not change.
+            identity_value = std::numeric_limits<double>::quiet_NaN();
         }
 
         // Calculate output shape
@@ -1550,7 +1586,18 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         else if (op_name == "max") tree_reduce_op = 1;
         else tree_reduce_op = 2;
 
-        constexpr uint32_t WG_SIZE = 256;
+        // MUST match the workgroup size actually baked into the "reduction_tree"
+        // pipeline below: getPipeline() specializes local_size_x_id=0 (and, in
+        // the shader, the LOCAL_SIZE_X-sized shared_data array via the same
+        // spec constant ID) to devices_[device_id].workgroupSize, which is a
+        // device-dependent optimal size that can be as low as 128 (the Vulkan
+        // spec minimum) -- NOT always 256. Each dispatched workgroup consumes
+        // exactly one element per invocation (gid = groupID*local_size_x+tid),
+        // so if this chunking math assumed a fixed 256 while the device's
+        // actual per-workgroup local size were smaller, too few workgroups
+        // would be dispatched and elements beyond first_wg*actual_size would
+        // silently never be read, truncating the sum/mean.
+        const uint32_t WG_SIZE = devices_[device_id].workgroupSize;
         uint32_t input_size = static_cast<uint32_t>(reduction_input.numel());
 
         auto* tree_pipeline = getPipeline("reduction_tree", device_id);
@@ -1661,7 +1708,7 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     }
 
     // --- Standard reduction path ---
-    // NOTE: The tree reduction fast path above (WG_SIZE=256 with subgroup arithmetic)
+    // NOTE: The tree reduction fast path above (WG_SIZE=device-optimal, with subgroup arithmetic)
     // already handles large full reductions efficiently. The standard path below
     // dispatches one workgroup per output element. For per-dim reductions on large
     // reduce dimensions (>65536), a two-pass strategy similar to the tree reduction

@@ -56,7 +56,18 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
 
     Tensor output(output_shape, weights.dtype(), weights.device());
 
-    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
+    // Accept Int32 or Int64 index tensors (matches CUDA's dual dtype support in
+    // indexing.cu and Vulkan's dispatchEmbedding). `get_data_ptr<const int64_t>`
+    // is a raw reinterpret_cast with no dtype check; calling it on an Int32
+    // buffer would silently read every index as a mangled 2-element-wide int64
+    // (an out-of-bounds read past the buffer for the last element) instead of
+    // rejecting the mismatch. Normalize to a real Int64 tensor via a dtype-safe
+    // conversion before taking the raw pointer.
+    if (indices.dtype() != DType::Int32 && indices.dtype() != DType::Int64) {
+        throw std::invalid_argument("embedding: indices must be Int32 or Int64");
+    }
+    Tensor indices_i64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices_i64);
 
     // Pre-validate indices host-side and throw for out-of-range values, matching
     // the CPU reference (embedding.cpp:106), which rejects ANY index outside
@@ -175,9 +186,16 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                sycl::queue& queue) -> Tensor {
     Tensor grad_weight({vocab_size, embedding_dim}, grad_output.dtype(), grad_output.device());
 
+    // Accept Int32 or Int64 index tensors — see embedding_lookup_kernel above
+    // for why a dtype check is required before the raw int64_t reinterpret.
+    if (indices.dtype() != DType::Int32 && indices.dtype() != DType::Int64) {
+        throw std::invalid_argument("embedding_backward: indices must be Int32 or Int64");
+    }
+    Tensor indices_i64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+
     int64_t total_weight_elements = vocab_size * embedding_dim;
     int64_t num_indices = indices.numel();
-    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
+    const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices_i64);
 
     if (grad_output.dtype() == DType::Float32) {
         float* grad_weight_ptr = get_data_ptr<float>(grad_weight);

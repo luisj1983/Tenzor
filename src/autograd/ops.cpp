@@ -1916,6 +1916,7 @@ auto to_device(const Variable& input, Device target) -> Variable {
     }
     auto grad_fn = std::make_shared<DeviceTransferBackward>();
     grad_fn->source_device = input.tensor().device();
+    grad_fn->target_device = target;
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -2108,7 +2109,12 @@ auto narrow(const Variable& input, int64_t dim, int64_t start, int64_t length) -
     const auto& sh = input.tensor().shape();
     auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
     std::memcpy(shape_tensor.data_ptr(), sh.data(), sh.size() * sizeof(int64_t));
-    grad_fn->save_for_backward({dim_tensor, start_tensor, shape_tensor});
+    // [3] = end (start+length). Needed by NarrowBackward::saved_attributes()
+    // (AttrKey::End) so the JVP walker's OpId::Slice rule sees the real
+    // narrowed window instead of defaulting to the whole dimension.
+    auto end_tensor = zeros({1}, DType::Int64, Device::cpu());
+    end_tensor.data<int64_t>()[0] = end;
+    grad_fn->save_for_backward({dim_tensor, start_tensor, shape_tensor, end_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);

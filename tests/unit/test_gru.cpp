@@ -273,6 +273,104 @@ TEST_P(GRUTest, OutputConsistency) {
     }
 }
 
+TEST_P(GRUTest, LearnableInitialStateGradientFlow) {
+    // The fused cuDNN-training fast path (CUDA, Float32, unidirectional,
+    // no projection) used to build next_functions/input_variables without
+    // h0 at all, and CudnnGRUTrainBackward::backward() dropped grad_hx
+    // from its returned gradient vector -- a user-supplied learnable
+    // initial hidden state silently received a zero gradient instead of
+    // the correct one. Other backends exercise a different
+    // (already-correct) autograd path, so this is a genuine cross-backend
+    // regression check, not a CUDA-only assertion.
+    nn::GRU gru(10, 20, 1);
+    gru.to(device);
+
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
+    auto h0 = Variable(randn({1, 5, 20}, DType::Float32, device), true);
+
+    auto [output, h_n] = gru.forward(input, h0);
+
+    auto loss = sum(output) + sum(h_n);
+    loss.backward();
+
+    ASSERT_TRUE(h0.grad().has_value()) << "h0 gradient missing on " << device.to_string();
+    auto h0_grad_cpu = h0.grad()->to(Device::cpu()).to(DType::Float32).contiguous();
+    float h0_grad_sum = 0.0f;
+    const float* hp = h0_grad_cpu.data<float>();
+    for (int64_t i = 0; i < h0_grad_cpu.numel(); ++i) h0_grad_sum += std::abs(hp[i]);
+    EXPECT_GT(h0_grad_sum, 0.0f) << "h0 gradient is all-zero on " << device.to_string();
+}
+
+// The fused fast path (Float32, eval(), no_grad, unidirectional,
+// linear_before_reset -- the standard fast-path-eligible config) used to
+// ignore `lengths` entirely, processing the full padded seq_len for every
+// batch row instead of falling through to the lengths-aware per-timestep
+// loop. Row 1 here is padded to seq_len=6 but has a true length of 3; its
+// output for timesteps 0..2 and its h_n must match an independent run of
+// the same 3-timestep sequence with no padding at all -- if the fused path
+// were still ignoring lengths, the padding (garbage timesteps 3..5) would
+// contaminate row 1's h_n and this would fail.
+TEST_P(GRUTest, FusedFastPathRespectsLengths) {
+    nn::GRU gru(4, 6, 1);
+    gru.to(device);
+    gru.eval();
+
+    const int64_t seq_len = 6, true_len = 3, feat = 4, hidden = 6;
+
+    auto padded_cpu = randn({seq_len, 2, feat}, DType::Float32, Device::cpu());
+    {
+        float* p = padded_cpu.data<float>();
+        for (int64_t t = true_len; t < seq_len; ++t) {
+            for (int64_t f = 0; f < feat; ++f) {
+                p[(t * 2 + 1) * feat + f] = 1000.0f;
+            }
+        }
+    }
+    auto lengths_cpu = zeros({2}, DType::Int64, Device::cpu());
+    lengths_cpu.data<int64_t>()[0] = seq_len;
+    lengths_cpu.data<int64_t>()[1] = true_len;
+
+    auto row1_unpadded_cpu = zeros({true_len, 1, feat}, DType::Float32, Device::cpu());
+    {
+        const float* src = padded_cpu.data<float>();
+        float* dst = row1_unpadded_cpu.data<float>();
+        for (int64_t t = 0; t < true_len; ++t) {
+            for (int64_t f = 0; f < feat; ++f) {
+                dst[t * feat + f] = src[(t * 2 + 1) * feat + f];
+            }
+        }
+    }
+
+    tenzor::NoGradGuard no_grad;
+    Variable padded_in(padded_cpu.to(device), false);
+    auto [padded_out, padded_h] = gru.forward(padded_in, Variable{}, lengths_cpu);
+
+    Variable row1_in(row1_unpadded_cpu.to(device), false);
+    auto [row1_out, row1_h] = gru.forward(row1_in, Variable{}, Tensor{});
+
+    auto padded_out_cpu = padded_out.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto row1_out_cpu = row1_out.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* po = padded_out_cpu.data<float>();
+    const float* ro = row1_out_cpu.data<float>();
+    for (int64_t t = 0; t < true_len; ++t) {
+        for (int64_t h = 0; h < hidden; ++h) {
+            EXPECT_NEAR(po[(t * 2 + 1) * hidden + h], ro[t * hidden + h], 1e-3f)
+                << "output[t=" << t << ",h=" << h << "] diverges on " << device.to_string()
+                << " -- fused fast path leaked padding into row 1";
+        }
+    }
+
+    auto padded_h_cpu = padded_h.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto row1_h_cpu = row1_h.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* ph = padded_h_cpu.data<float>();
+    const float* rh = row1_h_cpu.data<float>();
+    for (int64_t h = 0; h < hidden; ++h) {
+        EXPECT_NEAR(ph[hidden + h], rh[h], 1e-3f)
+            << "h_n[h=" << h << "] diverges on " << device.to_string()
+            << " -- fused fast path leaked padding into row 1's final hidden state";
+    }
+}
+
 TEST_P(GRUTest, GradientFlow) {
     // Test that gradients can flow through GRU
     nn::GRU gru(10, 20);

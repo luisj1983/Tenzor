@@ -346,6 +346,19 @@ enum class AttrKey : uint16_t {
     // dampening on the first step; subsequent steps apply dampening).
     FirstStep,
 
+    // DeviceTransferBackward JVP support: target Device::Type to move the
+    // forward-mode tangent onto, matching the primal output's residency
+    // (Tensor::to(Device) has no dispatch()-backed OpId, so the JVP
+    // adapter needs the full target Device, not just an index — see
+    // AttrKey::DeviceIndex above, which pairs with this for the index).
+    DeviceType,
+
+    // NormBackward_Linalg JVP support: the string ord ('fro','nuc','1',
+    // '-1','2','-2','inf','-inf') passed to linalg::norm(A, ord), so the
+    // registered JVP rule (scoped to "fro" only) can verify it applies
+    // before computing a tangent.
+    NormOrd,
+
     // Sentinel
     _Count
 };

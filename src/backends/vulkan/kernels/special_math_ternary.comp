@@ -40,6 +40,17 @@ float lgamma_lanczos(float x) {
     return 0.5f * log(2.0f * PI) + (xm1 + 0.5f) * log(t) - t + log(a);
 }
 float lgamma_impl(float x) {
+    // Pole at every non-positive integer: the reflection formula below
+    // divides by sin(PI*x), which floating-point PI never lands on exactly
+    // zero for. Return the real IEEE +inf bit pattern directly, bypassing
+    // the reflection formula entirely at poles (independent copy of the
+    // same fix applied to special_math_unary.comp/special_math_binary.comp
+    // -- each .comp shader is compiled standalone). betainc_impl below uses
+    // this via lbeta = lgamma(a)+lgamma(b)-lgamma(a+b), so a pole in a, b,
+    // or a+b now correctly propagates instead of returning finite garbage.
+    if (x <= 0.0f && x == floor(x)) {
+        return uintBitsToFloat(0x7F800000u);  // +inf
+    }
     if (x < 0.5f) {
         return log(PI / abs(sin(PI * x))) - lgamma_lanczos(1.0f - x);
     }

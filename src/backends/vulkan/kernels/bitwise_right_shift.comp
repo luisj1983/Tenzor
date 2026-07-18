@@ -12,5 +12,9 @@ layout(push_constant) uniform PushConstants { uint num_elements; } pc;
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.num_elements) return;
-    output_buf.data[idx] = a_buf.data[idx] >> b_buf.data[idx];
+    // Shift amounts outside [0, 32) are GLSL-spec-undefined; guard explicitly
+    // to match CPU/CUDA's defined out-of-range semantics (sign-saturated).
+    int a = a_buf.data[idx];
+    int b = b_buf.data[idx];
+    output_buf.data[idx] = (b < 0 || b >= 32) ? ((a < 0) ? -1 : 0) : (a >> b);
 }

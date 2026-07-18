@@ -13,7 +13,15 @@ layout(push_constant) uniform PushConstants {
     uint reduce_op;  // 0=sum, 1=max, 2=min
 } params;
 
-shared float shared_data[256];
+// Sized to LOCAL_SIZE_X (the same specialization constant that drives the
+// actual dispatched local_size_x via local_size_x_id=0 above), NOT a
+// hardcoded literal. The host queries a device-dependent optimal workgroup
+// size (can be as low as 128, the Vulkan spec minimum) and bakes it into
+// both local_size_x and LOCAL_SIZE_X via the same spec constant ID -- if
+// this array were a fixed 256 while the actual per-invocation chunking math
+// on the host assumed a different size, elements would be silently dropped.
+// See reduction.comp's WORKGROUP_SIZE-sized shared_data for the same pattern.
+shared float shared_data[LOCAL_SIZE_X];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;

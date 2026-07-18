@@ -842,6 +842,38 @@ auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitria
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
     int64_t nbatch = batch_size(work_a);
 
+    // For a non-unitriangular solve, cblas_trsm divides by each diagonal
+    // entry internally with no error reporting -- a zero diagonal silently
+    // yields Inf/NaN instead of throwing. Reject it up front with the same
+    // diagnostic the no-LAPACK fallback branch above already uses, so this
+    // MKL/LAPACKE build path (the codebase's default/primary CPU build)
+    // matches inv/solve/cholesky/svd/qr/eigh/eig/lu_solve/ldl_solve, all of
+    // which check for a singular input and throw.
+    if (!unitriangular) {
+        auto check_zero_diag = [&](auto* a_data) {
+            for (int64_t batch = 0; batch < nbatch; ++batch) {
+                const auto* A_mat = a_data + batch * n * n;
+                for (int64_t i = 0; i < n; ++i) {
+                    if (A_mat[i * n + i] == std::remove_const_t<
+                            std::remove_pointer_t<decltype(a_data)>>(0)) {
+                        throw std::runtime_error(
+                            "linalg::solve_triangular: zero diagonal element at row " +
+                            std::to_string(i));
+                    }
+                }
+            }
+        };
+        if (work_a.dtype() == DType::Float32) {
+            check_zero_diag(work_a.data<float>());
+        } else if (work_a.dtype() == DType::Complex64) {
+            check_zero_diag(work_a.data<std::complex<float>>());
+        } else if (work_a.dtype() == DType::Complex128) {
+            check_zero_diag(work_a.data<std::complex<double>>());
+        } else {
+            check_zero_diag(work_a.data<double>());
+        }
+    }
+
     auto uplo = upper ? CblasUpper : CblasLower;
     auto diag = unitriangular ? CblasUnit : CblasNonUnit;
     auto ln = static_cast<int>(n);
@@ -2359,6 +2391,10 @@ auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
     auto original_dtype = B.dtype();
     auto work_lu = prepare_matrix(LU_data);
     auto work_b = prepare_matrix(B);
+    if (is_complex_dtype(work_lu.dtype())) {
+        throw std::invalid_argument(
+            "linalg::lu_solve: complex (Complex64/Complex128) is not supported");
+    }
 
     auto lu_shape = LU_data.shape();
     auto b_shape = B.shape();
@@ -2998,6 +3034,10 @@ auto householder_product(const Tensor& input, const Tensor& tau) -> Tensor {
     auto original_dtype = input.dtype();
     auto work = prepare_matrix(input);
     auto tau_work = prepare_matrix(tau);
+    if (is_complex_dtype(work.dtype())) {
+        throw std::invalid_argument(
+            "linalg::householder_product: complex (Complex64/Complex128) is not supported");
+    }
 
     auto shape = input.shape();
     auto ndim = static_cast<int64_t>(shape.size());
@@ -3157,6 +3197,35 @@ auto ldl_factor(const Tensor& A) -> std::tuple<Tensor, Tensor> {
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
+#if defined(TENZOR_USE_MKL) || defined(TENZOR_USE_LAPACKE)
+// LAPACKE_?sytrs (the SOLVE step) trusts its LD/pivots inputs and does not
+// re-check for a zero pivot the way LAPACKE_?sytrf (the FACTOR step) does --
+// its own `info` only reports illegal-argument errors, never singularity.
+// If LD/pivots came from a validated ldl_factor() call this is unreachable
+// (factor's own info check already rejects a singular matrix), but a
+// hand-crafted or corrupted LD/pivots pair would silently divide by zero
+// inside LAPACK, propagating Inf/NaN with no diagnostic. Mirrors the same
+// pivot-block decoding ldl_factor's info convention describes, applied
+// host-side before ever calling into LAPACK.
+template<typename T>
+static bool ldl_has_zero_pivot(const T* ld_mat, const lapack_int* ipiv, int64_t n) {
+    for (int64_t k = 0; k < n; ) {
+        lapack_int p = ipiv[k];
+        if (p > 0) {
+            if (ld_mat[k * n + k] == T(0)) return true;
+            k++;
+        } else {
+            T d11 = ld_mat[k * n + k];
+            T d21 = ld_mat[(k + 1) * n + k];
+            T d22 = ld_mat[(k + 1) * n + (k + 1)];
+            if (d11 * d22 - d21 * d21 == T(0)) return true;
+            k += 2;
+        }
+    }
+    return false;
+}
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+
 auto ldl_solve(const Tensor& LD, const Tensor& pivots,
                const Tensor& B) -> Tensor {
     // Try GPU dispatch first
@@ -3172,6 +3241,10 @@ auto ldl_solve(const Tensor& LD, const Tensor& pivots,
     auto original_dtype = B.dtype();
     auto work_ld = prepare_matrix(LD);
     auto work_b = prepare_matrix(B);
+    if (is_complex_dtype(work_ld.dtype())) {
+        throw std::invalid_argument(
+            "linalg::ldl_solve: complex (Complex64/Complex128) is not supported");
+    }
 
     auto ld_shape = LD.shape();
     auto b_shape = B.shape();
@@ -3220,6 +3293,11 @@ auto ldl_solve(const Tensor& LD, const Tensor& pivots,
             int32_t* piv_mat = piv_ptr + b * n;
             for (int64_t i = 0; i < n; ++i) ipiv[i] = static_cast<lapack_int>(piv_mat[i]);
 
+            if (ldl_has_zero_pivot(ld_mat, ipiv.data(), n)) {
+                throw std::runtime_error(
+                    "linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+            }
+
             auto ln = static_cast<lapack_int>(n);
             auto lnrhs = static_cast<lapack_int>(nrhs);
             lapack_int info = LAPACKE_ssytrs(LAPACK_ROW_MAJOR, 'L', ln, lnrhs,
@@ -3239,6 +3317,11 @@ auto ldl_solve(const Tensor& LD, const Tensor& pivots,
             double* b_mat = b_ptr + b * n * nrhs;
             int32_t* piv_mat = piv_ptr + b * n;
             for (int64_t i = 0; i < n; ++i) ipiv[i] = static_cast<lapack_int>(piv_mat[i]);
+
+            if (ldl_has_zero_pivot(ld_mat, ipiv.data(), n)) {
+                throw std::runtime_error(
+                    "linalg::ldl_solve: singular LDL^T factor (zero pivot)");
+            }
 
             auto ln = static_cast<lapack_int>(n);
             auto lnrhs = static_cast<lapack_int>(nrhs);
@@ -3569,6 +3652,10 @@ auto ormqr(const Tensor& input, const Tensor& tau, const Tensor& other,
     auto work_input = prepare_matrix(input);
     auto work_tau = (needs_upcast(tau.dtype()) ? tau.to(DType::Float32) : tau).contiguous();
     auto work_other = prepare_matrix(other);
+    if (is_complex_dtype(work_input.dtype())) {
+        throw std::invalid_argument(
+            "linalg::ormqr: complex (Complex64/Complex128) is not supported");
+    }
 
     auto in_shape = input.shape();
     auto other_shape = other.shape();

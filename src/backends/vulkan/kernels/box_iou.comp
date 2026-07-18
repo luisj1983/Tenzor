@@ -57,8 +57,10 @@ void main() {
     // Union
     float union_area = area1 + area2 - inter_area;
 
-    // IoU
-    float iou = inter_area / (union_area + EPS);
+    // IoU. Matches CPU exactly: for degenerate/inverted input boxes union_area
+    // can be <= 0; the unguarded division can return a negative or blown-up
+    // IoU instead of the defined 0.
+    float iou = (union_area > 0.0) ? (inter_area / union_area) : 0.0;
 
     if (params.iou_type == 0) {
         // Standard IoU
@@ -70,7 +72,7 @@ void main() {
         float enclose_x2 = max(x2_1, x2_2);
         float enclose_y2 = max(y2_1, y2_2);
         float enclose_area = (enclose_x2 - enclose_x1) * (enclose_y2 - enclose_y1);
-        result[gid] = iou - (enclose_area - union_area) / (enclose_area + EPS);
+        result[gid] = iou - (enclose_area - union_area) / max(enclose_area, EPS);
     } else if (params.iou_type == 2) {
         // DIoU
         float cx1 = (x1_1 + x2_1) * 0.5;

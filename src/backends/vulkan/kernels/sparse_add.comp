@@ -4,6 +4,13 @@
 // The output buffer must be pre-filled with dense matrix values before dispatch.
 // This kernel adds CSR sparse values at the appropriate positions.
 // One workgroup per row, threads handle a subset of nonzeros in that row.
+//
+// A row's nonzeros are striped across threads in the workgroup, so two
+// threads can land on the same output column within a row (duplicate CSR
+// entries). The accumulation into output_data must therefore be atomic —
+// a plain `+=` here would be a lost-update race.
+#extension GL_EXT_shader_atomic_float : enable
+
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
@@ -26,6 +33,8 @@ void main() {
 
     for (uint i = row_start + tid; i < row_end; i += gl_WorkGroupSize.x) {
         uint col = uint(col_indices[i]);
-        output_data[row * n_cols + col] += values[i];
+        // atomicAdd: distinct threads in this workgroup can target the same
+        // (row,col) slot when a row has duplicate column entries.
+        atomicAdd(output_data[row * n_cols + col], values[i]);
     }
 }

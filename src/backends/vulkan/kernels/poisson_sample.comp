@@ -1,7 +1,31 @@
 #version 450
 
-// Poisson sampling: out[i] = Poisson(rates[i]) using Knuth's algorithm
-// with per-invocation LCG PRNG. Float32 rates input, Int32 output.
+// Poisson sampling: out[i] = Poisson(rates[i]) with a per-invocation LCG PRNG
+// (same seeding as bernoulli.comp).
+//
+// Two algorithms, split by lambda:
+//   - lambda < 12: naive Knuth product-of-uniforms. A do-while loop
+//     guarantees the body runs at least once, so lambda <= 0 (L=exp(-lambda)
+//     >= 1, so the first draw's p < 1 <= L always ends the loop) converges to
+//     k-1 == 0 instead of an invalid -1 (matches CPU/CUDA/ROCm/OneAPI).
+//   - lambda >= 12: Hörmann PTRS (transformed rejection with squeeze,
+//     Hörmann 1993). Knuth's stopping threshold L = exp(-lambda) underflows
+//     to exactly 0.0 in float32 once lambda gets large enough (~104+), which
+//     makes the naive loop's `p > L` condition degrade to `p > 0` and
+//     terminate after a lambda-independent ~100-150 iterations — a severe
+//     low bias (e.g. poisson(500) would cluster around ~100-150 instead of a
+//     mean of 500). Ported from the CUDA reference implementation
+//     (src/backends/cuda/kernels/advanced.cu poisson_kernel_impl), which
+//     computes the same math in double precision; this GLSL port stays in
+//     float32 since the rates buffer, the rest of this shader's RNG, and
+//     Vulkan's other sampling shaders in this codebase are all float32-only
+//     (no fp64 device requirement is needed for Poisson sampling elsewhere).
+//     GLSL has no built-in lgamma, so lgamma(k+1) uses the same Lanczos
+//     approximation as special_math_unary.comp's lgamma_lanczos (only the
+//     x >= 0.5 branch is needed here since k >= 0 is enforced before the
+//     lgamma call, so k+1 >= 1 always).
+//
+// Float32 rates input, Int32 output.
 
 layout(local_size_x_id = 0) in;
 
@@ -14,6 +38,40 @@ layout(push_constant) uniform PushConstants {
     uint seed_hi;
 } params;
 
+const float PI = 3.14159265358979f;
+
+// Advance the LCG and return a uniform clamped away from 0 (safe for log()).
+float next_uniform(inout uint state) {
+    state = state * 1664525u + 1013904223u;
+    float u = float(state) / 4294967295.0;
+    return max(u, 1.0e-7);
+}
+
+// Lanczos g=7 lgamma approximation (same coefficients as
+// special_math_unary.comp's lgamma_lanczos). Only valid for x >= 0.5, which
+// is all that is needed here (x = k + 1 with k >= 0).
+float lgamma_lanczos(float x) {
+    float coef[9];
+    coef[0] = 0.99999999999980993f;
+    coef[1] = 676.5203681218851f;
+    coef[2] = -1259.1392167224028f;
+    coef[3] = 771.32342877765313f;
+    coef[4] = -176.61502916214059f;
+    coef[5] = 12.507343278686905f;
+    coef[6] = -0.13857109526572012f;
+    coef[7] = 9.9843695780195716e-6f;
+    coef[8] = 1.5056327351493116e-7f;
+
+    float g = 7.0f;
+    float xm1 = x - 1.0f;
+    float a = coef[0];
+    float t = xm1 + g + 0.5f;
+    for (int i = 1; i < 9; ++i) {
+        a += coef[i] / (xm1 + float(i));
+    }
+    return 0.5f * log(2.0f * PI) + (xm1 + 0.5f) * log(t) - t + log(a);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n) return;
@@ -22,17 +80,53 @@ void main() {
     uint state = params.seed_lo ^ (params.seed_hi * 0x9E3779B9u) ^ (idx * 0x85EBCA77u);
 
     float lambda = rates[idx];
-    float L = exp(-lambda);
-    int k = 0;
-    float p = 1.0;
 
-    // Knuth algorithm — variable iteration count per invocation
-    while (p > L && k < 1000) {  // cap at 1000 to prevent infinite loops
-        k++;
-        state = state * 1664525u + 1013904223u;
-        float u = float(state) / 4294967295.0;
-        p *= u;
+    if (lambda < 12.0) {
+        // Knuth multiply-uniforms, do-while so lambda<=0 correctly converges
+        // to k=0 (see file header comment).
+        float L = exp(-lambda);
+        int k = 0;
+        float p = 1.0;
+        const int max_iter = 1000;  // safety cap; lambda<12 converges long before this
+        do {
+            k++;
+            p *= next_uniform(state);
+        } while (p > L && k < max_iter);
+        out_data[idx] = k - 1;
+        return;
     }
 
-    out_data[idx] = k - 1;
+    // Hörmann PTRS (transformed rejection with squeeze) for lambda >= 12.
+    float b = 0.931 + 2.53 * sqrt(lambda);
+    float a = -0.059 + 0.02483 * b;
+    float inv_alpha = 1.1239 + 1.1328 / (b - 3.4);
+    float v_r = 0.9277 - 3.6224 / (b - 2.0);
+    float loglam = log(lambda);
+
+    int k = 0;
+    for (int iter = 0; iter < 1024; ++iter) {
+        float U = next_uniform(state) - 0.5;
+        float V = next_uniform(state);
+        float us = 0.5 - abs(U);
+        float kd = floor((2.0 * a / us + b) * U + lambda + 0.43);
+
+        // Fast accept: squeeze region.
+        if (us >= 0.07 && V <= v_r) {
+            k = int(kd);
+            break;
+        }
+        // Reject outright: negative candidate, or outside the squeeze and
+        // failing the cheap pre-test.
+        if (kd < 0.0 || (us < 0.013 && V > us)) {
+            continue;
+        }
+        // Slow path: exact log-pmf ratio acceptance test.
+        float logV = log(V) + log(inv_alpha) - log(a / (us * us) + b);
+        float rhs = -lambda + kd * loglam - lgamma_lanczos(kd + 1.0);
+        if (logV <= rhs) {
+            k = int(kd);
+            break;
+        }
+    }
+    out_data[idx] = k;
 }

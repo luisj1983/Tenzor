@@ -385,6 +385,12 @@ enum class OpId : uint16_t {
     // Type Conversion Operations (316-319)
     // =========================================================================
     Cast = 316,
+    // Registry-only: no backend kernel anywhere (Tensor::to(Device) is a raw
+    // backend->copy() with zero dispatch() calls — see to_device() in
+    // src/autograd/ops.cpp). Exists purely so DeviceTransferBackward can
+    // report a real OpId for JVP-rule lookup (jvp_adapter_device_transfer in
+    // jvp_rules.cpp calls Tensor::to() directly, never tenzor::dispatch()).
+    DeviceTransfer,
 
     // =========================================================================
     // Extended Math Operations (320-339)
@@ -507,6 +513,14 @@ enum class OpId : uint16_t {
     Imag,                      // Extract imaginary part
     Angle,                     // Argument (phase angle)
     Polar,                     // Construct complex from magnitude and phase
+    // Registry-only: no backend kernel anywhere. view_as_real()/
+    // view_as_complex() (src/ops/transform.cpp) are pure metadata
+    // reinterpretation with zero dispatch() calls. Exist purely so
+    // ViewAsRealBackward/ViewAsComplexBackward can report a real OpId for
+    // JVP-rule lookup (jvp_adapter_view_as_real/_complex call
+    // tenzor::view_as_real()/view_as_complex() directly, never dispatch()).
+    ViewAsReal,                // Complex -> Real with trailing dim 2 (view)
+    ViewAsComplex,             // Real with trailing dim 2 -> Complex (view)
 
     // =========================================================================
     // Fused cuDNN full-sequence LSTM training forward/backward (450-459 range,
@@ -609,6 +623,14 @@ enum class OpId : uint16_t {
     LinalgMatrixNorm,          // Matrix norm (Frobenius, spectral, etc.)
     LinalgVecdot,              // Dot product along a dimension
     LinalgCholeskySolve,       // Solve via pre-computed Cholesky factor (potrs)
+    // Registry-only: no backend kernel anywhere (slogdet() derives sign/
+    // logabsdet from det()/lapack directly — see linalg::slogdet() in
+    // src/ops/linalg.cpp). Distinct from LinalgDet on purpose: d(logabsdet)
+    // = trace(A^{-1} dA) has a different tangent scale than
+    // d(det) = det(A)*trace(A^{-1} dA), so reusing LinalgDet's JVP rule
+    // here would be silently wrong, not merely missing (see
+    // SlogdetBackward's class comment in function.hpp).
+    LinalgSlogdet,             // (sign, logabsdet) = slogdet(A), 2-output
 
     // =========================================================================
     // Bitwise Operations (520-529)
@@ -685,6 +707,18 @@ enum class OpId : uint16_t {
     TensorSolve,               // Generalized tensor solve
     Ormqr,                     // Multiply by Q from QR factorization
     Geqrf,                     // Raw QR factorization returning (tau, R)
+    // Registry-only: no backend kernel anywhere. Represents the STRING-ord
+    // `linalg::norm(A, ord)` API ('fro','nuc','1','-1','2','-2','inf',
+    // '-inf' — see linalg::norm() in src/ops/linalg.cpp), distinct from
+    // the numeric-dim reduction OpId::Norm (=61, tensor.norm(p,dim)) and
+    // from OpId::LinalgVectorNorm/LinalgMatrixNorm (the float-ord/dim-based
+    // linalg API, which reduces only trailing axes — a different result
+    // shape for rank>2 batched input than the whole-tensor string-ord
+    // "fro" case). Only the "fro" case has a registered JVP rule
+    // (jvp_adapter_linalg_norm_fro); the other 7 ord values remain on the
+    // finite-difference fallback (see NormBackward_Linalg's class comment
+    // in function.hpp).
+    LinalgNorm,                // linalg::norm(A, ord) — string-ord API
 
     // =========================================================================
     // New Shape/Indexing Operations (610-619)

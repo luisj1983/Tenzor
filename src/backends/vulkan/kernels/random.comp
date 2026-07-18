@@ -1,14 +1,24 @@
 #version 450
 
 // GPU Random Number Generation using Philox 4x32 counter-based RNG
-// Generates uniform random floats in [0, 1) or normal distribution
+// Generates uniform random floats in [0, 1) or normal distribution.
+//
+// F042: counter/key layout and the Box-Muller formula are a bit-for-bit port
+// of CPU's tenzor::cpu::philox (src/backends/cpu/kernels/philox.hpp), so that
+// rand()/randn() produce the same stream as CPU for the same manual_seed().
+// Previously this shader (a) derived the Philox key from only the LOW 32
+// bits of the 64-bit global seed XORed with a constant (0xDEADBEEF) instead
+// of the seed's actual high 32 bits, and (b) wrote both the cos AND sin
+// Box-Muller outputs, whereas CPU draws exactly one N(0,1) sample per
+// element index (cos only) from a dedicated per-index Philox block.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;     // Number of elements to generate
-    uint seed;           // Random seed
+    uint seed_lo;        // Low 32 bits of the 64-bit global seed
+    uint seed_hi;        // High 32 bits of the 64-bit global seed
     uint offset;         // Offset for different invocations
     uint distribution;   // 0 = uniform [0,1), 1 = normal (Box-Muller)
 } params;
@@ -61,17 +71,18 @@ uvec4 philox4x32(uvec4 ctr, uvec2 key) {
 
 // Convert uint32 to float in [0, 1)
 float uint_to_float01(uint x) {
-    // Use upper 24 bits for mantissa (standard technique)
+    // Use upper 24 bits for mantissa (standard technique) — matches CPU's
+    // Philox4x32::uint32_to_uniform exactly.
     return float(x >> 8) * (1.0 / 16777216.0);
 }
 
-// Box-Muller transform for normal distribution
-vec2 box_muller(float u1, float u2) {
-    // Avoid log(0)
-    u1 = max(u1, 1e-10);
+// Box-Muller transform for normal distribution: cos-only, matching CPU's
+// philox_normal_f32 exactly (one N(0,1) sample per element index).
+float box_muller_f32(float u1, float u2) {
+    u1 = max(u1, 1e-37);
     float r = sqrt(-2.0 * log(u1));
-    float theta = 6.283185307179586 * u2;  // 2 * PI
-    return vec2(r * cos(theta), r * sin(theta));
+    float theta = 6.28318530718 * u2;  // 2 * PI
+    return r * cos(theta);
 }
 
 void main() {
@@ -81,10 +92,13 @@ void main() {
         return;
     }
 
-    // Create counter from thread index
+    // Counter/key layout matches CPU's philox.hpp exactly: counter[0] holds
+    // the element index, counter[1..3] are zero (element_idx never exceeds
+    // 32 bits here — the host always passes offset==0, see dispatchRand),
+    // and the key is the full 64-bit seed split into low/high 32-bit halves.
     uint element_idx = idx + params.offset;
-    uvec4 ctr = uvec4(element_idx, element_idx >> 16, 0, 0);
-    uvec2 key = uvec2(params.seed, params.seed ^ 0xDEADBEEF);
+    uvec4 ctr = uvec4(element_idx, 0u, 0u, 0u);
+    uvec2 key = uvec2(params.seed_lo, params.seed_hi);
 
     // Generate 4 random uint32s
     uvec4 rand_vals = philox4x32(ctr, key);
@@ -93,10 +107,9 @@ void main() {
         // Uniform distribution [0, 1)
         output_data[idx] = uint_to_float01(rand_vals.x);
     } else {
-        // Normal distribution using Box-Muller
+        // Normal distribution using Box-Muller on (out[0], out[1])
         float u1 = uint_to_float01(rand_vals.x);
         float u2 = uint_to_float01(rand_vals.y);
-        vec2 normal = box_muller(u1, u2);
-        output_data[idx] = normal.x;
+        output_data[idx] = box_muller_f32(u1, u2);
     }
 }
