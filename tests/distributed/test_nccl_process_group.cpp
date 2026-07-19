@@ -42,6 +42,16 @@ bool cuda_available() {
     }
 }
 
+// TENZOR_REQUIRE_MULTI_BACKEND=1 escalates "CUDA/NCCL not available" from a silent
+// GTEST_SKIP() to a hard FAIL() — matches the project-wide convention (see
+// tests/backend_parity/parity_test_utils.hpp's REQUIRE_MULTI_BACKEND_OR_SKIP) so a CI
+// job that expects a GPU backend to be present hard-fails when it silently failed to
+// initialize, instead of the whole suite reading as "all skipped, green".
+bool require_multi_backend() {
+    const char* v = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
+    return v != nullptr && std::string(v) == "1";
+}
+
 std::unique_ptr<NCCLProcessGroup> try_make_nccl_pg() {
     try {
         return std::make_unique<NCCLProcessGroup>(
@@ -59,18 +69,30 @@ protected:
 };
 
 TEST_F(NCCLProcessGroupTest, ConstructSingleRank_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available in this build";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available in this build (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available in this build";
+    }
     EXPECT_EQ(pg->rank(), 0);
     EXPECT_EQ(pg->world_size(), 1);
     EXPECT_TRUE(pg->supports_async_stream());
 }
 
 TEST_F(NCCLProcessGroupTest, AllReduce_SingleRank_IsIdentity_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available";
+    }
 
     auto t = randn({4, 4}, DType::Float32, Device::cpu()).to(Device::cuda(0));
     auto t_before = t.clone();
@@ -86,9 +108,15 @@ TEST_F(NCCLProcessGroupTest, AllReduce_SingleRank_IsIdentity_OrSkip) {
 }
 
 TEST_F(NCCLProcessGroupTest, Broadcast_SingleRank_IsIdentity_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available";
+    }
 
     auto t = randn({16}, DType::Float32, Device::cpu()).to(Device::cuda(0));
     auto t_before = t.clone();
@@ -104,9 +132,15 @@ TEST_F(NCCLProcessGroupTest, Broadcast_SingleRank_IsIdentity_OrSkip) {
 }
 
 TEST_F(NCCLProcessGroupTest, AllGather_SingleRank_OneEntry_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available";
+    }
 
     // NOTE: NCCLProcessGroup::all_gather(output, input) takes output FIRST,
     // input SECOND -- the reverse parameter order of NCCLBackend::all_gather
@@ -130,9 +164,15 @@ TEST_F(NCCLProcessGroupTest, AllGather_SingleRank_OneEntry_OrSkip) {
 }
 
 TEST_F(NCCLProcessGroupTest, ReduceScatter_SingleRank_MatchesInput_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available";
+    }
 
     auto input = full({3}, 7.0, DType::Float32, Device::cuda(0));
     auto output = zeros({3}, DType::Float32, Device::cuda(0));
@@ -145,9 +185,15 @@ TEST_F(NCCLProcessGroupTest, ReduceScatter_SingleRank_MatchesInput_OrSkip) {
 }
 
 TEST_F(NCCLProcessGroupTest, AllToAllSingle_SingleRank_IsIdentity_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available";
+    }
 
     auto in = full({4}, 0.0, DType::Float32, Device::cuda(0));
     auto in_cpu_src = zeros({4}, DType::Float32, Device::cpu());
@@ -166,9 +212,15 @@ TEST_F(NCCLProcessGroupTest, AllToAllSingle_SingleRank_IsIdentity_OrSkip) {
 }
 
 TEST_F(NCCLProcessGroupTest, Split_SingleRank_ReturnsSubGroupOfOne_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available";
+    }
 
     std::shared_ptr<ProcessGroupBase> sub;
     EXPECT_NO_THROW(sub = pg->split(/*color=*/0, /*key=*/0));
@@ -178,8 +230,14 @@ TEST_F(NCCLProcessGroupTest, Split_SingleRank_ReturnsSubGroupOfOne_OrSkip) {
 }
 
 TEST_F(NCCLProcessGroupTest, Barrier_SingleRank_OrSkip) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) {
+        if (require_multi_backend()) FAIL() << "CUDA not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "CUDA not available";
+    }
     auto pg = try_make_nccl_pg();
-    if (!pg) GTEST_SKIP() << "NCCL not available";
+    if (!pg) {
+        if (require_multi_backend()) FAIL() << "NCCL not available (TENZOR_REQUIRE_MULTI_BACKEND=1)";
+        GTEST_SKIP() << "NCCL not available";
+    }
     EXPECT_NO_THROW(pg->barrier());
 }

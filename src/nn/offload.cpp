@@ -60,6 +60,28 @@ namespace {
 OffloadContext::OffloadContext(Module& model, const Config& config)
     : model_(model), config_(config), enabled_(false) {
 
+    // Config::target_device defaults to Device::cuda(0) (see offload.hpp), which doesn't
+    // exist on a ROCm/Vulkan/OneAPI-only build. Unlike ComputeContext's
+    // pick_compute_device() helper above, this constructor never resolved that default
+    // against the backends actually available -- every prefetch/transfer/memory-pressure
+    // query below (get_memory_usage, cpu_to_gpu, etc.) would silently target a
+    // nonexistent CUDA device. If the configured target is still CUDA but CUDA isn't
+    // actually available, resolve to the first available accelerator backend instead,
+    // using the same probe order as pick_compute_device(). An explicit non-CUDA
+    // target_device the caller set is left untouched.
+    if (config_.target_device.type == Device::Type::CUDA) {
+        Backend* cuda_backend = ::tenzor::try_get_backend(Device::Type::CUDA);
+        if (cuda_backend == nullptr || !cuda_backend->is_available()) {
+            for (auto type : {Device::Type::ROCm, Device::Type::OneAPI,
+                              Device::Type::Vulkan, Device::Type::MPS}) {
+                if (auto* b = ::tenzor::try_get_backend(type); b != nullptr && b->is_available()) {
+                    config_.target_device = Device{type, 0};
+                    break;
+                }
+            }
+        }
+    }
+
     // Adopt the caller's TransferEngine when provided so the host-pinned pool is shared
     // with whichever other subsystem (typically a core::OffloadEngine driving Stage 1+
     // optimizer-state offload) built it. Without sharing, each component keeps its own

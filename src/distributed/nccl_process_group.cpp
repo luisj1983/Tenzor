@@ -696,7 +696,16 @@ auto NCCLProcessGroup::barrier() -> void {
     const int device_id = comm_device_;
     if (!barrier_dummy_.has_value() ||
         barrier_dummy_->device().index != device_id) {
+        // This TU is compiled once per owning backend DSO (see file header
+        // comment) with exactly one of TENZOR_USE_CUDA/TENZOR_USE_ROCM active,
+        // so the dummy's device type must match whichever backend this object
+        // was built for instead of hardcoding CUDA (which would bind an
+        // RCCL-backed communicator to a nonexistent/mismatched CUDA device).
+#if defined(TENZOR_USE_CUDA)
         barrier_dummy_.emplace(zeros({1}, DType::Float32, Device::cuda(device_id)));
+#elif defined(TENZOR_USE_ROCM)
+        barrier_dummy_.emplace(zeros({1}, DType::Float32, Device::rocm(device_id)));
+#endif
     }
     all_reduce(*barrier_dummy_, ReduceOp::SUM);
 #else

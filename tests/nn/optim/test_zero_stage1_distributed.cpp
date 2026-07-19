@@ -64,6 +64,19 @@ protected:
         world_size_ = std::atoi(world_size_env_);
 
         if (world_size_ < 2) {
+            // TENZOR_REQUIRE_MULTI_BACKEND=1 escalates this to a hard FAIL, matching
+            // the project-wide convention (CLAUDE.md: "turn the usual 'skip if only
+            // one backend available' into a hard FAIL"): once the distributed
+            // launcher IS driving this test (RANK/WORLD_SIZE are set, checked above),
+            // "only 1 process" is exactly the "not enough backends/ranks" case that
+            // convention exists to catch, rather than letting a misconfigured
+            // launcher silently read as "all skipped, green".
+            const char* v = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
+            if (v != nullptr && std::string(v) == "1") {
+                FAIL() << "world_size=" << world_size_
+                       << " < 2 (TENZOR_REQUIRE_MULTI_BACKEND=1); distributed ZeRO "
+                          "tests require a launcher configured for >= 2 processes";
+            }
             GTEST_SKIP() << "Need at least 2 processes for distributed ZeRO tests";
         }
 

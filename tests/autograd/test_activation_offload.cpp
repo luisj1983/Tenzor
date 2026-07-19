@@ -86,22 +86,25 @@ TEST_F(ActivationOffloadTest, NeverPolicyOverridesGlobal) {
 // forward time and the engine reloads them before backward runs.
 // ============================================================================
 //
-// Skipped when no CUDA or ROCm device is available.
+// Skipped when no GPU device (CUDA, ROCm, Vulkan, or OneAPI) is available.
 
 namespace {
 
-auto try_gpu_device() -> std::optional<Device> {
-    try {
-        Device d = Device::cuda(0);
-        tenzor::zeros({2}, DType::Float32, d);
-        return d;
-    } catch (...) {}
-    try {
-        Device d = Device::rocm(0);
-        tenzor::zeros({2}, DType::Float32, d);
-        return d;
-    } catch (...) {}
-    return std::nullopt;
+// Returns every GPU backend actually usable on this host, not just the first one
+// found -- a single try_gpu_device()-style "return the first match" helper meant
+// probing CUDA/ROCm only ever exercised whichever of those two happened to be
+// present first, so a correctness bug specific to ROCm (when CUDA was also present),
+// or specific to Vulkan/OneAPI (not probed at all), could never be caught by this
+// test regardless of what hardware the CI host actually has.
+auto all_gpu_devices() -> std::vector<Device> {
+    std::vector<Device> devices;
+    for (Device d : {Device::cuda(0), Device::rocm(0), Device::vulkan(0), Device::oneapi(0)}) {
+        try {
+            tenzor::zeros({2}, DType::Float32, d);
+            devices.push_back(d);
+        } catch (...) {}
+    }
+    return devices;
 }
 
 // Build a simple 2-layer computation (y = (x * w1) * w2, loss = sum(y)) and
@@ -148,68 +151,74 @@ auto run_two_layer(Device device) -> Tensor {
 } // namespace
 
 TEST_F(ActivationOffloadTest, GPURoundTripMatchesNonOffloaded) {
-    auto device_opt = try_gpu_device();
-    if (!device_opt) {
+    auto devices = all_gpu_devices();
+    if (devices.empty()) {
         GTEST_SKIP() << "No GPU device available";
     }
-    const Device device = *device_opt;
 
-    // Baseline: offload disabled.
-    set_activation_offload(false);
-    auto grad_baseline = run_two_layer(device);
+    for (const Device& device : devices) {
+        SCOPED_TRACE(testing::Message() << "device=" << device.to_string());
 
-    // With offload enabled the forward path moves saved tensors to CPU;
-    // the backward engine must reload them back to the original device
-    // before invoking each Function::backward. Gradients must match bit
-    // for bit (modulo rounding — tolerance tight).
-    set_activation_offload(true);
-    auto grad_offloaded = run_two_layer(device);
+        // Baseline: offload disabled.
+        set_activation_offload(false);
+        auto grad_baseline = run_two_layer(device);
 
-    auto cpu_a = grad_baseline.to(Device::cpu());
-    auto cpu_b = grad_offloaded.to(Device::cpu());
-    ASSERT_EQ(cpu_a.numel(), cpu_b.numel());
-    const auto* pa = cpu_a.data<float>();
-    const auto* pb = cpu_b.data<float>();
-    float max_err = 0.0f;
-    for (int64_t i = 0; i < cpu_a.numel(); ++i) {
-        max_err = std::max(max_err, std::fabs(pa[i] - pb[i]));
+        // With offload enabled the forward path moves saved tensors to CPU;
+        // the backward engine must reload them back to the original device
+        // before invoking each Function::backward. Gradients must match bit
+        // for bit (modulo rounding — tolerance tight).
+        set_activation_offload(true);
+        auto grad_offloaded = run_two_layer(device);
+
+        auto cpu_a = grad_baseline.to(Device::cpu());
+        auto cpu_b = grad_offloaded.to(Device::cpu());
+        ASSERT_EQ(cpu_a.numel(), cpu_b.numel());
+        const auto* pa = cpu_a.data<float>();
+        const auto* pb = cpu_b.data<float>();
+        float max_err = 0.0f;
+        for (int64_t i = 0; i < cpu_a.numel(); ++i) {
+            max_err = std::max(max_err, std::fabs(pa[i] - pb[i]));
+        }
+        EXPECT_LT(max_err, 1e-5f)
+            << "offload-enabled backward produced different gradients "
+            << "(max abs err = " << max_err << "). A mismatch here almost "
+            << "certainly means the engine didn't reload saved_tensors_ "
+            << "back to the original device before backward.";
     }
-    EXPECT_LT(max_err, 1e-5f)
-        << "offload-enabled backward produced different gradients "
-        << "(max abs err = " << max_err << "). A mismatch here almost "
-        << "certainly means the engine didn't reload saved_tensors_ "
-        << "back to the original device before backward.";
 }
 
 TEST_F(ActivationOffloadTest, SaveForBackwardMovesGPUToCPU) {
-    auto device_opt = try_gpu_device();
-    if (!device_opt) {
+    auto devices = all_gpu_devices();
+    if (devices.empty()) {
         GTEST_SKIP() << "No GPU device available";
     }
-    const Device device = *device_opt;
 
-    set_activation_offload(true);
+    for (const Device& device : devices) {
+        SCOPED_TRACE(testing::Message() << "device=" << device.to_string());
 
-    auto func = std::make_shared<AddBackward>();
-    // Default policy Inherit + global flag true → should offload.
-    auto gpu_tensor = tenzor::ones({16}, DType::Float32, device);
-    ASSERT_TRUE(func->should_offload(gpu_tensor));
+        set_activation_offload(true);
 
-    func->save_for_backward({gpu_tensor});
+        auto func = std::make_shared<AddBackward>();
+        // Default policy Inherit + global flag true → should offload.
+        auto gpu_tensor = tenzor::ones({16}, DType::Float32, device);
+        ASSERT_TRUE(func->should_offload(gpu_tensor));
 
-    // Force a direct peek at the stored tensor by *not* going through
-    // saved_tensors() — that would reload. We need an internal accessor
-    // or a proxy: use saved_tensors() and verify it comes back GPU,
-    // then toggle the flag off and inspect the underlying storage via
-    // a second save_for_backward call.
-    auto reloaded = func->saved_tensors()[0];
-    EXPECT_EQ(reloaded.device().type, device.type)
-        << "saved_tensors() must reload to the source device";
+        func->save_for_backward({gpu_tensor});
 
-    // Content preserved across the round-trip.
-    auto cpu_reloaded = reloaded.to(Device::cpu());
-    const auto* v = cpu_reloaded.data<float>();
-    for (int64_t i = 0; i < cpu_reloaded.numel(); ++i) {
-        EXPECT_FLOAT_EQ(v[i], 1.0f);
+        // Force a direct peek at the stored tensor by *not* going through
+        // saved_tensors() — that would reload. We need an internal accessor
+        // or a proxy: use saved_tensors() and verify it comes back GPU,
+        // then toggle the flag off and inspect the underlying storage via
+        // a second save_for_backward call.
+        auto reloaded = func->saved_tensors()[0];
+        EXPECT_EQ(reloaded.device().type, device.type)
+            << "saved_tensors() must reload to the source device";
+
+        // Content preserved across the round-trip.
+        auto cpu_reloaded = reloaded.to(Device::cpu());
+        const auto* v = cpu_reloaded.data<float>();
+        for (int64_t i = 0; i < cpu_reloaded.numel(); ++i) {
+            EXPECT_FLOAT_EQ(v[i], 1.0f);
+        }
     }
 }

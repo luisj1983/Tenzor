@@ -315,6 +315,10 @@ public:
     /**
      * @brief Check if GPU memory pressure is over threshold
      *
+     * Checks every GPU backend (CUDA, ROCm, Vulkan, OneAPI), not just the
+     * default-detected one, so auto-offload triggers correctly on a
+     * combined-backend build where tensors are registered on a non-default GPU.
+     *
      * @return true if auto-offload should trigger
      */
     auto is_over_threshold() const -> bool;

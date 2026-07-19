@@ -1888,6 +1888,10 @@ private:
         size_t partition_offset;            ///< Offset in full parameter
         size_t partition_size;              ///< Size of local partition (in elements)
         std::vector<int64_t> original_shape; ///< Original shape before flattening
+        Device original_device{Device::cpu()}; ///< Device the param lived on at registration
+                                                ///< time (partition_model_parameters). Used to
+                                                ///< reload a CPU-offloaded partition back onto
+                                                ///< the correct backend instead of guessing.
 
         // Phase D (D2): per-param local gradient slice. Previously
         // scatter_parameter_gradient stored the reduce-scatter result into

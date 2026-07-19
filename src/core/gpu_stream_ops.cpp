@@ -1,5 +1,6 @@
 #include "tenzor/core/gpu_stream_ops.hpp"
 #include "tenzor/core/rocm_transfer.hpp"
+#include "tenzor/backend/loader.hpp"
 #include <stdexcept>
 #include <string>
 
@@ -128,6 +129,32 @@ auto mem_get_info(Device device, std::size_t* free_bytes, std::size_t* total_byt
         return cudaMemGetInfo(free_bytes, total_bytes) == cudaSuccess;
     }
 #endif
+    if (device.type == Device::Type::Vulkan || device.type == Device::Type::OneAPI) {
+        // Vulkan/OneAPI have no direct cudaMemGetInfo equivalent reachable from this
+        // header-only core TU without pulling in vendor headers, but both backends
+        // already implement the generic Backend::get_device_info() query (real
+        // hardware-reported total_memory; available_memory is that same backend's own
+        // best-effort free estimate -- Vulkan lacks a portable free-memory query
+        // without the VK_EXT_memory_budget extension, and SYCL has no standard
+        // free-memory query, so each backend reports total_memory as available_memory
+        // there, same as the rest of this codebase's convention for those two
+        // backends). Route through that instead of a CPU fallback.
+        tenzor::Backend* backend = tenzor::try_get_backend(device.type);
+        if (backend == nullptr) {
+            return false;
+        }
+        tenzor::DeviceInfo info = backend->get_device_info(device.index);
+        if (info.total_memory == 0) {
+            return false;
+        }
+        if (total_bytes != nullptr) {
+            *total_bytes = info.total_memory;
+        }
+        if (free_bytes != nullptr) {
+            *free_bytes = info.available_memory;
+        }
+        return true;
+    }
     return false;
 }
 

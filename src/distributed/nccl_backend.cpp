@@ -954,7 +954,16 @@ auto NCCLBackend::barrier() -> void {
         GPU_CHECK(cudaGetDevice(&device_id));
     }
 
+    // This TU is compiled once per owning backend DSO with exactly one of
+    // TENZOR_USE_CUDA/TENZOR_USE_ROCM active (see src/backends/rocm/CMakeLists.txt's
+    // separate custom-command compile of this file), so the dummy's device type
+    // must match whichever backend this object was built for instead of
+    // hardcoding CUDA.
+#if defined(TENZOR_USE_CUDA)
     Tensor dummy = zeros({1}, DType::Float32, Device::cuda(device_id));
+#elif defined(TENZOR_USE_ROCM)
+    Tensor dummy = zeros({1}, DType::Float32, Device::rocm(device_id));
+#endif
     all_reduce(dummy, ReduceOp::SUM);
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");

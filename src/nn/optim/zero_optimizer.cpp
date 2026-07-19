@@ -25,6 +25,8 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <utility>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -2728,19 +2730,26 @@ auto ZeROStage2Optimizer::get_bucket_stats() const -> BucketStats {
 auto ZeROStage2Optimizer::create_gradient_buckets() -> void {
     std::lock_guard<std::mutex> lock(buckets_mutex_);
 
-    // Group parameters into buckets based on target rank and size
-    // Goal: Create buckets of approximately gradient_bucket_size bytes
+    // Group parameters into buckets based on target rank, dtype, and size.
+    // Goal: Create buckets of approximately gradient_bucket_size bytes.
 
     gradient_buckets_.clear();
 
-    // Create one bucket per rank to start
-    gradient_buckets_.resize(config_.world_size);
+    // Bucket key is (owner_rank, dtype), not just owner_rank. A bucket's flat_buffer
+    // is a single contiguous allocation of ONE dtype (reduce_scatter_gradients and
+    // gradient_hook both allocate flat_buffer from whichever gradient's dtype happens
+    // to be first, then add_() every other gradient into it by ELEMENT offset with no
+    // dtype check) -- a bucket that mixed dtypes would silently truncate/corrupt
+    // whichever gradient isn't the bucket's dtype (or diverge across backends
+    // depending on how each backend's add_ handles a dtype mismatch). Splitting by
+    // dtype up front makes every bucket dtype-homogeneous by construction, so that
+    // code path's single-dtype assumption always holds. Hook registration
+    // (register_backward_hooks) and all downstream bucket access already iterate
+    // gradient_buckets_ generically by index, so a variable bucket count (more than
+    // world_size when parameters mix dtypes) is safe.
+    std::map<std::pair<int, DType>, GradientBucket> buckets_by_key;
 
-    for (int rank = 0; rank < config_.world_size; ++rank) {
-        gradient_buckets_[rank].target_rank = rank;
-    }
-
-    // Assign parameters to buckets based on which rank owns them
+    // Assign parameters to buckets based on which rank owns them and their dtype.
     for (size_t param_idx = 0; param_idx < parameters_.size(); ++param_idx) {
         const auto& param = parameters_[param_idx];
 
@@ -2752,14 +2761,24 @@ auto ZeROStage2Optimizer::create_gradient_buckets() -> void {
             owner_rank = config_.world_size - 1;
         }
 
-        // Add parameter to the bucket for its owner rank
-        auto& bucket = gradient_buckets_[owner_rank];
+        const auto& tensor = param->tensor();
+        DType dt = tensor.dtype();
+
+        // Add parameter to the bucket for its (owner rank, dtype). map::operator[]
+        // default-constructs a fresh GradientBucket (which allocates its mutex, see
+        // GradientBucket's default constructor) the first time a key is seen.
+        auto& bucket = buckets_by_key[std::make_pair(owner_rank, dt)];
+        bucket.target_rank = owner_rank;
         bucket.params.push_back(param);
 
         // Calculate gradient size
-        const auto& tensor = param->tensor();
-        size_t grad_size = tensor.numel() * dtype_size(tensor.dtype());
+        size_t grad_size = tensor.numel() * dtype_size(dt);
         bucket.total_size += grad_size;
+    }
+
+    gradient_buckets_.reserve(buckets_by_key.size());
+    for (auto& [key, bucket] : buckets_by_key) {
+        gradient_buckets_.push_back(std::move(bucket));
     }
 
     // If bucketing is enabled, potentially split large buckets
@@ -4050,6 +4069,7 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
             // Store original shape
             auto shape_span = param_tensor.shape();
             state.original_shape = std::vector<int64_t>(shape_span.begin(), shape_span.end());
+            state.original_device = param_tensor.device();
 
             // In single-rank mode, local partition is the full parameter (no flattening)
             state.local_partition = param_tensor;
@@ -4102,6 +4122,11 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
         // Store original shape for reshaping after gather
         auto shape_span = param_tensor.shape();
         state.original_shape = std::vector<int64_t>(shape_span.begin(), shape_span.end());
+        // Capture the device BEFORE param_tensor is rebound below (to the local partition,
+        // or to an empty Tensor() for ranks that own no part of this parameter) -- once
+        // rebound, param_tensor's device may read as CPU/empty and no longer reflect where
+        // this parameter was actually registered from.
+        state.original_device = param_tensor.device();
 
         if (overlap_end > overlap_start) {
             // This rank owns part of this parameter.
@@ -4328,12 +4353,14 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
         && state.local_partition.numel() > 0
         && state.local_partition.device().type == Device::Type::CPU) {
         try {
-            // Default to CUDA(0) if we have no better hint -- partition_model_parameters
-            // ran in a CUDA context originally. Long-term we should record the original
-            // device on ParameterInfo at registration time.
+            // Prefer the param's own current device if it's still GPU-resident; otherwise
+            // fall back to the device this parameter was actually registered from
+            // (state.original_device, captured in partition_model_parameters) rather than
+            // guessing CUDA(0) -- on a ROCm/Vulkan/OneAPI-only build that guess targets a
+            // nonexistent backend.
             Device target = (state.param && state.param->device().type != Device::Type::CPU)
                               ? state.param->device()
-                              : Device::cuda(0);
+                              : state.original_device;
             state.local_partition = offload_engine_->load_to_gpu(state.local_partition, target);
             state.partition_on_cpu = false;
         } catch (const std::exception& e) {
@@ -5410,13 +5437,16 @@ auto ZeROStage3Optimizer::check_memory_pressure_locked() -> double {
     size_t used_gpu_memory = perf_stats_.current_gathered_memory;
 
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
-    if (param_device.type == Device::Type::CUDA || param_device.type == Device::Type::ROCm) {
+    if (param_device.type == Device::Type::CUDA || param_device.type == Device::Type::ROCm ||
+        param_device.type == Device::Type::Vulkan || param_device.type == Device::Type::OneAPI) {
         // Phase C (C7): query the actual device capacity instead of hardcoding 16 GB.
         // On an 80 GB H100 the old 16 GB constant fired the 0.85 threshold at 16% real
         // utilisation; on a 12 GB consumer card it never fired. gpu_stream::mem_get_info
-        // dispatches at runtime to cudaMemGetInfo or the isolated-TU ROCm equivalent
-        // (see FINDING 60 in findings.txt) to get the real (free, total) pair. Falls
-        // back to 16 GB only when the runtime call is unavailable or fails.
+        // dispatches at runtime to cudaMemGetInfo, the isolated-TU ROCm equivalent, or
+        // (for Vulkan/OneAPI) the generic Backend::get_device_info() query, to get the
+        // real (free, total) pair -- all four GPU backends get real pressure-based
+        // adaptive offload, not just CUDA/ROCm. Falls back to 16 GB only when the
+        // runtime call is unavailable or fails.
         size_t free_bytes = 0;
         size_t total_bytes = 0;
         bool got_real_total =
@@ -5440,7 +5470,7 @@ auto ZeROStage3Optimizer::check_memory_pressure_locked() -> double {
             }
         }
     } else {
-        // CPU mode - no memory pressure
+        // CPU mode (param_device.type == Device::Type::CPU) - no memory pressure to speak of.
         adaptive_metrics_.current_memory_pressure = 0.0;
         return 0.0;
     }

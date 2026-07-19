@@ -485,16 +485,23 @@ auto OffloadEngine::check_and_offload() -> size_t {
     // evict-load-evict thrash.
     const float low_water = config_.memory_fraction * 0.75f;
 
-    // Offload tensors until we're under low_water. get_gpu_memory_pressure() reads from
-    // memory_manager_ which has its own internal locking, so it's safe to call here.
+    // Offload tensors until each GPU device they actually reside on is under low_water.
+    // get_gpu_memory_pressure(type) reads from memory_manager_ which has its own internal
+    // locking, so it's safe to call here. Pressure is checked per-tensor's OWN device
+    // (not the single "default" device) -- on a combined-backend build (e.g. CUDA+ROCm)
+    // registered tensors can live on any GPU type, and a non-default backend can be over
+    // threshold while the default one is idle. We therefore can't `break` the moment ANY
+    // one device dips under low_water: doing so would stop scanning before entries
+    // resident on a still-over-threshold device are reached. `continue` past entries
+    // whose own device is already fine, keep scanning the rest.
     for (const auto& entry : snapshot) {
-        if (get_gpu_memory_pressure() <= low_water) {
-            break;  // Pressure dropped below low-water mark; stop hysteresis loop.
-        }
-
         Tensor* tensor = entry.tensor;
         if (tensor == nullptr || !is_gpu_device(tensor->device())) {
             continue;  // Already on CPU or invalidated
+        }
+
+        if (get_gpu_memory_pressure(tensor->device().type) <= low_water) {
+            continue;  // This tensor's device is already under the low-water mark.
         }
 
         try {
@@ -542,7 +549,20 @@ auto OffloadEngine::get_gpu_memory_pressure(Device::Type device_type) const -> f
 }
 
 auto OffloadEngine::is_over_threshold() const -> bool {
-    return get_gpu_memory_pressure() > config_.memory_fraction;
+    if (!memory_manager_) {
+        return false;
+    }
+    // Check every GPU backend, not just default_gpu_device_: on a combined-backend
+    // build (e.g. CUDA+ROCm), tensors can be explicitly placed on a non-default GPU
+    // via load_to_gpu(cpu_tensor, device), and auto-offload must trigger for whichever
+    // backend is actually over threshold, not only the auto-detected default one.
+    for (Device::Type type : {Device::Type::CUDA, Device::Type::ROCm,
+                               Device::Type::Vulkan, Device::Type::OneAPI}) {
+        if (memory_manager_->get_memory_pressure(type) > config_.memory_fraction) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ============================================================================
