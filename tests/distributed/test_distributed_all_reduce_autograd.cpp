@@ -1,8 +1,9 @@
 /**
  * @file test_distributed_all_reduce_autograd.cpp
- * @brief Single-process unit tests for tenzor::distributed_all_reduce (A5).
+ * @brief Unit tests for tenzor::distributed_all_reduce (A5).
  *
- * The public-surface tests exercise:
+ * The single-process public-surface tests (fake IdentityPG/DoublingPG below)
+ * exercise:
  *   - null PG rejection
  *   - non-differentiable ReduceOp rejection (PRODUCT/MIN/MAX/B*)
  *   - WS=1 forward identity (output equals input value-wise)
@@ -10,8 +11,11 @@
  *   - backward replays the same all-reduce on the incoming gradient
  *   - higher-order via backward_with_variables re-enters the autograd graph
  *
- * Multi-rank correctness (the actual collective reduction) is exercised by
- * the multi-process distributed test job (plan K3).
+ * Multi-rank correctness (the actual collective reduction, not a hand-rolled
+ * simulation of one) is exercised by MultiRankA5Test below: a real 2-process
+ * GlooProcessGroup, launched via tests/distributed/run_multirank_test.sh
+ * (FINDING 21 "plan K3" -- the multi-process C++ test job this file used to
+ * defer to but which never existed).
  */
 
 #include <gtest/gtest.h>
@@ -21,6 +25,7 @@
 #include <tenzor/distributed/process_group.hpp>
 #include <tenzor/distributed/distributed.hpp>
 #include <tenzor/ops/creation.hpp>
+#include <cstdlib>
 
 using namespace tenzor;
 using namespace tenzor::distributed;
@@ -204,4 +209,120 @@ TEST_F(A5Test, HigherOrderBackward_ReentersAutograd) {
     // Value: DoublingPG SUM on grad=1 -> 2.
     auto* g_in = var_grads[0].tensor().data<float>();
     for (int i = 0; i < 4; ++i) EXPECT_FLOAT_EQ(g_in[i], 2.0f);
+}
+
+// ============================================================================
+// Multi-rank tests (real GlooProcessGroup, real OS processes) — FINDING 21
+// ============================================================================
+// Run via tests/distributed/run_multirank_test.sh, which launches
+// world_size copies of this binary with RANK/WORLD_SIZE/MASTER_ADDR/
+// MASTER_PORT set. Skips (not fails) when those aren't set, so the binary
+// still runs standalone (e.g. under plain ctest) without a hard failure.
+namespace {
+
+class MultiRankA5Test : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() { tenzor::initialize(); }
+
+    void SetUp() override {
+        const char* rank_env = std::getenv("RANK");
+        const char* world_size_env = std::getenv("WORLD_SIZE");
+        if (!rank_env || !world_size_env) {
+            GTEST_SKIP() << "Distributed environment not available (RANK, WORLD_SIZE not set)";
+        }
+        rank_ = std::atoi(rank_env);
+        world_size_ = std::atoi(world_size_env);
+        if (world_size_ < 2) {
+            GTEST_SKIP() << "Need at least 2 processes for multi-rank A5 tests";
+        }
+
+        const char* addr_env = std::getenv("MASTER_ADDR");
+        const char* port_env = std::getenv("MASTER_PORT");
+        std::string addr = addr_env ? addr_env : "127.0.0.1";
+        int port = port_env ? std::atoi(port_env) : 29500;
+        pg_ = std::make_shared<GlooProcessGroup>(rank_, world_size_, addr, port);
+    }
+
+    void TearDown() override {
+        if (pg_) {
+            pg_->barrier();
+            pg_.reset();
+        }
+    }
+
+    int rank_{-1};
+    int world_size_{-1};
+    std::shared_ptr<GlooProcessGroup> pg_;
+};
+
+} // namespace
+
+// Real collective SUM across every rank, not DoublingPG's hand-rolled "2x"
+// simulation of a specific 2-rank case: each rank contributes (rank+1) in
+// every element, so the correct reduced value depends on world_size and on
+// every rank's real network participation, not on a single process's guess
+// at what its peers would have sent.
+TEST_F(MultiRankA5Test, ForwardSumAcrossRealRanks) {
+    auto x = zeros({4}, DType::Float32, Device::cpu());
+    auto* xp = x.data<float>();
+    for (int i = 0; i < 4; ++i) xp[i] = static_cast<float>(rank_ + 1);
+
+    Variable v(x, /*requires_grad=*/false);
+    Variable y = distributed_all_reduce(v, pg_, ReduceOp::SUM);
+
+    double expected = 0.0;
+    for (int r = 0; r < world_size_; ++r) expected += (r + 1);
+
+    auto* yp = y.tensor().data<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(yp[i], static_cast<float>(expected))
+            << "rank " << rank_ << " element " << i;
+    }
+}
+
+TEST_F(MultiRankA5Test, ForwardAvgAcrossRealRanks) {
+    auto x = zeros({4}, DType::Float32, Device::cpu());
+    auto* xp = x.data<float>();
+    for (int i = 0; i < 4; ++i) xp[i] = static_cast<float>(rank_ + 1);
+
+    Variable v(x, /*requires_grad=*/false);
+    Variable y = distributed_all_reduce(v, pg_, ReduceOp::AVG);
+
+    double sum = 0.0;
+    for (int r = 0; r < world_size_; ++r) sum += (r + 1);
+    double expected = sum / world_size_;
+
+    auto* yp = y.tensor().data<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(yp[i], static_cast<float>(expected), 1e-5f)
+            << "rank " << rank_ << " element " << i;
+    }
+}
+
+// Every rank feeds an identical, known gradient into backward(); the result
+// on every rank must be that gradient summed across every real rank's
+// participation in the collective (not DoublingPG's fixed "2x").
+TEST_F(MultiRankA5Test, BackwardReplaysRealAllReduce) {
+    auto x = zeros({4}, DType::Float32, Device::cpu());
+    auto* xp = x.data<float>();
+    for (int i = 0; i < 4; ++i) xp[i] = static_cast<float>(rank_ + 1);
+
+    Variable v(x, /*requires_grad=*/true);
+    Variable y = distributed_all_reduce(v, pg_, ReduceOp::SUM);
+
+    auto grad_y = zeros({4}, DType::Float32, Device::cpu());
+    auto* gp = grad_y.data<float>();
+    for (int i = 0; i < 4; ++i) gp[i] = 3.0f;
+
+    auto grad_fn = y.grad_fn();
+    ASSERT_NE(grad_fn, nullptr);
+    auto grads = grad_fn->backward({grad_y});
+    ASSERT_EQ(grads.size(), 1u);
+
+    double expected = 3.0 * world_size_;
+    auto* g_in = grads[0].data<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(g_in[i], static_cast<float>(expected))
+            << "rank " << rank_ << " element " << i;
+    }
 }

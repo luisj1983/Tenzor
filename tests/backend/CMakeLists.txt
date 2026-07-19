@@ -3,19 +3,25 @@
 # =============================================================================
 
 # OneAPI-specific tests
-if(TENZOR_BUILD_ONEAPI)
+if(TENZOR_BUILD_ONEAPI AND TARGET tenzor_backend_oneapi)
     find_package(IntelSYCL QUIET)
 
     # OneAPI backend tests (comprehensive)
     add_executable(test_oneapi_backend test_oneapi_backend.cpp)
     target_link_libraries(test_oneapi_backend PRIVATE tenzor_core GTest::gtest_main)
 
+    # OneAPI FP16 kernel-granularity tests (mirrors CUDA's test_fp16_kernels.cpp —
+    # see FINDING 59 in findings.txt)
+    add_executable(test_oneapi_fp16_kernels test_oneapi_fp16_kernels.cpp)
+    target_link_libraries(test_oneapi_fp16_kernels PRIVATE tenzor_core GTest::gtest_main)
+
     # OneAPI device initialization can be slow, use 60 second timeout
     tenzor_discover_tests(test_oneapi_backend DISCOVERY_TIMEOUT 60 BACKENDS oneapi)
+    tenzor_discover_tests(test_oneapi_fp16_kernels DISCOVERY_TIMEOUT 60 BACKENDS oneapi)
 endif()
 
 # Vulkan Caching Allocator Tests
-if(TENZOR_BUILD_VULKAN)
+if(TENZOR_BUILD_VULKAN AND TARGET tenzor_backend_vulkan)
     find_package(Vulkan REQUIRED)
 
     add_executable(test_vulkan_caching_allocator test_vulkan_caching_allocator.cpp)
@@ -23,6 +29,18 @@ if(TENZOR_BUILD_VULKAN)
         tenzor_core tenzor_backend_vulkan ${Vulkan_LIBRARIES} GTest::gtest_main)
     target_include_directories(test_vulkan_caching_allocator PRIVATE ${Vulkan_INCLUDE_DIRS})
     tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
+endif()
+
+# CUDA Caching Allocator Tests
+if(TENZOR_BUILD_CUDA AND TARGET tenzor_backend_cuda)
+    find_package(CUDAToolkit REQUIRED)
+
+    add_executable(test_cuda_caching_allocator test_cuda_caching_allocator.cpp)
+    target_link_libraries(test_cuda_caching_allocator PRIVATE
+        tenzor_core tenzor_backend_cuda GTest::gtest_main CUDA::cudart)
+    target_include_directories(test_cuda_caching_allocator PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    add_dependencies(test_cuda_caching_allocator tenzor_backend_cuda)
+    tenzor_discover_tests(test_cuda_caching_allocator DISCOVERY_TIMEOUT 60 BACKENDS cuda)
 endif()
 
 # ROCm Caching Allocator Tests

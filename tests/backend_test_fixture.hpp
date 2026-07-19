@@ -244,6 +244,18 @@ protected:
         } else {
             auto type = detail::nameToDeviceType(base);
             if (!isBackendAvailable(type, index)) {
+#ifndef __APPLE__
+                // MPS is structurally unbuildable off Apple platforms
+                // (CMakeLists.txt only defines TENZOR_BUILD_MPS if(APPLE)),
+                // and required_ops.hpp documents it as "out of scope per the
+                // audit plan". Exempt it from TENZOR_REQUIRE_MULTI_BACKEND
+                // escalation on non-Apple builds so a documented, permanent
+                // platform limitation doesn't read as a mass CI regression.
+                if (base == "mps") {
+                    GTEST_SKIP() << backend_param
+                                 << " not available (MPS requires Apple hardware)";
+                }
+#endif
                 if (require_multi_backend()) {
                     FAIL() << backend_param << " required by "
                               "TENZOR_REQUIRE_MULTI_BACKEND but unavailable";

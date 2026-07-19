@@ -23,6 +23,10 @@
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
+using tenzor::testing::test_operation_parity_single;
+using tenzor::testing::tensors_close;
+using tenzor::testing::max_abs_diff;
+namespace golden = tenzor::testing::golden;
 
 namespace {
 
@@ -65,10 +69,12 @@ void require_rocm_or_skip() {
     }
 }
 
-void run_kvcache_parity(int64_t seq_len_q, int64_t seq_len_k, bool causal) {
-    require_rocm_or_skip();
-    if (::testing::Test::HasFatalFailure() || ::testing::Test::IsSkipped()) return;
-
+// FINDING 17: previously an unconditional GTEST_SKIP() on a host without
+// ROCm, with zero golden::* integration — this whole file's coverage
+// (JIT-R158/159 ROCm-only bugs) was invisible on any non-ROCm CI shard. On a
+// CPU-only host, fall back to comparing against a recorded golden instead.
+void run_kvcache_parity(int64_t seq_len_q, int64_t seq_len_k, bool causal,
+                         const std::string& test_name) {
     // head_dim=64 is inside the tiled-kernel {32,64,128} set on ROCm.
     constexpr int64_t kHeadDim = 64;
     auto Q_cpu = random_f32({1, 2, seq_len_q, kHeadDim}, Device::cpu());
@@ -81,33 +87,12 @@ void run_kvcache_parity(int64_t seq_len_q, int64_t seq_len_k, bool causal) {
     attrs.set(AttrKey::DropoutP, 0.0);
     attrs.set(AttrKey::IsTraining, false);
 
-    std::vector<Tensor> cpu_inputs = {Q_cpu, K_cpu, V_cpu};
-    auto cpu_outs = dispatch(OpId::FlashAttention, cpu_inputs, attrs);
-    ASSERT_GE(cpu_outs.size(), 1u);
-    Tensor cpu_out = cpu_outs[0];
+    auto op = [&attrs](const std::vector<Tensor>& ins) -> Tensor {
+        return dispatch(OpId::FlashAttention, ins, attrs)[0];
+    };
 
-    auto Q_r = Q_cpu.to(Device::rocm(0));
-    auto K_r = K_cpu.to(Device::rocm(0));
-    auto V_r = V_cpu.to(Device::rocm(0));
-    std::vector<Tensor> rocm_inputs = {Q_r, K_r, V_r};
-    auto rocm_outs = dispatch(OpId::FlashAttention, rocm_inputs, attrs);
-    ASSERT_GE(rocm_outs.size(), 1u);
-    Tensor rocm_out = rocm_outs[0].to(Device::cpu());
-
-    ASSERT_EQ(cpu_out.shape().size(), rocm_out.shape().size());
-    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
-        EXPECT_EQ(cpu_out.shape()[i], rocm_out.shape()[i])
-            << " dim " << i << " (seq_len_q=" << seq_len_q
-            << ", seq_len_k=" << seq_len_k << ", causal=" << causal << ")";
-    }
-    auto* cp = cpu_out.data<float>();
-    auto* rp = rocm_out.data<float>();
-    int64_t n = cpu_out.numel();
-    for (int64_t i = 0; i < n; ++i) {
-        EXPECT_NEAR(cp[i], rp[i], 5e-4f)
-            << " elem " << i << " (seq_len_q=" << seq_len_q
-            << ", seq_len_k=" << seq_len_k << ", causal=" << causal << ")";
-    }
+    Device target = has_rocm() ? Device::rocm(0) : Device::cpu();
+    test_operation_parity_single(op, {Q_cpu, K_cpu, V_cpu}, target, 1e-5f, 5e-4f, test_name);
 }
 
 // H20: ROCm's fused Float32 FlashAttentionBackward fast path used to pass
@@ -118,10 +103,10 @@ void run_kvcache_parity(int64_t seq_len_q, int64_t seq_len_k, bool causal) {
 // head_dim for any B>1 or H>1 call (i.e. any standard MHA/GQA shape). Compare
 // dQ/dK/dV against the CPU reference for B=2,H=4 so the bug (if reintroduced)
 // is unambiguous, not masked by a degenerate batch_heads=1 collapse.
+// Three-output result (dQ, dK, dV) doesn't fit test_operation_parity_single's
+// single-Tensor contract, so wire golden::maybe_record/maybe_load directly —
+// one golden per output tensor, keyed by name (FINDING 17).
 void run_backward_parity(int64_t B, int64_t H, int64_t seq_len, int64_t head_dim) {
-    require_rocm_or_skip();
-    if (::testing::Test::HasFatalFailure() || ::testing::Test::IsSkipped()) return;
-
     auto Q_cpu = random_f32({B, H, seq_len, head_dim}, Device::cpu());
     auto K_cpu = random_f32({B, H, seq_len, head_dim}, Device::cpu());
     auto V_cpu = random_f32({B, H, seq_len, head_dim}, Device::cpu());
@@ -140,6 +125,33 @@ void run_backward_parity(int64_t B, int64_t H, int64_t seq_len, int64_t head_dim
     auto cpu_bwd = dispatch(OpId::FlashAttentionBackward, cpu_bwd_inputs, attrs);
     ASSERT_GE(cpu_bwd.size(), 3u);
 
+    const char* names[3] = {"dQ", "dK", "dV"};
+
+    if (!has_rocm()) {
+        if (golden::require_multi_backend()) {
+            FAIL() << "ROCm required by TENZOR_REQUIRE_MULTI_BACKEND but not available";
+        }
+        bool any_missing = false;
+        for (int idx = 0; idx < 3; ++idx) {
+            std::string test_name = std::string("FlashAttentionBackward_StandardMHA_") + names[idx];
+            if (auto golden_result = golden::maybe_load(test_name, cpu_bwd_inputs)) {
+                golden::note_comparison();
+                Tensor cpu_g = cpu_bwd[idx];
+                if (!tensors_close(cpu_g, *golden_result, 1e-5f, 5e-3f)) {
+                    float max_diff = max_abs_diff(cpu_g, *golden_result);
+                    FAIL() << test_name << " golden parity failed: max diff " << max_diff;
+                }
+            } else {
+                any_missing = true;
+            }
+        }
+        if (any_missing) {
+            GTEST_SKIP() << "ROCm not available and no recorded golden for one or more of dQ/dK/dV — "
+                            "nothing to compare against.";
+        }
+        return;
+    }
+
     auto Q_r = Q_cpu.to(Device::rocm(0));
     auto K_r = K_cpu.to(Device::rocm(0));
     auto V_r = V_cpu.to(Device::rocm(0));
@@ -151,7 +163,6 @@ void run_backward_parity(int64_t B, int64_t H, int64_t seq_len, int64_t head_dim
     auto rocm_bwd = dispatch(OpId::FlashAttentionBackward, rocm_bwd_inputs, attrs);
     ASSERT_GE(rocm_bwd.size(), 3u);
 
-    const char* names[3] = {"dQ", "dK", "dV"};
     for (int idx = 0; idx < 3; ++idx) {
         Tensor cpu_g = cpu_bwd[idx];
         Tensor rocm_g = rocm_bwd[idx].to(Device::cpu());
@@ -169,6 +180,11 @@ void run_backward_parity(int64_t B, int64_t H, int64_t seq_len, int64_t head_dim
                 << names[idx] << " elem " << i << " (B=" << B << ",H=" << H
                 << ",S=" << seq_len << ",D=" << head_dim << ")";
         }
+
+        if (golden::recording_enabled()) {
+            std::string test_name = std::string("FlashAttentionBackward_StandardMHA_") + names[idx];
+            golden::maybe_record(test_name, cpu_bwd_inputs, rocm_g);
+        }
     }
 }
 
@@ -181,7 +197,8 @@ TEST_F(FlashAttentionKvCacheParity, Backward_StandardMHA_MatchesCPU) {
 // Self-attention (seq_len_q == seq_len_k): the pre-existing, already-correct
 // case (causal_offset == 0) -- a no-regression baseline.
 TEST_F(FlashAttentionKvCacheParity, SelfAttention_Causal_MatchesCPU) {
-    run_kvcache_parity(/*seq_len_q=*/32, /*seq_len_k=*/32, /*causal=*/true);
+    run_kvcache_parity(/*seq_len_q=*/32, /*seq_len_k=*/32, /*causal=*/true,
+                        "FlashAttentionKvCache_SelfAttention_Causal");
 }
 
 // KV-cache decode: a single new query attending over a much longer growing
@@ -190,7 +207,8 @@ TEST_F(FlashAttentionKvCacheParity, SelfAttention_Causal_MatchesCPU) {
 // seq_len_k, so K/V (actually seq_len_k=64 long) were read/strided as if
 // only seq_len_q=1 long.
 TEST_F(FlashAttentionKvCacheParity, KvCacheDecode_Causal_MatchesCPU) {
-    run_kvcache_parity(/*seq_len_q=*/1, /*seq_len_k=*/64, /*causal=*/true);
+    run_kvcache_parity(/*seq_len_q=*/1, /*seq_len_k=*/64, /*causal=*/true,
+                        "FlashAttentionKvCache_Decode_Causal");
 }
 
 // KV-cache prefill-continuation: a chunk of new queries attending over a
@@ -199,13 +217,15 @@ TEST_F(FlashAttentionKvCacheParity, KvCacheDecode_Causal_MatchesCPU) {
 // tile-skip's kv_start > q_row check with q_row==0 never distinguishes an
 // offset bug the way a multi-row query chunk does).
 TEST_F(FlashAttentionKvCacheParity, KvCacheChunk_Causal_MatchesCPU) {
-    run_kvcache_parity(/*seq_len_q=*/16, /*seq_len_k=*/64, /*causal=*/true);
+    run_kvcache_parity(/*seq_len_q=*/16, /*seq_len_k=*/64, /*causal=*/true,
+                        "FlashAttentionKvCache_Chunk_Causal");
 }
 
 // Non-causal KV-cache cross-attention: no causal mask at all, so this
 // isolates the JIT-R158 seq_len bug alone (no causal_offset involved).
 TEST_F(FlashAttentionKvCacheParity, KvCacheChunk_NonCausal_MatchesCPU) {
-    run_kvcache_parity(/*seq_len_q=*/16, /*seq_len_k=*/64, /*causal=*/false);
+    run_kvcache_parity(/*seq_len_q=*/16, /*seq_len_k=*/64, /*causal=*/false,
+                        "FlashAttentionKvCache_Chunk_NonCausal");
 }
 
 // JIT-R183: every case above uses a freshly zeros()-filled, contiguous K/V
@@ -225,9 +245,6 @@ TEST_F(FlashAttentionKvCacheParity, KvCacheChunk_NonCausal_MatchesCPU) {
 // IDENTICAL strided view (not a freshly-copied contiguous CPU tensor,
 // which would silently sidestep the bug this test targets).
 TEST_F(FlashAttentionKvCacheParity, KvCacheChunk_StridedCacheBuffer_MatchesCPU) {
-    require_rocm_or_skip();
-    if (::testing::Test::HasFatalFailure() || ::testing::Test::IsSkipped()) return;
-
     constexpr int64_t kHeadDim = 64;
     constexpr int64_t kSeqLenQ = 16;
     constexpr int64_t kSeqLenK = 64;
@@ -252,35 +269,16 @@ TEST_F(FlashAttentionKvCacheParity, KvCacheChunk_StridedCacheBuffer_MatchesCPU) 
     attrs.set(AttrKey::DropoutP, 0.0);
     attrs.set(AttrKey::IsTraining, false);
 
-    std::vector<Tensor> cpu_inputs = {Q_cpu, K_cpu, V_cpu};
-    auto cpu_outs = dispatch(OpId::FlashAttention, cpu_inputs, attrs);
-    ASSERT_GE(cpu_outs.size(), 1u);
-    Tensor cpu_out = cpu_outs[0];
-
     // .to(device) on a non-contiguous view must still produce a tensor that,
     // when handed to the ROCm kernel, is either correctly interpreted with
     // its real strides or made contiguous by the transfer -- either way the
-    // ROCm dispatch below exercises the same logical (strided-source) data
-    // the CPU reference used.
-    auto Q_r = Q_cpu.to(Device::rocm(0));
-    auto K_r = K_cpu.to(Device::rocm(0));
-    auto V_r = V_cpu.to(Device::rocm(0));
-    std::vector<Tensor> rocm_inputs = {Q_r, K_r, V_r};
-    auto rocm_outs = dispatch(OpId::FlashAttention, rocm_inputs, attrs);
-    ASSERT_GE(rocm_outs.size(), 1u);
-    Tensor rocm_out = rocm_outs[0].to(Device::cpu());
+    // dispatch below exercises the same logical (strided-source) data the
+    // CPU reference used.
+    auto op = [&attrs](const std::vector<Tensor>& ins) -> Tensor {
+        return dispatch(OpId::FlashAttention, ins, attrs)[0];
+    };
 
-    ASSERT_EQ(cpu_out.shape().size(), rocm_out.shape().size());
-    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
-        EXPECT_EQ(cpu_out.shape()[i], rocm_out.shape()[i]) << " dim " << i;
-    }
-    auto cpu_out_c = cpu_out.contiguous();
-    auto rocm_out_c = rocm_out.contiguous();
-    auto* cp = cpu_out_c.data<float>();
-    auto* rp = rocm_out_c.data<float>();
-    int64_t n = cpu_out_c.numel();
-    for (int64_t i = 0; i < n; ++i) {
-        EXPECT_NEAR(cp[i], rp[i], 5e-4f)
-            << " elem " << i << " (strided/offset KV-cache buffer, JIT-R183)";
-    }
+    Device target = has_rocm() ? Device::rocm(0) : Device::cpu();
+    test_operation_parity_single(op, {Q_cpu, K_cpu, V_cpu}, target, 1e-5f, 5e-4f,
+                                  "FlashAttentionKvCache_StridedCacheBuffer");
 }

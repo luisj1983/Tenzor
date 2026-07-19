@@ -16,8 +16,10 @@
 #include <tenzor/backend/fast_dispatch.hpp>
 #include <tenzor/backend/op_attributes.hpp>
 #include <tenzor/ops/op_id.hpp>
+#include "parity_test_utils.hpp"
 
 using namespace tenzor;
+using namespace tenzor::testing;
 
 namespace {
 
@@ -52,8 +54,6 @@ static auto make_rois() -> Tensor {
 }  // namespace
 
 TEST_F(MpsRoiAlignBackward, Forward_MatchesCPU) {
-    if (!has_mps()) GTEST_SKIP() << "MPS not available";
-
     auto features_cpu = seq_f32({1, 2, 8, 8});
     auto rois_cpu = make_rois();
 
@@ -64,26 +64,18 @@ TEST_F(MpsRoiAlignBackward, Forward_MatchesCPU) {
     attrs.set(AttrKey::SamplingRatio, int64_t(2));
     attrs.set(AttrKey::Aligned, true);
 
-    Tensor cpu_out = dispatch(OpId::ROIAlignForward,
-                              std::vector<Tensor>{features_cpu, rois_cpu}, attrs)[0];
+    auto op = [&attrs](const std::vector<Tensor>& ins) -> Tensor {
+        return dispatch(OpId::ROIAlignForward, ins, attrs)[0];
+    };
 
-    auto features_mps = features_cpu.to(Device::mps(0));
-    auto rois_mps = rois_cpu.to(Device::mps(0));
-    Tensor mps_out = dispatch(OpId::ROIAlignForward,
-                              std::vector<Tensor>{features_mps, rois_mps}, attrs)[0]
-                          .to(Device::cpu());
-
-    ASSERT_EQ(cpu_out.numel(), mps_out.numel());
-    auto* cp = cpu_out.data<float>();
-    auto* mp = mps_out.data<float>();
-    for (int64_t i = 0; i < cpu_out.numel(); ++i) {
-        EXPECT_NEAR(cp[i], mp[i], 1e-4f) << " elem " << i;
-    }
+    // On a CPU-only host (i.e. every non-macOS host), fall back to comparing
+    // against a recorded golden instead of skipping outright (FINDING 17).
+    Device target = has_mps() ? Device::mps(0) : Device::cpu();
+    test_operation_parity_single(op, {features_cpu, rois_cpu}, target, 1e-5f, 1e-4f,
+                                  "ROIAlign_Forward");
 }
 
 TEST_F(MpsRoiAlignBackward, Backward_MatchesCPU) {
-    if (!has_mps()) GTEST_SKIP() << "MPS not available";
-
     auto grad_out_cpu = seq_f32({1, 2, 4, 4});
     auto rois_cpu = make_rois();
 
@@ -95,23 +87,11 @@ TEST_F(MpsRoiAlignBackward, Backward_MatchesCPU) {
     attrs.set(AttrKey::SamplingRatio, int64_t(2));
     attrs.set(AttrKey::Aligned, true);
 
-    Tensor cpu_out = dispatch(OpId::ROIAlignBackward,
-                              std::vector<Tensor>{grad_out_cpu, rois_cpu}, attrs)[0];
+    auto op = [&attrs](const std::vector<Tensor>& ins) -> Tensor {
+        return dispatch(OpId::ROIAlignBackward, ins, attrs)[0];
+    };
 
-    auto grad_out_mps = grad_out_cpu.to(Device::mps(0));
-    auto rois_mps = rois_cpu.to(Device::mps(0));
-    Tensor mps_out = dispatch(OpId::ROIAlignBackward,
-                              std::vector<Tensor>{grad_out_mps, rois_mps}, attrs)[0]
-                          .to(Device::cpu());
-
-    ASSERT_EQ(cpu_out.shape().size(), mps_out.shape().size());
-    for (size_t i = 0; i < cpu_out.shape().size(); ++i) {
-        EXPECT_EQ(cpu_out.shape()[i], mps_out.shape()[i]) << " dim " << i;
-    }
-    ASSERT_EQ(cpu_out.numel(), mps_out.numel());
-    auto* cp = cpu_out.data<float>();
-    auto* mp = mps_out.data<float>();
-    for (int64_t i = 0; i < cpu_out.numel(); ++i) {
-        EXPECT_NEAR(cp[i], mp[i], 1e-4f) << " elem " << i;
-    }
+    Device target = has_mps() ? Device::mps(0) : Device::cpu();
+    test_operation_parity_single(op, {grad_out_cpu, rois_cpu}, target, 1e-5f, 1e-4f,
+                                  "ROIAlign_Backward");
 }

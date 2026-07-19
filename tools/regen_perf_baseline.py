@@ -60,16 +60,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--baseline",
                    default="tests/backend_parity/baselines/perf_baseline.json",
                    help="Path to the baseline JSON to write")
-    p.add_argument("--executable",
-                   default="bin/test_performance_regression",
-                   help="Path to the test binary, relative to repo root")
+    # --executable defaults to None so main() can derive it from --build-dir
+    # (<build-dir>/bin/test_performance_regression) -- a hardcoded
+    # "bin/test_performance_regression" default silently ignored --build-dir
+    # entirely, so `--build-dir build` (the exact form this script's own
+    # docstring/help text recommends) looked in <repo_root>/bin instead of
+    # <repo_root>/build/bin and always failed with "binary not found".
+    p.add_argument("--executable", default=None,
+                   help="Path to the test binary, relative to repo root "
+                        "(default: <build-dir>/bin/test_performance_regression)")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parent.parent
-    bin_path = repo_root / args.executable
+    executable = args.executable or f"{args.build_dir}/bin/test_performance_regression"
+    bin_path = repo_root / executable
     baseline_path = repo_root / args.baseline
 
     if not bin_path.exists():

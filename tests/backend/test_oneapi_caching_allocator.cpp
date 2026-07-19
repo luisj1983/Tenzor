@@ -183,6 +183,95 @@ TEST_F(OneAPICachingAllocatorTest, CacheReuseExactSize) {
     allocator->free(ptr2, 0);
 }
 
+TEST_F(OneAPICachingAllocatorTest, BlockSplitOnOversizedReuse) {
+    const size_t big_size = 8192;
+    const size_t small_size = 1024;
+
+    void* big_ptr = allocator->allocate_shared(big_size, 0);
+    ASSERT_NE(big_ptr, nullptr);
+    allocator->free(big_ptr, 0);
+
+    size_t splits_before = allocator->get_stats(0).num_splits;
+
+    // A much smaller request reusing this cached block should SPLIT it rather
+    // than handing out the whole 8192 bytes: the leading `small_size` bytes
+    // come back at the original address, and the remainder becomes its own
+    // free block immediately available for reuse.
+    void* small_ptr = allocator->allocate_shared(small_size, 0);
+    ASSERT_NE(small_ptr, nullptr);
+    EXPECT_EQ(small_ptr, big_ptr) << "Split should hand out the front of the original block";
+    EXPECT_GT(allocator->get_stats(0).num_splits, splits_before)
+        << "Reusing an oversized cached block for a much smaller request should split it";
+
+    // The remainder (big_size - small_size) must be independently cached and
+    // reusable WITHOUT freeing small_ptr first — proving it was actually split
+    // off, not just logically reserved inside the still-whole block.
+    const size_t remainder_request = 2048;
+    ASSERT_LT(remainder_request, big_size - small_size);
+
+    size_t hits_before = allocator->get_stats(0).num_cache_hits;
+    void* remainder_ptr = allocator->allocate_shared(remainder_request, 0);
+    ASSERT_NE(remainder_ptr, nullptr);
+    EXPECT_EQ(remainder_ptr, static_cast<char*>(big_ptr) + small_size)
+        << "Remainder allocation should start exactly where the split occurred";
+    EXPECT_GT(allocator->get_stats(0).num_cache_hits, hits_before)
+        << "Remainder should be served from cache, not a fresh USM allocation";
+
+    allocator->free(small_ptr, 0);
+    allocator->free(remainder_ptr, 0);
+}
+
+TEST_F(OneAPICachingAllocatorTest, SplitBlocksCascadeMergeOnFree) {
+    const size_t total_size = 8192;
+    const size_t a_size = 2048;
+    const size_t b_size = 1024;
+
+    void* root_ptr = allocator->allocate_shared(total_size, 0);
+    ASSERT_NE(root_ptr, nullptr);
+    allocator->free(root_ptr, 0);
+
+    // Splits root -> A (used) + rem1 (free).
+    void* a_ptr = allocator->allocate_shared(a_size, 0);
+    ASSERT_NE(a_ptr, nullptr);
+    ASSERT_EQ(a_ptr, root_ptr);
+
+    // Splits rem1 -> B (used) + rem2 (free).
+    void* b_ptr = allocator->allocate_shared(b_size, 0);
+    ASSERT_NE(b_ptr, nullptr);
+    ASSERT_EQ(b_ptr, static_cast<char*>(root_ptr) + a_size);
+    ASSERT_GE(allocator->get_stats(0).num_splits, 2u);
+
+    // Freeing A first has no free neighbor yet: B (immediately after it) is
+    // still allocated, and A has no predecessor. Should not merge with anything.
+    allocator->free(a_ptr, 0);
+    EXPECT_EQ(allocator->get_stats(0).num_merges, 0u)
+        << "A has no free neighbor yet and should not have merged";
+
+    size_t merges_before_b = allocator->get_stats(0).num_merges;
+    allocator->free(b_ptr, 0);
+    // Freeing B should forward-merge with the still-free rem2 sibling, then
+    // backward-merge with the now-free A sibling — two coalesces from one
+    // free() call, fully reassembling the original 8192-byte allocation.
+    EXPECT_GE(allocator->get_stats(0).num_merges, merges_before_b + 2)
+        << "Freeing B should coalesce with both free neighbors (forward into "
+           "rem2, then backward into A)";
+
+    size_t hits_before = allocator->get_stats(0).num_cache_hits;
+    size_t reserved_before = allocator->get_stats(0).reserved_bytes;
+
+    const size_t big_request = total_size - 64;  // bigger than any single piece
+    void* merged_ptr = allocator->allocate_shared(big_request, 0);
+    ASSERT_NE(merged_ptr, nullptr);
+    EXPECT_EQ(merged_ptr, root_ptr)
+        << "Fully reassembled block should be handed out from the original base pointer";
+    EXPECT_GT(allocator->get_stats(0).num_cache_hits, hits_before)
+        << "A properly merged block should satisfy this from cache, not a fresh USM allocation";
+    EXPECT_EQ(allocator->get_stats(0).reserved_bytes, reserved_before)
+        << "No new USM allocation should occur once the split pieces fully re-merged";
+
+    allocator->free(merged_ptr, 0);
+}
+
 TEST_F(OneAPICachingAllocatorTest, SeparateCachePoolsForSharedAndDevice) {
     const size_t size = 1024;
 

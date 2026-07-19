@@ -29,7 +29,7 @@ TEST_P(NNConvParity, Conv1d_Basic) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv1d conv_dev(3, 16, 3, 1, 1);
             auto params = conv.parameters();
@@ -58,7 +58,7 @@ TEST_P(NNConvParity, Conv1d_Stride) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv1d conv_dev(3, 16, 3, 2, 1);
             auto params = conv.parameters();
@@ -87,7 +87,7 @@ TEST_P(NNConvParity, Conv1d_Padding) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv1d conv_dev(3, 16, 5, 1, 2);
             auto params = conv.parameters();
@@ -142,7 +142,7 @@ TEST_P(NNConvParity, Conv1d_PerAxisStride) {
     ASSERT_EQ(ref_output.shape().size(), 3u);
     EXPECT_EQ(ref_output.shape()[2], 16);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv1d conv_dev(3, 16, 3, 2, 1, 1);
             auto params = conv.parameters();
@@ -182,7 +182,7 @@ TEST_P(NNConvParity, Conv1d_PerAxisDilation) {
     ASSERT_EQ(ref_output.shape().size(), 3u);
     EXPECT_EQ(ref_output.shape()[2], 32);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv1d conv_dev(3, 16, 3, 1, 2, 2);
             auto params = conv.parameters();
@@ -221,7 +221,7 @@ TEST_P(NNConvParity, Conv3d_Basic) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv3d conv_dev(3, 16, 3, 1, 1);
             auto params = conv.parameters();
@@ -250,7 +250,7 @@ TEST_P(NNConvParity, Conv3d_Stride) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv3d conv_dev(3, 16, 3, 2, 1);
             auto params = conv.parameters();
@@ -283,7 +283,7 @@ TEST_P(NNConvParity, ConvTranspose1d) {
     auto input = randn({1, 16, 16}, DType::Float32, Device::cpu());
     ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::ConvTranspose1d conv_dev(16, 3, 3, 2, 0);
             auto params = conv.parameters();
@@ -312,7 +312,7 @@ TEST_P(NNConvParity, ConvTranspose3d) {
     auto input = randn({1, 16, 4, 4, 4}, DType::Float32, Device::cpu());
     ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::ConvTranspose3d conv_dev(16, 3, 3, 2, 0);
             auto params = conv.parameters();
@@ -346,7 +346,7 @@ TEST_P(NNConvParity, Conv2d_Groups2) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv2d conv_dev(16, 32, 3, 1, 1, 1, 2);
             auto params = conv.parameters();
@@ -376,7 +376,7 @@ TEST_P(NNConvParity, Conv1d_Groups) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv1d conv_dev(16, 32, 3, 1, 1, 1, 2);
             auto params = conv.parameters();
@@ -417,7 +417,7 @@ TEST_P(NNConvParity, DeformableConv2d) {
                                     Variable(offset, false),
                                     Variable(mask, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::DeformableConv2d conv_dev(3, 16, 3, 1, 1);
             auto params = conv.parameters();
@@ -455,7 +455,7 @@ TEST_P(NNConvParity, Conv2d_NoBias) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv2d conv_dev(3, 16, 3, 1, 1, 1, 1, false);
             auto params = conv.parameters();
@@ -490,7 +490,7 @@ TEST_P(NNConvParity, DepthwiseConv2d) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Conv2d conv_dev(16, 16, 3, 1, 1, 1, 16);
             auto params = conv.parameters();
@@ -523,7 +523,7 @@ TEST_P(NNConvParity, ConvTranspose2d) {
     auto input = randn({1, 4, 8, 8}, DType::Float32, Device::cpu());
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::ConvTranspose2d conv_dev(4, 8, 3, 2, 1, 0, 1, true);
             auto params = conv.parameters();
@@ -571,7 +571,7 @@ void conv_grad_parity(ConvT make_conv,
         ref_param_grads.push_back(p->grad().value());
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto dev_conv = make_conv();
             auto dev_params = dev_conv.parameters();

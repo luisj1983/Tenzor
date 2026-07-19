@@ -1657,6 +1657,29 @@ auto find_rocm_arch_tool() -> std::string {
     }
     roots.push_back("/opt/rocm");
 
+    // Newer ROCm packages (the "rocm-systems" monorepo layout, e.g. ROCm
+    // 7+) nest every component's binaries/libraries under an extra `core/`
+    // path segment: amdgpu-arch lives at <prefix>/core/lib/llvm/bin/
+    // amdgpu-arch and rocm_agent_enumerator at <prefix>/core/bin/
+    // rocm_agent_enumerator, not directly under <prefix>. None of the
+    // /llvm/bin, /lib/llvm/bin, or /bin sub-path templates below match that
+    // extra segment, so on such an install every existing root silently
+    // found nothing and detect_rocm_gfx_arch() always returned "" even
+    // though a real, working device is present -- JitRocmArch.
+    // DetectedArchMatchesDeviceAndCompiles caught this directly (found
+    // while adding grad_invoke/eager-fallback counter-regression coverage
+    // in this same file). Append a `<root>/core` variant for every root so
+    // both layouts resolve.
+    {
+        std::vector<std::string> with_core;
+        with_core.reserve(roots.size() * 2);
+        for (const auto& root : roots) {
+            with_core.push_back(root);
+            with_core.push_back(root + "/core");
+        }
+        roots = std::move(with_core);
+    }
+
     // amdgpu-arch prints exactly one gfx name per GPU, in HSA/KFD device
     // order (i.e. honoring ROCR_VISIBLE_DEVICES/GPU_DEVICE_ORDINAL, but not
     // HIP_VISIBLE_DEVICES). detect_rocm_gfx_arch() remaps the caller's HIP

@@ -108,7 +108,7 @@ TEST_P(QuantizedConv2dLargeBatch, GridZOverflow_MatchesCpu) {
     }
     ASSERT_EQ(ref.numel(), batch * out_channels);  // h_out=w_out=1
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input.to(backends[i]);
             auto weight_dev = weight.to(backends[i]);
@@ -162,7 +162,7 @@ TEST_P(QuantizedConv2dLargeBatch, GridZOverflow_Spatial_MatchesCpu) {
     const int64_t h_out = 3, w_out = 3;
     ASSERT_EQ(ref.numel(), batch * out_channels * h_out * w_out);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input.to(backends[i]);
             auto weight_dev = weight.to(backends[i]);

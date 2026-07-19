@@ -191,7 +191,6 @@ TEST_P(EdgeCaseTest, Float64Precision) {
 // triu/tril on a zero-size matrix dimension must not divide by zero (SIGFPE).
 // Previously batch_size = numel / (rows*cols) crashed when rows*cols == 0.
 TEST_P(EdgeCaseTest, TriuTrilZeroSizeMatrixDim) {
-    if (device.type != Device::Type::CPU) GTEST_SKIP();
     for (std::vector<int64_t> shp : {std::vector<int64_t>{0, 5},
                                      std::vector<int64_t>{5, 0},
                                      std::vector<int64_t>{3, 0, 4}}) {
@@ -223,7 +222,6 @@ TEST_P(EdgeCaseTest, ArgsortNegativeDim) {
 
 // unique_consecutive with negative dim must normalize identically to dim=1.
 TEST_P(EdgeCaseTest, UniqueConsecutiveNegativeDim) {
-    if (device.type != Device::Type::CPU) GTEST_SKIP();
     std::vector<float> xd{1, 1, 2, 1, 1, 2};
     auto x = tenzor::from_data(xd.data(), {2, 3}, Device::cpu()).to(device);
     auto [u_neg, inv_neg, cnt_neg] = unique_consecutive(x, false, false, -1);
@@ -238,7 +236,6 @@ TEST_P(EdgeCaseTest, UniqueConsecutiveNegativeDim) {
 // linalg::solve must reject a B whose row dimension != A's order n, rather
 // than letting LAPACK write n*nrhs elements into an under-sized buffer.
 TEST_P(EdgeCaseTest, SolveRejectsMismatchedBRows) {
-    if (device.type != Device::Type::CPU) GTEST_SKIP();
     auto A = tenzor::eye(4, std::nullopt, DType::Float32, device);
     auto B = zeros({2, 3}, DType::Float32, device);  // wrong: 2 rows, need 4
     EXPECT_THROW(tenzor::linalg::solve(A, B), std::invalid_argument);
@@ -246,7 +243,6 @@ TEST_P(EdgeCaseTest, SolveRejectsMismatchedBRows) {
 
 // fftfreq(0) must return an empty tensor, not [NaN] from 1/(0*d).
 TEST_P(EdgeCaseTest, FftfreqZeroReturnsEmpty) {
-    if (device.type != Device::Type::CPU) GTEST_SKIP();
     auto f = tenzor::fft::fftfreq(0, 1.0, DType::Float32, device);
     EXPECT_EQ(f.numel(), 0);
     EXPECT_THROW(tenzor::fft::fftfreq(-3, 1.0, DType::Float32, device),
@@ -255,7 +251,6 @@ TEST_P(EdgeCaseTest, FftfreqZeroReturnsEmpty) {
 
 // take must reject a flat index that is out of bounds (OOB read otherwise).
 TEST_P(EdgeCaseTest, TakeRejectsOutOfBoundsIndex) {
-    if (device.type != Device::Type::CPU) GTEST_SKIP();
     auto x = zeros({4}, DType::Float32, device);
     std::vector<int64_t> idxd{0, 9};
     auto bad_idx = tenzor::from_data(idxd.data(), {2}, Device::cpu()).to(device);

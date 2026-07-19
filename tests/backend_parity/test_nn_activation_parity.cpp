@@ -221,7 +221,7 @@ TEST_P(NNActivationParity, PReLU) {
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
     auto ref = prelu.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::PReLU prelu_dev(1);
             prelu_dev.eval();

@@ -12,6 +12,7 @@ namespace oneapi {
 struct QuantizeKernelFloat32 {};
 struct DequantizeKernelFloat32 {};
 struct QuantizedLinearKernelInt8 {};
+struct QuantizedLinearKernelInt4 {};
 struct QuantizedConv2dKernelInt8 {};
 
 
@@ -246,6 +247,76 @@ auto quantized_linear_kernel(
                     result += bias_ptr[o];
                 }
 
+                out_ptr[idx] = result;
+            }
+        );
+    }
+    else if (input.dtype() == DType::Int8 && weight.dtype() == DType::QInt4x2) {
+        // F031 parity fix: INT4 (QInt4x2) packed weights, two signed int4 per
+        // byte ([out_features, in_features/2]); input is int8. Symmetric only
+        // (no weight zero-point), matching the CPU/CUDA/ROCm int4 kernels
+        // (src/backends/cuda/kernels/quantization/quantized_linear.cu,
+        // src/backends/rocm/kernels/quantization.hip.cpp). Previously this
+        // fell through to the `else` throw below unconditionally -- the
+        // entire INT4-quantized-Linear feature hard-failed on OneAPI.
+        if (in_features % 2 != 0) {
+            throw std::invalid_argument("quantized_linear (int4): in_features must be even");
+        }
+        const float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
+        // F074 parity: match CPU/CUDA/ROCm's int4 contract (throws on
+        // output_scale <= 0) instead of silently substituting 1.0.
+        if (output_scale <= 0.0f) {
+            throw std::invalid_argument("quantized_linear (int4): output_scale must be > 0");
+        }
+        const int64_t packed_features = in_features / 2;
+        const int8_t* in_ptr = get_data_ptr<const int8_t>(input);
+        const uint8_t* weight_ptr = get_data_ptr<const uint8_t>(weight);
+        const float* bias_ptr = bias ? get_data_ptr<const float>(*bias) : nullptr;
+        float* out_ptr = get_data_ptr<float>(output);
+        const bool has_bias = (bias != nullptr);
+        const float combined_scale = input_scale * weight_scale / safe_output_scale;
+        const float input_over_output = input_scale / safe_output_scale;
+        const int32_t in_zp = input_zero_point;
+
+        queue.parallel_for<QuantizedLinearKernelInt4>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t b = idx / out_features;
+                int64_t o = idx % out_features;
+
+                const float chan_scale = per_channel
+                    ? (input_over_output * wscale_ptr[o])
+                    : combined_scale;
+
+                const int8_t* input_row = in_ptr + b * in_features;
+                const uint8_t* weight_row = weight_ptr + o * packed_features;
+
+                // sum_w: needed for the asymmetric activation zero-point
+                // correction below. INT4 weights are symmetric (weight_zp==0
+                // always), so only the -input_zp*sum_w cross term applies
+                // (mirrors the CPU/CUDA/ROCm int4 kernels).
+                int64_t acc = 0;
+                int64_t sum_w = 0;
+                for (int64_t p = 0; p < packed_features; ++p) {
+                    uint8_t packed = weight_row[p];
+                    int lo = packed & 0x0F;
+                    if (lo & 0x08) lo |= ~0x0F;
+                    int hi = (packed >> 4) & 0x0F;
+                    if (hi & 0x08) hi |= ~0x0F;
+                    acc += static_cast<int64_t>(input_row[p * 2]) * lo;
+                    acc += static_cast<int64_t>(input_row[p * 2 + 1]) * hi;
+                    sum_w += lo + hi;
+                }
+
+                int64_t corrected = acc;
+                if (in_zp != 0) {
+                    corrected -= static_cast<int64_t>(in_zp) * sum_w;
+                }
+
+                float result = static_cast<float>(corrected) * chan_scale;
+                if (has_bias) {
+                    result += bias_ptr[o];
+                }
                 out_ptr[idx] = result;
             }
         );

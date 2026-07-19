@@ -287,9 +287,38 @@ PY_SKIP_RE = re.compile(
     re.MULTILINE,
 )
 
+# Matches (in priority order) string literals, char literals, //-line
+# comments, and /* */ block comments. Used to blank out comment text before
+# scanning for GTEST_SKIP/SKIP_WITH_REASON, so prose describing a removed or
+# historical skip (e.g. "previously wrapped in try{...}catch(...){GTEST_SKIP(
+# ...)}") isn't counted as a live skip. String/char literals are matched (and
+# left untouched) rather than skipped over, so a `//` or `/*` inside a string
+# literal doesn't get misread as the start of a comment.
+_CXX_COMMENT_OR_STRING_RE = re.compile(
+    r'"(?:\\.|[^"\\])*"'
+    r"|'(?:\\.|[^'\\])*'"
+    r"|//[^\n]*"
+    r"|/\*.*?\*/",
+    re.DOTALL,
+)
+
+
+def _strip_cxx_comments(text: str) -> str:
+    def repl(m: re.Match) -> str:
+        s = m.group(0)
+        if s.startswith("//") or s.startswith("/*"):
+            # Blank out comment text but keep newlines, so line-relative
+            # offsets used elsewhere (e.g. the 240-char context window)
+            # still land in equivalent positions.
+            return re.sub(r"[^\n]", " ", s)
+        return s  # string/char literal — keep as-is
+
+    return _CXX_COMMENT_OR_STRING_RE.sub(repl, text)
+
 
 def scan_cxx(path: Path) -> dict:
     text = path.read_text(errors="replace")
+    text = _strip_cxx_comments(text)
     reasons = Counter()
     # Every SKIP_WITH_REASON invocation is a tagged skip.
     for m in CXX_SKIP_WITH_REASON_RE.finditer(text):

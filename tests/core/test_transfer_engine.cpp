@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"  // CC.18: SKIP_WITH_REASON
+#include "../backend_test_fixture.hpp"  // FINDING 25: BackendTest -- parametrized GPU device
 #include <tenzor/core/transfer_engine.hpp>
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/ops/creation.hpp>
@@ -27,26 +28,30 @@
 
 using namespace tenzor;
 using namespace tenzor::core;
+using namespace tenzor::testing;
 using namespace std::chrono_literals;
 
 /**
- * Test Fixture for Transfer Engine
+ * Test Fixture for Transfer Engine.
+ *
+ * FINDING 25: was TEST_F over a hardcoded Device::cuda(0), so ROCm/Vulkan/
+ * OneAPI's real (non-stub) TransferEngine implementations
+ * (include/tenzor/core/transfer_engine.hpp's #ifdef TENZOR_USE_ROCM/
+ * TENZOR_USE_ONEAPI/TENZOR_USE_VULKAN sections) got zero test exercise. Now
+ * TEST_P over BackendTest, parametrized across every GPU backend below --
+ * the inherited `device` member is the parametrized GPU device.
  */
-class TransferEngineTest : public ::testing::Test {
+class TransferEngineTest : public BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();  // Load CUDA backend
-    }
-
     void SetUp() override {
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
         // Default configuration
         default_config.num_streams = 4;
         default_config.queue_capacity = 64;
         default_config.use_pinned_memory = true;
         default_config.pinned_pool_size = 256 * 1024 * 1024;  // 256 MB
-
-        // Check if CUDA is available (simplified to avoid heap corruption)
-        cuda_available = true;  // Assume CUDA available after tenzor::initialize()
     }
 
     void TearDown() override {
@@ -54,18 +59,6 @@ protected:
     }
 
     TransferEngine::Config default_config;
-    bool cuda_available = false;
-
-    // Helper to check CUDA availability
-    bool checkCudaAvailable() {
-        try {
-            Device cuda_device = Device::cuda(0);
-            Tensor test = zeros({10}, DType::Float32, cuda_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
 
     // Helper to create tensor with specific pattern
     Tensor createPatternTensor(const std::vector<int64_t>& shape, DType dtype, Device device) {
@@ -116,13 +109,13 @@ protected:
 // Constructor Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, ConstructorWithValidConfig) {
+TEST_P(TransferEngineTest, ConstructorWithValidConfig) {
     ASSERT_NO_THROW({
         auto engine = std::make_unique<TransferEngine>(default_config);
     });
 }
 
-TEST_F(TransferEngineTest, ConstructorWithDefaultConfig) {
+TEST_P(TransferEngineTest, ConstructorWithDefaultConfig) {
     ASSERT_NO_THROW({
         TransferEngine::Config cfg;
         auto engine = std::make_unique<TransferEngine>(cfg);
@@ -133,33 +126,30 @@ TEST_F(TransferEngineTest, ConstructorWithDefaultConfig) {
 // Synchronous CPU->GPU Transfer Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, SyncCPUToGPU_BasicTransfer) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncCPUToGPU_BasicTransfer) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
 
-    EXPECT_EQ(gpu_tensor.device().type, Device::Type::CUDA);
+    EXPECT_EQ(gpu_tensor.device().type, device.type);
     verifyPatternTensor(gpu_tensor);
 }
 
-TEST_F(TransferEngineTest, SyncCPUToGPU_LargeTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncCPUToGPU_LargeTensor) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     // 10 MB tensor
     Tensor cpu_tensor = createPatternTensor({2560000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
 
-    EXPECT_EQ(gpu_tensor.device().type, Device::Type::CUDA);
+    EXPECT_EQ(gpu_tensor.device().type, device.type);
     verifyPatternTensor(gpu_tensor);
 }
 
-TEST_F(TransferEngineTest, SyncCPUToGPU_MultipleTensors) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncCPUToGPU_MultipleTensors) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -168,24 +158,23 @@ TEST_F(TransferEngineTest, SyncCPUToGPU_MultipleTensors) {
 
     for (int i = 0; i < 10; ++i) {
         cpu_tensors.push_back(createPatternTensor({1000}, DType::Float32, Device::cpu()));
-        gpu_tensors.push_back(engine->cpu_to_gpu(cpu_tensors.back(), Device::cuda(0)));
+        gpu_tensors.push_back(engine->cpu_to_gpu(cpu_tensors.back(), device));
     }
 
     for (const auto& gpu_t : gpu_tensors) {
-        EXPECT_EQ(gpu_t.device().type, Device::Type::CUDA);
+        EXPECT_EQ(gpu_t.device().type, device.type);
         verifyPatternTensor(gpu_t);
     }
 }
 
-TEST_F(TransferEngineTest, SyncCPUToGPU_EmptyTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncCPUToGPU_EmptyTensor) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor empty_cpu = Tensor(std::vector<int64_t>{0}, DType::Float32, Device::cpu());
 
     ASSERT_NO_THROW({
-        Tensor gpu_tensor = engine->cpu_to_gpu(empty_cpu, Device::cuda(0));
+        Tensor gpu_tensor = engine->cpu_to_gpu(empty_cpu, device);
         EXPECT_EQ(gpu_tensor.numel(), 0);
     });
 }
@@ -194,37 +183,34 @@ TEST_F(TransferEngineTest, SyncCPUToGPU_EmptyTensor) {
 // Synchronous GPU->CPU Transfer Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, SyncGPUToCPU_BasicTransfer) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncGPUToCPU_BasicTransfer) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cuda(0));
+    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, device);
     Tensor cpu_tensor = engine->gpu_to_cpu(gpu_tensor);
 
     EXPECT_EQ(cpu_tensor.device().type, Device::Type::CPU);
     verifyPatternTensor(cpu_tensor);
 }
 
-TEST_F(TransferEngineTest, SyncGPUToCPU_LargeTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncGPUToCPU_LargeTensor) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({2560000}, DType::Float32, Device::cuda(0));
+    Tensor gpu_tensor = createPatternTensor({2560000}, DType::Float32, device);
     Tensor cpu_tensor = engine->gpu_to_cpu(gpu_tensor);
 
     EXPECT_EQ(cpu_tensor.device().type, Device::Type::CPU);
     verifyPatternTensor(cpu_tensor);
 }
 
-TEST_F(TransferEngineTest, SyncGPUToCPU_RoundTrip) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncGPUToCPU_RoundTrip) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor original_cpu = createPatternTensor({1000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(original_cpu, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(original_cpu, device);
     Tensor result_cpu = engine->gpu_to_cpu(gpu_tensor);
 
     EXPECT_EQ(result_cpu.device().type, Device::Type::CPU);
@@ -235,29 +221,27 @@ TEST_F(TransferEngineTest, SyncGPUToCPU_RoundTrip) {
 // Asynchronous Transfer Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, AsyncCPUToGPU_BasicTransfer) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, AsyncCPUToGPU_BasicTransfer) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cpu());
-    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, Device::cuda(0));
+    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, device);
 
     EXPECT_TRUE(handle.is_valid());
 
     Tensor gpu_tensor = handle.get_tensor();
 
     EXPECT_TRUE(handle.is_ready());
-    EXPECT_EQ(gpu_tensor.device().type, Device::Type::CUDA);
+    EXPECT_EQ(gpu_tensor.device().type, device.type);
     verifyPatternTensor(gpu_tensor);
 }
 
-TEST_F(TransferEngineTest, AsyncGPUToCPU_BasicTransfer) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, AsyncGPUToCPU_BasicTransfer) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cuda(0));
+    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, device);
     TransferHandle handle = engine->gpu_to_cpu_async(gpu_tensor);
 
     Tensor cpu_tensor = handle.get_tensor();
@@ -266,13 +250,12 @@ TEST_F(TransferEngineTest, AsyncGPUToCPU_BasicTransfer) {
     verifyPatternTensor(cpu_tensor);
 }
 
-TEST_F(TransferEngineTest, AsyncTransfer_HandleWait) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, AsyncTransfer_HandleWait) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor = createPatternTensor({10000}, DType::Float32, Device::cpu());
-    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, Device::cuda(0));
+    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, device);
 
     // Wait for completion
     handle.wait();
@@ -280,8 +263,7 @@ TEST_F(TransferEngineTest, AsyncTransfer_HandleWait) {
     EXPECT_TRUE(handle.is_ready());
 }
 
-TEST_F(TransferEngineTest, AsyncTransfer_MultipleHandles) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, AsyncTransfer_MultipleHandles) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -290,7 +272,7 @@ TEST_F(TransferEngineTest, AsyncTransfer_MultipleHandles) {
 
     for (int i = 0; i < 5; ++i) {
         cpu_tensors.push_back(createPatternTensor({1000}, DType::Float32, Device::cpu()));
-        handles.push_back(engine->cpu_to_gpu_async(cpu_tensors.back(), Device::cuda(0)));
+        handles.push_back(engine->cpu_to_gpu_async(cpu_tensors.back(), device));
     }
 
     // Wait for all
@@ -304,8 +286,7 @@ TEST_F(TransferEngineTest, AsyncTransfer_MultipleHandles) {
 // Concurrent Transfer Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, ConcurrentTransfers_Bidirectional) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, ConcurrentTransfers_Bidirectional) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -315,9 +296,9 @@ TEST_F(TransferEngineTest, ConcurrentTransfers_Bidirectional) {
     // Start concurrent transfers in both directions
     for (int i = 0; i < 4; ++i) {
         Tensor cpu_t = createPatternTensor({5000}, DType::Float32, Device::cpu());
-        cpu_to_gpu_handles.push_back(engine->cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+        cpu_to_gpu_handles.push_back(engine->cpu_to_gpu_async(cpu_t, device));
 
-        Tensor gpu_t = createPatternTensor({5000}, DType::Float32, Device::cuda(0));
+        Tensor gpu_t = createPatternTensor({5000}, DType::Float32, device);
         gpu_to_cpu_handles.push_back(engine->gpu_to_cpu_async(gpu_t));
     }
 
@@ -338,8 +319,7 @@ TEST_F(TransferEngineTest, ConcurrentTransfers_Bidirectional) {
     }
 }
 
-TEST_F(TransferEngineTest, ConcurrentTransfers_UtilizesMultipleStreams) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, ConcurrentTransfers_UtilizesMultipleStreams) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -350,7 +330,7 @@ TEST_F(TransferEngineTest, ConcurrentTransfers_UtilizesMultipleStreams) {
 
     for (int i = 0; i < 8; ++i) {
         Tensor cpu_t = createPatternTensor({10000}, DType::Float32, Device::cpu());
-        handles.push_back(engine->cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+        handles.push_back(engine->cpu_to_gpu_async(cpu_t, device));
     }
 
     for (auto& handle : handles) {
@@ -368,13 +348,12 @@ TEST_F(TransferEngineTest, ConcurrentTransfers_UtilizesMultipleStreams) {
 // Stream Synchronization Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, StreamSync_WaitForCompletion) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, StreamSync_WaitForCompletion) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor = createPatternTensor({10000}, DType::Float32, Device::cpu());
-    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, Device::cuda(0));
+    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, device);
 
     // Should block until complete
     engine->synchronize();
@@ -382,8 +361,7 @@ TEST_F(TransferEngineTest, StreamSync_WaitForCompletion) {
     EXPECT_TRUE(handle.is_ready());
 }
 
-TEST_F(TransferEngineTest, StreamSync_MultipleTransfers) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, StreamSync_MultipleTransfers) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -391,7 +369,7 @@ TEST_F(TransferEngineTest, StreamSync_MultipleTransfers) {
 
     for (int i = 0; i < 10; ++i) {
         Tensor cpu_t = createPatternTensor({5000}, DType::Float32, Device::cpu());
-        handles.push_back(engine->cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+        handles.push_back(engine->cpu_to_gpu_async(cpu_t, device));
     }
 
     engine->synchronize();
@@ -401,13 +379,12 @@ TEST_F(TransferEngineTest, StreamSync_MultipleTransfers) {
     }
 }
 
-TEST_F(TransferEngineTest, StreamSync_IndividualStream) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, StreamSync_IndividualStream) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor = createPatternTensor({10000}, DType::Float32, Device::cpu());
-    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, Device::cuda(0));
+    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, device);
 
     // Synchronize specific stream (stream 0)
     engine->synchronize_stream(0);
@@ -419,44 +396,41 @@ TEST_F(TransferEngineTest, StreamSync_IndividualStream) {
 // Statistics Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, Statistics_TrackTransfers) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Statistics_TrackTransfers) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     size_t count_before = engine->get_transfer_count();
 
     Tensor cpu_tensor = createPatternTensor({10000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
 
     size_t count_after = engine->get_transfer_count();
 
     EXPECT_GT(count_after, count_before);
 }
 
-TEST_F(TransferEngineTest, Statistics_TrackBytes) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Statistics_TrackBytes) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     size_t bytes_before = engine->get_bytes_transferred();
 
     Tensor cpu_tensor = createPatternTensor({10000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
 
     size_t bytes_after = engine->get_bytes_transferred();
 
     EXPECT_GT(bytes_after, bytes_before);
 }
 
-TEST_F(TransferEngineTest, Statistics_GetStatistics) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Statistics_GetStatistics) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     for (int i = 0; i < 5; ++i) {
         Tensor cpu_t = createPatternTensor({100000}, DType::Float32, Device::cpu());
-        Tensor gpu_t = engine->cpu_to_gpu(cpu_t, Device::cuda(0));
+        Tensor gpu_t = engine->cpu_to_gpu(cpu_t, device);
     }
 
     auto stats = engine->get_statistics();
@@ -466,13 +440,12 @@ TEST_F(TransferEngineTest, Statistics_GetStatistics) {
     EXPECT_GT(stats.cpu_to_gpu_count, 0);
 }
 
-TEST_F(TransferEngineTest, Statistics_Reset) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Statistics_Reset) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_t = createPatternTensor({10000}, DType::Float32, Device::cpu());
-    Tensor gpu_t = engine->cpu_to_gpu(cpu_t, Device::cuda(0));
+    Tensor gpu_t = engine->cpu_to_gpu(cpu_t, device);
 
     EXPECT_GT(engine->get_transfer_count(), 0);
 
@@ -482,14 +455,13 @@ TEST_F(TransferEngineTest, Statistics_Reset) {
     EXPECT_EQ(engine->get_bytes_transferred(), 0);
 }
 
-TEST_F(TransferEngineTest, Statistics_AverageBandwidth) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Statistics_AverageBandwidth) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     for (int i = 0; i < 5; ++i) {
         Tensor cpu_t = createPatternTensor({100000}, DType::Float32, Device::cpu());
-        Tensor gpu_t = engine->cpu_to_gpu(cpu_t, Device::cuda(0));
+        Tensor gpu_t = engine->cpu_to_gpu(cpu_t, device);
     }
 
     float bandwidth = engine->get_average_bandwidth_gbps();
@@ -502,8 +474,7 @@ TEST_F(TransferEngineTest, Statistics_AverageBandwidth) {
 // Bandwidth Measurement Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, BandwidthMeasurement_CPUToGPU) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, BandwidthMeasurement_CPUToGPU) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -511,7 +482,7 @@ TEST_F(TransferEngineTest, BandwidthMeasurement_CPUToGPU) {
     Tensor cpu_tensor(std::vector<int64_t>{static_cast<int64_t>(transfer_size / 4)}, DType::Float32, Device::cpu());
 
     auto start = std::chrono::high_resolution_clock::now();
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
     auto end = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> duration = end - start;
@@ -522,13 +493,12 @@ TEST_F(TransferEngineTest, BandwidthMeasurement_CPUToGPU) {
     EXPECT_GT(bandwidth_gbps, 0.5);  // At least 0.5 GB/s
 }
 
-TEST_F(TransferEngineTest, BandwidthMeasurement_GPUToCPU) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, BandwidthMeasurement_GPUToCPU) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     size_t transfer_size = 100 * 1024 * 1024;  // 100 MB
-    Tensor gpu_tensor(std::vector<int64_t>{static_cast<int64_t>(transfer_size / 4)}, DType::Float32, Device::cuda(0));
+    Tensor gpu_tensor(std::vector<int64_t>{static_cast<int64_t>(transfer_size / 4)}, DType::Float32, device);
 
     auto start = std::chrono::high_resolution_clock::now();
     Tensor cpu_tensor = engine->gpu_to_cpu(gpu_tensor);
@@ -546,21 +516,19 @@ TEST_F(TransferEngineTest, BandwidthMeasurement_GPUToCPU) {
 // Multiple Data Types Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, SyncTransfer_Float16) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncTransfer_Float16) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor({1000}, DType::Float16, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
     Tensor result_cpu = engine->gpu_to_cpu(gpu_tensor);
 
     EXPECT_EQ(result_cpu.device().type, Device::Type::CPU);
     EXPECT_EQ(result_cpu.dtype(), DType::Float16);
 }
 
-TEST_F(TransferEngineTest, SyncTransfer_Int32) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncTransfer_Int32) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -570,7 +538,7 @@ TEST_F(TransferEngineTest, SyncTransfer_Int32) {
         data[i] = static_cast<int32_t>(i);
     }
 
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
     Tensor result_cpu = engine->gpu_to_cpu(gpu_tensor);
 
     const auto* result_data = result_cpu.data<int32_t>();
@@ -579,13 +547,12 @@ TEST_F(TransferEngineTest, SyncTransfer_Int32) {
     }
 }
 
-TEST_F(TransferEngineTest, SyncTransfer_Int64) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, SyncTransfer_Int64) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor({1000}, DType::Int64, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
     Tensor result_cpu = engine->gpu_to_cpu(gpu_tensor);
 
     EXPECT_EQ(result_cpu.device().type, Device::Type::CPU);
@@ -596,8 +563,7 @@ TEST_F(TransferEngineTest, SyncTransfer_Int64) {
 // Pinned Memory Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, PinnedMemory_LargeTensorBenefit) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, PinnedMemory_LargeTensorBenefit) {
 
     // Config with pinned memory
     TransferEngine::Config pinned_config = default_config;
@@ -614,13 +580,13 @@ TEST_F(TransferEngineTest, PinnedMemory_LargeTensorBenefit) {
 
     // Transfer with pinned memory
     auto start1 = std::chrono::high_resolution_clock::now();
-    Tensor gpu1 = pinned_engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu1 = pinned_engine->cpu_to_gpu(cpu_tensor, device);
     auto end1 = std::chrono::high_resolution_clock::now();
     double time_pinned = std::chrono::duration<double, std::milli>(end1 - start1).count();
 
     // Transfer without pinned memory
     auto start2 = std::chrono::high_resolution_clock::now();
-    Tensor gpu2 = no_pinned_engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu2 = no_pinned_engine->cpu_to_gpu(cpu_tensor, device);
     auto end2 = std::chrono::high_resolution_clock::now();
     double time_no_pinned = std::chrono::duration<double, std::milli>(end2 - start2).count();
 
@@ -631,15 +597,14 @@ TEST_F(TransferEngineTest, PinnedMemory_LargeTensorBenefit) {
     verifyPatternTensor(gpu2);
 }
 
-TEST_F(TransferEngineTest, PinnedMemory_ReuseBuffer) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, PinnedMemory_ReuseBuffer) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     // Transfer tensors of similar size to test buffer reuse
     for (int i = 0; i < 5; ++i) {
         Tensor cpu_t = createPatternTensor({10000}, DType::Float32, Device::cpu());
-        Tensor gpu_t = engine->cpu_to_gpu(cpu_t, Device::cuda(0));
+        Tensor gpu_t = engine->cpu_to_gpu(cpu_t, device);
         verifyPatternTensor(gpu_t);
     }
 
@@ -651,7 +616,7 @@ TEST_F(TransferEngineTest, PinnedMemory_ReuseBuffer) {
 // Configuration Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, Config_InvalidNumStreams) {
+TEST_P(TransferEngineTest, Config_InvalidNumStreams) {
     TransferEngine::Config invalid_config;
     invalid_config.num_streams = 0;
 
@@ -660,7 +625,7 @@ TEST_F(TransferEngineTest, Config_InvalidNumStreams) {
     }, std::invalid_argument);
 }
 
-TEST_F(TransferEngineTest, Config_InvalidQueueCapacity) {
+TEST_P(TransferEngineTest, Config_InvalidQueueCapacity) {
     TransferEngine::Config invalid_config;
     invalid_config.queue_capacity = 0;
 
@@ -669,8 +634,7 @@ TEST_F(TransferEngineTest, Config_InvalidQueueCapacity) {
     }, std::invalid_argument);
 }
 
-TEST_F(TransferEngineTest, Config_SingleStream) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Config_SingleStream) {
 
     TransferEngine::Config single_stream_config = default_config;
     single_stream_config.num_streams = 1;
@@ -678,14 +642,13 @@ TEST_F(TransferEngineTest, Config_SingleStream) {
     auto engine = std::make_unique<TransferEngine>(single_stream_config);
 
     Tensor cpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
 
-    EXPECT_EQ(gpu_tensor.device().type, Device::Type::CUDA);
+    EXPECT_EQ(gpu_tensor.device().type, device.type);
     verifyPatternTensor(gpu_tensor);
 }
 
-TEST_F(TransferEngineTest, Config_ManyStreams) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Config_ManyStreams) {
 
     TransferEngine::Config many_streams_config = default_config;
     many_streams_config.num_streams = 16;
@@ -695,7 +658,7 @@ TEST_F(TransferEngineTest, Config_ManyStreams) {
     std::vector<TransferHandle> handles;
     for (int i = 0; i < 20; ++i) {
         Tensor cpu_t = createPatternTensor({5000}, DType::Float32, Device::cpu());
-        handles.push_back(engine->cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+        handles.push_back(engine->cpu_to_gpu_async(cpu_t, device));
     }
 
     for (auto& handle : handles) {
@@ -708,21 +671,19 @@ TEST_F(TransferEngineTest, Config_ManyStreams) {
 // Edge Cases and Error Handling
 // =============================================================================
 
-TEST_F(TransferEngineTest, EmptyTensorTransfer) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, EmptyTensorTransfer) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor empty_cpu = zeros({0}, DType::Float32, Device::cpu());
 
     ASSERT_NO_THROW({
-        Tensor gpu_t = engine->cpu_to_gpu(empty_cpu, Device::cuda(0));
+        Tensor gpu_t = engine->cpu_to_gpu(empty_cpu, device);
         EXPECT_EQ(gpu_t.numel(), 0);
     });
 }
 
-TEST_F(TransferEngineTest, QueueOverflow_HandlesBackpressure) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, QueueOverflow_HandlesBackpressure) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -731,7 +692,7 @@ TEST_F(TransferEngineTest, QueueOverflow_HandlesBackpressure) {
 
     for (int i = 0; i < 100; ++i) {
         Tensor cpu_t = createPatternTensor({100}, DType::Float32, Device::cpu());
-        handles.push_back(engine->cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+        handles.push_back(engine->cpu_to_gpu_async(cpu_t, device));
     }
 
     // All should eventually complete
@@ -741,20 +702,18 @@ TEST_F(TransferEngineTest, QueueOverflow_HandlesBackpressure) {
     }
 }
 
-TEST_F(TransferEngineTest, Error_TransferNonCPUTensorToGPU) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Error_TransferNonCPUTensorToGPU) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cuda(0));
+    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, device);
 
     EXPECT_THROW({
-        Tensor result = engine->cpu_to_gpu(gpu_tensor, Device::cuda(0));
+        Tensor result = engine->cpu_to_gpu(gpu_tensor, device);
     }, std::runtime_error);
 }
 
-TEST_F(TransferEngineTest, Error_TransferNonGPUTensorToCPU) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Error_TransferNonGPUTensorToCPU) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -765,8 +724,7 @@ TEST_F(TransferEngineTest, Error_TransferNonGPUTensorToCPU) {
     }, std::runtime_error);
 }
 
-TEST_F(TransferEngineTest, Error_AsyncTransferInvalidDevice) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Error_AsyncTransferInvalidDevice) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -781,8 +739,7 @@ TEST_F(TransferEngineTest, Error_AsyncTransferInvalidDevice) {
 // Thread Safety Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, ThreadSafety_MultithreadedAsync) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, ThreadSafety_MultithreadedAsync) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -793,7 +750,7 @@ TEST_F(TransferEngineTest, ThreadSafety_MultithreadedAsync) {
         threads.emplace_back([&, t]() {
             for (int i = 0; i < 10; ++i) {
                 Tensor cpu_t = createPatternTensor({1000}, DType::Float32, Device::cpu());
-                thread_handles[t].push_back(engine->cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+                thread_handles[t].push_back(engine->cpu_to_gpu_async(cpu_t, device));
             }
         });
     }
@@ -811,15 +768,14 @@ TEST_F(TransferEngineTest, ThreadSafety_MultithreadedAsync) {
     }
 }
 
-TEST_F(TransferEngineTest, ThreadSafety_SynchronizeWhileTransferring) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, ThreadSafety_SynchronizeWhileTransferring) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     std::vector<TransferHandle> handles;
     for (int i = 0; i < 20; ++i) {
         Tensor cpu_t = createPatternTensor({10000}, DType::Float32, Device::cpu());
-        handles.push_back(engine->cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+        handles.push_back(engine->cpu_to_gpu_async(cpu_t, device));
     }
 
     // Synchronize while transfers are in flight
@@ -840,7 +796,7 @@ TEST_F(TransferEngineTest, ThreadSafety_SynchronizeWhileTransferring) {
 // Handle Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, Handle_EmptyHandle) {
+TEST_P(TransferEngineTest, Handle_EmptyHandle) {
     TransferHandle empty_handle;
 
     EXPECT_FALSE(empty_handle.is_valid());
@@ -851,13 +807,12 @@ TEST_F(TransferEngineTest, Handle_EmptyHandle) {
     });
 }
 
-TEST_F(TransferEngineTest, Handle_MultipleWaits) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Handle_MultipleWaits) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     Tensor cpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cpu());
-    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, Device::cuda(0));
+    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, device);
 
     // Multiple waits should be safe
     handle.wait();
@@ -867,14 +822,13 @@ TEST_F(TransferEngineTest, Handle_MultipleWaits) {
     EXPECT_TRUE(handle.is_ready());
 }
 
-TEST_F(TransferEngineTest, Handle_CheckReadyBeforeCompletion) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Handle_CheckReadyBeforeCompletion) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
     // Large tensor to ensure transfer takes time
     Tensor cpu_tensor = createPatternTensor({10000000}, DType::Float32, Device::cpu());
-    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, Device::cuda(0));
+    TransferHandle handle = engine->cpu_to_gpu_async(cpu_tensor, device);
 
     // May or may not be ready immediately
     bool ready_immediately = handle.is_ready();
@@ -890,8 +844,7 @@ TEST_F(TransferEngineTest, Handle_CheckReadyBeforeCompletion) {
 // Performance Validation Tests
 // =============================================================================
 
-TEST_F(TransferEngineTest, Performance_MinimumBandwidth) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Performance_MinimumBandwidth) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -899,11 +852,11 @@ TEST_F(TransferEngineTest, Performance_MinimumBandwidth) {
     Tensor cpu_tensor({static_cast<int64_t>(transfer_size / 4)}, DType::Float32, Device::cpu());
 
     // Warm-up
-    engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    engine->cpu_to_gpu(cpu_tensor, device);
 
     // Measure bandwidth
     auto start = std::chrono::high_resolution_clock::now();
-    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine->cpu_to_gpu(cpu_tensor, device);
     auto end = std::chrono::high_resolution_clock::now();
 
     double time_s = std::chrono::duration<double>(end - start).count();
@@ -915,8 +868,7 @@ TEST_F(TransferEngineTest, Performance_MinimumBandwidth) {
     EXPECT_GT(bandwidth_gbps, 1.0);
 }
 
-TEST_F(TransferEngineTest, Performance_AsyncOverlapping) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferEngineTest, Performance_AsyncOverlapping) {
 
     auto engine = std::make_unique<TransferEngine>(default_config);
 
@@ -929,7 +881,7 @@ TEST_F(TransferEngineTest, Performance_AsyncOverlapping) {
     // Launch 8 async transfers
     for (int i = 0; i < 8; ++i) {
         cpu_tensors.push_back(createPatternTensor({1000000}, DType::Float32, Device::cpu()));
-        handles.push_back(engine->cpu_to_gpu_async(cpu_tensors.back(), Device::cuda(0)));
+        handles.push_back(engine->cpu_to_gpu_async(cpu_tensors.back(), device));
     }
 
     // Wait for all
@@ -943,7 +895,7 @@ TEST_F(TransferEngineTest, Performance_AsyncOverlapping) {
     // Do same transfers synchronously for comparison
     start = std::chrono::high_resolution_clock::now();
     for (auto& cpu_t : cpu_tensors) {
-        engine->cpu_to_gpu(cpu_t, Device::cuda(0));
+        engine->cpu_to_gpu(cpu_t, device);
     }
     end = std::chrono::high_resolution_clock::now();
     double sync_time = std::chrono::duration<double, std::milli>(end - start).count();
@@ -955,6 +907,18 @@ TEST_F(TransferEngineTest, Performance_AsyncOverlapping) {
     EXPECT_GT(sync_time, 0);
     EXPECT_GT(async_time, 0);
 }
+
+// FINDING 25: exercise every real (non-stub) TransferEngine GPU backend
+// implementation, not just CUDA. MPS omitted (BackendTest itself skips it
+// cleanly off-Apple; including it would just add dead rows on this host).
+INSTANTIATE_TEST_SUITE_P(
+    GpuBackends,
+    TransferEngineTest,
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    }
+);
 
 // =============================================================================
 // Main

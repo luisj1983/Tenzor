@@ -30,7 +30,7 @@ TEST_P(NNOperationParity, Conv2d_Basic) {
     // CPU reference
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::Conv2d conv_dev(3, 16, 3, 1, 1);
         // Copy weights from CPU conv
         auto params = conv.parameters();
@@ -55,7 +55,7 @@ TEST_P(NNOperationParity, Conv2d_Stride2) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::Conv2d conv_dev(3, 16, 3, 2, 1);
         auto params = conv.parameters();
         auto dev_params = conv_dev.parameters();
@@ -79,7 +79,7 @@ TEST_P(NNOperationParity, Conv2d_Padding2) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::Conv2d conv_dev(3, 16, 5, 1, 2);
         auto params = conv.parameters();
         auto dev_params = conv_dev.parameters();
@@ -103,7 +103,7 @@ TEST_P(NNOperationParity, Conv2d_Dilation) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::Conv2d conv_dev(3, 16, 3, 1, 2, 2);
         auto params = conv.parameters();
         auto dev_params = conv_dev.parameters();
@@ -127,7 +127,7 @@ TEST_P(NNOperationParity, Conv2d_Groups) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::Conv2d conv_dev(16, 16, 3, 1, 1, 1, 16);
         auto params = conv.parameters();
         auto dev_params = conv_dev.parameters();
@@ -151,7 +151,7 @@ TEST_P(NNOperationParity, ConvTranspose2d) {
 
     auto ref_output = conv.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::ConvTranspose2d conv_dev(16, 3, 4, 2, 1);
         auto params = conv.parameters();
         auto dev_params = conv_dev.parameters();
@@ -248,7 +248,7 @@ TEST_P(NNOperationParity, BatchNorm2d_Train) {
 
     auto ref_output = bn.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::BatchNorm2d bn_dev(16);
         bn_dev.train();
         auto params = bn.parameters();
@@ -278,7 +278,7 @@ TEST_P(NNOperationParity, BatchNorm2d_Eval) {
     auto input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
     auto ref_output = bn.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::BatchNorm2d bn_dev(16);
         bn_dev.train();
         auto params = bn.parameters();
@@ -308,7 +308,7 @@ TEST_P(NNOperationParity, LayerNorm) {
 
     auto ref_output = ln.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::LayerNorm ln_dev({64});
         auto params = ln.parameters();
         auto dev_params = ln_dev.parameters();
@@ -332,7 +332,7 @@ TEST_P(NNOperationParity, GroupNorm) {
 
     auto ref_output = gn.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::GroupNorm gn_dev(4, 16);
         auto params = gn.parameters();
         auto dev_params = gn_dev.parameters();
@@ -488,7 +488,7 @@ TEST_P(NNOperationParity, Embedding) {
 
     auto ref_output = emb.forward(Variable(indices, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::Embedding emb_dev(100, 32);
         auto params = emb.parameters();
         auto dev_params = emb_dev.parameters();

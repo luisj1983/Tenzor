@@ -67,7 +67,7 @@ TEST_P(NestedParity, NestedSoftmax_FwdBwd) {
         ref_grad = v.grad().value();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto values_dev = values_cpu.to(backends[i]);
             auto offsets_dev = offsets_cpu.to(backends[i]);
@@ -115,7 +115,7 @@ TEST_P(NestedParity, NestedSoftmax_RankThreeValues_FwdBwd) {
         ref_grad = v.grad().value();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto values_dev = values_cpu.to(backends[i]);
             auto offsets_dev = offsets_cpu.to(backends[i]);
@@ -168,7 +168,7 @@ TEST_P(NestedParity, NestedLayerNorm_FwdBwd) {
         ref_grad_bias = b.grad().value();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto values_dev = values_cpu.to(backends[i]);
             auto offsets_dev = offsets_cpu.to(backends[i]);
@@ -220,7 +220,7 @@ TEST_P(NestedParity, NestedSum) {
         ref = nested_sum(v, offsets_cpu).tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto values_dev = values_cpu.to(backends[i]);
             auto offsets_dev = offsets_cpu.to(backends[i]);
@@ -252,7 +252,7 @@ TEST_P(NestedParity, NestedMean) {
         ref = nested_mean(v, offsets_cpu).tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto values_dev = values_cpu.to(backends[i]);
             auto offsets_dev = offsets_cpu.to(backends[i]);
@@ -304,7 +304,7 @@ TEST_P(NestedParity, NestedAttention_FwdBwd) {
         ref_v_grad = vv.grad().value();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto q_dev = q_cpu.to(backends[i]);
             auto k_dev = k_cpu.to(backends[i]);

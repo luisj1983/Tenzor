@@ -868,6 +868,63 @@ TEST_P(GradCheckMissingTest, SparseTriSolveGradcheck) {
         << "sparse_triangular_solve gradcheck failed";
 }
 
+// FINDING 20: commit ba4910fe added Complex64/Complex128 sparse-triangular-
+// solve kernels across all 5 backends with forward-parity coverage
+// (test_sparse_parity.cpp), but no backward/gradcheck coverage existed for
+// the complex case at all (distinct from the real-dtype GPU gap above,
+// which is at least tracked as KnownBug).
+//
+// Complex input, complex output: neither gradcheck() (real-only) nor
+// gradcheck_complex() (real-INPUT-only, per its own doc comment) applies.
+// Instead, verify SparseTriSolveBackward's documented adjoint identity
+// directly: for x = L^{-1} @ b, backward gives grad_b = L^{-H} @ grad_x, so
+// L^H @ grad_b must equal the backward seed exactly (up to float tolerance).
+// This exercises the ops.cpp conjugate-transpose wiring (SparseTriSolveBackward
+// needs L^H, not just L^T) using only independently-verified primitives
+// (dense matmul/transpose/conj), with no dependency on a separate solve op.
+TEST_P(GradCheckMissingTest, SparseTriSolveComplexBackwardMatchesAdjoint) {
+    int64_t n = 4;
+    auto eye_t = ::tenzor::eye(n, std::nullopt, DType::Complex64, Device::cpu());
+    // Well-conditioned complex lower-triangular: I + small complex lower noise.
+    auto noise_t = ::tenzor::mul(::tenzor::tril(
+        randn({n, n}, DType::Complex64, Device::cpu()), -1), 0.1);
+    auto L_dense = ::tenzor::add(eye_t, noise_t).to(device);
+    auto L = ::tenzor::SparseTensor::from_dense(L_dense, ::tenzor::SparseLayout::CSR);
+
+    auto b_t = randn({n, 2}, DType::Complex64, Device::cpu()).to(device);
+    Variable b(b_t, /*requires_grad=*/true);
+
+    Variable x;
+    try {
+        x = ::tenzor::sparse_triangular_solve(L, b, /*upper=*/false);
+    } catch (const std::exception& e) {
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            std::string("sparse_triangular_solve complex forward threw: ") + e.what());
+    }
+
+    auto seed = randn({n, 2}, DType::Complex64, Device::cpu()).to(device);
+    try {
+        x.backward(seed);
+    } catch (const std::exception& e) {
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            std::string("sparse_triangular_solve complex backward threw: ") + e.what());
+    }
+    ASSERT_TRUE(b.has_grad());
+
+    auto grad_b = b.grad()->to(Device::cpu());
+    auto L_dense_cpu = L_dense.to(Device::cpu());
+    auto L_H = ::tenzor::conj(::tenzor::transpose(L_dense_cpu, 0, 1));
+    auto reconstructed_seed = ::tenzor::matmul(L_H, grad_b);
+    auto seed_cpu = seed.to(Device::cpu());
+
+    auto* recon_p = reconstructed_seed.contiguous().data<std::complex<float>>();
+    auto* seed_p = seed_cpu.contiguous().data<std::complex<float>>();
+    for (int64_t i = 0; i < reconstructed_seed.numel(); ++i) {
+        EXPECT_NEAR(recon_p[i].real(), seed_p[i].real(), 1e-3f) << "i=" << i;
+        EXPECT_NEAR(recon_p[i].imag(), seed_p[i].imag(), 1e-3f) << "i=" << i;
+    }
+}
+
 TEST_P(GradCheckMissingTest, SparseAddGradcheck) {
     if (device.type != Device::Type::CPU) {
         SKIP_WITH_REASON(SkipReason::KnownBug,

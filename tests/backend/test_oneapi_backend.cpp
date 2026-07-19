@@ -747,6 +747,115 @@ TEST_F(OneAPIBackendTest, MinReduction) {
 }
 
 // ============================================================================
+// Finding 29: large (> WG_SIZE^2 = 65,536 element) full-reduction regression.
+//
+// src/backends/oneapi/kernels/reduction.cpp's own comments document that the
+// two-phase SYCL reduction for full-tensor Int64/UInt64 sum(), and
+// separately the WG_SIZE=256-capped sycl_arg_reduce_full used by no-dim
+// argmax/argmin (Float32/Float64/Float16/Int32), both PREVIOUSLY silently
+// dropped partial sums/indices whenever num_wgs > WG_SIZE -- i.e. whenever
+// the tensor exceeds WG_SIZE^2 = 65,536 elements -- and that this bug class
+// recurred independently in at least two separately-implemented reduction
+// kernels. Every other OneAPI reduction test in this file/suite stays at
+// a few thousand elements at most, so a regression that reintroduces the
+// WG_SIZE cap (e.g. collapsing the grid-stride fold "for simplicity") would
+// pass the entire existing suite silently. These use 200,000 elements
+// (> 65,536, and not a round multiple of WG_SIZE=256, so a boundary-only
+// fix wouldn't accidentally look correct).
+// ============================================================================
+
+TEST_F(OneAPIBackendTest, LargeSumReductionInt64) {
+    if (!hasOneAPIDevice()) {
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
+    }
+    auto device = Device::oneapi(0);
+    constexpr int64_t n = 200000;  // > WG_SIZE^2 = 65,536
+
+    auto input_cpu = zeros({n}, DType::Int64, Device::cpu());
+    auto* data = input_cpu.data<int64_t>();
+    for (int64_t i = 0; i < n; ++i) data[i] = 1;
+
+    auto input = input_cpu.to(device);
+    auto result = sum(input, std::nullopt, false);
+    ASSERT_EQ(result.numel(), 1);
+
+    auto cpu_result = result.to(Device::cpu());
+    EXPECT_EQ(cpu_result.data<int64_t>()[0], n)
+        << "full-tensor Int64 sum() over " << n << " elements (> WG_SIZE^2) "
+           "must not silently drop partial sums from work-groups beyond "
+           "WG_SIZE (num_wgs > WG_SIZE)";
+}
+
+TEST_F(OneAPIBackendTest, LargeSumReductionUInt64) {
+    if (!hasOneAPIDevice()) {
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
+    }
+    auto device = Device::oneapi(0);
+    constexpr int64_t n = 200000;
+
+    auto input_cpu = zeros({n}, DType::UInt64, Device::cpu());
+    auto* data = input_cpu.data<uint64_t>();
+    for (int64_t i = 0; i < n; ++i) data[i] = 1;
+
+    auto input = input_cpu.to(device);
+    auto result = sum(input, std::nullopt, false);
+    ASSERT_EQ(result.numel(), 1);
+
+    auto cpu_result = result.to(Device::cpu());
+    EXPECT_EQ(cpu_result.data<uint64_t>()[0], static_cast<uint64_t>(n))
+        << "full-tensor UInt64 sum() over " << n << " elements (> WG_SIZE^2) "
+           "must not silently drop partial sums";
+}
+
+TEST_F(OneAPIBackendTest, LargeArgMaxFullReduction) {
+    if (!hasOneAPIDevice()) {
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
+    }
+    auto device = Device::oneapi(0);
+    constexpr int64_t n = 200000;
+    constexpr int64_t max_idx = 150000;  // deliberately not the last element
+
+    auto input_cpu = zeros({n}, DType::Float32, Device::cpu());
+    auto* data = input_cpu.data<float>();
+    for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(i % 1000);
+    data[max_idx] = 5000.0f;  // unambiguous global max
+
+    auto input = input_cpu.to(device);
+    // No dim -> full-tensor reduction, the sycl_arg_reduce_full path.
+    auto result = argmax(input, std::nullopt, false);
+    ASSERT_EQ(result.numel(), 1);
+
+    auto cpu_result = result.to(Device::cpu());
+    EXPECT_EQ(cpu_result.data<int64_t>()[0], max_idx)
+        << "full-tensor argmax() over " << n << " elements (> WG_SIZE^2) must "
+           "not silently drop the correct index from a work-group beyond "
+           "WG_SIZE";
+}
+
+TEST_F(OneAPIBackendTest, LargeArgMinFullReduction) {
+    if (!hasOneAPIDevice()) {
+        SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "No OneAPI devices available");
+    }
+    auto device = Device::oneapi(0);
+    constexpr int64_t n = 200000;
+    constexpr int64_t min_idx = 180000;
+
+    auto input_cpu = zeros({n}, DType::Float32, Device::cpu());
+    auto* data = input_cpu.data<float>();
+    for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(1000 + (i % 1000));
+    data[min_idx] = -5000.0f;  // unambiguous global min
+
+    auto input = input_cpu.to(device);
+    auto result = argmin(input, std::nullopt, false);
+    ASSERT_EQ(result.numel(), 1);
+
+    auto cpu_result = result.to(Device::cpu());
+    EXPECT_EQ(cpu_result.data<int64_t>()[0], min_idx)
+        << "full-tensor argmin() over " << n << " elements (> WG_SIZE^2) must "
+           "not silently drop the correct index";
+}
+
+// ============================================================================
 // Transform Operations Tests
 // ============================================================================
 

@@ -20,7 +20,7 @@ from tolerances import (
 
 # All non-CPU backends we want to compare against CPU. CPU-vs-CPU is skipped
 # inside _resolve_device below since it's trivially equal.
-NON_CPU_BACKENDS = ["cuda", "vulkan", "oneapi", "rocm"]
+NON_CPU_BACKENDS = ["cuda", "vulkan", "oneapi", "rocm", "mps"]
 
 
 def _resolve_device(device_name):
@@ -34,6 +34,7 @@ def _resolve_device(device_name):
         "vulkan": tz.Device.vulkan,
         "oneapi": tz.Device.oneapi,
         "rocm":   tz.Device.rocm,
+        "mps":    tz.Device.mps,
     }[device_name]
     return ctor(0)
 

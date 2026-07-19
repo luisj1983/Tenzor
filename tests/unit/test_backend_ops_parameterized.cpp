@@ -7,7 +7,7 @@ using namespace tenzor;
 
 /**
  * @file test_backend_ops_parameterized.cpp
- * @brief Parameterized tests that run on ALL backends (CPU, CUDA, OneAPI)
+ * @brief Parameterized tests that run on ALL backends (CPU, CUDA, OneAPI, ROCm, Vulkan)
  *
  * This ensures feature parity across all backends by running the same tests
  * with different device configurations.
@@ -87,6 +87,7 @@ std::vector<BackendConfig> get_available_backends() {
         {"CUDA",  Device::Type::CUDA,  0, true},
         {"OneAPI", Device::Type::OneAPI, 0, true},
         {"ROCm",  Device::Type::ROCm,  0, true},
+        {"Vulkan", Device::Type::Vulkan, 0, true},
     };
 }
 

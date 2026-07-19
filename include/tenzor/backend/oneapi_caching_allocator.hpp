@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -30,6 +31,12 @@ struct OneAPIBlock {
     bool allocated;             // Whether block is currently allocated
     int device;                 // Device index
     bool is_shared;             // Whether this is shared memory (vs device-only)
+    void* original_ptr;         // Pointer returned by the owning sycl::malloc_*
+                                 // call. A block produced by split_block shares
+                                 // its parent's original_ptr (it is an interior
+                                 // sub-range, not independently sycl::free'able).
+                                 // Only a block with ptr == original_ptr may ever
+                                 // be passed to sycl::free — see release_block.
 
     // Release fence (actually a heap-allocated sycl::event*, kept as void* to
     // avoid the sycl.hpp header dependency). Set when the block is freed: a
@@ -42,7 +49,8 @@ struct OneAPIBlock {
     void* release_fence{nullptr};
 
     OneAPIBlock(void* p, size_t s, int dev, bool shared = true)
-        : ptr(p), size(s), allocated(false), device(dev), is_shared(shared) {}
+        : ptr(p), size(s), allocated(false), device(dev), is_shared(shared),
+          original_ptr(p) {}
 
     // Comparison for ordered containers (by size, then by pointer)
     bool operator<(const OneAPIBlock& other) const {
@@ -296,9 +304,12 @@ private:
     void enforce_cache_limit(int device);
 
     /**
-     * @brief Release a block back to device
+     * @brief Release a block back to device. Returns false (no-op) for an
+     * interior split remainder that does not solely own its original_ptr
+     * allocation — such a block can only be reclaimed once try_merge_blocks
+     * has reassembled it with its siblings.
      */
-    void release_block(OneAPIBlock* block);
+    bool release_block(OneAPIBlock* block);
 
     // Per-device data structures
     struct DeviceAllocator {
@@ -311,6 +322,11 @@ private:
 
         // All blocks (free and allocated) by pointer
         std::unordered_map<void*, std::unique_ptr<OneAPIBlock>> all_blocks;
+
+        // Address-ordered index over the same blocks as all_blocks, used by
+        // try_merge_blocks to find the block immediately preceding a given
+        // address in O(log n) (backward/predecessor coalescing).
+        std::map<void*, OneAPIBlock*> blocks_by_addr;
 
         // Statistics
         OneAPIMemoryStats stats;

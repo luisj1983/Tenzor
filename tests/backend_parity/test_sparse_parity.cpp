@@ -314,7 +314,7 @@ TEST_P(SparseParity, SpGEMM) {
         ref_dense = C_sparse.to_dense();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_sp = tenzor::to_sparse(A_dense.to(backends[i]));
             auto B_sp = tenzor::to_sparse(B_dense.to(backends[i]));
@@ -349,7 +349,7 @@ TEST_P(SparseParity, SparseTriangularSolve) {
         ref = tenzor::sparse::sparse_triangular_solve(L_sparse, b_dense, false);
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto L_sp = tenzor::to_sparse(L_dense.to(backends[i]));
             auto x = tenzor::sparse::sparse_triangular_solve(
@@ -387,7 +387,7 @@ TEST_P(SparseParity, SparseTriangularSolve_Matrix) {
         ref = tenzor::sparse::sparse_triangular_solve(L_sparse, B_dense, false);
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto L_sp = tenzor::to_sparse(L_dense.to(backends[i]));
             auto X = tenzor::sparse::sparse_triangular_solve(
@@ -482,7 +482,7 @@ TEST_P(SparseParity, SparseTriangularSolve_Complex64) {
     // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, b_dense, false);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto L_sp = L_sparse.to(backends[i]);
             auto x = tenzor::sparse::sparse_triangular_solve(
@@ -514,7 +514,7 @@ TEST_P(SparseParity, SparseTriangularSolve_Complex64_Matrix) {
     // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, B_dense, false);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto L_sp = L_sparse.to(backends[i]);
             auto X = tenzor::sparse::sparse_triangular_solve(
@@ -546,7 +546,7 @@ TEST_P(SparseParity, SparseTriangularSolve_Complex128) {
     // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, b_dense, false);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto L_sp = L_sparse.to(backends[i]);
             auto x = tenzor::sparse::sparse_triangular_solve(
@@ -578,7 +578,7 @@ TEST_P(SparseParity, SparseTriangularSolve_Complex128_Matrix) {
     // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref = tenzor::sparse::sparse_triangular_solve(L_sparse, B_dense, false);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto L_sp = L_sparse.to(backends[i]);
             auto X = tenzor::sparse::sparse_triangular_solve(

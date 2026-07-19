@@ -37,6 +37,7 @@ const std::vector<BackendInfo> kBackends = {
     {"ROCm",   Device::Type::ROCm},
     {"Vulkan", Device::Type::Vulkan},
     {"OneAPI", Device::Type::OneAPI},
+    {"MPS",    Device::Type::MPS},
 };
 
 }  // namespace
@@ -44,12 +45,14 @@ const std::vector<BackendInfo> kBackends = {
 TEST(RegistrationReport, CoverageMatrix) {
     tenzor::initialize();
 
-    // Determine which backends are available
+    // Determine which backends are available. CPU goes through
+    // is_backend_available() too (not an unconditional push_back), so
+    // TENZOR_SKIP_BACKENDS=cpu is honored uniformly with every other
+    // backend rather than being silently ignored for CPU alone.
     std::vector<BackendInfo> available;
-    available.push_back(kBackends[0]);  // CPU is always available
-    for (size_t i = 1; i < kBackends.size(); ++i) {
-        if (is_backend_available(kBackends[i].type)) {
-            available.push_back(kBackends[i]);
+    for (const auto& backend : kBackends) {
+        if (is_backend_available(backend.type)) {
+            available.push_back(backend);
         }
     }
 

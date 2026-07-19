@@ -42,7 +42,7 @@ TEST_P(MoEHRMParity, MixtureOfExperts_Forward) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("moe/hrm parity");
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::MixtureOfExperts moe_dev(16, 32, 4, 2, 1.25, 0.01, 0.0);
             moe_dev.eval();
@@ -101,7 +101,7 @@ TEST_P(MoEHRMParity, HRM_Forward) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("moe/hrm parity");
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::HRM hrm_dev(cfg);
             hrm_dev.eval();
@@ -165,7 +165,7 @@ TEST_P(MoEHRMParity, MixtureOfExperts_Backward) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("moe backward parity");
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::MixtureOfExperts moe_dev(16, 32, 4, 2, 1.25, 0.01, 0.0);
             moe_dev.eval();

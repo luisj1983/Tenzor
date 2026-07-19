@@ -12,6 +12,16 @@ find_program(ICPX_COMPILER NAMES icpx)
 if(NOT ICPX_COMPILER)
     message(WARNING "OneAPI backend requires icpx from Intel oneAPI Base Toolkit")
     message(WARNING "Install from: https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html")
+    # Returning here alone leaves TENZOR_BUILD_ONEAPI (and thus the
+    # tenzor_backend_oneapi TARGET) in a state the rest of the build can't see:
+    # test CMakeLists.txt files gate on `if(TENZOR_BUILD_ONEAPI)` without also
+    # checking `TARGET tenzor_backend_oneapi`, so find_package(...REQUIRED)/link
+    # calls inside those blocks would still run and abort the ENTIRE configure
+    # (see FINDING 26). FORCE the cache var off so every later
+    # if(TENZOR_BUILD_ONEAPI) check — including in tests/ — degrades gracefully,
+    # mirroring the CUDA/ROCm probe-and-FORCE-OFF pattern in
+    # src/backends/CMakeLists.txt.
+    set(TENZOR_BUILD_ONEAPI OFF CACHE BOOL "Build OneAPI backend" FORCE)
     return()
 endif()
 

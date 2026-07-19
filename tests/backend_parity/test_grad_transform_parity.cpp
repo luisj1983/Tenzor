@@ -82,7 +82,7 @@ TEST_P(GradTransformParity, JVP) {
         ref_tangent = t;
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input_cpu.to(backends[i]);
             auto tangent_dev = tangent_cpu.to(backends[i]);
@@ -122,7 +122,7 @@ TEST_P(GradTransformParity, VJP) {
         ref_grad = g;
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input_cpu.to(backends[i]);
             auto cotangent_dev = cotangent_cpu.to(backends[i]);
@@ -154,7 +154,7 @@ TEST_P(GradTransformParity, Jacobian) {
     // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref = tenzor::jacobian(f_elem_sq, Variable(input_cpu, false));
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input_cpu.to(backends[i]);
             auto out = tenzor::jacobian(f_elem_sq, Variable(input_dev, false));
@@ -184,7 +184,7 @@ TEST_P(GradTransformParity, Hessian) {
     // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref = tenzor::hessian(f_sum_sq, Variable(input_cpu, false));
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input_cpu.to(backends[i]);
             auto out = tenzor::hessian(f_sum_sq, Variable(input_dev, false));
@@ -217,7 +217,7 @@ TEST_P(GradTransformParity, HVP) {
         ref_hv = hv;
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input_cpu.to(backends[i]);
             auto v_dev = v_cpu.to(backends[i]);
@@ -247,7 +247,7 @@ TEST_P(GradTransformParity, Vmap_Basic) {
     // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref = tenzor::vmap(f_elem_sq, Variable(input_cpu, false), 0).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto input_dev = input_cpu.to(backends[i]);
             auto out = tenzor::vmap(f_elem_sq, Variable(input_dev, false), 0);

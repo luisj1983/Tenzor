@@ -162,11 +162,15 @@ def _all_gather_two_ranks(rank, world_size, tz_local):
     local = tz_local.full([4], float(rank + 1))
     placeholder = [tz_local.zeros([4]) for _ in range(world_size)]
     pg = tz_local.distributed.get_process_group()
-    gathered = pg.all_gather(local, placeholder)
-    # gathered[0] should be 1.0 on every rank; gathered[1] should be 2.0.
-    return [float(t[0].item()) for t in gathered]
+    # all_gather populates `placeholder` in place and returns None (matches
+    # the C++ signature all_gather(const Tensor&, std::vector<Tensor>&) ->
+    # void) — it does NOT return the gathered list.
+    pg.all_gather(local, placeholder)
+    # placeholder[0] should be 1.0 on every rank; placeholder[1] should be 2.0.
+    return [float(t[0].item()) for t in placeholder]
 
 
+@_register
 def _all_gather_large_deadlock(rank, world_size, tz_local):
     # Deadlock-free all_gather regression: each rank contributes a large
     # (~2 MiB) tensor. The old implementation issued ALL blocking send_tensor
@@ -180,13 +184,15 @@ def _all_gather_large_deadlock(rank, world_size, tz_local):
     local = tz_local.full([n], float(rank + 1))
     placeholder = [tz_local.zeros([n]) for _ in range(world_size)]
     pg = tz_local.distributed.get_process_group()
-    gathered = pg.all_gather(local, placeholder)
-    # gathered[r] must be entirely (r+1): check first and last element of each.
+    # See _all_gather_two_ranks above: all_gather mutates `placeholder` in
+    # place and returns None.
+    pg.all_gather(local, placeholder)
+    # placeholder[r] must be entirely (r+1): check first and last element of each.
     ok = True
     for r in range(world_size):
         expected = float(r + 1)
-        if (float(gathered[r][0].item()) != expected or
-                float(gathered[r][n - 1].item()) != expected):
+        if (float(placeholder[r][0].item()) != expected or
+                float(placeholder[r][n - 1].item()) != expected):
             ok = False
     return ok
 

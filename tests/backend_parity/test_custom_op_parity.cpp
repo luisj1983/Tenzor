@@ -55,7 +55,7 @@ TEST_P(CustomOpParity, Affine_MultiBackend) {
     auto ref_var = dispatch_custom_op(op_id, {Variable(input_cpu, false)});
     Tensor ref = ref_var.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto out = dispatch_custom_op(op_id,
                 {Variable(input_cpu.to(backends[i]), false)});
@@ -112,7 +112,7 @@ TEST_P(CustomOpParity, Squared_Backward_MultiBackend) {
     Tensor ref_out = y_cpu.tensor();
     Tensor ref_grad = x_cpu.grad().value();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto x_dev = Variable(input_cpu.to(backends[i]), true);
             auto y_dev = dispatch_custom_op(op_id, {x_dev});

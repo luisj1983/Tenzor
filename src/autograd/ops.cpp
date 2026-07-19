@@ -3743,6 +3743,37 @@ auto conj(const Variable& input) -> Variable {
     return output;
 }
 
+// Variable-level real/imag routed through RealBackward/ImagBackward (see
+// FINDING 19 in findings.txt: the *Backward classes and their forward/
+// backward bodies already existed in function_elementwise.cpp, but no
+// Variable-level wrapper ever called them — real(Variable)/imag(Variable)
+// were not actually differentiable). Mirrors conj's wrapper above exactly.
+auto real(const Variable& input) -> Variable {
+    auto grad_fn = std::make_shared<RealBackward>();
+    auto outputs = grad_fn->forward({input});
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(outputs[0].tensor(), false);
+    }
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(outputs[0].tensor(), true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto imag(const Variable& input) -> Variable {
+    auto grad_fn = std::make_shared<ImagBackward>();
+    auto outputs = grad_fn->forward({input});
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(outputs[0].tensor(), false);
+    }
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(outputs[0].tensor(), true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 // ============================================================================
 // Vision Operations — Variable-level wrappers for grid_sample / affine_grid.
 // The *Backward classes already exist (see include/tenzor/autograd/function.hpp

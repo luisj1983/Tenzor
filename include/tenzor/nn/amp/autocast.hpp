@@ -78,7 +78,8 @@ public:
      * @brief Constructor for Autocast context
      * @param enabled Whether autocast is enabled
      * @param dtype Target dtype for autocasting (Float16 or BFloat16)
-     * @param device_type Device type to apply autocast (CUDA only by default)
+     * @param device_type Device type to apply autocast; nullopt (default)
+     * applies device-agnostically, to whichever device an op actually runs on
      */
     // device_type: which device the scope autocasts. Default (nullopt) applies
     // to the op's actual device (both CPU and CUDA), so device-agnostic code
@@ -176,7 +177,7 @@ private:
 inline auto autocast(
     bool enabled = true,
     DType dtype = DType::Float16,
-    Device::Type device_type = Device::Type::CUDA
+    std::optional<Device::Type> device_type = std::nullopt
 ) -> Autocast {
     return Autocast(enabled, dtype, device_type);
 }

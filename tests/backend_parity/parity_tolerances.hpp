@@ -50,9 +50,15 @@ inline constexpr float TRANSCENDENTAL_ATOL = 1e-7f;
 inline constexpr float MATMUL_RTOL = 1e-4f;
 inline constexpr float MATMUL_ATOL = 1e-5f;
 
-// Reductions (sum, mean, var) — accumulation order differs between backends
+// Reductions (sum, mean, var) — accumulation order differs between backends.
+// FINDING 16 follow-up: 1e-6 atol was too tight to reliably cover FP32
+// accumulation-order noise once test_cross_backend_pairs.cpp's inputs became
+// seed-deterministic (needed for the golden-record/replay fallback to
+// actually round-trip) — a fixed seed can land the true sum arbitrarily
+// close to zero, where atol (not rtol) dominates the comparison. Matches
+// MATMUL_ATOL's order of magnitude, still numerically tight for FP32.
 inline constexpr float REDUCTION_RTOL = 1e-5f;
-inline constexpr float REDUCTION_ATOL = 1e-6f;
+inline constexpr float REDUCTION_ATOL = 1e-5f;
 
 // Convolution (im2col + GEMM, or cuDNN/oneDNN winograd) — reduction over many MACs
 inline constexpr float CONV_RTOL = 1e-3f;

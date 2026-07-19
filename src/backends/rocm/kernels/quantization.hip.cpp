@@ -195,6 +195,133 @@ auto quantized_linear_hip(
 }
 
 // ==============================================================================
+// INT4 (QInt4x2) quantized linear (F031 parity fix). Weights are packed two
+// signed int4 per byte ([out_features, in_features/2]); the input is int8.
+// Symmetric only (no weight zero-point), matching the CPU/CUDA int4 kernels
+// (src/backends/cuda/kernels/quantization/quantized_linear.cu). Before this,
+// ROCm had no dedicated int4 path: the registry unconditionally routed
+// QInt4x2 weights into quantized_linear_hip above, which reads
+// `in_features` int8 bytes per output row via weight_c.data<int8_t>() — for
+// a QInt4x2 tensor the real backing buffer is only `in_features/2` bytes per
+// row, so that was a heap OOB read of up to 2x the allocated buffer.
+// ==============================================================================
+
+__device__ __forceinline__ void unpack_int4_hip(uint8_t packed, int& low, int& high) {
+    int lo = packed & 0x0F;
+    if (lo & 0x08) lo |= ~0x0F;      // sign-extend bit 3
+    int hi = (packed >> 4) & 0x0F;
+    if (hi & 0x08) hi |= ~0x0F;
+    low = lo;
+    high = hi;
+}
+
+__global__ void quantized_linear_int4_kernel_hip(
+    const int8_t* __restrict__ input,
+    const uint8_t* __restrict__ weight_packed,
+    const float* __restrict__ bias,
+    float* __restrict__ output,
+    int64_t batch_size, int64_t in_features, int64_t out_features,
+    float combined_scale,
+    const float* __restrict__ weight_scales,  // per-channel (nullptr => per-tensor)
+    float input_over_output,
+    int32_t input_zp
+) {
+    int64_t b = blockIdx.y;
+    int64_t o = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= batch_size || o >= out_features) return;
+
+    int64_t packed_features = in_features / 2;
+    const int8_t* input_row = input + b * in_features;
+    const uint8_t* weight_row = weight_packed + o * packed_features;
+
+    int64_t acc = 0;
+    // sum_w: needed for the asymmetric activation zero-point correction below.
+    // INT4 weights are symmetric (weight_zp==0 always), so unlike the INT8
+    // kernel's full 4-term correction, only the -input_zp*sum_w cross term is
+    // needed (mirrors CPU's fused_qlinear_dequant col_sum_w correction and the
+    // CUDA int4 kernel).
+    int64_t sum_w = 0;
+    for (int64_t p = 0; p < packed_features; ++p) {
+        int lo, hi;
+        unpack_int4_hip(weight_row[p], lo, hi);
+        acc += static_cast<int64_t>(input_row[p * 2]) * lo;
+        acc += static_cast<int64_t>(input_row[p * 2 + 1]) * hi;
+        sum_w += lo + hi;
+    }
+
+    int64_t corrected = acc;
+    if (input_zp != 0) {
+        corrected -= static_cast<int64_t>(input_zp) * sum_w;
+    }
+
+    float scale = weight_scales ? (input_over_output * weight_scales[o]) : combined_scale;
+    float result = static_cast<float>(corrected) * scale;
+    if (bias != nullptr) result += bias[o];
+    output[b * out_features + o] = result;
+}
+
+/**
+ * @brief Host wrapper for INT4 (QInt4x2 packed) quantized linear.
+ */
+auto quantized_linear_int4_hip(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    float input_scale,
+    int32_t input_zero_point,
+    float weight_scale,
+    float output_scale,
+    hipStream_t stream,
+    const Tensor* weight_scales  // per-channel [out_features]; nullptr => per-tensor
+) -> Tensor {
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
+
+    auto input_shape = input_c.shape();
+    auto weight_shape = weight_c.shape();
+    int64_t batch_size = input_shape[0];
+    int64_t in_features = input_shape[1];
+    int64_t out_features = weight_shape[0];
+
+    if (in_features % 2 != 0) {
+        throw std::invalid_argument("quantized_linear_int4_hip: in_features must be even");
+    }
+    // F074 parity: match the CPU/CUDA int4 kernels' output_scale contract
+    // (throws on output_scale <= 0) instead of silently substituting 1.0.
+    if (output_scale <= 0.0f) {
+        throw std::invalid_argument("quantized_linear_int4_hip: output_scale must be > 0");
+    }
+
+    Tensor output({batch_size, out_features}, DType::Float32, input_c.device());
+
+    float combined_scale = input_scale * weight_scale / output_scale;
+    float input_over_output = input_scale / output_scale;
+
+    Tensor wscale_c;
+    const float* wscale_ptr = nullptr;
+    if (weight_scales != nullptr && weight_scales->numel() > 1) {
+        wscale_c = weight_scales->is_contiguous() ? *weight_scales : weight_scales->contiguous();
+        wscale_ptr = wscale_c.data<float>();
+    }
+
+    const int THREADS = 256;
+    dim3 blocks((out_features + THREADS - 1) / THREADS, batch_size);
+    dim3 threads(THREADS);
+
+    hipLaunchKernelGGL(quantized_linear_int4_kernel_hip,
+        blocks, threads, 0, stream,
+        input_c.data<int8_t>(),
+        reinterpret_cast<const uint8_t*>(weight_c.data_ptr()),
+        bias ? bias->data<float>() : nullptr,
+        output.data<float>(),
+        batch_size, in_features, out_features,
+        combined_scale, wscale_ptr, input_over_output, input_zero_point);
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ==============================================================================
 // Quantized Conv2d — im2col + rocBLAS GEMM (INT8 → INT32 accumulation)
 // ==============================================================================
 

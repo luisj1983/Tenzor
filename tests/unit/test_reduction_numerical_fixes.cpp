@@ -87,53 +87,68 @@ protected:
     void SetUp() override { tz::testing::EnsureInitialized(); }
 };
 
-TEST_F(NormSpecialPCpu, L0FullReductionCountsNonzero) {
-    auto t = tz::zeros({5}, tz::DType::Float32);
-    float* p = t.data<float>();
+// The six tests below (norm's p==0 "count nonzero" and p==-inf "min(|x|)"
+// special cases) used to live in NormSpecialPCpu as CPU-only TEST_F cases —
+// exactly the kind of gap that let CUDA's norm(p=0)/norm(p=-inf) ship broken
+// on this same commit while every other backend got the fix (see the CUDA
+// norm_kernel/norm_along_dim_kernel special-case branches this test now
+// exercises). Moved onto the ReductionNumericalFixes BackendTest fixture so
+// they run on every backend, matching TESTING.md's "no CPU-only regression
+// test for an op with real cross-backend kernels" rule.
+
+TEST_P(ReductionNumericalFixes, L0FullReductionCountsNonzero) {
+    auto t_host = tz::zeros({5}, tz::DType::Float32);
+    float* p = t_host.data<float>();
     p[0] = 0.0f; p[1] = 3.0f; p[2] = 0.0f; p[3] = -2.0f; p[4] = 0.0f;
-    EXPECT_FLOAT_EQ(tz::norm(t, 0.0).item<float>(), 2.0f);
+    auto t = t_host.to(device);
+    EXPECT_FLOAT_EQ(tz::norm(t, 0.0).cpu().item<float>(), 2.0f);
 }
 
-TEST_F(NormSpecialPCpu, L0PerDimCountsNonzero) {
-    auto t = tz::zeros({2, 3}, tz::DType::Float32);
-    float* p = t.data<float>();
+TEST_P(ReductionNumericalFixes, L0PerDimCountsNonzero) {
+    auto t_host = tz::zeros({2, 3}, tz::DType::Float32);
+    float* p = t_host.data<float>();
     p[0] = 0.0f; p[1] = 3.0f; p[2] = 0.0f;   // row 0: 1 nonzero
     p[3] = -2.0f; p[4] = 0.0f; p[5] = 5.0f;  // row 1: 2 nonzero
-    auto n = tz::norm(t, 0.0, /*dim=*/1, /*keepdim=*/false);
+    auto t = t_host.to(device);
+    auto n = tz::norm(t, 0.0, /*dim=*/1, /*keepdim=*/false).cpu();
     const float* out = n.data<float>();
     EXPECT_FLOAT_EQ(out[0], 1.0f);
     EXPECT_FLOAT_EQ(out[1], 2.0f);
 }
 
-TEST_F(NormSpecialPCpu, NegativeInfinityFullReductionReturnsMinAbs) {
-    auto t = tz::zeros({4}, tz::DType::Float32);
-    float* p = t.data<float>();
+TEST_P(ReductionNumericalFixes, NegativeInfinityFullReductionReturnsMinAbs) {
+    auto t_host = tz::zeros({4}, tz::DType::Float32);
+    float* p = t_host.data<float>();
     p[0] = 5.0f; p[1] = -2.0f; p[2] = 7.0f; p[3] = -3.0f;
-    EXPECT_FLOAT_EQ(tz::norm(t, -std::numeric_limits<double>::infinity()).item<float>(), 2.0f);
+    auto t = t_host.to(device);
+    EXPECT_FLOAT_EQ(tz::norm(t, -std::numeric_limits<double>::infinity()).cpu().item<float>(), 2.0f);
     // p=+inf must be unaffected by the sign-check.
-    EXPECT_FLOAT_EQ(tz::norm(t, std::numeric_limits<double>::infinity()).item<float>(), 7.0f);
+    EXPECT_FLOAT_EQ(tz::norm(t, std::numeric_limits<double>::infinity()).cpu().item<float>(), 7.0f);
 }
 
-TEST_F(NormSpecialPCpu, NegativeInfinityPerDimReturnsMinAbs) {
-    auto t = tz::zeros({1, 4}, tz::DType::Float32);
-    float* p = t.data<float>();
+TEST_P(ReductionNumericalFixes, NegativeInfinityPerDimReturnsMinAbs) {
+    auto t_host = tz::zeros({1, 4}, tz::DType::Float32);
+    float* p = t_host.data<float>();
     p[0] = 5.0f; p[1] = -2.0f; p[2] = 7.0f; p[3] = -3.0f;
+    auto t = t_host.to(device);
     auto n = tz::norm(t, -std::numeric_limits<double>::infinity(), /*dim=*/1, /*keepdim=*/false);
-    EXPECT_FLOAT_EQ(n.item<float>(), 2.0f);
+    EXPECT_FLOAT_EQ(n.cpu().item<float>(), 2.0f);
 }
 
-TEST_F(NormSpecialPCpu, Float64L0CountsNonzero) {
-    auto t = tz::zeros({4}, tz::DType::Float64);
-    double* p = t.data<double>();
+TEST_P(ReductionNumericalFixes, Float64L0CountsNonzero) {
+    auto t_host = tz::zeros({4}, tz::DType::Float64);
+    double* p = t_host.data<double>();
     p[0] = 0.0; p[1] = 3.0; p[2] = 0.0; p[3] = -2.0;
-    EXPECT_DOUBLE_EQ(tz::norm(t, 0.0).item<double>(), 2.0);
+    auto t = t_host.to(device);
+    EXPECT_DOUBLE_EQ(tz::norm(t, 0.0).cpu().item<double>(), 2.0);
 }
 
-TEST_F(NormSpecialPCpu, Float64NegativeInfinityReturnsMinAbs) {
-    auto t = tz::zeros({4}, tz::DType::Float64);
-    double* p = t.data<double>();
+TEST_P(ReductionNumericalFixes, Float64NegativeInfinityReturnsMinAbs) {
+    auto t_host = tz::zeros({4}, tz::DType::Float64);
+    double* p = t_host.data<double>();
     p[0] = 5.0; p[1] = -2.0; p[2] = 7.0; p[3] = -3.0;
-    EXPECT_DOUBLE_EQ(tz::norm(t, -std::numeric_limits<double>::infinity()).item<double>(), 2.0);
+    auto t = t_host.to(device);
+    EXPECT_DOUBLE_EQ(tz::norm(t, -std::numeric_limits<double>::infinity()).cpu().item<double>(), 2.0);
 }
 
 TEST_F(NormSpecialPCpu, EmptyDimSliceThrowsInsteadOfSilentZero) {

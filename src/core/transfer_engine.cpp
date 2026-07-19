@@ -30,22 +30,20 @@
 
 #endif
 
-#ifdef TENZOR_USE_ROCM
-#include <hip/hip_runtime.h>
-
-// HIP error checking macro
-#define HIP_CHECK(call) \
-    do { \
-        hipError_t err = call; \
-        if (err != hipSuccess) { \
-            throw std::runtime_error( \
-                std::string("HIP error at ") + __FILE__ + ":" + \
-                std::to_string(__LINE__) + " - " + hipGetErrorString(err) \
-            ); \
-        } \
-    } while(0)
-
-#endif
+// FINDING 60: this TU previously #included <hip/hip_runtime.h> here under
+// #ifdef TENZOR_USE_ROCM. That's the reason TENZOR_USE_ROCM could never
+// safely be defined for tenzor_core: on a combined CUDA+ROCm build (this
+// project's default), the file already includes <cuda_runtime.h> above, and
+// HIP's and CUDA's vector-type headers define conflicting make_ulonglong3
+// -style helpers when both land in the same translation unit (confirmed by
+// actually trying it -- ~30 redefinition errors). Every ROCm code path in
+// this file already routes through tenzor::rocm_transfer:: (the isolated
+// HIP-language TU in rocm_transfer.hip.cpp, which is the ONLY place
+// <hip/hip_runtime.h> may be included from tenzor_core) or the public Tensor
+// API's own .to()/copy() dispatch, both proven correct and exercised on real
+// ROCm hardware this session -- so the direct-hipMemcpy/hipStream_t code
+// this header enabled was already 100% dead (TENZOR_USE_ROCM was never
+// defined anywhere in the build) and has been removed rather than resurrected.
 
 #ifdef TENZOR_USE_VULKAN
 // Vulkan error checking macro
@@ -276,21 +274,9 @@ TransferState::~TransferState() {
         finalize_deferred_copy();
     }
 #endif
-#ifdef TENZOR_USE_ROCM
-    if (hip_event && !completed.load(std::memory_order_acquire)) {
-        hipEventSynchronize(hip_event);  // ignore errors at teardown
-    }
-#endif
-
 #ifdef TENZOR_USE_CUDA
     if (event && engine) {
         engine->return_event(event);
-    }
-#endif
-
-#ifdef TENZOR_USE_ROCM
-    if (hip_event && engine) {
-        engine->return_hip_event(hip_event);
     }
 #endif
 
@@ -370,19 +356,6 @@ auto TransferHandle::is_ready() const -> bool {
     }
 #endif
 
-#ifdef TENZOR_USE_ROCM
-    if (state_->hip_event) {
-        hipError_t result = hipEventQuery(state_->hip_event);
-        if (result == hipSuccess) {
-            state_->completed.store(true, std::memory_order_release);
-            return true;
-        }
-        if (result != hipErrorNotReady) {
-            HIP_CHECK(result);
-        }
-    }
-#endif
-
 #ifdef TENZOR_USE_ONEAPI
     if (state_->has_sycl_event) {
         auto status = state_->sycl_event.get_info<sycl::info::event::command_execution_status>();
@@ -436,15 +409,6 @@ auto TransferHandle::wait() -> void {
     }
 #endif
 
-#ifdef TENZOR_USE_ROCM
-    if (state_->hip_event) {
-        HIP_CHECK(hipEventSynchronize(state_->hip_event));
-        state_->completed.store(true, std::memory_order_release);
-        state_->cv.notify_all();
-        return;
-    }
-#endif
-
 #ifdef TENZOR_USE_ONEAPI
     if (state_->has_sycl_event) {
         state_->sycl_event.wait();
@@ -469,9 +433,6 @@ auto TransferHandle::wait() -> void {
 #ifdef TENZOR_USE_CUDA
                || (state_->event != nullptr)
 #endif
-#ifdef TENZOR_USE_ROCM
-               || (state_->hip_event != nullptr)
-#endif
 #ifdef TENZOR_USE_ONEAPI
                || state_->has_sycl_event
 #endif
@@ -485,16 +446,6 @@ auto TransferHandle::wait() -> void {
         // DMA done: run the deferred pinned->dst host copy (if any) before
         // publishing completion so a subsequent get_tensor() sees the bytes.
         state_->finalize_deferred_copy();
-        state_->completed.store(true, std::memory_order_release);
-        state_->cv.notify_all();
-        return;
-    }
-#endif
-
-#ifdef TENZOR_USE_ROCM
-    if (state_->hip_event) {
-        lock.unlock();
-        HIP_CHECK(hipEventSynchronize(state_->hip_event));
         state_->completed.store(true, std::memory_order_release);
         state_->cv.notify_all();
         return;
@@ -540,7 +491,10 @@ TransferEngine::TransferEngine(const Config& config)
     }
 
     initialize_cuda_resources();
-    initialize_rocm_resources();
+    // ROCm resources: no per-engine init needed. The isolated-TU
+    // rocm_transfer:: path (see the file-top comment) owns its own
+    // streams/event pool internally (rocm_transfer.hip.cpp's g_streams/
+    // g_event_pool), so there is nothing for TransferEngine itself to set up.
 
 #ifdef TENZOR_USE_ONEAPI
     initialize_oneapi_resources();
@@ -586,7 +540,8 @@ TransferEngine::~TransferEngine() {
     }
 
     cleanup_cuda_resources();
-    cleanup_rocm_resources();
+    // ROCm: see initialize_rocm_resources' removal note above -- nothing
+    // per-engine to clean up.
 
 #ifdef TENZOR_USE_ONEAPI
     cleanup_oneapi_resources();
@@ -660,71 +615,12 @@ auto TransferEngine::cleanup_cuda_resources() -> void {
 #endif
 }
 
-auto TransferEngine::initialize_rocm_resources() -> void {
-#ifdef TENZOR_USE_ROCM
-    hip_streams_.reserve(config_.num_streams);
-    for (int i = 0; i < config_.num_streams; ++i) {
-        hipStream_t stream;
-        HIP_CHECK(hipStreamCreate(&stream));
-        hip_streams_.push_back(stream);
-    }
-
-    hip_event_pool_.reserve(config_.num_streams * 2);
-    for (int i = 0; i < config_.num_streams * 2; ++i) {
-        hipEvent_t event;
-        HIP_CHECK(hipEventCreateWithFlags(&event, hipEventDisableTiming));
-        hip_event_pool_.push_back(event);
-    }
-
-#ifndef TENZOR_USE_CUDA
-    if (config_.use_pinned_memory && config_.pinned_pool_size > 0) {
-        std::vector<size_t> buffer_sizes = {
-            1 * 1024 * 1024,
-            4 * 1024 * 1024,
-            16 * 1024 * 1024,
-            64 * 1024 * 1024
-        };
-
-        size_t total_allocated = 0;
-        for (size_t size : buffer_sizes) {
-            if (total_allocated + size > config_.pinned_pool_size) {
-                break;
-            }
-
-            void* ptr = nullptr;
-            hipError_t err = hipHostMalloc(&ptr, size, hipHostMallocDefault);
-            if (err == hipSuccess) {
-                pinned_buffers_.push_back({ptr, size, false});
-                total_allocated += size;
-            }
-        }
-    }
-#endif
-#endif
-}
-
-auto TransferEngine::cleanup_rocm_resources() -> void {
-#ifdef TENZOR_USE_ROCM
-    for (hipStream_t stream : hip_streams_) {
-        hipStreamDestroy(stream);
-    }
-    hip_streams_.clear();
-
-    for (hipEvent_t event : hip_event_pool_) {
-        hipEventDestroy(event);
-    }
-    hip_event_pool_.clear();
-
-#ifndef TENZOR_USE_CUDA
-    for (auto& buffer : pinned_buffers_) {
-        if (buffer.ptr) {
-            hipHostFree(buffer.ptr);
-        }
-    }
-    pinned_buffers_.clear();
-#endif
-#endif
-}
+// FINDING 60: initialize_rocm_resources()/cleanup_rocm_resources() removed.
+// Their entire bodies were gated on TENZOR_USE_ROCM, which was never defined
+// for this TU (see the file-top comment), so they were dead code that never
+// executed. The isolated-TU rocm_transfer:: path owns ROCm stream/event/
+// pinned-buffer lifetime instead (see rocm_transfer.hip.cpp). The calls to
+// these two functions were already removed from the constructor/destructor.
 
 #ifdef TENZOR_USE_CUDA
 auto TransferEngine::get_event() -> cudaEvent_t {
@@ -748,27 +644,8 @@ auto TransferEngine::return_event(cudaEvent_t event) -> void {
 }
 #endif
 
-#ifdef TENZOR_USE_ROCM
-auto TransferEngine::get_hip_event() -> hipEvent_t {
-    std::lock_guard lock(hip_event_pool_mutex_);
-
-    if (!hip_event_pool_.empty()) {
-        hipEvent_t event = hip_event_pool_.back();
-        hip_event_pool_.pop_back();
-        return event;
-    }
-
-    hipEvent_t event;
-    HIP_CHECK(hipEventCreateWithFlags(&event, hipEventDisableTiming));
-    return event;
-}
-
-auto TransferEngine::return_hip_event(hipEvent_t event) -> void {
-    if (!event) return;
-    std::lock_guard lock(hip_event_pool_mutex_);
-    hip_event_pool_.push_back(event);
-}
-#endif
+// FINDING 60: get_hip_event()/return_hip_event() removed — dead code, see
+// the removal note above initialize_rocm_resources' former location.
 
 auto TransferEngine::get_pinned_buffer(size_t size) -> void* {
     std::lock_guard lock(pinned_mutex_);
@@ -808,8 +685,6 @@ auto TransferEngine::get_pinned_buffer(size_t size) -> void* {
                 if (!it->in_use) {
 #ifdef TENZOR_USE_CUDA
                     cudaFreeHost(it->ptr);
-#elif defined(TENZOR_USE_ROCM)
-                    hipHostFree(it->ptr);
 #endif
                     it = pinned_buffers_.erase(it);
                 } else {
@@ -827,13 +702,6 @@ auto TransferEngine::get_pinned_buffer(size_t size) -> void* {
 #ifdef TENZOR_USE_CUDA
         cudaError_t err = cudaMallocHost(&result, size);
         if (err == cudaSuccess) {
-            pinned_buffers_.push_back({result, size, true});
-        } else {
-            result = nullptr;
-        }
-#elif defined(TENZOR_USE_ROCM)
-        hipError_t err = hipHostMalloc(&result, size, hipHostMallocDefault);
-        if (err == hipSuccess) {
             pinned_buffers_.push_back({result, size, true});
         } else {
             result = nullptr;
@@ -982,30 +850,13 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
 #endif
 
     // ROCm: route through the public Tensor API (dispatches to the ROCm backend's
-    // own HIP memcpy). The direct hipMemcpy path below is gated on TENZOR_USE_ROCM,
-    // which is NOT defined for tenzor_core (HIP/CUDA host headers define conflicting
-    // make_*N helpers in multi-backend builds). When compiled out, the branch left
-    // the freshly-allocated GPU tensor UNFILLED — so offload-restore silently
-    // returned all-zero parameters and models (DeepLabV3Plus etc.) produced
-    // all-zero output. Using .to() fills it correctly regardless of that macro.
-#ifdef TENZOR_USE_ROCM
-    if (gpu_device.type == Device::Type::ROCm) {
-        // Contiguify first: a strided source's data_ptr() base would make the
-        // flat byte memcpy below read the wrong elements (mirrors the CUDA path).
-        Tensor src = cpu_tensor.contiguous();
-        HIP_CHECK(hipSetDevice(gpu_device.index));
-        HIP_CHECK(hipMemcpy(
-            gpu_tensor.data_ptr(),
-            src.data_ptr(),
-            bytes,
-            hipMemcpyHostToDevice
-        ));
-    }
-#else
+    // own HIP memcpy). A direct hipMemcpy path used to be gated on TENZOR_USE_ROCM,
+    // which is never defined for tenzor_core (HIP/CUDA host headers define
+    // conflicting make_*N helpers in multi-backend builds), so that branch was
+    // dead code and has been removed (FINDING 60). Using .to() fills it correctly.
     if (gpu_device.type == Device::Type::ROCm) {
         gpu_tensor = cpu_tensor.to(gpu_device);
     }
-#endif
 
     // Vulkan transfers via tensor .to() method
     if (gpu_device.type == Device::Type::Vulkan) {
@@ -1058,28 +909,12 @@ auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
     }
 #endif
 
-    // ROCm: see cpu_to_gpu — the direct hipMemcpy path is compiled out of core
-    // (TENZOR_USE_ROCM undefined), which left this branch empty and returned an
-    // unfilled (zero) host tensor. Route through .to() so the value is preserved.
-#ifdef TENZOR_USE_ROCM
-    if (gpu_tensor.device().type == Device::Type::ROCm) {
-        // Contiguify the (possibly strided) GPU source so the flat byte copy
-        // into the fresh contiguous host tensor reads logical element order
-        // (mirrors the CUDA path).
-        Tensor src = gpu_tensor.contiguous();
-        HIP_CHECK(hipSetDevice(gpu_tensor.device().index));
-        HIP_CHECK(hipMemcpy(
-            cpu_tensor.data_ptr(),
-            src.data_ptr(),
-            bytes,
-            hipMemcpyDeviceToHost
-        ));
-    }
-#else
+    // ROCm: see cpu_to_gpu — a direct hipMemcpy path used to be compiled out of
+    // core (TENZOR_USE_ROCM undefined), leaving this branch dead. Removed
+    // (FINDING 60); route through .to() so the value is preserved.
     if (gpu_tensor.device().type == Device::Type::ROCm) {
         cpu_tensor = gpu_tensor.to(Device::cpu());
     }
-#endif
 
     // Vulkan transfers via tensor .to() method
     if (gpu_tensor.device().type == Device::Type::Vulkan) {
@@ -1113,88 +948,43 @@ auto TransferEngine::cpu_to_gpu_async(
 
     if (gpu_device.type != Device::Type::CUDA &&
         gpu_device.type != Device::Type::ROCm &&
-        gpu_device.type != Device::Type::OneAPI) {
-        throw std::runtime_error("Target device must be CUDA, ROCm, or OneAPI");
+        gpu_device.type != Device::Type::OneAPI &&
+        gpu_device.type != Device::Type::Vulkan) {
+        throw std::runtime_error("Target device must be CUDA, ROCm, OneAPI, or Vulkan");
     }
 
     auto state = std::make_shared<TransferState>();
     state->engine = this;
 
-    // Handle ROCm direct transfers
+    // Handle ROCm direct transfers. A direct HIP host-transfer path using
+    // hip_streams_/get_hip_event() used to be gated on TENZOR_USE_ROCM, which
+    // is never defined for tenzor_core (HIP/CUDA host headers define
+    // conflicting make_*N vector helpers in a multi-backend build), so it was
+    // dead code and has been removed (FINDING 60). The isolated-TU
+    // rocm_transfer::h2d_async() path below (compiled by hipcc in
+    // rocm_transfer.hip.cpp, exposed via an opaque void*-based API) is the
+    // only ROCm async-transfer path that has ever actually run.
     if (gpu_device.type == Device::Type::ROCm) {
-#ifdef TENZOR_USE_ROCM
-        static std::atomic<int> hip_stream_counter{0};
-        int stream_idx = hip_stream_counter.fetch_add(1, std::memory_order_relaxed) % config_.num_streams;
-        hipStream_t stream = hip_streams_[stream_idx];
-
-        HIP_CHECK(hipSetDevice(gpu_device.index));
-
         auto shape_span = cpu_tensor.shape();
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
         Tensor gpu_tensor = allocate_tensor(shape_vec, cpu_tensor.dtype(), gpu_device);
-
-        // The async byte memcpy reads a flat run from data_ptr(); for a
-        // non-contiguous source (transpose/slice view) that run is the wrong
-        // elements. Contiguify first and anchor in state->source so the buffer
-        // stays alive until the DMA completes (mirrors the sync path).
+        // Contiguify so the flat byte DMA reads logical element order; anchor
+        // the contiguous buffer in state->source until the async DMA completes.
         Tensor src = cpu_tensor.contiguous();
         size_t bytes = src.numel() * dtype_size(src.dtype());
-        const void* src_ptr = src.data_ptr();
-        void* dst_ptr = gpu_tensor.data_ptr();
-
-        if (config_.use_pinned_memory) {
-            void* pinned = get_pinned_buffer(bytes);
-            if (pinned) {
-                std::memcpy(pinned, src_ptr, bytes);
-                HIP_CHECK(hipMemcpyAsync(dst_ptr, pinned, bytes, hipMemcpyHostToDevice, stream));
-                state->pinned_buffer = pinned;
-            } else {
-                HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, bytes, hipMemcpyHostToDevice, stream));
-            }
-        } else {
-            HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, bytes, hipMemcpyHostToDevice, stream));
-        }
-
-        hipEvent_t event = get_hip_event();
-        HIP_CHECK(hipEventRecord(event, stream));
-
+        void* ev = tenzor::rocm_transfer::h2d_async(
+            gpu_tensor.data_ptr(), src.data_ptr(), bytes, gpu_device.index);
         state->result = gpu_tensor;
         state->source = src;  // keep contiguous source alive until DMA completes
-        state->hip_event = event;
-        state->hip_stream = stream;
-
-        auto start = std::chrono::high_resolution_clock::now();
-        auto end = std::chrono::high_resolution_clock::now();
-        double time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-        record_transfer(bytes, time_ms, true);
-
-        return TransferHandle(state);
-#else
-        // The direct HIP host-transfer path is not compiled into tenzor_core
-        // (HIP and CUDA host headers define conflicting make_*N vector helpers
-        // in a multi-backend build). Fall back to a synchronous device copy via
-        // the public Tensor API, which dispatches to the ROCm backend's own
-        // working HIP memcpy. This keeps parameter/activation offload correct on
-        // ROCm (it formerly threw, leaving offloaded params off-device → all-zero
-        // model output); we trade async overlap for correctness.
-        {
-            auto shape_span = cpu_tensor.shape();
-            std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-            Tensor gpu_tensor = allocate_tensor(shape_vec, cpu_tensor.dtype(), gpu_device);
-            // Contiguify so the flat byte DMA reads logical element order; anchor
-            // the contiguous buffer in state->source until the async DMA completes.
-            Tensor src = cpu_tensor.contiguous();
-            size_t bytes = src.numel() * dtype_size(src.dtype());
-            void* ev = tenzor::rocm_transfer::h2d_async(
-                gpu_tensor.data_ptr(), src.data_ptr(), bytes, gpu_device.index);
-            state->result = gpu_tensor;
-            state->source = src;  // keep contiguous source alive until DMA completes
-            state->rocm_event = ev;
-            if (ev == nullptr) state->completed.store(true, std::memory_order_release);
-            record_transfer(bytes, 0.0, true);
-            return TransferHandle(state);
+        state->rocm_event = ev;
+        if (ev == nullptr) {
+            state->completed.store(true, std::memory_order_release);
+        } else {
+            std::lock_guard<std::mutex> pending_lock(rocm_pending_mutex_);
+            rocm_pending_states_.push_back(state);
         }
-#endif
+        record_transfer(bytes, 0.0, true);
+        return TransferHandle(state);
     }
 
 #ifdef TENZOR_USE_ONEAPI
@@ -1230,6 +1020,24 @@ auto TransferEngine::cpu_to_gpu_async(
     }
 #endif
 
+    // Vulkan has no dedicated async stream/queue wired into TransferEngine (no
+    // per-stream VkCommandBuffer/VkFence pool analogous to hip_streams_/the
+    // SYCL queues above). Same trade-off the ROCm branch documents when its
+    // HIP-isolated TU is unavailable: do the transfer synchronously via the
+    // Tensor API's own working Vulkan copy path (used by the sync cpu_to_gpu()
+    // above) and mark the handle immediately complete. This used to
+    // unconditionally throw here, which meant any caller using the async
+    // offload API on Vulkan (ZeRO offload_to_cpu, OffloadEngine) got an
+    // exception instead of a degraded-but-correct transfer.
+    if (gpu_device.type == Device::Type::Vulkan) {
+        Tensor gpu_tensor = cpu_tensor.to(gpu_device);
+        size_t bytes = static_cast<size_t>(gpu_tensor.numel()) * dtype_size(gpu_tensor.dtype());
+        state->result = gpu_tensor;
+        state->completed.store(true, std::memory_order_release);
+        record_transfer(bytes, 0.0, true);
+        return TransferHandle(state);
+    }
+
     // Queue transfer request for CUDA
     TransferRequest request;
     request.type = TransferRequest::Type::CPU_TO_GPU;
@@ -1258,100 +1066,39 @@ auto TransferEngine::cpu_to_gpu_async(
 auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandle {
     if (gpu_tensor.device().type != Device::Type::CUDA &&
         gpu_tensor.device().type != Device::Type::ROCm &&
-        gpu_tensor.device().type != Device::Type::OneAPI) {
-        throw std::runtime_error("Source tensor must be on CUDA, ROCm, or OneAPI");
+        gpu_tensor.device().type != Device::Type::OneAPI &&
+        gpu_tensor.device().type != Device::Type::Vulkan) {
+        throw std::runtime_error("Source tensor must be on CUDA, ROCm, OneAPI, or Vulkan");
     }
 
     auto state = std::make_shared<TransferState>();
     state->engine = this;
 
-    // Handle ROCm direct transfers
+    // Handle ROCm direct transfers. A direct HIP host-transfer path using
+    // hip_streams_/get_hip_event() used to be gated on TENZOR_USE_ROCM, which
+    // is never defined for tenzor_core, so it was dead code and has been
+    // removed (FINDING 60). See cpu_to_gpu_async for the same rationale.
     if (gpu_tensor.device().type == Device::Type::ROCm) {
-#ifdef TENZOR_USE_ROCM
-        static std::atomic<int> hip_stream_counter{0};
-        int stream_idx = hip_stream_counter.fetch_add(1, std::memory_order_relaxed) % config_.num_streams;
-        hipStream_t stream = hip_streams_[stream_idx];
-
-        HIP_CHECK(hipSetDevice(gpu_tensor.device().index));
-
-        // Contiguify the (possibly strided) GPU source so the flat byte DMA into
-        // the fresh contiguous host tensor reads logical element order. Anchor the
-        // contiguous GPU buffer in state->source until the DMA completes.
+        // Contiguify the GPU source so the flat byte DMA reads logical element
+        // order; anchor the contiguous buffer until the async DMA completes.
         Tensor src = gpu_tensor.contiguous();
-
         auto shape_span = src.shape();
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
         Tensor cpu_result = allocate_tensor(shape_vec, src.dtype(), Device::cpu());
-
         size_t bytes = src.numel() * dtype_size(src.dtype());
-        const void* src_ptr = src.data_ptr();
-        void* dst_ptr = cpu_result.data_ptr();
-
-        if (config_.use_pinned_memory) {
-            void* pinned = get_pinned_buffer(bytes);
-            if (pinned) {
-                HIP_CHECK(hipMemcpyAsync(pinned, src_ptr, bytes, hipMemcpyDeviceToHost, stream));
-
-                hipEvent_t event = get_hip_event();
-                HIP_CHECK(hipEventRecord(event, stream));
-                HIP_CHECK(hipEventSynchronize(event));
-
-                std::memcpy(dst_ptr, pinned, bytes);
-
-                return_hip_event(event);
-                state->pinned_buffer = pinned;
-                state->result = cpu_result;
+        void* ev = tenzor::rocm_transfer::d2h_async(
+            cpu_result.data_ptr(), src.data_ptr(), bytes, src.device().index);
+        state->result = cpu_result;
         state->source = src;  // keep contiguous source alive until DMA completes
-                state->completed.store(true, std::memory_order_release);
-            } else {
-                HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, bytes, hipMemcpyDeviceToHost, stream));
-
-                hipEvent_t event = get_hip_event();
-                HIP_CHECK(hipEventRecord(event, stream));
-
-                state->result = cpu_result;
-        state->source = src;  // keep contiguous source alive until DMA completes
-                state->hip_event = event;
-                state->hip_stream = stream;
-            }
+        state->rocm_event = ev;
+        if (ev == nullptr) {
+            state->completed.store(true, std::memory_order_release);
         } else {
-            HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, bytes, hipMemcpyDeviceToHost, stream));
-
-            hipEvent_t event = get_hip_event();
-            HIP_CHECK(hipEventRecord(event, stream));
-
-            state->result = cpu_result;
-        state->source = src;  // keep contiguous source alive until DMA completes
-            state->hip_event = event;
-            state->hip_stream = stream;
+            std::lock_guard<std::mutex> pending_lock(rocm_pending_mutex_);
+            rocm_pending_states_.push_back(state);
         }
-
-        auto start = std::chrono::high_resolution_clock::now();
-        auto end = std::chrono::high_resolution_clock::now();
-        double time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-        record_transfer(bytes, time_ms, false);
-
+        record_transfer(bytes, 0.0, false);
         return TransferHandle(state);
-#else
-        // Async GPU->CPU via the HIP-isolated transfer TU (see cpu_to_gpu_async).
-        {
-            // Contiguify the GPU source so the flat byte DMA reads logical element
-            // order; anchor the contiguous buffer until the async DMA completes.
-            Tensor src = gpu_tensor.contiguous();
-            auto shape_span = src.shape();
-            std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-            Tensor cpu_result = allocate_tensor(shape_vec, src.dtype(), Device::cpu());
-            size_t bytes = src.numel() * dtype_size(src.dtype());
-            void* ev = tenzor::rocm_transfer::d2h_async(
-                cpu_result.data_ptr(), src.data_ptr(), bytes, src.device().index);
-            state->result = cpu_result;
-            state->source = src;  // keep contiguous source alive until DMA completes
-            state->rocm_event = ev;
-            if (ev == nullptr) state->completed.store(true, std::memory_order_release);
-            record_transfer(bytes, 0.0, false);
-            return TransferHandle(state);
-        }
-#endif
     }
 
 #ifdef TENZOR_USE_ONEAPI
@@ -1386,6 +1133,20 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
         }
     }
 #endif
+
+    // Vulkan has no dedicated async stream/queue wired into TransferEngine --
+    // see the matching comment in cpu_to_gpu_async(). Do the transfer
+    // synchronously via the Tensor API's own working Vulkan copy path (used
+    // by the sync gpu_to_cpu() above) and mark the handle immediately
+    // complete.
+    if (gpu_tensor.device().type == Device::Type::Vulkan) {
+        Tensor cpu_result = gpu_tensor.to(Device::cpu());
+        size_t bytes = static_cast<size_t>(cpu_result.numel()) * dtype_size(cpu_result.dtype());
+        state->result = cpu_result;
+        state->completed.store(true, std::memory_order_release);
+        record_transfer(bytes, 0.0, false);
+        return TransferHandle(state);
+    }
 
     // Queue transfer request for CUDA
     TransferRequest request;
@@ -1586,6 +1347,24 @@ auto TransferEngine::process_transfer(const TransferRequest& request) -> void {
 // Stream Management
 // ============================================================================
 
+auto TransferEngine::drain_rocm_pending_states() -> void {
+    std::vector<std::weak_ptr<TransferState>> pending;
+    {
+        std::lock_guard<std::mutex> lock(rocm_pending_mutex_);
+        pending.swap(rocm_pending_states_);
+    }
+    for (auto& weak_state : pending) {
+        auto state = weak_state.lock();
+        if (!state) continue;  // handle + state already destroyed (dtor synced/released it)
+        if (state->rocm_event != nullptr) {
+            tenzor::rocm_transfer::event_sync(state->rocm_event);
+            state->rocm_event = nullptr;
+            state->completed.store(true, std::memory_order_release);
+            state->cv.notify_all();
+        }
+    }
+}
+
 auto TransferEngine::synchronize() -> void {
     {
         std::unique_lock lock(queue_mutex_);
@@ -1601,11 +1380,10 @@ auto TransferEngine::synchronize() -> void {
     }
 #endif
 
-#ifdef TENZOR_USE_ROCM
-    for (hipStream_t stream : hip_streams_) {
-        HIP_CHECK(hipStreamSynchronize(stream));
-    }
-#endif
+    // ROCm streams are owned by the isolated-TU rocm_transfer:: path (see the
+    // file-top comment); drain_rocm_pending_states() below is what actually
+    // syncs outstanding ROCm transfers. A direct hip_streams_ loop gated on
+    // TENZOR_USE_ROCM used to sit here but was dead code (FINDING 60).
 
 #ifdef TENZOR_USE_ONEAPI
     for (auto& queue : sycl_queues_) {
@@ -1616,6 +1394,8 @@ auto TransferEngine::synchronize() -> void {
         }
     }
 #endif
+
+    drain_rocm_pending_states();
 }
 
 auto TransferEngine::synchronize_stream(int stream_id) -> void {
@@ -1635,9 +1415,8 @@ auto TransferEngine::synchronize_stream(int stream_id) -> void {
     CUDA_CHECK(cudaStreamSynchronize(streams_[stream_id]));
 #endif
 
-#ifdef TENZOR_USE_ROCM
-    HIP_CHECK(hipStreamSynchronize(hip_streams_[stream_id]));
-#endif
+    // ROCm: see synchronize() -- a direct hip_streams_[stream_id] sync gated on
+    // TENZOR_USE_ROCM used to sit here but was dead code (FINDING 60).
 
 #ifdef TENZOR_USE_ONEAPI
     if (stream_id < static_cast<int>(sycl_queues_.size())) {
@@ -1648,6 +1427,13 @@ auto TransferEngine::synchronize_stream(int stream_id) -> void {
         }
     }
 #endif
+
+    // The ROCm isolated-TU async path has no per-stream affiliation (h2d_async/
+    // d2h_async take a device index, not a stream id), so there is no narrower
+    // "just this stream" semantics available for it -- drain all of them, same
+    // as synchronize(). Still correct: synchronize_stream(id) is documented as
+    // "at least as strong as" a targeted wait, never weaker.
+    drain_rocm_pending_states();
 }
 
 // ============================================================================

@@ -26,6 +26,44 @@
 
 namespace tenzor {
 
+namespace {
+
+// Staging buffers serve BOTH directions: CPU->GPU writes (HostToDevice) and
+// GPU->CPU reads (DeviceToHost, via memcpy out of the mapped pointer in
+// VulkanBackend::copy's DeviceToHost case). VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+// | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT alone, with no HOST_CACHED bit, was
+// the only property set ever requested here -- that combination is
+// satisfied by write-combined (uncached) system memory on most discrete-GPU
+// drivers (fast sequential CPU writes, but every CPU *read* misses cache and
+// pays a full round trip). That made GPU->CPU staging readback measured at
+// ~0.4 GB/s versus ~4-10 GB/s for CUDA/ROCm/OneAPI on the same host doing the
+// same 100MB transfer (see FINDING 25 / tests/core/test_transfer_engine.cpp's
+// BandwidthMeasurement_GPUToCPU) -- roughly a 10-20x self-inflicted penalty
+// for every Vulkan-backed ZeRO-offload readback, not a fundamentally slower
+// backend. Prefer an also-HOST_CACHED memory type (fine for writes too --
+// the GPU-side DMA read performance is independent of the host's cache
+// attributes) and fall back to the coherent-only combination on hardware
+// that doesn't expose a cached host-visible type (e.g. some unified-memory
+// integrated GPUs, where COHERENT-without-CACHED is often already about as
+// fast as it gets).
+auto makeStagingBuffer(VkDevice device, VkPhysicalDevice physicalDevice, VkDeviceSize size)
+        -> std::unique_ptr<vulkan::VulkanBuffer> {
+    constexpr VkBufferUsageFlags kUsage =
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    constexpr VkMemoryPropertyFlags kPreferred =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+        VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    constexpr VkMemoryPropertyFlags kFallback =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    try {
+        return std::make_unique<vulkan::VulkanBuffer>(device, physicalDevice, size, kUsage, kPreferred);
+    } catch (const std::exception&) {
+        return std::make_unique<vulkan::VulkanBuffer>(device, physicalDevice, size, kUsage, kFallback);
+    }
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Staging buffer pool implementation (9D)
 // ---------------------------------------------------------------------------
@@ -48,11 +86,7 @@ size_t VulkanBackend::StagingBufferPool::acquire(
     // Try to find a slot that is not in use but needs resizing (or is empty)
     for (size_t i = 0; i < buffers.size(); ++i) {
         if (!buffers[i].in_use) {
-            buffers[i].buffer = std::make_unique<vulkan::VulkanBuffer>(
-                ctx.device, ctx.physicalDevice, size,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-            );
+            buffers[i].buffer = makeStagingBuffer(ctx.device, ctx.physicalDevice, size);
             buffers[i].size = size;
             buffers[i].in_use = true;
             buffers[i].last_use_tick = current_tick;
@@ -71,11 +105,7 @@ size_t VulkanBackend::StagingBufferPool::acquire(
             }
         }
         if (oldest_idx != SIZE_MAX) {
-            buffers[oldest_idx].buffer = std::make_unique<vulkan::VulkanBuffer>(
-                ctx.device, ctx.physicalDevice, size,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-            );
+            buffers[oldest_idx].buffer = makeStagingBuffer(ctx.device, ctx.physicalDevice, size);
             buffers[oldest_idx].size = size;
             buffers[oldest_idx].in_use = true;
             buffers[oldest_idx].last_use_tick = current_tick;
@@ -86,11 +116,7 @@ size_t VulkanBackend::StagingBufferPool::acquire(
     // All slots are in use -- create a new one
     size_t idx = buffers.size();
     auto& sb = buffers.emplace_back();
-    sb.buffer = std::make_unique<vulkan::VulkanBuffer>(
-        ctx.device, ctx.physicalDevice, size,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
+    sb.buffer = makeStagingBuffer(ctx.device, ctx.physicalDevice, size);
     sb.size = size;
     sb.in_use = true;
     sb.last_use_tick = current_tick;

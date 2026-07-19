@@ -293,12 +293,30 @@ static void run_while_loop_replay_on(Device dev) {
 }
 
 TEST_F(ControlFlowIntegrationTest, WhileLoopReplayMatchesEagerForVariousTripCounts) {
+    // Finding 45: jit::while_loop/cond graph replay (Graph::forward
+    // executing OpType::Loop/OpType::If nodes) is a backend-generic
+    // interpreter path -- it dispatches an ordinary op (Add, a required-
+    // floor op registered on every backend) through the standard
+    // multi-backend dispatch table, not GPU-specific codegen. Previously
+    // only CPU/CUDA/ROCm were exercised here despite that; Vulkan and
+    // OneAPI are equally reachable and equally capable of a Loop-replay-
+    // specific bug (e.g. a stride/device-transfer/dtype issue when the
+    // interpreter re-runs the loop body) that this test's own docstring
+    // says the sibling test_jit_control_flow_inplace_fixes.cpp already
+    // covers "on all available backends (CPU, CUDA, ROCm, Vulkan, OneAPI)"
+    // for the identical category of test.
     run_while_loop_replay_on(Device::cpu());
     if (is_op_supported(OpId::Add, Device::Type::CUDA)) {
         run_while_loop_replay_on(Device::cuda(0));
     }
     if (is_op_supported(OpId::Add, Device::Type::ROCm)) {
         run_while_loop_replay_on(Device::rocm(0));
+    }
+    if (is_op_supported(OpId::Add, Device::Type::Vulkan)) {
+        run_while_loop_replay_on(Device::vulkan(0));
+    }
+    if (is_op_supported(OpId::Add, Device::Type::OneAPI)) {
+        run_while_loop_replay_on(Device::oneapi(0));
     }
 }
 

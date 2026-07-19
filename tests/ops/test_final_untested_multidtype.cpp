@@ -236,14 +236,6 @@ TEST_P(FinalUntestedMultiDTypeTest, NestedFamilyFromPaddedLinearToPadded) {
         SKIP_WITH_REASON(SkipReason::DtypeUnsupportedOnBackend,
                          "NestedTensor ops are Float32-only in this build");
     }
-    if (device().type != Device::Type::CPU) {
-        // The nested_linear CPU reference is the only backend-agnostic path
-        // today. Other backends may redispatch to CPU or fail outright —
-        // skip to keep this test deterministic and cross-backend-safe.
-        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
-                         "NestedTensor path is CPU-only in this build");
-    }
-
     // Padded input: shape [B=2, max_len=4, features=8]. Lengths per batch
     // element: 3 and 4 — row 0 of the batch is padded in its last position.
     auto padded = randn({2, 4, 8}, DType::Float32, Device::cpu());

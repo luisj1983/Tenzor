@@ -78,6 +78,7 @@ enum class SkipReason {
     KernelNotImplemented,         // feature is genuinely TODO
     RequiresMultiGPU,             // multi-device distributed coverage
     KnownBug,                     // track with issue #; do not paper over
+    MissingPerfBaseline,          // host has no committed perf-baseline entry
 };
 
 inline const char* skip_reason_string(SkipReason r) {
@@ -91,6 +92,7 @@ inline const char* skip_reason_string(SkipReason r) {
         case SkipReason::KernelNotImplemented:       return "KernelNotImplemented";
         case SkipReason::RequiresMultiGPU:           return "RequiresMultiGPU";
         case SkipReason::KnownBug:                   return "KnownBug";
+        case SkipReason::MissingPerfBaseline:        return "MissingPerfBaseline";
     }
     return "Unknown";
 }
@@ -439,6 +441,21 @@ protected:
         // hard FAIL instead of a skip — surfaces broken CI environments.
         // TENZOR_SKIP_BACKENDS wins over this, already handled above.
         if (!isBackendNameAvailable(backend_name)) {
+#ifndef __APPLE__
+            // MPS is structurally unbuildable off Apple platforms
+            // (CMakeLists.txt only defines TENZOR_BUILD_MPS if(APPLE)), and
+            // required_ops.hpp documents it as "out of scope per the audit
+            // plan". Escalating "unavailable" to FAIL() here would turn a
+            // permanent, documented platform limitation into a false mass
+            // regression on every non-Apple CI runner. Exempt MPS from
+            // escalation on non-Apple builds; it still (correctly) skips
+            // below. On Apple builds MPS gets no exemption and follows the
+            // same escalation rule as every other backend.
+            if (parseBackendName(backend_name) == "mps") {
+                GTEST_SKIP() << backend_name
+                             << " backend not available (MPS requires Apple hardware)";
+            }
+#endif
             const char* req = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
             if (req && *req && *req != '0' &&
                 parseBackendName(backend_name) != "cpu") {
@@ -1013,7 +1030,7 @@ inline bool MultiDTypeTest::initialized_ = false;
  * @brief Generate all combinations of backends and dtypes
  */
 inline auto GenerateBackendDTypeParams(
-    const std::vector<std::string>& backends = {"cpu", "cuda", "oneapi"},
+    const std::vector<std::string>& backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm", "mps"},
     const std::vector<DType>& dtypes = {DType::Float32, DType::Float64, DType::Float16}) {
 
     std::vector<BackendDTypeParam> params;

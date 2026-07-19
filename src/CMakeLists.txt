@@ -14,6 +14,7 @@ set(TENZOR_CORE_SOURCES
     core/transfer_engine.cpp
     core/pinned_allocator.cpp
     core/offload_engine.cpp
+    core/gpu_stream_ops.cpp
     core/device_guard.cpp
     core/generator.cpp
     backend/backend.cpp
@@ -623,6 +624,21 @@ if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
             # <hip/hip_fp16.h> / <hip/hip_bf16.h> (Float16/BFloat16 fusions).
             TENZOR_HIPRTC_INCLUDE="${_ROCM_ROOT}/include"
         )
+        # NOTE (FINDING 60, resolved): ddp.cpp/fsdp.cpp/zero_optimizer.cpp used
+        # to guard their dedicated comm-stream/event overlap code on
+        # TENZOR_USE_ROCM, compile-time-mutually-exclusive with
+        # TENZOR_USE_CUDA -- which is defined tenzor_core-wide, so the ROCm
+        # branch could never be reached on this combined CUDA+ROCm build no
+        # matter what. Scoping TENZOR_USE_ROCM per-file wouldn't have helped
+        # either (same #elif precedence issue) and would additionally have
+        # collided <hip/hip_runtime.h> against <cuda_runtime.h> in the same TU
+        # (~30 make_*N/dim3 redefinition errors, proved by actually trying it).
+        # Fixed by moving stream/event creation into
+        # include/tenzor/core/gpu_stream_ops.hpp, which dispatches at RUNTIME
+        # on the tensors' actual Device::Type: CUDA calls go straight through,
+        # ROCm calls route through the isolated rocm_transfer.hip.cpp TU below
+        # via its opaque void*-based API. No TENZOR_USE_ROCM define needed
+        # anywhere for these three files anymore.
         target_include_directories(tenzor_core PRIVATE
             ${_ROCM_ROOT}/include
         )

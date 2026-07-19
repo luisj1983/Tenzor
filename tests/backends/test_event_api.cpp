@@ -165,6 +165,99 @@ TEST_F(EventAPITest, ROCmEventRecordAndElapsed) {
     rocm->destroy_stream(stream);
 }
 
+// Test OneAPI events if available (see FINDING 24 in findings.txt: OneAPI's
+// SYCL barrier-based create_event/record_event/wait_event/event_elapsed_ms
+// had zero test coverage despite being just as real an implementation as
+// CUDA/ROCm's).
+TEST_F(EventAPITest, OneAPIEventCreateDestroy) {
+    if (!isBackendAvailable("oneapi")) {
+        GTEST_SKIP() << "OneAPI not available";
+    }
+
+    auto& loader = backend_registry();
+    auto* oneapi = loader.get_backend("oneapi");
+
+    auto event = oneapi->create_event(0, true);
+    EXPECT_NE(event, nullptr);
+
+    oneapi->destroy_event(event);
+}
+
+TEST_F(EventAPITest, OneAPIEventRecordAndWait) {
+    if (!isBackendAvailable("oneapi")) {
+        GTEST_SKIP() << "OneAPI not available";
+    }
+
+    auto& loader = backend_registry();
+    auto* oneapi = loader.get_backend("oneapi");
+
+    auto stream = oneapi->create_stream(0);
+    auto event = oneapi->create_event(0, true);
+
+    // Record event on stream (SYCL barrier via ext_oneapi_submit_barrier)
+    oneapi->record_event(event, stream);
+
+    // Wait on event (should complete immediately since stream is empty)
+    oneapi->wait_event(event, nullptr);
+
+    oneapi->destroy_event(event);
+    oneapi->destroy_stream(stream);
+}
+
+TEST_F(EventAPITest, OneAPIEventElapsedTime) {
+    if (!isBackendAvailable("oneapi")) {
+        GTEST_SKIP() << "OneAPI not available";
+    }
+
+    auto& loader = backend_registry();
+    auto* oneapi = loader.get_backend("oneapi");
+
+    auto stream = oneapi->create_stream(0);
+    auto start = oneapi->create_event(0, true);
+    auto end = oneapi->create_event(0, true);
+
+    // Record start, do some work, record end
+    oneapi->record_event(start, stream);
+
+    // Run a matmul to generate measurable GPU work
+    auto a = randn({512, 512}, DType::Float32, Device::oneapi(0));
+    auto b = randn({512, 512}, DType::Float32, Device::oneapi(0));
+    auto c = matmul(a, b);
+
+    oneapi->record_event(end, stream);
+
+    // event_elapsed_ms uses get_profiling_info<command_end> — exercises the
+    // profiling-info-based elapsed time computation specifically.
+    float elapsed = oneapi->event_elapsed_ms(start, end);
+    EXPECT_GE(elapsed, 0.0f);
+
+    // Same event used as both endpoints must produce exactly 0.
+    EXPECT_FLOAT_EQ(oneapi->event_elapsed_ms(start, start), 0.0f);
+
+    oneapi->destroy_event(start);
+    oneapi->destroy_event(end);
+    oneapi->destroy_stream(stream);
+}
+
+TEST_F(EventAPITest, OneAPIEventNoTiming) {
+    if (!isBackendAvailable("oneapi")) {
+        GTEST_SKIP() << "OneAPI not available";
+    }
+
+    auto& loader = backend_registry();
+    auto* oneapi = loader.get_backend("oneapi");
+
+    auto event = oneapi->create_event(0, false);  // timing disabled
+    EXPECT_NE(event, nullptr);
+
+    auto stream = oneapi->create_stream(0);
+    oneapi->record_event(event, stream);
+    oneapi->wait_event(event, stream);
+
+    oneapi->destroy_event(event);
+    oneapi->destroy_stream(stream);
+}
+
 // Test event with timing disabled
 TEST_F(EventAPITest, CUDAEventNoTiming) {
     if (!isBackendAvailable("cuda")) {

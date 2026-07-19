@@ -24,6 +24,7 @@
 #include <tenzor/ops/math.hpp>
 #include <memory>
 #include <vector>
+#include "../../backend_test_fixture.hpp"  // FINDING 25: BackendTest -- parametrized GPU device
 
 using namespace tenzor;
 using namespace tenzor::optim;
@@ -101,16 +102,6 @@ protected:
             params.push_back(param);
         }
         return params;
-    }
-
-    // Helper: Check if CUDA is available by attempting to create a tensor
-    static bool cuda_available() {
-        try {
-            auto test_tensor = ones({1}, DType::Float32, Device::cuda(0));
-            return true;
-        } catch (...) {
-            return false;
-        }
     }
 
     // Helper: Create test model
@@ -704,39 +695,9 @@ TEST_F(ZeROStage2Test, CPUOffloadGradientsMemoryLocation) {
     EXPECT_EQ(stats.num_local_parameters, 50);
 }
 
-TEST_F(ZeROStage2Test, CPUOffloadFromGPU) {
-    // This test requires CUDA - skip if not available
-    if (!cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping GPU offload test";
-    }
-
-    // Create parameters on GPU
-    auto params = create_test_params(10, {128, 128}, Device::cuda(0));
-
-    // Verify params are on GPU
-    for (const auto& param : params) {
-        ASSERT_EQ(param->tensor().device().type, Device::Type::CUDA);
-    }
-
-    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
-
-    ZeROStage2Config config = default_config;
-    config.offload_to_cpu = true;
-    config.cpu_offload_threshold = 1024;
-
-    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
-
-    // Attach gradients on GPU
-    for (auto& param : params) {
-        param->set_grad(ones_like(param->tensor()));
-    }
-
-    EXPECT_TRUE(optimizer.is_cpu_offload_enabled());
-    EXPECT_NO_THROW(optimizer.step());
-
-    auto stats = optimizer.get_memory_stats();
-    EXPECT_EQ(stats.num_local_parameters, 10);
-}
+// FINDING 25: CPUOffloadFromGPU moved to the parametrized
+// ZeROStage2GpuOffloadTest fixture at the end of this file (was hardcoded to
+// Device::cuda(0) and skipped entirely off CUDA hardware).
 
 TEST_F(ZeROStage2Test, CPUOffloadGradientsThreshold) {
     auto params = create_test_params(10, {8, 8});  // Small params
@@ -1085,6 +1046,88 @@ TEST_F(ZeROStage2Test, ElementLevel_PeakBucketMemoryBoundedByPerRankSlice) {
             << (b.global_end - b.global_start) << " is not a multiple of world_size " << W;
     }
 }
+
+// ============================================================================
+// GPU Offload Tests (FINDING 25)
+// ============================================================================
+// CPUOffloadFromGPU actually exercises ZeRO Stage 2's GPU->CPU gradient
+// offload path (as opposed to the rest of this file, which is backend-
+// agnostic CPU logic and stays TEST_F/::testing::Test). It used to be
+// hardcoded to Device::cuda(0) and skipped entirely off CUDA hardware, so
+// ROCm/Vulkan/OneAPI's TransferEngine-backed offload never got exercised.
+class ZeROStage2GpuOffloadTest : public tenzor::testing::BackendTest {
+protected:
+    void SetUp() override {
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
+        default_config.world_size = 1;  // Single process mode
+        default_config.rank = 0;
+        default_config.offload_to_cpu = false;
+        default_config.cpu_offload_threshold = 1024;  // 1KB
+        default_config.overlap_comm = true;
+        default_config.pin_memory = true;
+        default_config.process_group = nullptr;  // Single-process mode
+    }
+
+    // Helper: Create test parameters on a specific device
+    auto create_test_params(size_t count, const std::vector<int64_t>& shape,
+                           Device param_device)
+        -> std::vector<std::shared_ptr<Variable>> {
+        std::vector<std::shared_ptr<Variable>> params;
+        params.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            auto param = std::make_shared<Variable>(
+                ones(shape, DType::Float32, param_device),
+                true
+            );
+            params.push_back(param);
+        }
+        return params;
+    }
+
+    ZeROStage2Config default_config;
+};
+
+TEST_P(ZeROStage2GpuOffloadTest, CPUOffloadFromGPU) {
+    // Create parameters on GPU
+    auto params = create_test_params(10, {128, 128}, device);
+
+    // Verify params are on GPU
+    for (const auto& param : params) {
+        ASSERT_EQ(param->tensor().device().type, device.type);
+    }
+
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage2Config config = default_config;
+    config.offload_to_cpu = true;
+    config.cpu_offload_threshold = 1024;
+
+    ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
+
+    // Attach gradients on GPU
+    for (auto& param : params) {
+        param->set_grad(ones_like(param->tensor()));
+    }
+
+    EXPECT_TRUE(optimizer.is_cpu_offload_enabled());
+    EXPECT_NO_THROW(optimizer.step());
+
+    auto stats = optimizer.get_memory_stats();
+    EXPECT_EQ(stats.num_local_parameters, 10);
+}
+
+// FINDING 25: exercise every real (non-stub) ZeRO GPU-offload backend, not
+// just CUDA.
+INSTANTIATE_TEST_SUITE_P(
+    GpuBackends,
+    ZeROStage2GpuOffloadTest,
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    }
+);
 
 // ============================================================================
 // Main

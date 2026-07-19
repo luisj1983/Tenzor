@@ -1403,10 +1403,10 @@ PYBIND11_MODULE(tenzor_core, m) {
     struct PyAutocastContext {
         bool enabled_;
         tenzor::DType dtype_;
-        tenzor::Device::Type device_type_;
+        std::optional<tenzor::Device::Type> device_type_;
         std::unique_ptr<tenzor::nn::amp::Autocast> guard_;
 
-        PyAutocastContext(bool enabled, tenzor::DType dtype, tenzor::Device::Type device_type)
+        PyAutocastContext(bool enabled, tenzor::DType dtype, std::optional<tenzor::Device::Type> device_type)
             : enabled_(enabled), dtype_(dtype), device_type_(device_type) {}
 
         PyAutocastContext(const PyAutocastContext&) = delete;
@@ -1448,11 +1448,14 @@ PYBIND11_MODULE(tenzor_core, m) {
                 with tz.amp.Autocast():
                     output = model(input)  # Ops auto-cast to FP16
         )pbdoc")
-        .def(py::init<bool, tenzor::DType, tenzor::Device::Type>(),
+        .def(py::init<bool, tenzor::DType, std::optional<tenzor::Device::Type>>(),
              py::arg("enabled") = true,
              py::arg("dtype") = tenzor::DType::Float16,
-             py::arg("device_type") = tenzor::Device::Type::CUDA,
-             "Create autocast context")
+             py::arg("device_type") = py::none(),
+             "Create autocast context. device_type defaults to None, which "
+             "applies device-agnostically to whichever device an op actually "
+             "runs on (matching the C++ Autocast class's own default) — pass "
+             "an explicit tz.Device.Type to restrict to one backend.")
         .def("__enter__", [](PyAutocastContext& self) -> PyAutocastContext& {
             self.enter();
             return self;

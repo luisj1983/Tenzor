@@ -151,7 +151,7 @@ TEST_P(IndexingParity, MaskedSelect) {
     auto [ref_sorted_v, ref_indices] = sort(Variable(ref.to(Device::cpu()), false), 0);
             auto ref_sorted = ref_sorted_v.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         auto backend = backends[i];
         try {
             auto inp_dev = input.to(backend);
@@ -462,7 +462,7 @@ TEST_P(IndexingParity, Nonzero) {
     auto ref = nonzero(input);
     auto ref_cpu = ref.to(Device::cpu());
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         auto backend = backends[i];
         try {
             auto inp_dev = input.to(backend);

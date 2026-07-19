@@ -436,11 +436,20 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 // Linear Kernels (using rocBLAS)
 // ============================================================================
 
-auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+auto linear_kernel(const Tensor& input_arg, const Tensor& weight_arg, const Tensor* bias,
                    hipStream_t stream) -> Tensor {
     // input: [*, in_features] or [batch, in_features]
     // weight: [out_features, in_features]
     // output: [*, out_features]
+
+    // F124 (see linear_backward_kernel below): rocBLAS reads these with
+    // leading dimensions derived from the logical shape, so a non-contiguous
+    // view (e.g. a per-timestep slice of a batch_first-transposed LSTM input,
+    // or any other strided view) would be read with the wrong strides and
+    // silently produce a wrong result. Materialise contiguous copies first,
+    // as CPU/CUDA/OneAPI/Vulkan all do (see cublas_ops.cu's linear_kernel).
+    Tensor input = input_arg.is_contiguous() ? input_arg : input_arg.contiguous();
+    Tensor weight = weight_arg.is_contiguous() ? weight_arg : weight_arg.contiguous();
 
     auto in_shape = input.shape();
     auto w_shape = weight.shape();

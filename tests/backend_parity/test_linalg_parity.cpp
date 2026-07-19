@@ -67,7 +67,7 @@ TEST_P(LinalgParity, Det) {
     // exception propagate as a test failure rather than masking it as a skip.
     Tensor ref = linalg::det(A);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto result = linalg::det(A_dev);
@@ -106,7 +106,7 @@ TEST_P(LinalgParity, Inv) {
     auto ref_product = matmul(A, ref_inv);
     EXPECT_TENSORS_CLOSE(ref_product, I, 1e-4f, 1e-5f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto inv_dev = linalg::inv(A_dev);
@@ -139,7 +139,7 @@ TEST_P(LinalgParity, Solve) {
     auto reconstructed = matmul(A, ref_x);
     EXPECT_TENSORS_CLOSE(reconstructed, b, 1e-4f, 1e-5f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto b_dev = b.to(backends[i]);
@@ -178,7 +178,7 @@ TEST_P(LinalgParity, SVD) {
     auto ref_recon = matmul(matmul(ref_U, S_diag), ref_Vh);
     EXPECT_TENSORS_CLOSE(ref_recon, A, 1e-3f, 1e-4f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto [U, S, Vh] = linalg::svd(A_dev, /*full_matrices=*/false);
@@ -212,7 +212,7 @@ TEST_P(LinalgParity, QR) {
     auto ref_recon = matmul(ref_Q, ref_R);
     EXPECT_TENSORS_CLOSE(ref_recon, A, 1e-4f, 1e-5f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto [Q, R] = linalg::qr(A_dev);
@@ -247,7 +247,7 @@ TEST_P(LinalgParity, Eigh) {
     auto Vr = matmul(ref_eigenvectors, diag(ref_eigenvalues));
     EXPECT_TENSORS_CLOSE(Vl, Vr, 1e-3f, 1e-4f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto [eigenvalues, eigenvectors] = linalg::eigh(A_dev);
@@ -293,7 +293,7 @@ TEST_P(LinalgParity, Eigh_LargeBatched) {
     Tensor ref_vals, ref_vecs;
     std::tie(ref_vals, ref_vecs) = linalg::eigh(A);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto [vals, vecs] = linalg::eigh(A_dev);
@@ -580,7 +580,7 @@ TEST_P(LinalgParity, Cholesky) {
     auto ref_recon = matmul(ref_L, Lt);
     EXPECT_TENSORS_CLOSE(ref_recon, A, 1e-4f, 1e-5f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto L = linalg::cholesky(A_dev);
@@ -618,7 +618,7 @@ TEST_P(LinalgParity, LU) {
     // Alternatively, just check L @ U reconstruction is consistent across backends.
     auto ref_recon = matmul(ref_L, ref_U);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto [L, U, pivots] = linalg::lu(A_dev);
@@ -705,7 +705,7 @@ TEST_P(LinalgParity, SolveTriangular) {
     auto reconstructed = matmul(A, ref_x);
     EXPECT_TENSORS_CLOSE(reconstructed, b, 1e-4f, 1e-5f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto A_dev = A.to(backends[i]);
             auto b_dev = b.to(backends[i]);

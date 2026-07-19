@@ -76,7 +76,7 @@ void run_layernorm_parity(int64_t D, const std::vector<int64_t>& lens) {
         ref_grad_bias = b.grad().value();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto values_dev = values_cpu.to(backends[i]);
             auto offsets_dev = offsets_cpu.to(backends[i]);

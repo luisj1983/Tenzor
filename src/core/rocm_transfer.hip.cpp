@@ -55,6 +55,29 @@ auto do_copy(void* dst, const void* src, std::size_t bytes, int device, hipMemcp
     std::call_once(g_init_flag, init_streams);
     (void)hipSetDevice(device);
     hipStream_t stream = g_streams[g_round_robin.fetch_add(1, std::memory_order_relaxed) % kNumStreams];
+
+    // FINDING 25: g_streams are created hipStreamNonBlocking specifically so
+    // transfers overlap with compute on the default stream -- but that
+    // explicitly OPTS OUT of the implicit ordering the (legacy) default
+    // stream would otherwise give for free. For a DeviceToHost/HostToDevice
+    // copy whose `src`/`dst` device buffer was JUST produced/will be
+    // consumed by regular tensor-op kernels (dispatched on the default
+    // stream by the normal ROCm kernel-dispatch path, not through this
+    // isolated TU), nothing here ever waited for that producer/consumer
+    // kernel to reach the GPU before the DMA on g_streams[i] started/
+    // finished -- a genuine missing cross-stream dependency, not just a
+    // theoretical race: reproduced via OffloadContext's Int8-with-scale
+    // parameter offload (quantize kernels write `src` on the default
+    // stream, then gpu_to_cpu_async's ROCm path lands here), where later
+    // parameters in a multi-tensor offload loop non-deterministically read
+    // stale/partially-written GPU memory, corrupting the dequantized
+    // result. A full device sync before the copy is the safe fix (we don't
+    // know which stream the producer/consumer kernel used); this only
+    // covers the case where SOME other in-flight work needs to complete
+    // before this DMA. Once issued, the copy itself is still async on its
+    // own non-blocking stream as intended.
+    (void)hipDeviceSynchronize();
+
     // A nullptr return means "no event / nothing to wait on" and callers treat
     // it as already-completed (see transfer_engine cpu_to_gpu_async). A failed
     // DMA must therefore NOT share that sentinel, or the never-filled
@@ -92,6 +115,76 @@ auto event_sync(void* event) -> void {
 auto event_ready(void* event) -> bool {
     if (event == nullptr) return true;
     return hipEventQuery(static_cast<hipEvent_t>(event)) == hipSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// Generic stream/event primitives (FINDING 60 — DDP/FSDP/ZeRO comm overlap).
+// Unlike h2d_async/d2h_async's pooled streams/events, these are owned
+// 1:1 by the caller (mirrors cudaStreamCreate/cudaEventCreate lifecycle).
+// ---------------------------------------------------------------------------
+
+auto stream_create() -> void* {
+    hipStream_t stream = nullptr;
+    if (hipError_t err = hipStreamCreateWithFlags(&stream, hipStreamNonBlocking);
+        err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("rocm_transfer::stream_create: ") + hipGetErrorString(err));
+    }
+    return static_cast<void*>(stream);
+}
+
+auto stream_destroy(void* stream) -> void {
+    if (stream == nullptr) return;
+    (void)hipStreamDestroy(static_cast<hipStream_t>(stream));
+}
+
+auto event_create() -> void* {
+    hipEvent_t event = nullptr;
+    if (hipError_t err = hipEventCreateWithFlags(&event, hipEventDisableTiming);
+        err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("rocm_transfer::event_create: ") + hipGetErrorString(err));
+    }
+    return static_cast<void*>(event);
+}
+
+auto event_destroy(void* event) -> void {
+    if (event == nullptr) return;
+    (void)hipEventDestroy(static_cast<hipEvent_t>(event));
+}
+
+auto event_record(void* event, void* stream) -> void {
+    if (event == nullptr) return;
+    if (hipError_t err = hipEventRecord(static_cast<hipEvent_t>(event),
+                                         static_cast<hipStream_t>(stream));
+        err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("rocm_transfer::event_record: ") + hipGetErrorString(err));
+    }
+}
+
+auto stream_wait_event(void* stream, void* event) -> void {
+    if (event == nullptr) return;
+    if (hipError_t err = hipStreamWaitEvent(static_cast<hipStream_t>(stream),
+                                             static_cast<hipEvent_t>(event), 0);
+        err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("rocm_transfer::stream_wait_event: ") + hipGetErrorString(err));
+    }
+}
+
+auto stream_synchronize(void* stream) -> void {
+    if (stream == nullptr) return;
+    if (hipError_t err = hipStreamSynchronize(static_cast<hipStream_t>(stream));
+        err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("rocm_transfer::stream_synchronize: ") + hipGetErrorString(err));
+    }
+}
+
+auto mem_get_info(int device, std::size_t* free_bytes, std::size_t* total_bytes) -> bool {
+    (void)hipSetDevice(device);
+    return hipMemGetInfo(free_bytes, total_bytes) == hipSuccess;
 }
 
 }  // namespace rocm_transfer

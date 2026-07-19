@@ -750,6 +750,94 @@ TEST_P(GradCheckComprehensiveTest, DivComplexBackwardMatchesWirtinger) {
     }
 }
 
+// FINDING 19: masked_fill/masked_select and conj/real/imag had zero
+// gradcheck coverage on any backend despite forward-parity coverage
+// (test_indexing_parity.cpp, test_complex_parity.cpp). masked_fill/
+// masked_select operate on real-valued tensors, so the standard
+// finite-difference gradcheck() applies directly.
+TEST_P(GradCheckComprehensiveTest, MaskedFill) {
+    auto x = make_var({4, 6}, device);
+    auto mask_cpu = zeros({4, 6}, DType::Bool, Device::cpu());
+    auto* mask_data = mask_cpu.data<bool>();
+    for (int64_t i = 0; i < 24; ++i) mask_data[i] = (i % 3 == 0);
+    auto mask = mask_cpu.to(device);
+    auto f = [&mask](const Variable& v) { return masked_fill(v, mask, 0.0); };
+    EXPECT_TRUE(gradcheck(f, x));
+}
+
+TEST_P(GradCheckComprehensiveTest, MaskedSelect) {
+    auto x = make_var({4, 6}, device);
+    auto mask_cpu = zeros({4, 6}, DType::Bool, Device::cpu());
+    auto* mask_data = mask_cpu.data<bool>();
+    for (int64_t i = 0; i < 24; ++i) mask_data[i] = (i % 2 == 0);
+    auto mask = mask_cpu.to(device);
+    auto f = [&mask](const Variable& v) { return masked_select(v, mask); };
+    EXPECT_TRUE(gradcheck(f, x));
+}
+
+// conj/real/imag take COMPLEX input, which neither gradcheck() (real-only)
+// nor gradcheck_complex() (real-input-only, per its own doc comment)
+// supports — so, like DivComplexBackwardMatchesWirtinger above, these check
+// backward() directly against a host-computed analytic reference.
+TEST_P(GradCheckComprehensiveTest, ConjBackwardMatchesWirtinger) {
+    std::complex<float> z_data[] = {{1.0f, 2.0f}, {-0.5f, 0.5f}, {3.0f, -1.5f}};
+    auto z_t = Tensor::from_blob(z_data, {3}, DType::Complex64, Device::cpu()).clone().to(device);
+    Variable z(z_t, true);
+
+    Variable y = tenzor::conj(z);
+    ASSERT_NO_THROW(y.backward(tenzor::ones_like(y.tensor())));
+    ASSERT_TRUE(z.has_grad());
+
+    auto gz = z.grad()->to(Device::cpu());
+    auto* gz_p = gz.data<std::complex<float>>();
+    for (int i = 0; i < 3; ++i) {
+        // grad_z = conj(grad_y); grad_y seeded as ones, so grad_z = conj(1) = 1.
+        std::complex<float> expected = std::conj(std::complex<float>(1.0f, 0.0f));
+        EXPECT_NEAR(gz_p[i].real(), expected.real(), 1e-5f) << "i=" << i;
+        EXPECT_NEAR(gz_p[i].imag(), expected.imag(), 1e-5f) << "i=" << i;
+    }
+}
+
+TEST_P(GradCheckComprehensiveTest, RealBackwardMatchesPyTorchContract) {
+    std::complex<float> z_data[] = {{1.0f, 2.0f}, {-0.5f, 0.5f}, {3.0f, -1.5f}};
+    auto z_t = Tensor::from_blob(z_data, {3}, DType::Complex64, Device::cpu()).clone().to(device);
+    Variable z(z_t, true);
+
+    Variable y = tenzor::real(z);
+    EXPECT_EQ(y.tensor().dtype(), DType::Float32);
+    auto grad_seed = full({3}, 1.0f, DType::Float32, device);
+    ASSERT_NO_THROW(y.backward(grad_seed));
+    ASSERT_TRUE(z.has_grad());
+
+    auto gz = z.grad()->to(Device::cpu());
+    auto* gz_p = gz.data<std::complex<float>>();
+    for (int i = 0; i < 3; ++i) {
+        // grad_z = complex(grad_y, 0) (audit-7 DD.1, no 0.5 Wirtinger factor).
+        EXPECT_NEAR(gz_p[i].real(), 1.0f, 1e-5f) << "i=" << i;
+        EXPECT_NEAR(gz_p[i].imag(), 0.0f, 1e-5f) << "i=" << i;
+    }
+}
+
+TEST_P(GradCheckComprehensiveTest, ImagBackwardMatchesPyTorchContract) {
+    std::complex<float> z_data[] = {{1.0f, 2.0f}, {-0.5f, 0.5f}, {3.0f, -1.5f}};
+    auto z_t = Tensor::from_blob(z_data, {3}, DType::Complex64, Device::cpu()).clone().to(device);
+    Variable z(z_t, true);
+
+    Variable y = tenzor::imag(z);
+    EXPECT_EQ(y.tensor().dtype(), DType::Float32);
+    auto grad_seed = full({3}, 1.0f, DType::Float32, device);
+    ASSERT_NO_THROW(y.backward(grad_seed));
+    ASSERT_TRUE(z.has_grad());
+
+    auto gz = z.grad()->to(Device::cpu());
+    auto* gz_p = gz.data<std::complex<float>>();
+    for (int i = 0; i < 3; ++i) {
+        // grad_z = complex(0, grad_y) (audit-7 DD.2, no -0.5j Wirtinger factor).
+        EXPECT_NEAR(gz_p[i].real(), 0.0f, 1e-5f) << "i=" << i;
+        EXPECT_NEAR(gz_p[i].imag(), 1.0f, 1e-5f) << "i=" << i;
+    }
+}
+
 TEST_P(GradCheckComprehensiveTest, IFFT) {
     auto x = make_centered_var({8}, device);
     auto f = [](const Variable& v) {

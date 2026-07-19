@@ -8,8 +8,15 @@
  *
  * The fake PG implements collectives as if every peer held a copy of *this*
  * rank's input — so the shapes and call counts are checkable end-to-end
- * without spawning processes. Real multi-rank reduction semantics are
- * verified by plan K3's multi-process distributed test job.
+ * without spawning processes. Real multi-rank reduction semantics (does
+ * Shard→Replicate's all_gather actually concatenate DIFFERENT peers' real
+ * data in the right order, does Partial→Replicate's all_reduce actually sum
+ * DIFFERENT peers' real values, etc. -- none of which "every peer holds a
+ * copy of my own input" can catch) are verified by MultiRankB2Test below: a
+ * real 2-process GlooProcessGroup, launched via
+ * tests/distributed/run_multirank_test.sh (FINDING 21 "plan K3" -- the
+ * multi-process C++ test job this file used to defer to but which never
+ * existed).
  */
 
 #include <gtest/gtest.h>
@@ -20,6 +27,7 @@
 #include <tenzor/distributed/distributed.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/transform.hpp>
+#include <cstdlib>
 
 using namespace tenzor;
 using namespace tenzor::distributed;
@@ -244,4 +252,181 @@ TEST_F(B2Test, InvalidTransition_ReplicateToPartial_Throws) {
     DTensor d(local, mesh, {Replicate{}});
     EXPECT_THROW(d.redistribute({Partial{DTensorReduceOp::Sum}}),
                  std::runtime_error);
+}
+
+// ============================================================================
+// Multi-rank tests (real GlooProcessGroup, real OS processes) — FINDING 21
+// ============================================================================
+namespace {
+
+class MultiRankB2Test : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() { tenzor::initialize(); }
+
+    void SetUp() override {
+        const char* rank_env = std::getenv("RANK");
+        const char* world_size_env = std::getenv("WORLD_SIZE");
+        if (!rank_env || !world_size_env) {
+            GTEST_SKIP() << "Distributed environment not available (RANK, WORLD_SIZE not set)";
+        }
+        rank_ = std::atoi(rank_env);
+        world_size_ = std::atoi(world_size_env);
+        if (world_size_ != 2) {
+            GTEST_SKIP() << "MultiRankB2Test is written for exactly 2 ranks";
+        }
+
+        const char* addr_env = std::getenv("MASTER_ADDR");
+        const char* port_env = std::getenv("MASTER_PORT");
+        std::string addr = addr_env ? addr_env : "127.0.0.1";
+        int port = port_env ? std::atoi(port_env) : 29500;
+        pg_ = std::make_shared<GlooProcessGroup>(rank_, world_size_, addr, port);
+
+        mesh_ = std::make_shared<DeviceMesh>(
+            Device::Type::CPU, std::vector<int64_t>{world_size_},
+            std::vector<std::string>{"x"}, /*mesh_rank=*/rank_);
+        mesh_->set_process_group(pg_);
+    }
+
+    void TearDown() override {
+        if (pg_) {
+            pg_->barrier();
+            pg_.reset();
+        }
+    }
+
+    static auto seq_tensor(std::vector<int64_t> shape) -> Tensor {
+        Tensor t = zeros(shape, DType::Float32, Device::cpu());
+        auto* p = t.data<float>();
+        int64_t n = t.numel();
+        for (int64_t i = 0; i < n; ++i) p[i] = static_cast<float>(i);
+        return t;
+    }
+
+    int rank_{-1};
+    int world_size_{-1};
+    std::shared_ptr<GlooProcessGroup> pg_;
+    std::shared_ptr<DeviceMesh> mesh_;
+};
+
+} // namespace
+
+// Each rank's local shard holds DIFFERENT, rank-identifiable data (unlike
+// SelfAsEveryonePG, where every "peer" is a copy of the caller's own input).
+// After Shard(0)->Replicate, every rank must see the TRUE global tensor --
+// rank 0's rows followed by rank 1's rows, in the correct order -- proving
+// the real all_gather actually moved each peer's own data, not just that a
+// collective of the right shape was called.
+TEST_F(MultiRankB2Test, ShardToReplicate_RealAllGatherAcrossRanks) {
+    Tensor local = zeros({3, 4}, DType::Float32, Device::cpu());
+    {
+        auto* p = local.data<float>();
+        for (int64_t i = 0; i < 12; ++i) p[i] = static_cast<float>(rank_ * 100 + i);
+    }
+
+    DTensor d(local, mesh_, {Shard{0}});
+    auto result = d.redistribute({Replicate{}});
+
+    auto shape = result.local_tensor().shape();
+    ASSERT_EQ(shape.size(), 2u);
+    EXPECT_EQ(shape[0], 6);
+    EXPECT_EQ(shape[1], 4);
+
+    auto cpu_full = result.local_tensor().to(Device::cpu()).contiguous();
+    const float* fp = cpu_full.data<float>();
+    for (int r = 0; r < world_size_; ++r) {
+        for (int64_t i = 0; i < 12; ++i) {
+            float expected = static_cast<float>(r * 100 + i);
+            EXPECT_FLOAT_EQ(fp[r * 12 + i], expected)
+                << "rank " << rank_ << " reading peer " << r << "'s row-block, element " << i;
+        }
+    }
+}
+
+// Every rank contributes a DIFFERENT Partial value (ones() * (rank+1)); the
+// real all_reduce SUM must combine all of them, not just replay one rank's
+// own contribution scaled by world_size (which is all SelfAsEveryonePG can
+// simulate).
+TEST_F(MultiRankB2Test, PartialToReplicate_RealAllReduceAcrossRanks) {
+    Tensor local = full({3, 4}, static_cast<double>(rank_ + 1), DType::Float32, Device::cpu());
+    DTensor d(local, mesh_, {Partial{DTensorReduceOp::Sum}});
+    auto result = d.redistribute({Replicate{}});
+
+    double expected_sum = 0.0;
+    for (int r = 0; r < world_size_; ++r) expected_sum += (r + 1);
+
+    auto cpu_result = result.local_tensor().to(Device::cpu()).contiguous();
+    const float* p = cpu_result.data<float>();
+    for (int64_t i = 0; i < cpu_result.numel(); ++i) {
+        EXPECT_NEAR(p[i], static_cast<float>(expected_sum), 1e-4f)
+            << "rank " << rank_ << " element " << i;
+    }
+}
+
+// Real reduce_scatter: every rank contributes a DIFFERENT Partial value: the
+// resulting shard on rank r must be the SUM of every peer's contribution,
+// restricted to rank r's own slice -- exercised with a genuinely different
+// value per rank so a broken reduce_scatter (e.g. one that just narrows
+// without reducing, or reduces without narrowing) would be caught.
+TEST_F(MultiRankB2Test, PartialToShard_RealReduceScatterAcrossRanks) {
+    Tensor local = full({4, 4}, static_cast<double>(rank_ + 1), DType::Float32, Device::cpu());
+    DTensor d(local, mesh_, {Partial{DTensorReduceOp::Sum}});
+    auto result = d.redistribute({Shard{0}});
+
+    auto shape = result.local_tensor().shape();
+    ASSERT_EQ(shape.size(), 2u);
+    EXPECT_EQ(shape[0], 4 / world_size_);
+    EXPECT_EQ(shape[1], 4);
+
+    double expected_sum = 0.0;
+    for (int r = 0; r < world_size_; ++r) expected_sum += (r + 1);
+
+    auto cpu_result = result.local_tensor().to(Device::cpu()).contiguous();
+    const float* p = cpu_result.data<float>();
+    for (int64_t i = 0; i < cpu_result.numel(); ++i) {
+        EXPECT_NEAR(p[i], static_cast<float>(expected_sum), 1e-4f)
+            << "rank " << rank_ << " element " << i;
+    }
+}
+
+// Shard(0)->Shard(1) on a real 2-rank mesh: rank 0 holds rows [0,1] and rank
+// 1 holds rows [2,3] of one shared logical [4,4] global tensor (a genuine
+// distributed tensor, not a self-as-everyone fake). After the transpose-like
+// redistribution, rank r must hold ALL 4 rows but only columns [2r, 2r+1] --
+// verified against the known closed-form global value at every position,
+// which only holds if all_to_all_single actually exchanged the two ranks'
+// real, different column data.
+TEST_F(MultiRankB2Test, ShardToShard_RealAllToAllAcrossRanks) {
+    // This rank's local tile is rows [rank_*2, rank_*2+1] of the global
+    // seq_tensor({4,4}) (value at [row, col] = row*4 + col).
+    Tensor local = zeros({2, 4}, DType::Float32, Device::cpu());
+    {
+        auto* p = local.data<float>();
+        for (int64_t local_row = 0; local_row < 2; ++local_row) {
+            int64_t global_row = rank_ * 2 + local_row;
+            for (int64_t col = 0; col < 4; ++col) {
+                p[local_row * 4 + col] = static_cast<float>(global_row * 4 + col);
+            }
+        }
+    }
+
+    DTensor d(local, mesh_, {Shard{0}});
+    auto result = d.redistribute({Shard{1}});
+
+    auto shape = result.local_tensor().shape();
+    ASSERT_EQ(shape.size(), 2u);
+    EXPECT_EQ(shape[0], 4);
+    EXPECT_EQ(shape[1], 2);
+
+    // Result[row][local_col] must equal the global value at
+    // [row, rank_*2 + local_col].
+    auto cpu_result = result.local_tensor().to(Device::cpu()).contiguous();
+    const float* p = cpu_result.data<float>();
+    for (int64_t row = 0; row < 4; ++row) {
+        for (int64_t local_col = 0; local_col < 2; ++local_col) {
+            int64_t global_col = rank_ * 2 + local_col;
+            float expected = static_cast<float>(row * 4 + global_col);
+            EXPECT_FLOAT_EQ(p[row * 2 + local_col], expected)
+                << "rank " << rank_ << " row " << row << " local_col " << local_col;
+        }
+    }
 }

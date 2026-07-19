@@ -2,7 +2,7 @@
  * @file test_kernel_completeness.cpp
  * @brief Verify that all required operations have registered kernels on each backend.
  *
- * Phase 4A: For each compute backend (CPU, CUDA, ROCm, Vulkan, OneAPI), checks that
+ * Phase 4A: For each compute backend (CPU, CUDA, ROCm, Vulkan, OneAPI, MPS), checks that
  * a curated set of "required" OpIds are present in the dispatch table.  Specialized,
  * fused, backward-only, in-place, and creation ops are excluded from the required set.
  */
@@ -68,6 +68,7 @@ const char* device_type_name(Device::Type t) {
         case Device::Type::ROCm:   return "ROCm";
         case Device::Type::Vulkan: return "Vulkan";
         case Device::Type::OneAPI: return "OneAPI";
+        case Device::Type::MPS:    return "MPS";
         default:                   return "Unknown";
     }
 }

@@ -35,7 +35,7 @@ TEST_P(NNNormParity, InstanceNorm1d) {
     auto input = randn({4, 16, 32}, DType::Float32, Device::cpu());
     auto ref = in1d.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::InstanceNorm1d in1d_dev(16);
             in1d_dev.eval();
@@ -65,7 +65,7 @@ TEST_P(NNNormParity, InstanceNorm2d) {
     auto input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
     auto ref = in2d.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::InstanceNorm2d in2d_dev(16);
             in2d_dev.eval();
@@ -95,7 +95,7 @@ TEST_P(NNNormParity, InstanceNorm3d) {
     auto input = randn({4, 16, 4, 4, 4}, DType::Float32, Device::cpu());
     auto ref = in3d.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::InstanceNorm3d in3d_dev(16);
             in3d_dev.eval();
@@ -129,7 +129,7 @@ TEST_P(NNNormParity, RMSNorm) {
     auto input = randn({4, 8, 32}, DType::Float32, Device::cpu());
     auto ref = rms.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::RMSNorm rms_dev(32);
             rms_dev.eval();
@@ -333,7 +333,7 @@ TEST_P(NNNormParity, LocalResponseNorm) {
     auto input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
     auto ref = lrn.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LocalResponseNorm lrn_dev(5);
             lrn_dev.eval();
@@ -374,7 +374,7 @@ TEST_P(NNNormParity, BatchNorm2d_NoAffine) {
     auto input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
     auto ref = bn.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::BatchNorm2d bn_dev(16, 1e-5, 0.1, /*affine=*/false);
             bn_dev.train();
@@ -413,7 +413,7 @@ TEST_P(NNNormParity, LayerNorm_MultiDim) {
     auto input = randn({4, 8, 32}, DType::Float32, Device::cpu());
     auto ref = ln.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LayerNorm ln_dev({8, 32});
             ln_dev.eval();
@@ -516,7 +516,7 @@ TEST_P(NNNormParity, SyncBatchNorm) {
     auto input = randn({4, 16, 8, 8}, DType::Float32, Device::cpu());
     auto ref = sbn.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             // intentionally exercising deprecated legacy SyncBatchNorm ctor
 #pragma GCC diagnostic push

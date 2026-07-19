@@ -1003,6 +1003,15 @@ namespace rocm {
         float output_scale, int32_t output_zero_point,
         hipStream_t stream,
         const Tensor* weight_scales = nullptr, const Tensor* weight_zps = nullptr) -> Tensor;
+    // F031 parity fix: dedicated INT4 (QInt4x2 packed) path — see
+    // quantization.hip.cpp for why routing QInt4x2 weights through
+    // quantized_linear_hip above is a heap OOB read.
+    auto quantized_linear_int4_hip(
+        const Tensor& input, const Tensor& weight, const Tensor* bias,
+        float input_scale, int32_t input_zero_point,
+        float weight_scale, float output_scale,
+        hipStream_t stream,
+        const Tensor* weight_scales = nullptr) -> Tensor;
     auto quantized_conv2d_hip(
         const Tensor& input, const Tensor& weight, const Tensor* bias,
         int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w,
@@ -2710,8 +2719,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Fused Conv2D + BatchNorm + ReLU (full pipeline)
     // ========================================================================
     table.register_single_output_kernel(OpId::FusedConv2dBnReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        const auto stride  = ::tenzor::backend::attrs::stride_2d(attrs);
-        const auto padding = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         // Phase 2.1: fused_conv2d_bn_relu_full_hip kernel is scalar-only; reject asymmetric.
         if (stride[0] != stride[1] || padding[0] != padding[1]) {
@@ -2719,6 +2729,19 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 "FusedConv2dBnReLU (ROCm): backend kernel only supports symmetric stride/padding; "
                 "got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
                 ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]));
+        }
+        // FINDING 17 follow-up: fused_conv2d_bn_relu_full_hip has no dilation
+        // parameter at all — its output-shape formula and per-thread kernel
+        // indexing both assume dilation=1. It was silently computing the
+        // non-dilated result for ANY requested dilation (confirmed via
+        // cross-backend parity: CUDA vs ROCm diverged by ~0.85 absolute for
+        // dilation=2, since CUDA's kernel does support it). Reject explicitly
+        // rather than silently return a wrong answer, mirroring the
+        // symmetric-only guard immediately above.
+        if (dilation[0] != 1 || dilation[1] != 1) {
+            throw std::invalid_argument(
+                "FusedConv2dBnReLU (ROCm): backend kernel does not support dilation != 1; "
+                "got dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
         }
         const Tensor* bias = inputs.size() > 2 && inputs[2].numel() > 0 ? &inputs[2] : nullptr;
         return rocm::fused_conv2d_bn_relu_full_hip(inputs[0], inputs[1], bias,
@@ -4675,6 +4698,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         // Per-channel weight scale/zero-point (inputs[3]/[4]) (F045).
         const Tensor* wscales = (inputs.size() > 3 && inputs[3].numel() > 1) ? &inputs[3] : nullptr;
         const Tensor* wzps = (inputs.size() > 4 && inputs[4].numel() > 0) ? &inputs[4] : nullptr;
+        // F031 parity fix: QInt4x2 weights are packed two signed int4 per
+        // byte ([out_features, in_features/2]) — routing them through the
+        // plain INT8 kernel below reads `in_features` bytes per output row
+        // from a buffer that only has `in_features/2`, a heap OOB read.
+        // Matches CUDA's cuda_kernel_registry.cpp dispatch branch.
+        if (inputs[1].dtype() == DType::QInt4x2) {
+            return rocm::quantized_linear_int4_hip(
+                inputs[0], inputs[1], bias,
+                input_scale, input_zp, weight_scale, output_scale,
+                get_hip_stream(attrs), wscales);
+        }
         return rocm::quantized_linear_hip(
             inputs[0], inputs[1], bias,
             input_scale, input_zp, weight_scale, weight_zp,

@@ -30,7 +30,7 @@ TEST_P(NNLinearEmbParity, Linear_Basic) {
     auto input = randn({4, 64}, DType::Float32, Device::cpu());
     auto ref = layer.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Linear layer_dev(64, 32);
             auto params_src = layer.parameters();
@@ -44,7 +44,7 @@ TEST_P(NNLinearEmbParity, Linear_Basic) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "Linear_Basic failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -57,7 +57,7 @@ TEST_P(NNLinearEmbParity, Linear_NoBias) {
     auto input = randn({4, 64}, DType::Float32, Device::cpu());
     auto ref = layer.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Linear layer_dev(64, 32, false);
             auto params_src = layer.parameters();
@@ -71,7 +71,7 @@ TEST_P(NNLinearEmbParity, Linear_NoBias) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "Linear_NoBias failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -85,7 +85,7 @@ TEST_P(NNLinearEmbParity, Bilinear) {
     auto input2 = randn({4, 32}, DType::Float32, Device::cpu());
     auto ref = layer.forward(Variable(input1, false), Variable(input2, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::Bilinear layer_dev(32, 32, 16);
             auto params_src = layer.parameters();
@@ -105,7 +105,7 @@ TEST_P(NNLinearEmbParity, Bilinear) {
             // accumulates one extra reduction stage beyond a plain GEMM.
             EXPECT_TENSORS_CLOSE(ref, output, parity::MATMUL_RTOL, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "Bilinear failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -131,7 +131,7 @@ TEST_P(NNLinearEmbParity, EmbeddingBag_Sum) {
 
     auto ref = layer.forward(Variable(indices, false), Variable(offsets_data, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::EmbeddingBag layer_dev(100, 32, 0.0, 2.0, false, "sum");
             auto params_src = layer.parameters();
@@ -147,7 +147,7 @@ TEST_P(NNLinearEmbParity, EmbeddingBag_Sum) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-5f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "EmbeddingBag_Sum failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -165,7 +165,7 @@ TEST_P(NNLinearEmbParity, EmbeddingBag_Mean) {
 
     auto ref = layer.forward(Variable(indices, false), Variable(offsets_data, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::EmbeddingBag layer_dev(100, 32, 0.0, 2.0, false, "mean");
             auto params_src = layer.parameters();
@@ -181,7 +181,7 @@ TEST_P(NNLinearEmbParity, EmbeddingBag_Mean) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-5f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "EmbeddingBag_Mean failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -200,7 +200,7 @@ TEST_P(NNLinearEmbParity, LazyLinear) {
     // First forward materializes weights on CPU
     auto ref = layer.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LazyLinear layer_dev(32);
             // Materialize on CPU first so we can copy params
@@ -219,7 +219,7 @@ TEST_P(NNLinearEmbParity, LazyLinear) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LazyLinear failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -251,7 +251,7 @@ void lazy_conv_parity_test(
     auto input = randn(test_shape, DType::Float32, Device::cpu());
     auto ref = ref_layer.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto dev_layer = make_layer();
             // Warm up on CPU (with a scratch tensor of the same C_in) so the
@@ -279,7 +279,7 @@ void lazy_conv_parity_test(
             SCOPED_TRACE(std::string(name) + " on " + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped " << name << " on "
+            ADD_FAILURE() << name << " failed on "
                       << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }

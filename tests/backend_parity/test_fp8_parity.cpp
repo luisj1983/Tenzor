@@ -126,7 +126,7 @@ TEST_P(FP8Parity, MatMul_FP8_E4M3) {
         ref_f32 = out_e4m3.to(DType::Float32);
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         const auto& dev = backends[i];
         try {
             auto a_dev = a_f32.to(dev).to(DType::FP8_E4M3);
@@ -164,7 +164,7 @@ TEST_P(FP8Parity, MatMul_FP8_E5M2) {
         ref_f32 = out_e5m2.to(DType::Float32);
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         const auto& dev = backends[i];
         try {
             auto a_dev = a_f32.to(dev).to(DType::FP8_E5M2);

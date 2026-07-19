@@ -146,6 +146,14 @@ public:
     auto is_available() const -> bool override;
     auto get_device_info(int32_t device_id) const -> DeviceInfo override;
 
+    // The RCCL collective implementation is linked into this backend DSO
+    // (tenzor_backend_rocm links roc::rccl PRIVATE, mirroring the CUDA
+    // backend's equivalent NCCL wiring). Returns a heap NCCLBackend the
+    // distributed factory wraps in a unique_ptr; when this DSO was built
+    // without RCCL the stub NCCLBackend has no real collective support,
+    // surfaced as a clear error by the caller (same contract as CUDA).
+    auto create_comm_backend() -> void* override;
+
     // Device context management
     auto set_device(int32_t device_id) -> void override;
     auto get_current_device() const -> int32_t override;

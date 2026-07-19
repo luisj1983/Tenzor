@@ -24,9 +24,18 @@
 #include <cuda_runtime.h>
 #endif
 
-#ifdef TENZOR_USE_ROCM
-#include <hip/hip_runtime.h>
-#endif
+// FINDING 60: this header used to #include <hip/hip_runtime.h> here under
+// #ifdef TENZOR_USE_ROCM. That's the reason TENZOR_USE_ROCM could never
+// safely be defined for tenzor_core: this TU (transitively, via
+// offload_engine.hpp -> zero_optimizer.cpp etc.) is also compiled with
+// TENZOR_USE_CUDA defined, and HIP's and CUDA's vector-type headers define
+// conflicting make_*N helpers when both are included in one translation
+// unit. Since TENZOR_USE_ROCM was therefore never defined anywhere in the
+// build, every direct-HIP code path this include enabled was 100% dead and
+// has been removed rather than resurrected. ROCm async transfers are
+// implemented in the isolated rocm_transfer.hip.cpp TU (compiled by hipcc,
+// LANGUAGE HIP), exposed here via an opaque void*-based API with no HIP
+// types in this header's signature.
 
 #ifdef TENZOR_USE_ONEAPI
 #include <sycl/sycl.hpp>
@@ -317,20 +326,10 @@ private:
     auto return_event(cudaEvent_t event) -> void;
 #endif
 
-#ifdef TENZOR_USE_ROCM
-    // HIP streams for parallel transfers
-    std::vector<hipStream_t> hip_streams_;
-
-    // HIP events pool for tracking completion
-    std::vector<hipEvent_t> hip_event_pool_;
-    std::mutex hip_event_pool_mutex_;
-
-    // Get HIP event from pool or create new one
-    auto get_hip_event() -> hipEvent_t;
-
-    // Return HIP event to pool
-    auto return_hip_event(hipEvent_t event) -> void;
-#endif
+    // FINDING 60: no per-engine HIP stream/event pool here. ROCm streams and
+    // events are owned by the isolated-TU rocm_transfer:: path (see the
+    // file-top comment) internally -- TransferEngine only ever sees an opaque
+    // void* event handle (TransferState::rocm_event below).
 
     // Pinned memory pool for fast transfers
     struct PinnedBuffer {
@@ -365,6 +364,15 @@ private:
     std::atomic<int> in_flight_transfers_{0};  ///< Transfers dequeued but not yet completed
     std::thread worker_thread_;
 
+    // States created by the ROCm isolated-TU async path (cpu_to_gpu_async/
+    // gpu_to_cpu_async, see FINDING 60 in findings.txt) bypass transfer_queue_
+    // entirely and carry their completion as an opaque rocm_event instead.
+    // Track outstanding ones here (weak_ptr: a caller who never syncs and
+    // drops their TransferHandle still gets cleaned up by TransferState's own
+    // destructor) so bulk synchronize()/synchronize_stream() can drain them.
+    std::vector<std::weak_ptr<TransferState>> rocm_pending_states_;
+    std::mutex rocm_pending_mutex_;
+
     // Worker thread function
     auto transfer_worker() -> void;
 
@@ -376,6 +384,13 @@ private:
 
     // Record transfer statistics
     auto record_transfer(size_t bytes, double time_ms, bool cpu_to_gpu) -> void;
+
+    // Wait for every still-outstanding rocm_pending_states_ entry (see its
+    // declaration above) and clear the list. Safe to call repeatedly / when
+    // empty. Matches TransferHandle::wait()'s rocm_event check-then-sync-
+    // then-null sequence so a state already drained by its own handle's
+    // wait() (rocm_event == nullptr) is skipped rather than double-released.
+    auto drain_rocm_pending_states() -> void;
 
     // Initialize CUDA resources
     auto initialize_cuda_resources() -> void;
@@ -487,14 +502,6 @@ public:
 
     // Stream used for transfer
     cudaStream_t stream{nullptr};
-#endif
-
-#ifdef TENZOR_USE_ROCM
-    // HIP event for async completion tracking
-    hipEvent_t hip_event{nullptr};
-
-    // HIP stream used for transfer
-    hipStream_t hip_stream{nullptr};
 #endif
 
     // Pinned buffer (if used)

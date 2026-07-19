@@ -265,6 +265,14 @@ int main(int argc, char** argv) {
     try {
         if (!::testing::GTEST_FLAG(list_tests)) {
             tenzor::initialize();
+            // FINDING 16: the golden-record/replay fallback (see
+            // parity_test_utils.hpp's test_operation_parity_cross_backend)
+            // fingerprints inputs by their raw bytes, so a golden recorded on
+            // a multi-backend host can only match a later CPU-only replay if
+            // every test's randn() calls draw the exact same values both
+            // times. Fix the global RNG seed so that holds (test execution
+            // order is otherwise stable/unshuffled by default).
+            tenzor::manual_seed(42);
         }
     } catch (const std::exception& e) {
         std::cerr << "Failed to initialize Tenzor: " << e.what() << std::endl;

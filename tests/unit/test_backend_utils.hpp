@@ -107,6 +107,7 @@ inline std::vector<BackendConfig> get_available_backends() {
         {"CUDA",  Device::Type::CUDA,  0, true},
         {"OneAPI", Device::Type::OneAPI, 0, true},
         {"ROCm",  Device::Type::ROCm,  0, true},
+        {"Vulkan", Device::Type::Vulkan, 0, true},
     };
 }
 

@@ -39,6 +39,19 @@
         } while(0)
 #elif defined(TENZOR_USE_ROCM)
     #include <hip/hip_runtime.h>
+    // Map CUDA runtime API names to HIP equivalents (same technique as
+    // ddp.cpp/fsdp.cpp/zero_optimizer.cpp in this codebase) so the single
+    // shared-collective-implementation body below — written against the
+    // cuda* names, per this file's own "NCCL and RCCL are source-compatible"
+    // design comment further down — compiles unchanged for ROCm. Only the
+    // runtime API needs aliasing; the ncclXxx()/rcclXxx() calls are already
+    // ABI-compatible per the nccl.h/rccl.h headers themselves.
+    #define cudaStream_t hipStream_t
+    #define cudaSetDevice hipSetDevice
+    #define cudaGetDevice hipGetDevice
+    #define cudaDeviceSynchronize hipDeviceSynchronize
+    #define cudaMemcpyAsync hipMemcpyAsync
+    #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
     #define GPU_CHECK(call) \
         do { \
             hipError_t err = call; \

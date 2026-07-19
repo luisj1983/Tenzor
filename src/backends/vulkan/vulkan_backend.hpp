@@ -57,6 +57,18 @@ public:
     auto is_available() const -> bool override;
     auto get_device_info(int32_t device_id) const -> DeviceInfo override;
 
+    // Vulkan has no driver-level "current device" concept (every op takes an
+    // explicit device_id, unlike CUDA/ROCm's cudaSetDevice/hipSetDevice
+    // thread-local context) — the default Backend::set_device()/
+    // get_current_device() no-op silently made Vulkan report "always device
+    // 0" despite genuinely supporting multiple physical devices
+    // (device_count() > 1). These honor the documented Backend contract with
+    // our own validated per-thread bookkeeping, matching what WorkerPool's
+    // switch_device() (src/core/device_guard.cpp) expects from every non-CPU
+    // backend.
+    auto set_device(int32_t device_id) -> void override;
+    auto get_current_device() const -> int32_t override;
+
     auto allocate(size_t bytes, int32_t device_id) -> void* override;
     auto deallocate(void* ptr) -> void override;
     auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override;

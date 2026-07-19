@@ -30,22 +30,15 @@
 #include <iostream>
 #include <iomanip>
 
-// CUDA/HIP runtime for the dedicated comm stream. Same conditional pattern as ddp.cpp:
-// when neither CUDA nor ROCm is compiled in, the async path is unavailable and the
-// optimizer transparently falls back to fully-synchronous all_reduce.
-#if defined(TENZOR_USE_CUDA)
-    #include <cuda_runtime.h>
-#elif defined(TENZOR_USE_ROCM)
-    #include <hip/hip_runtime.h>
-    #define cudaStream_t              hipStream_t
-    #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
-    #define cudaStreamNonBlocking     hipStreamNonBlocking
-    #define cudaStreamDestroy         hipStreamDestroy
-    #define cudaStreamSynchronize     hipStreamSynchronize
-    #define cudaSuccess               hipSuccess
-    #define cudaGetErrorString        hipGetErrorString
-    using cudaError_t = hipError_t;
-#endif
+// FINDING 60 (resolved): stream creation/sync/mem-query used to pick their
+// CUDA-vs-HIP API at compile time via #if defined(TENZOR_USE_CUDA) #elif
+// defined(TENZOR_USE_ROCM), which could never reach the ROCm branch on this
+// project's combined CUDA+ROCm build (see ddp.cpp's equivalent comment for
+// the full rationale). gpu_stream_ops.hpp dispatches at runtime instead, on
+// comm_device_type_ (set in the constructors below). When neither CUDA nor
+// ROCm is compiled in, gpu_stream_ops' create_stream() returns nullptr and
+// the optimizer transparently falls back to fully-synchronous all_reduce.
+#include "tenzor/core/gpu_stream_ops.hpp"
 
 namespace tenzor {
 namespace optim {
@@ -180,6 +173,20 @@ inline auto state_blob_path(
     return dir / fname;
 }
 
+// FINDING 60: determine the actual GPU vendor from a flat parameter list at
+// runtime -- used to pick which GPU driver the dedicated comm stream is
+// created against (see gpu_stream_ops.hpp). Falls back to CUDA if no
+// parameter is found (matches the prior compile-time default when
+// TENZOR_USE_CUDA was defined).
+inline auto detect_comm_device_type(
+    const std::vector<std::shared_ptr<Variable>>& params
+) -> Device::Type {
+    for (const auto& p : params) {
+        if (p) return p->tensor().device().type;
+    }
+    return Device::Type::CUDA;
+}
+
 }  // namespace
 
 // =============================================================================
@@ -227,15 +234,10 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
     // (NCCL/RCCL on GPU). When yes, allocate a dedicated non-blocking stream so the
     // all-reduce in step_impl can overlap with the host-side fetch_states_to_gpu work.
     if (config_.process_group && config_.process_group->supports_async_stream()) {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-        cudaStream_t s = nullptr;
-        cudaError_t err = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
-        if (err == cudaSuccess) {
-            comm_stream_ = static_cast<void*>(s);
-            use_gpu_comm_ = true;
-        }
-        // If stream creation fails, fall back to sync path; not fatal.
-#endif
+        comm_device_type_ = detect_comm_device_type(parameters_);
+        comm_stream_ = core::gpu_stream::create_stream(comm_device_type_);
+        // If stream creation fails (nullptr), fall back to sync path; not fatal.
+        use_gpu_comm_ = (comm_stream_ != nullptr);
     }
 
     partition_parameters();
@@ -287,14 +289,9 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
     }
 
     if (config_.process_group && config_.process_group->supports_async_stream()) {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-        cudaStream_t s = nullptr;
-        cudaError_t err = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
-        if (err == cudaSuccess) {
-            comm_stream_ = static_cast<void*>(s);
-            use_gpu_comm_ = true;
-        }
-#endif
+        comm_device_type_ = detect_comm_device_type(parameters_);
+        comm_stream_ = core::gpu_stream::create_stream(comm_device_type_);
+        use_gpu_comm_ = (comm_stream_ != nullptr);
     }
 
     partition_parameters();
@@ -329,15 +326,14 @@ ZeROStage1Optimizer::~ZeROStage1Optimizer() {
             // swallow — destructors must not throw
         }
     }
-    // Tear down the dedicated comm stream if we allocated one. cudaStreamDestroy waits for
-    // any in-flight ops on the stream, so this is safe even if the user dropped the
-    // optimizer mid-step (which they shouldn't but might in error paths).
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    // Tear down the dedicated comm stream if we allocated one. Destroying the
+    // stream waits for any in-flight ops on it, so this is safe even if the
+    // user dropped the optimizer mid-step (which they shouldn't but might in
+    // error paths).
     if (comm_stream_) {
-        cudaStreamDestroy(static_cast<cudaStream_t>(comm_stream_));
+        core::gpu_stream::destroy_stream(comm_stream_, comm_device_type_);
         comm_stream_ = nullptr;
     }
-#endif
 
     // Other cleanup is automatic via smart pointers.
 }
@@ -1338,12 +1334,28 @@ auto ZeROStage1Optimizer::issue_async_all_reduce_gradients() -> void {
     // All-reduce gradients for all parameters. When use_gpu_comm_ is set we route the
     // collective through the dedicated comm_stream_ so it can overlap with the host /
     // PCIe-side fetch_states_to_gpu work that step_impl runs next.
+    //
+    // MULTI-RANK HARNESS FINDING: this loop used to skip a parameter entirely
+    // (no all_reduce call at all) when `!param->has_grad()` on THIS rank. That
+    // check is per-rank/local, so when gradient presence differs across ranks
+    // (e.g. one rank never populated grads for a step) each rank issued a
+    // DIFFERENT NUMBER of collective calls, in a different order — Gloo/NCCL
+    // then paired rank A's call for parameter i against rank B's call for a
+    // DIFFERENT parameter j, corrupting the connection ("recv_tensor: size
+    // mismatch", "Connection reset by peer") for the rest of the run.
+    // Reproduced deterministically via a real 2-process Gloo run
+    // (ZeROGlooTest.EmptyGradientsOnSomeRanks, one rank with grads set, one
+    // without). Fixed by making every rank issue EXACTLY one all_reduce per
+    // parameter in `parameters_`, unconditionally and in the same order,
+    // substituting a zero gradient when this rank has none for a given
+    // parameter — the same contract PyTorch DDP uses for
+    // find_unused_parameters. AVG naturally averages in zero contributions
+    // from ranks without a local gradient.
     for (auto& param : parameters_) {
-        if (!param->has_grad()) continue;
         const auto& grad_opt = param->grad();
-        if (!grad_opt.has_value()) continue;
-
-        Tensor grad = grad_opt.value();
+        Tensor grad = (param->has_grad() && grad_opt.has_value())
+                          ? grad_opt.value()
+                          : zeros_like(param->tensor());
 
         if (profiling_enabled_) {
             size_t bytes = grad.numel() * dtype_size(grad.dtype());
@@ -1389,19 +1401,19 @@ auto ZeROStage1Optimizer::wait_for_async_all_reduce() -> void {
     // Block until every async all-reduce we issued has completed on the comm stream. For
     // the sync fallback path (no GPU comm), this is a no-op — the all_reduce calls in
     // issue_* already finished synchronously.
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     if (use_gpu_comm_ && comm_stream_) {
-        cudaStreamSynchronize(static_cast<cudaStream_t>(comm_stream_));
+        core::gpu_stream::synchronize_stream(comm_stream_, comm_device_type_);
     }
-#endif
 
     // Decompress the held-over compressed payloads, if any, and write the resulting
-    // full-precision grads back to their Variables. Order matches the order in which they
-    // were pushed in issue_*; the parameters_ traversal here mirrors that.
+    // full-precision grads back to their Variables. issue_async_all_reduce_gradients()
+    // now pushes exactly one compressed entry per `parameters_[i]`, unconditionally and
+    // in order (see the MULTI-RANK HARNESS FINDING comment there) — no has_grad() skip
+    // here, or this loop and that one would walk out of lock-step the moment any
+    // parameter's has_grad() state changed between issue and wait.
     if (!in_flight_compressed_.empty() && config_.grad_compressor) {
         size_t comp_idx = 0;
         for (auto& param : parameters_) {
-            if (!param->has_grad()) continue;
             if (comp_idx >= in_flight_compressed_.size()) break;
             Tensor grad = config_.grad_compressor->decompress(in_flight_compressed_[comp_idx]);
             param->set_grad(grad);
@@ -4387,9 +4399,7 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
             // overlap-with-compute properties.
             if (use_gpu_comm_ && comm_stream_) {
                 config_.process_group->all_gather_async(tensor_in, parts_out, comm_stream_);
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-                cudaStreamSynchronize(static_cast<cudaStream_t>(comm_stream_));
-#endif
+                core::gpu_stream::synchronize_stream(comm_stream_, comm_device_type_);
             } else {
                 config_.process_group->all_gather(tensor_in, parts_out);
             }
@@ -5400,33 +5410,31 @@ auto ZeROStage3Optimizer::check_memory_pressure_locked() -> double {
     size_t used_gpu_memory = perf_stats_.current_gathered_memory;
 
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
-    if (param_device.type == Device::Type::CUDA) {
+    if (param_device.type == Device::Type::CUDA || param_device.type == Device::Type::ROCm) {
         // Phase C (C7): query the actual device capacity instead of hardcoding 16 GB.
         // On an 80 GB H100 the old 16 GB constant fired the 0.85 threshold at 16% real
-        // utilisation; on a 12 GB consumer card it never fired. Now we use cudaMemGetInfo
-        // (also covered by hipMemGetInfo via the HIP shim) to get the real (free, total)
-        // pair. Falls back to 16 GB only when the runtime call is unavailable or fails.
+        // utilisation; on a 12 GB consumer card it never fired. gpu_stream::mem_get_info
+        // dispatches at runtime to cudaMemGetInfo or the isolated-TU ROCm equivalent
+        // (see FINDING 60 in findings.txt) to get the real (free, total) pair. Falls
+        // back to 16 GB only when the runtime call is unavailable or fails.
         size_t free_bytes = 0;
         size_t total_bytes = 0;
-        bool got_real_total = false;
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-        cudaError_t err = cudaMemGetInfo(&free_bytes, &total_bytes);
-        if (err == cudaSuccess && total_bytes > 0) {
+        bool got_real_total =
+            core::gpu_stream::mem_get_info(param_device, &free_bytes, &total_bytes) &&
+            total_bytes > 0;
+        if (got_real_total) {
             total_gpu_memory = total_bytes;
             // Use the runtime-reported free/used split as ground truth instead of our
             // tracked counters when available -- catches allocations from other parts
             // of the program (autograd cache, comm buffers, etc.) the optimizer doesn't
             // see.
             used_gpu_memory = total_bytes - free_bytes;
-            got_real_total = true;
-        }
-#endif
-        if (!got_real_total) {
+        } else {
             total_gpu_memory = 16ULL * 1024 * 1024 * 1024;  // 16 GB fallback
             // Track parameter memory ourselves since we don't have device-truth.
             for (const auto& param : parameters_) {
                 const auto& tensor = param->tensor();
-                if (tensor.device().type == Device::Type::CUDA) {
+                if (tensor.device().type == param_device.type) {
                     used_gpu_memory += tensor.numel() * dtype_size(tensor.dtype());
                 }
             }

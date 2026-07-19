@@ -18,6 +18,8 @@
 #include <mutex>
 #include <atomic>
 #include <unordered_set>
+#include <unordered_map>
+#include <optional>
 
 namespace tenzor::distributed {
 
@@ -60,6 +62,36 @@ struct GradBucket {
         std::vector<size_t> numels;        ///< Param numels (same order)
     };
     std::vector<DTypeGroup> dtype_groups;  ///< One group per distinct dtype in this bucket
+
+    /**
+     * @brief Per-step override for the gradient of the parameter whose
+     * backward hook is CURRENTLY firing (see mark_param_ready()).
+     *
+     * The autograd engine (engine.cpp) runs a Variable's registered hooks
+     * BEFORE accumulating the just-computed gradient into that Variable's
+     * own grad_ storage (the hook transforms the gradient that then gets
+     * written). DDP's backward hook synchronously triggers this bucket's
+     * all-reduce the moment the LAST parameter in the bucket gets its
+     * gradient computed -- but at that exact moment, THAT parameter's own
+     * param->grad() has NOT been written yet (it's still whatever was left
+     * over from before this backward pass: nullopt on a fresh model, or a
+     * stale prior-iteration value). Packing the flat all-reduce buffer via
+     * plain param->grad() reads therefore silently dropped or corrupted
+     * that one parameter's contribution to the collective, and the
+     * engine's own accumulation (which runs immediately after the hook
+     * returns) then overwrote it with the un-reduced LOCAL-only gradient
+     * -- so DDP's post-sync gradients matched across ranks for every
+     * bucket-completing parameter EXCEPT whichever one happened to fill
+     * the bucket last, silently breaking the "identical gradients after
+     * sync" contract the whole class exists to provide.
+     *
+     * mark_param_ready() stashes the hook's `grad` argument here (the
+     * correct, current-iteration value) keyed by the parameter's
+     * data_ptr(); pack_bucket_flat() consults this map first and falls
+     * back to param->grad() for every other (already-accumulated)
+     * parameter in the bucket. Cleared after each pack.
+     */
+    std::unordered_map<const void*, Tensor> pending_grad_override;
 };
 
 /**
@@ -344,6 +376,15 @@ private:
     bool use_gpu_comm_{false};
 
     /**
+     * @brief GPU vendor the communication streams/events below were created
+     * for, determined at runtime from the model's own parameters (see
+     * init_comm_resources() / FINDING 60 in findings.txt). Every
+     * bucket_streams_/bucket_events_ handle is only ever valid for this
+     * device type.
+     */
+    Device::Type comm_device_type_{Device::Type::CPU};
+
+    /**
      * @brief Per-bucket dedicated CUDA streams for communication.
      *
      * Stored as void* (cudaStream_t) to avoid including cuda_runtime.h
@@ -420,7 +461,15 @@ private:
      *
      * @param param_ptr data_ptr() of the parameter whose gradient arrived
      */
-    auto mark_param_ready(const void* param_ptr) -> void;
+    // Returns the post-reduction gradient for param_ptr when the reduction
+    // it triggered ran SYNCHRONOUSLY within this call (CPU backend, or a
+    // GPU backend with a compressor_ set -- see the .cpp for why the
+    // caller's hook MUST return this instead of the original gradient it
+    // was given). std::nullopt when no reduction happened this call, or
+    // when it was the GPU async path (whose completion is deferred to
+    // sync_comm(), safely after backward() has fully returned).
+    auto mark_param_ready(const void* param_ptr, const Tensor& current_grad)
+        -> std::optional<Tensor>;
 
     /**
      * @brief All-reduce a single gradient bucket (synchronous fallback).

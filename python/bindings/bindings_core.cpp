@@ -4336,6 +4336,15 @@ Returns:
     m.def("reshape", [](const tenzor::Tensor& input, std::vector<int64_t> shape) {
          return tenzor::reshape(input, std::move(shape));
          }, "Reshape tensor", py::arg("input"), py::arg("shape"));
+    // Variable overload (autograd-tracked reshape) -- previously missing,
+    // unlike sum/mean/etc. below which register both a Tensor and a
+    // Variable overload. tz.reshape(x, shape) raised a pybind11
+    // "incompatible function arguments" TypeError for any requires_grad=True
+    // input (a Variable doesn't implicitly convert to Tensor), even though
+    // the equivalent x.reshape(shape) method form worked fine.
+    m.def("reshape", [](const tenzor::Variable& input, std::vector<int64_t> shape) {
+         return tenzor::reshape(input, shape);
+         }, "Reshape tensor with autograd (Variable)", py::arg("input"), py::arg("shape"));
     m.def("chunk", [](const tenzor::Tensor& input, int64_t chunks, int64_t dim) {
          return tenzor::chunk(input, chunks, dim);
          }, "Split tensor into chunks",
@@ -5345,6 +5354,11 @@ Returns:
              "Get the underlying tensor (const)")
         // Gradient access
         .def_property_readonly("grad", py::overload_cast<>(&tenzor::Variable::grad, py::const_))
+        .def("set_grad", &tenzor::Variable::set_grad, py::arg("gradient"),
+             "Directly set (overwrite) this variable's gradient tensor. Mainly "
+             "for tests that need to hand-craft a gradient (e.g. an Inf/NaN "
+             "value to exercise GradScaler overflow detection) without a real "
+             "backward pass.")
         .def_property_readonly("grad_fn", &tenzor::Variable::grad_fn,
              "Get gradient function that created this variable")
         .def_property_readonly("is_leaf", &tenzor::Variable::is_leaf,

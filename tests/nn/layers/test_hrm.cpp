@@ -20,6 +20,7 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "../../grad_flow_helpers.hpp"  // EXPECT_GRAD_FLOWS
+#include "../../backend_test_fixture.hpp"  // HONOR_BACKEND_ENV_VARS
 #include <vector>
 #include <chrono>
 #include <cmath>
@@ -80,6 +81,12 @@ class HRMMultiBackendTest : public ::testing::TestWithParam<std::string> {
 protected:
     void SetUp() override {
         backend_name_ = GetParam();
+
+        // Retrofits this hand-rolled fixture with the same TENZOR_SKIP_BACKENDS/
+        // TENZOR_REQUIRE_MULTI_BACKEND handling BackendTest/MultiBackendDTypeTest
+        // get for free, so a silently-broken GPU driver escalates to a hard
+        // failure under TENZOR_REQUIRE_MULTI_BACKEND=1 instead of a quiet skip.
+        HONOR_BACKEND_ENV_VARS(backend_name_);
 
         // Check if backend is available
         Device::Type device_type;

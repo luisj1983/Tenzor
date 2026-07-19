@@ -6,6 +6,16 @@ find_package(Vulkan)
 
 if(NOT Vulkan_FOUND)
     message(WARNING "Vulkan SDK not found. Vulkan backend will not be built.")
+    # Returning here alone leaves TENZOR_BUILD_VULKAN (and thus the
+    # tenzor_backend_vulkan TARGET) in a state the rest of the build can't see:
+    # test CMakeLists.txt files gate on `if(TENZOR_BUILD_VULKAN)` without also
+    # checking `TARGET tenzor_backend_vulkan`, so find_package(Vulkan REQUIRED)/
+    # link calls inside those blocks would still run and abort the ENTIRE
+    # configure (see FINDING 26). FORCE the cache var off so every later
+    # if(TENZOR_BUILD_VULKAN) check — including in tests/ — degrades gracefully,
+    # mirroring the CUDA/ROCm probe-and-FORCE-OFF pattern in
+    # src/backends/CMakeLists.txt.
+    set(TENZOR_BUILD_VULKAN OFF CACHE BOOL "Build Vulkan backend" FORCE)
     return()
 endif()
 
@@ -30,6 +40,12 @@ if(NOT GLSLC)
     message(WARNING "glslc shader compiler not found. Vulkan backend will NOT be built "
                     "(a shader-less Vulkan library is non-functional). Install the Vulkan "
                     "SDK or set VULKAN_SDK to enable it.")
+    # See the Vulkan_FOUND branch above: FORCE the cache var off so the rest of
+    # the build (in particular tests/, which does not additionally guard on
+    # `TARGET tenzor_backend_vulkan`) correctly treats Vulkan as unavailable
+    # instead of later hitting find_package(Vulkan REQUIRED) and aborting the
+    # entire CMake configure (FINDING 26).
+    set(TENZOR_BUILD_VULKAN OFF CACHE BOOL "Build Vulkan backend" FORCE)
     return()
 endif()
 message(STATUS "Found glslc: ${GLSLC}")

@@ -3295,16 +3295,21 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::FusedConv2dBnReLU,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
-            const auto stride  = ::tenzor::backend::attrs::stride_2d(attrs);
-            const auto padding = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+            const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+            const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
             float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             const Tensor* bias = inputs.size() > 2 && inputs[2].numel() > 0 ? &inputs[2] : nullptr;
             auto& queue = get_q(inputs);
 
-            // Step 1: Conv2d forward (per-axis, with dilation = 1)
+            // Step 1: Conv2d forward (per-axis, dilation-aware).
             // Dispatches via OneAPI per-axis overload which throws cleanly on asymmetric.
+            // FINDING 17 follow-up: this previously hardcoded dilation to 1,1,
+            // silently ignoring AttrKey::Dilation — confirmed via cross-backend
+            // parity (CUDA vs OneAPI/ROCm) that a dilation=2 request produced
+            // completely different output on OneAPI than on CUDA/CPU.
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                stride[0], stride[1], padding[0], padding[1], 1, 1, 1, queue);
+                stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1], 1, queue);
 
             // conv2d_forward may run via oneDNN (its own primitive/stream); the
             // raw SYCL BatchNorm/ReLU kernels below read conv_out, so synchronize

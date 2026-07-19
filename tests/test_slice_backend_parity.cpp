@@ -67,6 +67,34 @@ TEST(SliceBackendParityTest, SliceSubtraction) {
             EXPECT_NEAR(area, 100.0f, 1e-5f) << "Vulkan area mismatch at index " << i;
         }
     }
+
+    // Test on ROCm if available
+    if (isBackendAvailable(Device::Type::ROCm)) {
+        auto boxes_rocm = boxes_cpu.to(Device::rocm(0));
+        auto widths_rocm = boxes_rocm.slice(1, 2, 3) - boxes_rocm.slice(1, 0, 1);
+        auto heights_rocm = boxes_rocm.slice(1, 3, 4) - boxes_rocm.slice(1, 1, 2);
+        auto areas_rocm = (widths_rocm * heights_rocm).squeeze(1);
+        auto areas_rocm_cpu = areas_rocm.to(Device::cpu());
+
+        for (int i = 0; i < 10; i++) {
+            float area = areas_rocm_cpu.data<float>()[i];
+            EXPECT_NEAR(area, 100.0f, 1e-5f) << "ROCm area mismatch at index " << i;
+        }
+    }
+
+    // Test on OneAPI if available
+    if (isBackendAvailable(Device::Type::OneAPI)) {
+        auto boxes_oneapi = boxes_cpu.to(Device::oneapi(0));
+        auto widths_oneapi = boxes_oneapi.slice(1, 2, 3) - boxes_oneapi.slice(1, 0, 1);
+        auto heights_oneapi = boxes_oneapi.slice(1, 3, 4) - boxes_oneapi.slice(1, 1, 2);
+        auto areas_oneapi = (widths_oneapi * heights_oneapi).squeeze(1);
+        auto areas_oneapi_cpu = areas_oneapi.to(Device::cpu());
+
+        for (int i = 0; i < 10; i++) {
+            float area = areas_oneapi_cpu.data<float>()[i];
+            EXPECT_NEAR(area, 100.0f, 1e-5f) << "OneAPI area mismatch at index " << i;
+        }
+    }
 }
 
 // Test exact computation used in box_area
@@ -118,6 +146,48 @@ TEST(SliceBackendParityTest, BoxAreaComputation) {
         for (int i = 0; i < 5; i++) {
             EXPECT_NEAR(areas_cuda_cpu.data<float>()[i], expected_areas[i], 1e-5f)
                 << "CUDA box area mismatch at index " << i;
+        }
+    }
+
+    // Vulkan computation
+    if (isBackendAvailable(Device::Type::Vulkan)) {
+        auto boxes_vulkan = boxes_cpu.to(Device::vulkan(0));
+        auto widths_vulkan = boxes_vulkan.slice(1, 2, 3) - boxes_vulkan.slice(1, 0, 1);
+        auto heights_vulkan = boxes_vulkan.slice(1, 3, 4) - boxes_vulkan.slice(1, 1, 2);
+        auto areas_vulkan = (widths_vulkan * heights_vulkan).squeeze(1);
+        auto areas_vulkan_cpu = areas_vulkan.to(Device::cpu());
+
+        for (int i = 0; i < 5; i++) {
+            EXPECT_NEAR(areas_vulkan_cpu.data<float>()[i], expected_areas[i], 1e-5f)
+                << "Vulkan box area mismatch at index " << i;
+        }
+    }
+
+    // ROCm computation
+    if (isBackendAvailable(Device::Type::ROCm)) {
+        auto boxes_rocm = boxes_cpu.to(Device::rocm(0));
+        auto widths_rocm = boxes_rocm.slice(1, 2, 3) - boxes_rocm.slice(1, 0, 1);
+        auto heights_rocm = boxes_rocm.slice(1, 3, 4) - boxes_rocm.slice(1, 1, 2);
+        auto areas_rocm = (widths_rocm * heights_rocm).squeeze(1);
+        auto areas_rocm_cpu = areas_rocm.to(Device::cpu());
+
+        for (int i = 0; i < 5; i++) {
+            EXPECT_NEAR(areas_rocm_cpu.data<float>()[i], expected_areas[i], 1e-5f)
+                << "ROCm box area mismatch at index " << i;
+        }
+    }
+
+    // OneAPI computation
+    if (isBackendAvailable(Device::Type::OneAPI)) {
+        auto boxes_oneapi = boxes_cpu.to(Device::oneapi(0));
+        auto widths_oneapi = boxes_oneapi.slice(1, 2, 3) - boxes_oneapi.slice(1, 0, 1);
+        auto heights_oneapi = boxes_oneapi.slice(1, 3, 4) - boxes_oneapi.slice(1, 1, 2);
+        auto areas_oneapi = (widths_oneapi * heights_oneapi).squeeze(1);
+        auto areas_oneapi_cpu = areas_oneapi.to(Device::cpu());
+
+        for (int i = 0; i < 5; i++) {
+            EXPECT_NEAR(areas_oneapi_cpu.data<float>()[i], expected_areas[i], 1e-5f)
+                << "OneAPI box area mismatch at index " << i;
         }
     }
 }

@@ -265,16 +265,48 @@ gradcheck).
 **Activations:** `leaky_relu`, `softplus` (added to the multibackend file
 too).
 
-`tests/autograd/test_gradcheck_multibackend.cpp` expanded from 6 ops
-(matmul, softmax, add, mul, relu, sumreduction) to **25 ops** running
-Float32 + Float64 on every backend (CPU/CUDA/Vulkan/OneAPI/ROCm).
+## Update — 2026-07-18 (Finding 31 — regenerated stale gap list)
+
+`tests/autograd/test_gradcheck_multibackend.cpp` had grown to **176**
+`TEST_P(GradCheckMultiBackendTest, ...)` cases by this update (`grep -c
+"^TEST_P(GradCheckMultiBackendTest" tests/autograd/test_gradcheck_multibackend.cpp`),
+not the 25 the previous revision of this doc claimed — most of the
+"gaps still open" list below (as of the 2026-04-29 update) had since been
+closed under later audit-phase markers without this doc being updated to
+match. Verified op-by-op via `grep "^TEST_P(GradCheckMultiBackendTest"` and
+re-derived which entries are genuinely still absent vs. now present:
+
+**Now covered** (previously listed as gaps, confirmed present in this file):
+LU (`LinalgLU*`), QR (`LinalgQR*`), eigh/eigvalsh
+(`LinalgEigh*`/`LinalgEigvalsh*`), SVD (`LinalgSVD*`),
+`linalg_matrix_norm` (`LinalgMatrixNorm`), `linalg_ldl_factor`
+(`LinalgLDLFactor`), Bessel functions (`Bessel*`), `i0e`/`i1e`
+(`I0e`/`I1e`), `multigammaln` (`Multigammaln`), `erf_inv` (`ErfInv`),
+`sparse_add`/`sp_mm`/`sp_mv` (`SparseAdd`/`SparseSpMM`/`SparseSpMV`),
+FFT/IFFT round-trip forms (`FFTRoundTrip`, `FFT2RoundTrip`,
+`FFTNRoundTrip`, `IFFT2RoundTrip`, `IFFTNRoundTrip`).
+
+**Still genuinely absent** (re-confirmed by grep, zero matching
+`TEST_P` cases):
+- `linalg_vecdot`, `linalg_vector_norm`, `linalg_ldl_solve`.
+- Direct (non-round-trip) `rfft`/`irfft` gradcheck — only the
+  `fft`/`ifft` round-trip forms above exist; a real-input rfft/irfft pair
+  has no dedicated case.
+- `sp_gemm` (sparse-sparse matmul), `sparse_tri_solve`.
+
+Real, current pass/fail tally for this file (`./bin/test_gradcheck_multibackend`,
+run 2026-07-18, no filter): **3168 tests, 1548 passed, 0 failed, 1620
+skipped** (Float16 — gradcheck only supports Float32/Float64 — MPS
+unavailable on this Linux host, and the tracked J4 Vulkan-Float64
+trig/hyperbolic skips account for the skips). This supersedes the
+2026-04-17 tally of "84 pass, 18 fail" from `test_gradcheck*` binaries
+predating this file's growth to 176 ops — that tally is retained above
+purely as a historical note, not current status.
 
 Gaps still open:
-- ~35 backward impls remain without gradcheck (LinAlg family: lu, qr, eigh,
-  eigvalsh, svd, linalg_vecdot, linalg_vector_norm, linalg_matrix_norm,
-  linalg_ldl_factor, linalg_ldl_solve; FFT: fft, ifft, rfft, irfft;
-  Special math: bessel_*, i0e, i1e, multigammaln, erf_inv; Sparse:
-  sparse_add, sp_gemm, sp_mm, sp_mv, sparse_tri_solve).
+- `linalg_vecdot`, `linalg_vector_norm`, `linalg_ldl_solve`, direct
+  `rfft`/`irfft`, `sp_gemm`, `sparse_tri_solve` (see the itemized list
+  above).
 - Stride-variant parity for Conv/Pool/Norm surfaced J6 (stride-ignoring
   kernels) and J5 (Float64 downcast); both tracked.
 - `functional::avg_pool2d`/`max_pool2d`/`adaptive_avg_pool2d`/`lp_pool1d`
@@ -285,4 +317,6 @@ Gaps still open:
   autograd backward doesn't apply directly at the functional level.
 - Float64 parity for Conv is green across all backends; LayerNorm/Pool
   diverge on every GPU backend (J5).
-- ROCm 126 ops and OneAPI 65 ops still missing from dispatch tables (F1/F2).
+- ROCm 126 ops and OneAPI 65 ops still missing from dispatch tables (F1/F2)
+  as of the 2026-04-29 audit — not re-verified by this update (out of
+  scope for the gradcheck-file gap-list regeneration Finding 31 covers).

@@ -646,6 +646,36 @@ auto solve_cpu_impl(const Tensor& A, const Tensor& B) -> Tensor {
 } // namespace
 
 auto solve(const Tensor& A, const Tensor& B) -> Tensor {
+    // Validate B's shape against A up front, before any backend dispatch.
+    // Every backend's LU-solve kernel (LAPACKE_?gesv on CPU, cusolverDnSgetrs
+    // on CUDA, hipsolver/rocsolver on ROCm, the equivalent SYCL/Vulkan
+    // kernels) indexes B per-batch as b_data + b*n*nrhs and writes the
+    // solution in place — a B with fewer rows than A's order n, or a
+    // mismatched batch count, causes an out-of-bounds heap read/write.
+    // This check used to live only in the CPU fallback (solve_cpu_impl),
+    // which meant GPU dispatch — reached first — bypassed it entirely.
+    // check_square()/batch_size() only touch .shape(), so this validation
+    // is device-agnostic and safe to run before try_gpu_dispatch.
+    {
+        auto [n, ndim_a] = check_square(A);
+        auto b_shape = B.shape();
+        auto b_ndim = static_cast<int64_t>(b_shape.size());
+        if (b_ndim < 1) throw std::invalid_argument("linalg::solve: B must be at least 1D");
+        int64_t b_rows = (b_ndim >= 2) ? b_shape[b_ndim - 2] : b_shape[0];
+        if (b_rows != n) {
+            throw std::invalid_argument(
+                "linalg::solve: B row dimension (" + std::to_string(b_rows) +
+                ") must match A's size n (" + std::to_string(n) + ")");
+        }
+        int64_t nbatch_a = batch_size(A);
+        int64_t nbatch_b = batch_size(B);
+        if (nbatch_b != nbatch_a) {
+            throw std::invalid_argument(
+                "linalg::solve: batch count of A (" + std::to_string(nbatch_a) +
+                ") does not match batch count of B (" + std::to_string(nbatch_b) + ")");
+        }
+    }
+
     // Try GPU dispatch first. The GPU solve kernels expect a 2D RHS (they
     // transpose B for the column-major cuSOLVER call, which fails on a 1D
     // vector); promote a 1D B to (n, 1) and squeeze the solution back.

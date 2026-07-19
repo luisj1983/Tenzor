@@ -40,7 +40,7 @@ TEST_P(AMPParity, ScaleLossMatches) {
         ref_scaled = scaled.tensor().item<float>();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::amp::GradScaler scaler(65536.0f);
             auto x = Variable(input_cpu.to(backends[i]), true);
@@ -83,7 +83,7 @@ TEST_P(AMPParity, ScaledBackwardMatches) {
         ref_grad = x.grad().value();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::amp::GradScaler scaler(1024.0f);
             auto x = Variable(input_cpu.to(backends[i]), true);

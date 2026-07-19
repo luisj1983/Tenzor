@@ -169,7 +169,7 @@ TEST_F(SkipPolicyMetaTest, BothFlagsClear_DefaultPolicy) {
 // it into a passing assertion — if the macro silently skipped instead, this
 // test would itself report SKIPPED, which CI surfaces as a regression.
 TEST_F(SkipPolicyMetaTest, Macro_FailsRather_WhenRequireSetAndOnlyCpu) {
-    ScopedEnv skip("TENZOR_SKIP_BACKENDS", "cuda,rocm,oneapi,vulkan");
+    ScopedEnv skip("TENZOR_SKIP_BACKENDS", "cuda,rocm,oneapi,vulkan,mps");
     ScopedEnv req("TENZOR_REQUIRE_MULTI_BACKEND", "1");
     // Sanity-check the precondition before invoking the macro under the SPI.
     ASSERT_LT(get_available_backends().size(), 2u)
@@ -184,7 +184,7 @@ TEST_F(SkipPolicyMetaTest, Macro_FailsRather_WhenRequireSetAndOnlyCpu) {
 // a properly working macro invokes the skip path and the test reports SKIPPED;
 // a broken macro reaches the trap and the test reports FAILED.
 TEST_F(SkipPolicyMetaTest, Macro_SkipsRather_WhenRequireUnsetAndOnlyCpu) {
-    ScopedEnv skip("TENZOR_SKIP_BACKENDS", "cuda,rocm,oneapi,vulkan");
+    ScopedEnv skip("TENZOR_SKIP_BACKENDS", "cuda,rocm,oneapi,vulkan,mps");
     ScopedEnv req("TENZOR_REQUIRE_MULTI_BACKEND", nullptr);
     ASSERT_LT(get_available_backends().size(), 2u)
         << "Test setup expected only CPU after skipping every GPU.";

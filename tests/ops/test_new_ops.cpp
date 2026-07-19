@@ -177,7 +177,6 @@ TEST_P(NewOpsTest, SegmentReduceSum) {
 // ============================================================================
 
 TEST_P(NewOpsTest, AsStridedBasic) {
-    if (device().type != Device::Type::CPU) GTEST_SKIP() << "as_strided is CPU metadata op";
     auto t = fromVec({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
     std::vector<int64_t> size = {2, 3};
     std::vector<int64_t> stride = {3, 1};

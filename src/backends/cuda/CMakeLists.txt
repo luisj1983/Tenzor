@@ -152,8 +152,15 @@ if(NCCL_FOUND)
         ../../distributed/nccl_process_group.cpp
         PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_NCCL;TENZOR_USE_CUDA"
     )
+    # Exposed so tests/distributed/CMakeLists.txt can tell whether
+    # tenzor_backend_cuda.so actually has NCCLProcessGroup compiled in (its
+    # declaration in process_group.hpp is itself gated on #ifdef
+    # TENZOR_HAS_NCCL, so a test referencing the class needs to know this
+    # too, not just link the DSO).
+    set(TENZOR_CUDA_NCCL_AVAILABLE ON CACHE INTERNAL "CUDA backend built with real NCCL")
     message(STATUS "CUDA Backend: NCCL support enabled")
 else()
+    set(TENZOR_CUDA_NCCL_AVAILABLE OFF CACHE INTERNAL "CUDA backend built with real NCCL")
     if(TENZOR_REQUIRE_NCCL)
         message(FATAL_ERROR "NCCL library required (-DTENZOR_REQUIRE_NCCL=ON) but not found. "
                 "Set NCCL_ROOT or install NCCL.")

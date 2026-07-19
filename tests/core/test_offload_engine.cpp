@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"  // CC.18: SKIP_WITH_REASON
+#include "../backend_test_fixture.hpp"  // FINDING 25: BackendTest -- parametrized GPU device
 #include "tenzor/core/offload_engine.hpp"
 #include "tenzor/core/transfer_engine.hpp"
 #include "tenzor/core/tensor.hpp"
@@ -14,28 +15,27 @@
 
 using namespace tenzor;
 using namespace tenzor::core;
+using namespace tenzor::testing;
 
-class OffloadEngineTest : public ::testing::Test {
+/**
+ * FINDING 25: was TEST_F over a hardcoded Device::cuda(), so OffloadEngine's
+ * real ROCm/Vulkan/OneAPI TransferEngine-backed paths got zero test exercise.
+ * Now TEST_P over BackendTest, parametrized across every GPU backend below --
+ * the inherited `device` member is the parametrized GPU device.
+ */
+class OffloadEngineTest : public BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
-    }
-
     void SetUp() override {
-        // Check if CUDA backend is available
-        auto* backend = backend_registry().get_backend("cuda");
-        cuda_available = (backend != nullptr && backend->is_available());
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
 
-        if (cuda_available) {
-            default_config.pinned_memory_size = 256 * 1024 * 1024;  // 256 MB
-            default_config.num_transfer_streams = 4;
-            default_config.enable_prefetch = true;
-            default_config.prefetch_depth = 2;
-            default_config.memory_fraction = 0.25f;
-        }
+        default_config.pinned_memory_size = 256 * 1024 * 1024;  // 256 MB
+        default_config.num_transfer_streams = 4;
+        default_config.enable_prefetch = true;
+        default_config.prefetch_depth = 2;
+        default_config.memory_fraction = 0.25f;
     }
 
-    bool cuda_available = false;
     OffloadEngine::Config default_config;
 
     // Helper to create test tensor with pattern
@@ -78,16 +78,14 @@ protected:
 // Constructor Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, ConstructorWithValidConfig) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, ConstructorWithValidConfig) {
 
     ASSERT_NO_THROW({
         OffloadEngine engine(default_config);
     });
 }
 
-TEST_F(OffloadEngineTest, ConstructorWithDefaultConfig) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, ConstructorWithDefaultConfig) {
 
     OffloadEngine::Config config;
     ASSERT_NO_THROW({
@@ -95,8 +93,7 @@ TEST_F(OffloadEngineTest, ConstructorWithDefaultConfig) {
     });
 }
 
-TEST_F(OffloadEngineTest, ConstructorInitializesResources) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, ConstructorInitializesResources) {
 
     OffloadEngine engine(default_config);
 
@@ -111,25 +108,23 @@ TEST_F(OffloadEngineTest, ConstructorInitializesResources) {
 // Synchronous API Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, SyncOffloadToCPU_BasicTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, SyncOffloadToCPU_BasicTensor) {
 
     OffloadEngine engine(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, device);
     Tensor cpu_tensor = engine.offload_to_cpu(gpu_tensor);
 
     EXPECT_EQ(cpu_tensor.device().type, Device::Type::CPU);
     EXPECT_TRUE(verifyPatternTensor(cpu_tensor));
 }
 
-TEST_F(OffloadEngineTest, SyncOffloadToCPU_LargeTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, SyncOffloadToCPU_LargeTensor) {
 
     OffloadEngine engine(default_config);
 
     // 10 MB tensor
-    Tensor gpu_tensor = createPatternTensor({2500, 1000}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = createPatternTensor({2500, 1000}, DType::Float32, device);
     Tensor cpu_tensor = engine.offload_to_cpu(gpu_tensor);
 
     EXPECT_EQ(cpu_tensor.device().type, Device::Type::CPU);
@@ -137,55 +132,57 @@ TEST_F(OffloadEngineTest, SyncOffloadToCPU_LargeTensor) {
                           gpu_tensor.shape().begin(), gpu_tensor.shape().end()));
 }
 
-TEST_F(OffloadEngineTest, SyncLoadToGPU_BasicTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, SyncLoadToGPU_BasicTensor) {
 
     OffloadEngine engine(default_config);
 
     Tensor cpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine.load_to_gpu(cpu_tensor);
+    // Explicit-device overload: the device-less load_to_gpu(cpu_tensor)
+    // targets OffloadEngine's own default_gpu_device_, which on a host with
+    // multiple GPU backends registered prefers CUDA (see
+    // detect_default_gpu_device() in offload_engine.cpp) regardless of which
+    // backend THIS parametrized test is targeting -- pass `device` explicitly
+    // to actually exercise cuda/rocm/vulkan/oneapi symmetrically.
+    Tensor gpu_tensor = engine.load_to_gpu(cpu_tensor, device);
 
-    EXPECT_EQ(gpu_tensor.device().type, Device::Type::CUDA);
+    EXPECT_EQ(gpu_tensor.device().type, device.type);
     EXPECT_TRUE(verifyPatternTensor(gpu_tensor));
 }
 
-TEST_F(OffloadEngineTest, SyncLoadToGPU_LargeTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, SyncLoadToGPU_LargeTensor) {
 
     OffloadEngine engine(default_config);
 
     Tensor cpu_tensor = createPatternTensor({2500, 1000}, DType::Float32, Device::cpu());
-    Tensor gpu_tensor = engine.load_to_gpu(cpu_tensor);
+    Tensor gpu_tensor = engine.load_to_gpu(cpu_tensor, device);
 
-    EXPECT_EQ(gpu_tensor.device().type, Device::Type::CUDA);
+    EXPECT_EQ(gpu_tensor.device().type, device.type);
     EXPECT_TRUE(std::equal(gpu_tensor.shape().begin(), gpu_tensor.shape().end(),
                           cpu_tensor.shape().begin(), cpu_tensor.shape().end()));
 }
 
-TEST_F(OffloadEngineTest, SyncRoundTrip_PreservesData) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, SyncRoundTrip_PreservesData) {
 
     OffloadEngine engine(default_config);
 
-    Tensor original = createPatternTensor({1000, 500}, DType::Float32, Device::cuda());
+    Tensor original = createPatternTensor({1000, 500}, DType::Float32, device);
     Tensor cpu = engine.offload_to_cpu(original);
     Tensor restored = engine.load_to_gpu(cpu);
 
     EXPECT_TRUE(verifyPatternTensor(restored));
 }
 
-TEST_F(OffloadEngineTest, SyncOffload_MultipleTypes) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, SyncOffload_MultipleTypes) {
 
     OffloadEngine engine(default_config);
 
     // Test Float32
-    Tensor float32_gpu = zeros({100}, DType::Float32, Device::cuda());
+    Tensor float32_gpu = zeros({100}, DType::Float32, device);
     Tensor float32_cpu = engine.offload_to_cpu(float32_gpu);
     EXPECT_EQ(float32_cpu.dtype(), DType::Float32);
 
     // Test Int32
-    Tensor int32_gpu = zeros({100}, DType::Int32, Device::cuda());
+    Tensor int32_gpu = zeros({100}, DType::Int32, device);
     Tensor int32_cpu = engine.offload_to_cpu(int32_gpu);
     EXPECT_EQ(int32_cpu.dtype(), DType::Int32);
 }
@@ -194,12 +191,11 @@ TEST_F(OffloadEngineTest, SyncOffload_MultipleTypes) {
 // Asynchronous API Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, AsyncOffloadToCPU_BasicTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncOffloadToCPU_BasicTensor) {
 
     OffloadEngine engine(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, device);
     auto handle = engine.offload_to_cpu_async(gpu_tensor);
 
     EXPECT_TRUE(handle.is_valid());
@@ -209,23 +205,21 @@ TEST_F(OffloadEngineTest, AsyncOffloadToCPU_BasicTensor) {
     EXPECT_TRUE(verifyPatternTensor(cpu_tensor));
 }
 
-TEST_F(OffloadEngineTest, AsyncOffloadToCPU_ReturnsHandle) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncOffloadToCPU_ReturnsHandle) {
 
     OffloadEngine engine(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = createPatternTensor({1000}, DType::Float32, device);
     auto handle = engine.offload_to_cpu_async(gpu_tensor);
 
     EXPECT_TRUE(handle.is_valid());
 }
 
-TEST_F(OffloadEngineTest, AsyncOffloadToCPU_CanWait) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncOffloadToCPU_CanWait) {
 
     OffloadEngine engine(default_config);
 
-    Tensor gpu_tensor = createPatternTensor({5000, 1000}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = createPatternTensor({5000, 1000}, DType::Float32, device);
     auto handle = engine.offload_to_cpu_async(gpu_tensor);
 
     // Wait for completion
@@ -233,28 +227,27 @@ TEST_F(OffloadEngineTest, AsyncOffloadToCPU_CanWait) {
     EXPECT_TRUE(handle.is_ready());
 }
 
-TEST_F(OffloadEngineTest, AsyncLoadToGPU_BasicTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncLoadToGPU_BasicTensor) {
 
     OffloadEngine engine(default_config);
 
     Tensor cpu_tensor = createPatternTensor({1000}, DType::Float32, Device::cpu());
-    auto handle = engine.load_to_gpu_async(cpu_tensor);
+    // See SyncLoadToGPU_BasicTensor above re: explicit device overload.
+    auto handle = engine.load_to_gpu_async(cpu_tensor, device);
 
     Tensor gpu_tensor = handle.get_tensor();
-    EXPECT_EQ(gpu_tensor.device().type, Device::Type::CUDA);
+    EXPECT_EQ(gpu_tensor.device().type, device.type);
     EXPECT_TRUE(verifyPatternTensor(gpu_tensor));
 }
 
-TEST_F(OffloadEngineTest, AsyncTransfers_MultipleSimultaneous) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncTransfers_MultipleSimultaneous) {
 
     OffloadEngine engine(default_config);
 
     // Start multiple async transfers
     std::vector<TransferHandle> handles;
     for (int i = 0; i < 4; ++i) {
-        Tensor gpu_tensor = createPatternTensor({500, 250}, DType::Float32, Device::cuda());
+        Tensor gpu_tensor = createPatternTensor({500, 250}, DType::Float32, device);
         handles.push_back(engine.offload_to_cpu_async(gpu_tensor));
     }
 
@@ -265,8 +258,7 @@ TEST_F(OffloadEngineTest, AsyncTransfers_MultipleSimultaneous) {
     }
 }
 
-TEST_F(OffloadEngineTest, AsyncTransfers_CorrectOrdering) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncTransfers_CorrectOrdering) {
 
     OffloadEngine engine(default_config);
 
@@ -275,7 +267,7 @@ TEST_F(OffloadEngineTest, AsyncTransfers_CorrectOrdering) {
 
     // Create and offload tensors with unique patterns
     for (int i = 0; i < 3; ++i) {
-        gpu_tensors.push_back(createPatternTensor({100 * (i + 1)}, DType::Float32, Device::cuda()));
+        gpu_tensors.push_back(createPatternTensor({100 * (i + 1)}, DType::Float32, device));
         handles.push_back(engine.offload_to_cpu_async(gpu_tensors[i]));
     }
 
@@ -286,8 +278,7 @@ TEST_F(OffloadEngineTest, AsyncTransfers_CorrectOrdering) {
     }
 }
 
-TEST_F(OffloadEngineTest, AsyncPrefetch_SingleTensor) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncPrefetch_SingleTensor) {
 
     OffloadEngine engine(default_config);
 
@@ -304,8 +295,7 @@ TEST_F(OffloadEngineTest, AsyncPrefetch_SingleTensor) {
     engine.wait_for_prefetch();
 }
 
-TEST_F(OffloadEngineTest, AsyncPrefetch_MultipleTensors) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AsyncPrefetch_MultipleTensors) {
 
     OffloadEngine engine(default_config);
 
@@ -321,11 +311,10 @@ TEST_F(OffloadEngineTest, AsyncPrefetch_MultipleTensors) {
     });
 }
 
-TEST_F(OffloadEngineTest, AsyncPrefetch_CommitsToTargetTensor) {
+TEST_P(OffloadEngineTest, AsyncPrefetch_CommitsToTargetTensor) {
     // Locks in the contract that prefetch_to_gpu + wait_for_prefetch actually moves the
     // tensor to GPU and preserves its data — the legacy code dropped the TransferHandle on
     // the floor so the user's Tensor* never saw the GPU copy.
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     OffloadEngine engine(default_config);
 
@@ -352,7 +341,7 @@ TEST_F(OffloadEngineTest, AsyncPrefetch_CommitsToTargetTensor) {
     }
 }
 
-TEST_F(OffloadEngineTest, SharedTransferEngine_ConfigAdoptsCallerEngine) {
+TEST_P(OffloadEngineTest, SharedTransferEngine_ConfigAdoptsCallerEngine) {
     // Locks in the contract that OffloadEngine::Config::shared_transfer_engine, when set,
     // is *adopted* by the OffloadEngine rather than ignored — the latter would silently
     // fall back to the legacy "every subsystem keeps its own pinned pool" behaviour and
@@ -368,7 +357,7 @@ TEST_F(OffloadEngineTest, SharedTransferEngine_ConfigAdoptsCallerEngine) {
         << "OffloadEngine should adopt the caller's TransferEngine when one is provided";
 }
 
-TEST_F(OffloadEngineTest, SharedTransferEngine_DefaultsToOwnEngine) {
+TEST_P(OffloadEngineTest, SharedTransferEngine_DefaultsToOwnEngine) {
     // The shared_transfer_engine field is opt-in: with it unset, OffloadEngine should
     // build its own engine (legacy behaviour) so existing callers are unaffected.
     OffloadEngine engine(default_config);
@@ -381,8 +370,7 @@ TEST_F(OffloadEngineTest, SharedTransferEngine_DefaultsToOwnEngine) {
 // Memory Management Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, PinnedMemoryStats_Accurate) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, PinnedMemoryStats_Accurate) {
 
     OffloadEngine engine(default_config);
 
@@ -391,12 +379,11 @@ TEST_F(OffloadEngineTest, PinnedMemoryStats_Accurate) {
     EXPECT_EQ(initial_stats.allocated_size, 0);
 }
 
-TEST_F(OffloadEngineTest, AutoOffload_Registration) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AutoOffload_Registration) {
 
     OffloadEngine engine(default_config);
 
-    Tensor tensor = createPatternTensor({1000}, DType::Float32, Device::cuda());
+    Tensor tensor = createPatternTensor({1000}, DType::Float32, device);
 
     ASSERT_NO_THROW({
         engine.register_auto_offload(&tensor, OffloadPriority::NORMAL);
@@ -408,13 +395,12 @@ TEST_F(OffloadEngineTest, AutoOffload_Registration) {
     });
 }
 
-TEST_F(OffloadEngineTest, AutoOffload_ByPriority) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, AutoOffload_ByPriority) {
 
     OffloadEngine engine(default_config);
 
-    Tensor low_priority = createPatternTensor({100}, DType::Float32, Device::cuda());
-    Tensor high_priority = createPatternTensor({100}, DType::Float32, Device::cuda());
+    Tensor low_priority = createPatternTensor({100}, DType::Float32, device);
+    Tensor high_priority = createPatternTensor({100}, DType::Float32, device);
 
     engine.register_auto_offload(&low_priority, OffloadPriority::LOW);
     engine.register_auto_offload(&high_priority, OffloadPriority::HIGH);
@@ -423,8 +409,7 @@ TEST_F(OffloadEngineTest, AutoOffload_ByPriority) {
     engine.check_and_offload();
 }
 
-TEST_F(OffloadEngineTest, MemoryPressure_Calculation) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, MemoryPressure_Calculation) {
 
     OffloadEngine engine(default_config);
 
@@ -437,8 +422,7 @@ TEST_F(OffloadEngineTest, MemoryPressure_Calculation) {
 // Prefetch Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, Prefetch_StartsTransferEarly) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, Prefetch_StartsTransferEarly) {
 
     OffloadEngine engine(default_config);
 
@@ -452,8 +436,7 @@ TEST_F(OffloadEngineTest, Prefetch_StartsTransferEarly) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
-TEST_F(OffloadEngineTest, Prefetch_WithDisabledConfig) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, Prefetch_WithDisabledConfig) {
 
     OffloadEngine::Config config = default_config;
     config.enable_prefetch = false;
@@ -473,13 +456,12 @@ TEST_F(OffloadEngineTest, Prefetch_WithDisabledConfig) {
 // Performance Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, BandwidthMeasurement_Offload) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, BandwidthMeasurement_Offload) {
 
     OffloadEngine engine(default_config);
 
     // 100 MB tensor
-    Tensor gpu_tensor = createPatternTensor({25000, 1000}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = createPatternTensor({25000, 1000}, DType::Float32, device);
     size_t bytes = gpu_tensor.numel() * sizeof(float);
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -493,8 +475,7 @@ TEST_F(OffloadEngineTest, BandwidthMeasurement_Offload) {
     EXPECT_GT(bandwidth_gbps, 0.5);  // At least 0.5 GB/s
 }
 
-TEST_F(OffloadEngineTest, BandwidthMeasurement_Load) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, BandwidthMeasurement_Load) {
 
     OffloadEngine engine(default_config);
 
@@ -503,7 +484,7 @@ TEST_F(OffloadEngineTest, BandwidthMeasurement_Load) {
     size_t bytes = cpu_tensor.numel() * sizeof(float);
 
     auto start = std::chrono::high_resolution_clock::now();
-    Tensor gpu_tensor = engine.load_to_gpu(cpu_tensor);
+    Tensor gpu_tensor = engine.load_to_gpu(cpu_tensor, device);
     auto end = std::chrono::high_resolution_clock::now();
 
     double time_s = std::chrono::duration<double>(end - start).count();
@@ -517,8 +498,7 @@ TEST_F(OffloadEngineTest, BandwidthMeasurement_Load) {
 // Error Handling Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, OffloadCPUTensor_NoOp) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, OffloadCPUTensor_NoOp) {
 
     OffloadEngine engine(default_config);
 
@@ -530,12 +510,11 @@ TEST_F(OffloadEngineTest, OffloadCPUTensor_NoOp) {
     EXPECT_EQ(result.numel(), cpu_tensor.numel());
 }
 
-TEST_F(OffloadEngineTest, LoadNonCPUTensor_ThrowsError) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, LoadNonCPUTensor_ThrowsError) {
 
     OffloadEngine engine(default_config);
 
-    Tensor gpu_tensor = zeros({100}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = zeros({100}, DType::Float32, device);
 
     EXPECT_THROW({
         engine.load_to_gpu(gpu_tensor);
@@ -546,15 +525,14 @@ TEST_F(OffloadEngineTest, LoadNonCPUTensor_ThrowsError) {
 // Synchronization Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, Synchronize_WaitsForAll) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, Synchronize_WaitsForAll) {
 
     OffloadEngine engine(default_config);
 
     // Start multiple async operations
     std::vector<TransferHandle> handles;
     for (int i = 0; i < 4; ++i) {
-        Tensor gpu = createPatternTensor({1000, 500}, DType::Float32, Device::cuda());
+        Tensor gpu = createPatternTensor({1000, 500}, DType::Float32, device);
         handles.push_back(engine.offload_to_cpu_async(gpu));
     }
 
@@ -571,18 +549,28 @@ TEST_F(OffloadEngineTest, Synchronize_WaitsForAll) {
 // Statistics Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, Statistics_TrackOperations) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(OffloadEngineTest, Statistics_TrackOperations) {
 
     OffloadEngine engine(default_config);
 
     size_t initial_count = engine.get_offload_count();
 
-    Tensor gpu_tensor = createPatternTensor({100}, DType::Float32, Device::cuda());
+    Tensor gpu_tensor = createPatternTensor({100}, DType::Float32, device);
     engine.offload_to_cpu(gpu_tensor);
 
     EXPECT_EQ(engine.get_offload_count(), initial_count + 1);
 }
+
+// FINDING 25: exercise every real (non-stub) OffloadEngine/TransferEngine GPU
+// backend, not just CUDA.
+INSTANTIATE_TEST_SUITE_P(
+    GpuBackends,
+    OffloadEngineTest,
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    }
+);
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

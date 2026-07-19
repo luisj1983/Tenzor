@@ -32,7 +32,7 @@ TEST_P(NNTransformerParity, TransformerEncoderLayer) {
     auto input = randn({8, 4, 64}, DType::Float32, Device::cpu());
     auto ref = layer.forward(Variable(input, false), Tensor{}, Tensor{}).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::TransformerEncoderLayer layer_dev(64, 4);
         layer_dev.eval();
         auto params = layer.parameters();
@@ -60,7 +60,7 @@ TEST_P(NNTransformerParity, TransformerDecoderLayer) {
     auto tgt = randn({6, 4, 64}, DType::Float32, Device::cpu());
     auto ref = layer.forward(Variable(tgt, false), Variable(memory, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::TransformerDecoderLayer layer_dev(64, 4);
         layer_dev.eval();
         auto params = layer.parameters();
@@ -89,7 +89,7 @@ TEST_P(NNTransformerParity, TransformerEncoder) {
     auto input = randn({8, 4, 64}, DType::Float32, Device::cpu());
     auto ref = encoder.forward(Variable(input, false), Tensor{}, Tensor{}).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         auto enc_layer_dev = std::make_shared<nn::TransformerEncoderLayer>(64, 4);
         nn::TransformerEncoder encoder_dev(enc_layer_dev, 2);
         encoder_dev.eval();
@@ -121,7 +121,7 @@ TEST_P(NNTransformerParity, MultiheadAttention) {
         Variable(query, false), Variable(key, false), Variable(value, false));
     auto ref = ref_out.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::MultiheadAttention attn_dev(64, 4);
         attn_dev.eval();
         auto params = attn.parameters();
@@ -151,7 +151,7 @@ TEST_P(NNTransformerParity, PositionalEncoding) {
     auto input = randn({8, 4, 64}, DType::Float32, Device::cpu());
     auto ref = pe.forward(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::PositionalEncoding pe_dev(64, 100);
         pe_dev.eval();
         auto params = pe.parameters();
@@ -186,7 +186,7 @@ TEST_P(NNTransformerParity, FlexAttention) {
     auto ref = nn::flex_attention(q, k, v, mask_cpu,
                                   nn::causal_score_mod(), -1.0f);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         auto q_dev = q.to(backends[i]);
         auto k_dev = k.to(backends[i]);
         auto v_dev = v.to(backends[i]);
@@ -221,7 +221,7 @@ TEST_P(NNTransformerParity, SlidingWindowAttention) {
         Variable(query, false), Variable(key, false), Variable(value, false));
     auto ref = ref_out.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::GroupedQueryAttention gqa_dev(64, 4, 2, 0.0, true, true, nullptr, 4);
         gqa_dev.eval();
         auto params = gqa.parameters();
@@ -259,7 +259,7 @@ TEST_P(NNTransformerParity, GroupedQueryAttention) {
         Variable(query, false), Variable(key, false), Variable(value, false));
     auto ref = ref_out.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         nn::GroupedQueryAttention gqa_dev(64, 4, 2);
         gqa_dev.eval();
         auto params = gqa.parameters();

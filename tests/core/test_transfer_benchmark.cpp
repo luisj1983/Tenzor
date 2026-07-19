@@ -7,6 +7,14 @@
  * - Measure bandwidth in GB/s
  * - Test async overlap benefits
  * - Report results to stdout
+ *
+ * FINDING 25: was TEST_F over a hardcoded Device::cuda(0), so TransferEngine's
+ * real ROCm/Vulkan/OneAPI backends never got bandwidth-benchmarked at all. Now
+ * TEST_P over BackendTest, parametrized across every GPU backend below -- the
+ * inherited `device` member is the parametrized GPU device. TransferEngine's
+ * cpu_to_gpu/cpu_to_gpu_async already take an explicit Device parameter (no
+ * default-device ambiguity to work around here, unlike OffloadEngine's
+ * convenience overloads in test_offload_engine*.cpp).
  */
 
 #include <gtest/gtest.h>
@@ -14,7 +22,7 @@
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/tenzor.hpp>
-#include "../multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
+#include "../backend_test_fixture.hpp"  // FINDING 25: BackendTest -- parametrized GPU device
 #include <chrono>
 #include <vector>
 #include <iomanip>
@@ -24,35 +32,32 @@
 
 using namespace tenzor;
 using namespace tenzor::core;
+using namespace tenzor::testing;
 
 /**
  * Test Fixture for Transfer Benchmarks
  */
-class TransferBenchmarkTest : public ::testing::Test {
+class TransferBenchmarkTest : public BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();  // Load CUDA backend
-    }
-
     void SetUp() override {
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
         // Configure engine for optimal performance
         config.num_streams = 8;
         config.queue_capacity = 128;
         config.use_pinned_memory = true;
         config.pinned_pool_size = 512 * 1024 * 1024;  // 512 MB
-
-        cuda_available = checkCudaAvailable();
     }
 
     void TearDown() override {
         // Report summary
-        if (cuda_available && !results.empty()) {
+        if (!results.empty()) {
             printSummary();
         }
     }
 
     TransferEngine::Config config;
-    bool cuda_available = false;
 
     struct BenchmarkResult {
         std::string name;
@@ -63,24 +68,13 @@ protected:
 
     std::vector<BenchmarkResult> results;
 
-    // Helper to check CUDA availability
-    bool checkCudaAvailable() {
-        try {
-            Device cuda_device = Device::cuda(0);
-            Tensor test = zeros({10}, DType::Float32, cuda_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
     // Helper to create tensor
-    Tensor createTensor(size_t bytes, Device device) {
+    Tensor createTensor(size_t bytes, Device tensor_device) {
         size_t numel = bytes / sizeof(float);
-        Tensor t(std::vector<int64_t>{static_cast<int64_t>(numel)}, DType::Float32, device);
+        Tensor t(std::vector<int64_t>{static_cast<int64_t>(numel)}, DType::Float32, tensor_device);
 
         // Fill with data to ensure memory is allocated
-        if (device.type == Device::Type::CPU) {
+        if (tensor_device.type == Device::Type::CPU) {
             auto* data = t.data<float>();
             for (size_t i = 0; i < numel; ++i) {
                 data[i] = static_cast<float>(i % 1000);
@@ -182,8 +176,7 @@ protected:
 // CPU to GPU Bandwidth Benchmarks
 // =============================================================================
 
-TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_1MB) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Bandwidth_CPUToGPU_1MB) {
 
     TransferEngine engine(config);
     size_t size = 1 * 1024 * 1024;  // 1 MB
@@ -191,14 +184,13 @@ TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_1MB) {
     Tensor cpu_tensor = createTensor(size, Device::cpu());
 
     double time_ms = measureTime([&]() {
-        Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, Device::cuda(0));
+        Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, device);
     });
 
     recordResult("CPU->GPU 1MB", size, time_ms);
 }
 
-TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_10MB) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Bandwidth_CPUToGPU_10MB) {
 
     TransferEngine engine(config);
     size_t size = 10 * 1024 * 1024;  // 10 MB
@@ -206,14 +198,13 @@ TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_10MB) {
     Tensor cpu_tensor = createTensor(size, Device::cpu());
 
     double time_ms = measureTime([&]() {
-        Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, Device::cuda(0));
+        Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, device);
     });
 
     recordResult("CPU->GPU 10MB", size, time_ms);
 }
 
-TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_100MB) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Bandwidth_CPUToGPU_100MB) {
 
     TransferEngine engine(config);
     size_t size = 100 * 1024 * 1024;  // 100 MB
@@ -221,7 +212,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_100MB) {
     Tensor cpu_tensor = createTensor(size, Device::cpu());
 
     double time_ms = measureTime([&]() {
-        Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, Device::cuda(0));
+        Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, device);
     });
 
     recordResult("CPU->GPU 100MB", size, time_ms);
@@ -231,13 +222,12 @@ TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_100MB) {
 // GPU to CPU Bandwidth Benchmarks
 // =============================================================================
 
-TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_1MB) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Bandwidth_GPUToCPU_1MB) {
 
     TransferEngine engine(config);
     size_t size = 1 * 1024 * 1024;  // 1 MB
 
-    Tensor gpu_tensor = createTensor(size, Device::cuda(0));
+    Tensor gpu_tensor = createTensor(size, device);
 
     double time_ms = measureTime([&]() {
         Tensor cpu_tensor = engine.gpu_to_cpu(gpu_tensor);
@@ -246,13 +236,12 @@ TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_1MB) {
     recordResult("GPU->CPU 1MB", size, time_ms);
 }
 
-TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_10MB) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Bandwidth_GPUToCPU_10MB) {
 
     TransferEngine engine(config);
     size_t size = 10 * 1024 * 1024;  // 10 MB
 
-    Tensor gpu_tensor = createTensor(size, Device::cuda(0));
+    Tensor gpu_tensor = createTensor(size, device);
 
     double time_ms = measureTime([&]() {
         Tensor cpu_tensor = engine.gpu_to_cpu(gpu_tensor);
@@ -261,13 +250,12 @@ TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_10MB) {
     recordResult("GPU->CPU 10MB", size, time_ms);
 }
 
-TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_100MB) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Bandwidth_GPUToCPU_100MB) {
 
     TransferEngine engine(config);
     size_t size = 100 * 1024 * 1024;  // 100 MB
 
-    Tensor gpu_tensor = createTensor(size, Device::cuda(0));
+    Tensor gpu_tensor = createTensor(size, device);
 
     double time_ms = measureTime([&]() {
         Tensor cpu_tensor = engine.gpu_to_cpu(gpu_tensor);
@@ -280,8 +268,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_100MB) {
 // Async Overlap Benchmarks
 // =============================================================================
 
-TEST_F(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
 
     TransferEngine engine(config);
     size_t size = 10 * 1024 * 1024;  // 10 MB
@@ -295,7 +282,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
     // Serial transfers
     double serial_time_ms = measureBestTime([&]() {
         for (auto& cpu_t : cpu_tensors) {
-            Tensor gpu_t = engine.cpu_to_gpu(cpu_t, Device::cuda(0));
+            Tensor gpu_t = engine.cpu_to_gpu(cpu_t, device);
         }
     });
     recordResult("Serial 8x10MB", num_transfers * size, serial_time_ms);
@@ -304,7 +291,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
     double parallel_time_ms = measureBestTime([&]() {
         std::vector<TransferHandle> handles;
         for (auto& cpu_t : cpu_tensors) {
-            handles.push_back(engine.cpu_to_gpu_async(cpu_t, Device::cuda(0)));
+            handles.push_back(engine.cpu_to_gpu_async(cpu_t, device));
         }
         for (auto& handle : handles) {
             handle.wait();
@@ -316,7 +303,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
     std::cout << "Async overlap speedup: " << std::fixed << std::setprecision(2)
               << speedup << "x" << std::endl;
 
-    // What this asserts, and why 0.9:
+    // What this asserts, and why 0.9 (0.3 for OneAPI):
     //
     // On this host the H2D PCIe link saturates at ~13.7 GB/s with a *single*
     // transfer stream (verified: 10 MB and 200 MB transfers both hit the same
@@ -332,14 +319,28 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
     // a saturated link) but "async overlap is not broken" — i.e. the pipeline
     // is not accidentally serialized (which would show up as a ~Nx, not a few
     // percent, slowdown). Comparing best-of-N times, the async pipeline lands
-    // within ~5% of the serial baseline; 0.9 leaves margin for that intrinsic
-    // overhead while still failing hard if overlap ever regresses into full
-    // serialization.
-    EXPECT_GT(speedup, 0.9);
+    // within ~5% of the serial baseline on cuda/rocm/vulkan; 0.9 leaves margin
+    // for that intrinsic overhead while still failing hard if overlap ever
+    // regresses into full serialization.
+    //
+    // OneAPI is a real, measured exception to the "saturated PCIe link" model
+    // above: this host's OneAPI SYCL device is CPU-backed (no discrete Intel
+    // GPU present, target is spir64), so its "async transfers" are concurrent
+    // host-memory-bound SYCL kernels contending for the same CPU cores and
+    // memory bandwidth, not independent DMAs sharing a separate bus. That
+    // contention can make the parallel path measurably SLOWER than serial,
+    // not just fail to beat it -- verified stable at ~0.40-0.47x speedup
+    // across 3 repeated runs (versus 0.97-1.31x for cuda/rocm/vulkan on the
+    // same host). A regression to full serialization would still show up as
+    // a much larger drop (worker-thread-per-transfer stalls are ~1/N, not a
+    // ~2x contention penalty), so 0.3 keeps this a meaningful regression
+    // guard for OneAPI without false-failing on its legitimate backend
+    // characteristics.
+    const double min_speedup = (device.type == Device::Type::OneAPI) ? 0.3 : 0.9;
+    EXPECT_GT(speedup, min_speedup);
 }
 
-TEST_F(TransferBenchmarkTest, AsyncOverlap_BidirectionalTransfers) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, AsyncOverlap_BidirectionalTransfers) {
 
     TransferEngine engine(config);
     size_t size = 20 * 1024 * 1024;  // 20 MB
@@ -350,7 +351,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_BidirectionalTransfers) {
 
     for (int i = 0; i < num_pairs; ++i) {
         cpu_tensors.push_back(createTensor(size, Device::cpu()));
-        gpu_tensors.push_back(createTensor(size, Device::cuda(0)));
+        gpu_tensors.push_back(createTensor(size, device));
     }
 
     // Bidirectional async transfers
@@ -360,7 +361,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_BidirectionalTransfers) {
 
         // Launch all transfers
         for (int i = 0; i < num_pairs; ++i) {
-            cpu_to_gpu_handles.push_back(engine.cpu_to_gpu_async(cpu_tensors[i], Device::cuda(0)));
+            cpu_to_gpu_handles.push_back(engine.cpu_to_gpu_async(cpu_tensors[i], device));
             gpu_to_cpu_handles.push_back(engine.gpu_to_cpu_async(gpu_tensors[i]));
         }
 
@@ -389,8 +390,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_BidirectionalTransfers) {
 // back to full serialization would show as a ~Nx slowdown; comparing best-of-N
 // times, speedup > 0.9 leaves margin for the intrinsic overhead while failing
 // hard if the worker is ever stalled per transfer again.
-TEST_F(TransferBenchmarkTest, AsyncOverlap_D2H_SerialVsParallel) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, AsyncOverlap_D2H_SerialVsParallel) {
 
     TransferEngine engine(config);
     size_t size = 10 * 1024 * 1024;  // 10 MB
@@ -398,7 +398,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_D2H_SerialVsParallel) {
     const int num_transfers = 8;
     std::vector<Tensor> gpu_tensors;
     for (int i = 0; i < num_transfers; ++i) {
-        gpu_tensors.push_back(createTensor(size, Device::cpu()).to(Device::cuda(0)));
+        gpu_tensors.push_back(createTensor(size, Device::cpu()).to(device));
     }
 
     // Serial D2H transfers (synchronous).
@@ -425,7 +425,14 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_D2H_SerialVsParallel) {
     std::cout << "Async D2H overlap speedup: " << std::fixed << std::setprecision(2)
               << speedup << "x" << std::endl;
 
-    EXPECT_GT(speedup, 0.9);
+    // See AsyncOverlap_SerialVsParallel's comment for the full 0.9-vs-0.3
+    // rationale: OneAPI's SYCL device on this host is CPU-backed, so
+    // concurrent transfers genuinely contend rather than overlap on an
+    // independent bus. D2H measured 0.81-1.17x across repeated runs
+    // (load-sensitive but occasionally dips below 0.9), versus a stable
+    // 1.14-1.33x for cuda/rocm/vulkan.
+    const double min_speedup = (device.type == Device::Type::OneAPI) ? 0.3 : 0.9;
+    EXPECT_GT(speedup, min_speedup);
 }
 
 // Async GPU->CPU (D2H) correctness under concurrency: the deferred pinned->dst
@@ -433,8 +440,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_D2H_SerialVsParallel) {
 // several overlapping transfers (each holding its own pinned staging buffer).
 // Compared byte-exact against an independent synchronous D2H reference — a pure
 // memory copy involves no arithmetic, so exact equality is the correct check.
-TEST_F(TransferBenchmarkTest, AsyncOverlap_D2H_Correctness) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, AsyncOverlap_D2H_Correctness) {
 
     TransferEngine engine(config);
     size_t size = 4 * 1024 * 1024;  // 4 MB
@@ -445,7 +451,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_D2H_Correctness) {
     for (int i = 0; i < num_transfers; ++i) {
         // createTensor fills the CPU source with a deterministic pattern; move
         // it to the GPU so the device holds known bytes.
-        gpu_tensors.push_back(createTensor(size, Device::cpu()).to(Device::cuda(0)));
+        gpu_tensors.push_back(createTensor(size, Device::cpu()).to(device));
     }
 
     // Synchronous D2H reference (does not use the async deferred-copy path).
@@ -478,8 +484,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_D2H_Correctness) {
 // Sustained Throughput Benchmarks
 // =============================================================================
 
-TEST_F(TransferBenchmarkTest, SustainedThroughput_100Transfers) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, SustainedThroughput_100Transfers) {
 
     TransferEngine engine(config);
     size_t size = 1 * 1024 * 1024;  // 1 MB
@@ -490,7 +495,7 @@ TEST_F(TransferBenchmarkTest, SustainedThroughput_100Transfers) {
 
     for (int i = 0; i < num_transfers; ++i) {
         Tensor cpu_t = createTensor(size, Device::cpu());
-        Tensor gpu_t = engine.cpu_to_gpu(cpu_t, Device::cuda(0));
+        Tensor gpu_t = engine.cpu_to_gpu(cpu_t, device);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -504,8 +509,7 @@ TEST_F(TransferBenchmarkTest, SustainedThroughput_100Transfers) {
 // Latency Benchmarks
 // =============================================================================
 
-TEST_F(TransferBenchmarkTest, Latency_SmallTransfer) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Latency_SmallTransfer) {
 
     TransferEngine engine(config);
     size_t size = 4;  // 4 bytes
@@ -514,7 +518,7 @@ TEST_F(TransferBenchmarkTest, Latency_SmallTransfer) {
 
     // Measure minimum latency
     auto start = std::chrono::high_resolution_clock::now();
-    Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, Device::cuda(0));
+    Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, device);
     auto end = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double, std::micro> duration = end - start;
@@ -522,8 +526,7 @@ TEST_F(TransferBenchmarkTest, Latency_SmallTransfer) {
     std::cout << "Minimum transfer latency: " << duration.count() << " μs" << std::endl;
 }
 
-TEST_F(TransferBenchmarkTest, Latency_AsyncOverhead) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, Latency_AsyncOverhead) {
 
     TransferEngine engine(config);
     size_t size = 1024;  // 1 KB
@@ -532,7 +535,7 @@ TEST_F(TransferBenchmarkTest, Latency_AsyncOverhead) {
 
     // Measure async overhead
     auto start = std::chrono::high_resolution_clock::now();
-    TransferHandle handle = engine.cpu_to_gpu_async(cpu_tensor, Device::cuda(0));
+    TransferHandle handle = engine.cpu_to_gpu_async(cpu_tensor, device);
     auto launch_end = std::chrono::high_resolution_clock::now();
     handle.wait();
     auto wait_end = std::chrono::high_resolution_clock::now();
@@ -548,8 +551,7 @@ TEST_F(TransferBenchmarkTest, Latency_AsyncOverhead) {
 // PCIe Utilization Benchmarks
 // =============================================================================
 
-TEST_F(TransferBenchmarkTest, PCIeUtilization_MaxBandwidth) {
-    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+TEST_P(TransferBenchmarkTest, PCIeUtilization_MaxBandwidth) {
 
     TransferEngine engine(config);
 
@@ -569,7 +571,7 @@ TEST_F(TransferBenchmarkTest, PCIeUtilization_MaxBandwidth) {
         Tensor cpu_tensor = createTensor(size, Device::cpu());
 
         double time_ms = measureTime([&]() {
-            Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, Device::cuda(0));
+            Tensor gpu_tensor = engine.cpu_to_gpu(cpu_tensor, device);
         });
 
         double bandwidth_gbps = (size / (time_ms / 1000.0)) / 1e9;
@@ -591,6 +593,17 @@ TEST_F(TransferBenchmarkTest, PCIeUtilization_MaxBandwidth) {
     // Typical PCIe 4.0 x16: ~25 GB/s
     EXPECT_GT(max_bandwidth, 5.0);  // At least 5 GB/s expected
 }
+
+// FINDING 25: exercise every real (non-stub) TransferEngine GPU backend, not
+// just CUDA.
+INSTANTIATE_TEST_SUITE_P(
+    GpuBackends,
+    TransferBenchmarkTest,
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    }
+);
 
 // =============================================================================
 // Main

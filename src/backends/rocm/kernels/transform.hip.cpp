@@ -1393,8 +1393,12 @@ __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
             do { e++; m <<= 1; } while ((m & 0x8) == 0);
             f_exp = 127 - 7 - e; f_mantissa = (m & 0x7) << 20;
         }
-    } else if (exp == 0xF && mantissa != 0) {
-        f_exp = 0xFF; f_mantissa = mantissa << 20;  // NaN
+    } else if (exp == 0xF && mantissa == 0x7) {
+        // Only exp=0xF/mantissa=0x7 is NaN (matches NVIDIA's native E4M3 /
+        // src/core/dtype.cpp's FP8_E4M3 reference). Previously matched ANY
+        // nonzero mantissa at exp=0xF, incorrectly decoding the valid
+        // finite values 256/288/320/352/384/416/448 (mantissa 0x0-0x6) as NaN.
+        f_exp = 0xFF; f_mantissa = 0x700000;  // NaN
     } else {
         f_exp = exp - 7 + 127; f_mantissa = mantissa << 20;  // normal
     }
@@ -1443,7 +1447,12 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float f) {
     else if (exp == 0) { h_exp = 0; h_mantissa = 0; }            // zero/denormal -> zero
     else {
         int32_t new_exp = static_cast<int32_t>(exp) - 127 + 7;
-        if (new_exp >= 0xF) { h_exp = 0xE; h_mantissa = 0x7; }  // overflow -> max normal
+        // Overflow: clamp to E4M3's true max finite (exp=0xF, mantissa=0x6
+        // = 448), not the stale exp=0xE/mantissa=0x7 (=240) bit pattern --
+        // quantize_to_fp8 (fp8_scaling.cpp) deliberately scales its input
+        // so the tensor's max element lands exactly at fp8_max_value()
+        // (448) before casting, so 448.0 itself hits this branch.
+        if (new_exp >= 0xF) { h_exp = 0xF; h_mantissa = 0x6; }  // overflow -> max finite
         else if (new_exp <= 0) {
             if (new_exp >= -3) {
                 uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);

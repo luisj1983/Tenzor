@@ -6,6 +6,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/utils/profiling.hpp"
 
@@ -630,9 +631,69 @@ auto histc(const Tensor& input, int64_t bins, double min_val, double max_val) ->
 auto unique_consecutive(const Tensor& input, bool return_inverse, bool return_counts,
                         std::optional<int64_t> dim)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    if (dim.has_value()) {
+        // Dim-scoped consecutive-dedup compares whole hyperplanes perpendicular
+        // to `dim` (not individual elements), so it can't reuse the flattened
+        // per-backend kernel below. Implemented instead by composing existing
+        // ops that already have real, non-fallback dispatch on every backend
+        // (movedim/ne/any/cumsum/nonzero/index_select/bincount) — this reduces
+        // the N-D problem to comparing rows of a (L, M) matrix, one real
+        // kernel call per step, on whichever device `input` lives on.
+        int64_t d = normalize_reduce_dim(dim.value(), static_cast<int64_t>(input.shape().size()), "unique_consecutive");
+        auto in_shape = input.shape();
+        int64_t L = in_shape[d];
+        Device device = input.device();
+
+        if (L == 0) {
+            std::vector<int64_t> out_shape(in_shape.begin(), in_shape.end());
+            out_shape[static_cast<size_t>(d)] = 0;
+            Tensor unique_vals = tenzor::zeros(out_shape, input.dtype(), device);
+            return {unique_vals,
+                    return_inverse ? Tensor({0}, DType::Int64, device) : Tensor(),
+                    return_counts ? Tensor({0}, DType::Int64, device) : Tensor()};
+        }
+
+        // Move dim d to the front and collapse the remaining dims into one:
+        // consecutive-group detection then reduces to "does row i differ from
+        // row i-1" on a (L, M) matrix.
+        Tensor Xp = tenzor::movedim(input, {d}, {0}).contiguous();
+        auto xp_shape = Xp.shape();
+        std::vector<int64_t> rest_shape(xp_shape.begin() + 1, xp_shape.end());
+        int64_t M = 1;
+        for (auto s : rest_shape) M *= s;
+        Tensor X2 = tenzor::reshape(Xp, {L, M});
+
+        Tensor boundary;
+        if (L == 1) {
+            boundary = tenzor::ones({1}, DType::Int64, device);
+        } else {
+            Tensor diff = tenzor::ne(tenzor::slice(X2, 0, 1, L), tenzor::slice(X2, 0, 0, L - 1));
+            Tensor is_new = tenzor::any(diff, 1, false).to(DType::Int64);
+            Tensor first = tenzor::ones({1}, DType::Int64, device);
+            boundary = tenzor::cat({first, is_new}, 0);
+        }
+
+        Tensor group_start_2d = tenzor::nonzero(boundary);   // (n_unique, 1)
+        int64_t n_unique = group_start_2d.shape()[0];
+        Tensor group_start = tenzor::squeeze(group_start_2d, 1);  // (n_unique,)
+
+        Tensor unique_rows = tenzor::index_select(X2, 0, group_start);  // (n_unique, M)
+        std::vector<int64_t> unique_p_shape = {n_unique};
+        unique_p_shape.insert(unique_p_shape.end(), rest_shape.begin(), rest_shape.end());
+        Tensor unique_p = tenzor::reshape(unique_rows, unique_p_shape);
+        Tensor unique_vals = tenzor::movedim(unique_p, {0}, {d});
+
+        Tensor inverse, counts;
+        if (return_inverse || return_counts) {
+            Tensor group_id = tenzor::sub(tenzor::cumsum(boundary, 0), 1.0).to(DType::Int64);
+            if (return_inverse) inverse = group_id;
+            if (return_counts) counts = tenzor::bincount(group_id, std::nullopt, n_unique);
+        }
+        return {unique_vals, inverse, counts};
+    }
+
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(dim.value(), static_cast<int64_t>(input.shape().size()), "unique_consecutive"));
     attrs.set(AttrKey::Keepdim, return_inverse);  // reuse for return_inverse flag
     auto results = dispatch<OpId::UniqueConsecutive>(inputs, attrs);
     // results[0] = unique values, results[1] = inverse indices, results[2] = counts

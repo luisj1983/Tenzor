@@ -497,22 +497,27 @@ tenzor_discover_tests(tenzor_backend_param_tests DISCOVERY_TIMEOUT 120 BACKENDS 
 # These drive the oneAPI backend directly (skipping at runtime when no oneAPI
 # device is present). Tagged BACKENDS oneapi so they get the `oneapi_` prefix
 # and `oneapi` label instead of masquerading as CPU tests.
-add_executable(tenzor_oneapi_tests
-    unit/test_oneapi_backend_loading.cpp
-    unit/test_oneapi_operations.cpp
-)
-target_link_libraries(tenzor_oneapi_tests PRIVATE
-    tenzor_core
-    tenzor_backend_cpu
-    GTest::gtest_main
-)
-target_include_directories(tenzor_oneapi_tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/include
-)
-if(TARGET tenzor_backend_oneapi)
-    target_link_libraries(tenzor_oneapi_tests PRIVATE tenzor_backend_oneapi)
+# Guarded on TENZOR_BUILD_ONEAPI, matching CUDA/ROCm/Vulkan's pattern in
+# tests/backends/CMakeLists.txt: -DTENZOR_BUILD_ONEAPI=OFF must produce zero
+# registered oneapi tests, not a binary whose cases runtime-skip.
+if(TENZOR_BUILD_ONEAPI)
+    add_executable(tenzor_oneapi_tests
+        unit/test_oneapi_backend_loading.cpp
+        unit/test_oneapi_operations.cpp
+    )
+    target_link_libraries(tenzor_oneapi_tests PRIVATE
+        tenzor_core
+        tenzor_backend_cpu
+        GTest::gtest_main
+    )
+    target_include_directories(tenzor_oneapi_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+    )
+    if(TARGET tenzor_backend_oneapi)
+        target_link_libraries(tenzor_oneapi_tests PRIVATE tenzor_backend_oneapi)
+    endif()
+    tenzor_discover_tests(tenzor_oneapi_tests DISCOVERY_TIMEOUT 120 BACKENDS oneapi LABELS "unit")
 endif()
-tenzor_discover_tests(tenzor_oneapi_tests DISCOVERY_TIMEOUT 120 BACKENDS oneapi LABELS "unit")
 
 # Runtime SIMD dispatch test — standalone executable for targeted runs.
 # Also included in tenzor_unit_tests above.
@@ -549,7 +554,7 @@ target_link_libraries(tenzor_simd_benchmark PRIVATE
 # CUDA scalar debug test (separate executable for quick debugging)
 add_executable(test_cuda_scalar_debug test_cuda_scalar_debug.cpp)
 target_link_libraries(test_cuda_scalar_debug PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 60 BACKENDS cuda)
 
 
 
@@ -655,14 +660,23 @@ add_executable(test_vulkan_batchnorm_fused_bessel test_vulkan_batchnorm_fused_be
 target_link_libraries(test_vulkan_batchnorm_fused_bessel PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_vulkan_batchnorm_fused_bessel DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
 
-# Phase P0 / Fix 6 — CUDA flash-attention backward dropout reproduction:
-# backward kernel used to (void)-cast the Philox seed; now threads it
-# through and re-applies the same mask the forward used.
+# Phase P0 / Fix 6 — flash-attention backward dropout reproduction: backward
+# kernel used to (void)-cast the Philox seed; now threads it through and
+# re-applies the same mask the forward used. Runs device-agnostically via
+# BackendTest (TEST_P over every registered backend), not CUDA-only —
+# despite that, this used to also directly/statically link
+# tenzor_backend_cuda on top of the normal tenzor_core dynamic backend
+# loading tenzor::initialize() already performs. The test never references
+# any tenzor::cuda:: symbol; the redundant static link just forced CUDA's
+# global constructors to run at process-startup load order instead of
+# tenzor::initialize()'s controlled dlopen sequence, which was observed to
+# make the ROCm backend's first lazy pthread_create() (its async-completion
+# worker thread) abort the whole process in this binary specifically, while
+# every other multi-backend ROCm test (which only links tenzor_core, same
+# as add_parity_test) ran fine. Matches the linkage pattern already used
+# throughout tests/backend_parity/CMakeLists.txt's add_parity_test().
 add_executable(test_flash_attention_dropout_backward test_flash_attention_dropout_backward.cpp)
 target_link_libraries(test_flash_attention_dropout_backward PRIVATE tenzor_core GTest::gtest_main)
-if(TARGET tenzor_backend_cuda)
-    target_link_libraries(test_flash_attention_dropout_backward PRIVATE tenzor_backend_cuda)
-endif()
 tenzor_discover_tests(test_flash_attention_dropout_backward DISCOVERY_TIMEOUT 60)
 
 # Phase P0 / Fix 7 — grid_sample bicubic: forward used to silently fall
@@ -812,7 +826,13 @@ tenzor_discover_tests(test_ciou_loss DISCOVERY_TIMEOUT 60)
 # Backend Parity Test - Verify slice operations work correctly on all backends
 add_executable(test_slice_backend_parity test_slice_backend_parity.cpp)
 target_link_libraries(test_slice_backend_parity PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_slice_backend_parity DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_slice_backend_parity DISCOVERY_TIMEOUT 60 BACKENDS multi)
+
+# Finding 40: Backend::set_device()/get_current_device() must be real
+# (not the CPU-inherited no-op) on every GPU backend, not just CUDA/ROCm/MPS.
+add_executable(test_device_switching test_device_switching.cpp)
+target_link_libraries(test_device_switching PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_device_switching DISCOVERY_TIMEOUT 60 BACKENDS multi)
 
 # Slice Debug Test - Debug slice offset and data_ptr behavior
 add_executable(test_slice_debug test_slice_debug.cpp)

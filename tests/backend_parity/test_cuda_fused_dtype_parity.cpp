@@ -12,6 +12,7 @@
 #include <tenzor/backend/op_attributes.hpp>
 #include <tenzor/ops/op_id.hpp>
 #include "../multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
+#include "parity_test_utils.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -42,6 +43,13 @@ static auto random_f32(std::vector<int64_t> shape) -> Tensor {
 
 }  // namespace
 
+// FINDING 17 follow-up: unlike the CPU-vs-CUDA tests in this file, the tests
+// below compare CUDA's native-low-precision result against CUDA's OWN F32
+// result — both sides require CUDA to compute at all (there is no CPU
+// reference anywhere in the comparison), so a CPU-only host has no live
+// value to check against a recorded golden even in principle. These
+// necessarily stay CUDA-only; SKIP_WITH_REASON is the correct, honest
+// outcome here, not a coverage gap to paper over.
 TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_F16_NativeMatchesRef) {
     if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
@@ -268,8 +276,10 @@ static Tensor positive_var(int64_t c) {
 }
 }  // namespace
 
+// FINDING 17: previously an unconditional SKIP_WITH_REASON() on a host
+// without CUDA, with zero golden::* integration. On a CPU-only host, fall
+// back to comparing against a recorded golden instead of skipping outright.
 TEST_F(CudaFusedDtypeParity, FusedConv2dBnReLU_DilationMatchesCPU) {
-    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     auto input  = random_f32({2, 3, 8, 8});
     auto weight = random_f32({4, 3, 3, 3});
     auto bias   = random_f32({4});
@@ -284,21 +294,14 @@ TEST_F(CudaFusedDtypeParity, FusedConv2dBnReLU_DilationMatchesCPU) {
     attrs.set(AttrKey::Dilation, static_cast<int64_t>(2));
     attrs.set(AttrKey::Eps,      static_cast<double>(1e-5));
 
-    std::vector<Tensor> cpu_in = {input, weight, bias, gamma, beta, rm, rv};
-    Tensor ref = dispatch(OpId::FusedConv2dBnReLU, cpu_in, attrs)[0];
+    auto op = [&attrs](const std::vector<Tensor>& ins) -> Tensor {
+        return dispatch(OpId::FusedConv2dBnReLU, ins, attrs)[0];
+    };
 
-    std::vector<Tensor> cu_in = {
-        input.to(Device::cuda(0)), weight.to(Device::cuda(0)), bias.to(Device::cuda(0)),
-        gamma.to(Device::cuda(0)), beta.to(Device::cuda(0)),
-        rm.to(Device::cuda(0)), rv.to(Device::cuda(0))};
-    Tensor out = dispatch(OpId::FusedConv2dBnReLU, cu_in, attrs)[0].to(Device::cpu());
-
-    ASSERT_EQ(ref.numel(), out.numel());
-    ASSERT_GT(ref.numel(), 0);
-    const float* rp = ref.data<float>();
-    const float* op = out.data<float>();
-    for (int64_t i = 0; i < ref.numel(); ++i)
-        EXPECT_NEAR(rp[i], op[i], 1e-4f) << "dilated conv-bn-relu elem " << i;
+    Device target = has_cuda() ? Device::cuda(0) : Device::cpu();
+    ::tenzor::testing::test_operation_parity_single(
+        op, {input, weight, bias, gamma, beta, rm, rv}, target, 1e-5f, 1e-4f,
+        "FusedConv2dBnReLU_Dilation");
 }
 
 // F055: fused conv-activation with asymmetric stride/padding. The non-cuDNN CUDA
@@ -306,7 +309,6 @@ TEST_F(CudaFusedDtypeParity, FusedConv2dBnReLU_DilationMatchesCPU) {
 // config; this checks the op-level result matches CPU (cuDNN serves it here, the
 // native kernel is the non-cuDNN mirror of the same math).
 TEST_F(CudaFusedDtypeParity, FusedConv2dReLU_AsymmetricMatchesCPU) {
-    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     auto input  = random_f32({2, 3, 9, 11});
     auto weight = random_f32({4, 3, 3, 3});
 
@@ -317,19 +319,20 @@ TEST_F(CudaFusedDtypeParity, FusedConv2dReLU_AsymmetricMatchesCPU) {
     attrs.set(AttrKey::PaddingW, static_cast<int64_t>(1));
     attrs.set(AttrKey::Groups,   static_cast<int64_t>(1));
 
-    std::vector<Tensor> cpu_in = {input, weight};
-    Tensor ref = dispatch(OpId::FusedConv2dReLU, cpu_in, attrs)[0];
-    std::vector<Tensor> cu_in = {input.to(Device::cuda(0)), weight.to(Device::cuda(0))};
-    Tensor out = dispatch(OpId::FusedConv2dReLU, cu_in, attrs)[0].to(Device::cpu());
+    auto op = [&attrs](const std::vector<Tensor>& ins) -> Tensor {
+        return dispatch(OpId::FusedConv2dReLU, ins, attrs)[0];
+    };
 
-    ASSERT_EQ(ref.numel(), out.numel());
-    ASSERT_GT(ref.numel(), 0);
-    const float* rp = ref.data<float>();
-    const float* op = out.data<float>();
-    for (int64_t i = 0; i < ref.numel(); ++i)
-        EXPECT_NEAR(rp[i], op[i], 1e-3f) << "asymmetric fused conv-relu elem " << i;
+    Device target = has_cuda() ? Device::cuda(0) : Device::cpu();
+    ::tenzor::testing::test_operation_parity_single(
+        op, {input, weight}, target, 1e-5f, 1e-3f, "FusedConv2dReLU_Asymmetric");
 }
 
+// FINDING 17 follow-up: this test also asserts on the in-place-mutated
+// running_mean/running_var side effect (lines below), which doesn't fit
+// test_operation_parity_single's single-return-value golden contract.
+// Left CUDA-only rather than force-fitting a workaround for the mutation
+// check specifically.
 TEST_F(CudaFusedDtypeParity, FusedConv2dBnReLU_TrainingMatchesCPU) {
     if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     auto input  = random_f32({2, 3, 6, 6});

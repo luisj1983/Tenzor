@@ -59,7 +59,12 @@ if(TENZOR_BUILD_ROCM)
     target_link_libraries(test_rocm_rnn_kernels PRIVATE tenzor_core GTest::gtest_main hip::host)
     target_include_directories(test_rocm_rnn_kernels PRIVATE ${ROCM_PATH}/include)
 
-    # ROCm initialization can be slow, use 60 second timeout. All six suites drive
+    # ROCm FP16 kernel-granularity tests (mirrors CUDA's test_fp16_kernels.cpp —
+    # see FINDING 59 in findings.txt)
+    add_executable(test_rocm_fp16_kernels test_rocm_fp16_kernels.cpp)
+    target_link_libraries(test_rocm_fp16_kernels PRIVATE tenzor_core GTest::gtest_main)
+
+    # ROCm initialization can be slow, use 60 second timeout. All seven suites drive
     # the ROCm backend directly (Device::rocm(), hipGetDeviceCount) and skip when no
     # ROCm device is present, so they are tagged `rocm` (prefix `rocm_`, label `rocm`)
     # instead of the default `cpu` tag.
@@ -69,6 +74,24 @@ if(TENZOR_BUILD_ROCM)
     tenzor_discover_tests(test_rocm_detection_kernels DISCOVERY_TIMEOUT 60 BACKENDS rocm)
     tenzor_discover_tests(test_rocm_reduction DISCOVERY_TIMEOUT 60 BACKENDS rocm)
     tenzor_discover_tests(test_rocm_rnn_kernels DISCOVERY_TIMEOUT 60 BACKENDS rocm)
+    tenzor_discover_tests(test_rocm_fp16_kernels DISCOVERY_TIMEOUT 60 BACKENDS rocm)
+endif()
+
+# OneAPI FFT / RNN kernel tests (mirrors ROCm's test_rocm_fft.cpp and
+# test_rocm_rnn_kernels.cpp — see FINDING 3 in findings.txt: ROCm had
+# dedicated FFT/RNN-cell edge-case test files with no OneAPI equivalent)
+if(TENZOR_BUILD_ONEAPI AND TARGET tenzor_backend_oneapi)
+    add_executable(test_oneapi_fft test_oneapi_fft.cpp)
+    target_link_libraries(test_oneapi_fft PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_oneapi_fft DISCOVERY_TIMEOUT 60 BACKENDS oneapi)
+
+    add_executable(test_oneapi_rnn_kernels test_oneapi_rnn_kernels.cpp)
+    target_link_libraries(test_oneapi_rnn_kernels PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_oneapi_rnn_kernels DISCOVERY_TIMEOUT 60 BACKENDS oneapi)
+
+    add_executable(test_oneapi_detection_kernels test_oneapi_detection_kernels.cpp)
+    target_link_libraries(test_oneapi_detection_kernels PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_oneapi_detection_kernels DISCOVERY_TIMEOUT 60 BACKENDS oneapi)
 endif()
 
 # Sparse GPU tests (works with any GPU backend: CUDA, ROCm, Vulkan, or OneAPI —
@@ -80,7 +103,7 @@ if(TENZOR_BUILD_CUDA OR TENZOR_BUILD_ROCM OR TENZOR_BUILD_VULKAN OR TENZOR_BUILD
 endif()
 
 # Vulkan-specific tests
-if(TENZOR_BUILD_VULKAN)
+if(TENZOR_BUILD_VULKAN AND TARGET tenzor_backend_vulkan)
     add_executable(test_vulkan_threading test_vulkan_threading.cpp)
     target_link_libraries(test_vulkan_threading PRIVATE tenzor_core GTest::gtest_main)
     # Drives the Vulkan backend directly; skips when no Vulkan device is present.
@@ -93,6 +116,12 @@ if(TENZOR_BUILD_VULKAN)
         tenzor_core tenzor_backend_vulkan ${Vulkan_LIBRARIES} GTest::gtest_main)
     target_include_directories(test_vulkan_allocator_merge PRIVATE ${Vulkan_INCLUDE_DIRS})
     tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
+
+    # Vulkan FP16 kernel-granularity tests (mirrors CUDA's test_fp16_kernels.cpp —
+    # see FINDING 59 in findings.txt)
+    add_executable(test_vulkan_fp16_kernels test_vulkan_fp16_kernels.cpp)
+    target_link_libraries(test_vulkan_fp16_kernels PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_vulkan_fp16_kernels DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
 endif()
 
 # ARM NEON kernel tests (compiles on all platforms; tests skip on non-ARM)

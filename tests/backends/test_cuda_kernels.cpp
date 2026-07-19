@@ -2,6 +2,7 @@
 #include <tenzor/tenzor.hpp>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <cuda_runtime.h>
 
 using namespace tenzor;
@@ -885,6 +886,286 @@ TEST(CUDAKernelsTest, Performance_LargeMatMul) {
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
+}
+
+// ============================================================================
+// Normalization Tests (mirrors ROCm's test_rocm_kernels.cpp — see FINDING 6
+// in findings.txt: CUDA lacked kernel-level tests for BatchNorm/Pool/Conv2d
+// that ROCm's file already covered)
+// ============================================================================
+
+TEST(CUDAKernelsTest, BatchNorm2d_Forward) {
+    // Input: [N, C, H, W] = [2, 4, 8, 8]
+    auto input = ones({2, 4, 8, 8}, DType::Float32, Device::cuda());
+
+    auto input_data = input.data<float>();
+    std::vector<float> host_input(2 * 4 * 8 * 8);
+
+    std::mt19937 gen(42);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+
+    for (size_t i = 0; i < host_input.size(); i++) {
+        host_input[i] = dist(gen);
+    }
+    ASSERT_EQ(cudaMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Create batch norm layer
+    auto bn = nn::BatchNorm2d(4);
+    bn.to(Device::cuda());
+
+    // Forward pass
+    auto output = bn.forward(Variable(input));
+
+    EXPECT_EQ(output.tensor().shape()[0], 2);
+    EXPECT_EQ(output.tensor().shape()[1], 4);
+    EXPECT_EQ(output.tensor().shape()[2], 8);
+    EXPECT_EQ(output.tensor().shape()[3], 8);
+
+    // Verify output is on CUDA
+    EXPECT_EQ(output.tensor().device().type, Device::Type::CUDA);
+}
+
+TEST(CUDAKernelsTest, LayerNorm_Forward) {
+    auto input = ones({32, 128}, DType::Float32, Device::cuda());
+
+    auto input_data = input.data<float>();
+    std::vector<float> host_input(32 * 128);
+
+    std::mt19937 gen(42);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+
+    for (size_t i = 0; i < host_input.size(); i++) {
+        host_input[i] = dist(gen);
+    }
+    ASSERT_EQ(cudaMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Create layer norm
+    auto ln = nn::LayerNorm({128});
+    ln.to(Device::cuda());
+
+    // Forward pass
+    auto output = ln.forward(Variable(input));
+
+    EXPECT_EQ(output.tensor().shape()[0], 32);
+    EXPECT_EQ(output.tensor().shape()[1], 128);
+
+    // Verify output is on CUDA
+    EXPECT_EQ(output.tensor().device().type, Device::Type::CUDA);
+
+    // Check that mean is close to 0 and std is close to 1 for each sample
+    auto output_cpu = output.tensor().to(Device::cpu());
+    auto output_data = output_cpu.data<float>();
+
+    for (int i = 0; i < 32; i++) {
+        float sum = 0.0f;
+        float sum_sq = 0.0f;
+
+        for (int j = 0; j < 128; j++) {
+            float val = output_data[i * 128 + j];
+            sum += val;
+            sum_sq += val * val;
+        }
+
+        float mean = sum / 128.0f;
+        float var = sum_sq / 128.0f - mean * mean;
+        float std = std::sqrt(var);
+
+        EXPECT_NEAR(mean, 0.0f, 1e-5f);
+        EXPECT_NEAR(std, 1.0f, 1e-1f);
+    }
+}
+
+// ============================================================================
+// Pooling Tests
+// ============================================================================
+
+TEST(CUDAKernelsTest, MaxPool2d_Forward) {
+    // Input: [N, C, H, W] = [2, 3, 8, 8]
+    auto input = ones({2, 3, 8, 8}, DType::Float32, Device::cuda());
+
+    auto input_data = input.data<float>();
+    std::vector<float> host_input(2 * 3 * 8 * 8);
+
+    for (size_t i = 0; i < host_input.size(); i++) {
+        host_input[i] = static_cast<float>(i % 64);
+    }
+    ASSERT_EQ(cudaMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Create MaxPool2d layer with kernel_size=2, stride=2
+    auto pool = nn::MaxPool2d(2, 2);
+    pool.to(Device::cuda());
+
+    // Forward pass
+    auto output = pool.forward(Variable(input));
+
+    // Output should be [2, 3, 4, 4]
+    EXPECT_EQ(output.tensor().shape()[0], 2);
+    EXPECT_EQ(output.tensor().shape()[1], 3);
+    EXPECT_EQ(output.tensor().shape()[2], 4);
+    EXPECT_EQ(output.tensor().shape()[3], 4);
+
+    // Verify output is on CUDA
+    EXPECT_EQ(output.tensor().device().type, Device::Type::CUDA);
+}
+
+TEST(CUDAKernelsTest, AvgPool2d_Forward) {
+    // Input: [N, C, H, W] = [2, 3, 8, 8]
+    auto input = ones({2, 3, 8, 8}, DType::Float32, Device::cuda());
+
+    auto input_data = input.data<float>();
+    std::vector<float> host_input(2 * 3 * 8 * 8);
+
+    for (size_t i = 0; i < host_input.size(); i++) {
+        host_input[i] = static_cast<float>((i % 4) + 1);
+    }
+    ASSERT_EQ(cudaMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Create AvgPool2d layer with kernel_size=2, stride=2
+    auto pool = nn::AvgPool2d(2, 2);
+    pool.to(Device::cuda());
+
+    // Forward pass
+    auto output = pool.forward(Variable(input));
+
+    // Output should be [2, 3, 4, 4]
+    EXPECT_EQ(output.tensor().shape()[0], 2);
+    EXPECT_EQ(output.tensor().shape()[1], 3);
+    EXPECT_EQ(output.tensor().shape()[2], 4);
+    EXPECT_EQ(output.tensor().shape()[3], 4);
+
+    // Verify output is on CUDA
+    EXPECT_EQ(output.tensor().device().type, Device::Type::CUDA);
+}
+
+// ============================================================================
+// Convolution Tests
+// ============================================================================
+
+TEST(CUDAKernelsTest, Conv2d_Forward_Basic) {
+    // Input: [N, C_in, H, W] = [1, 3, 8, 8]
+    auto input = ones({1, 3, 8, 8}, DType::Float32, Device::cuda());
+
+    auto input_data = input.data<float>();
+    std::vector<float> host_input(1 * 3 * 8 * 8, 1.0f);
+    ASSERT_EQ(cudaMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Create Conv2d layer: in_channels=3, out_channels=16, kernel_size=3
+    auto conv = nn::Conv2d(3, 16, 3, 1, 1); // stride=1, padding=1
+    conv.to(Device::cuda());
+
+    // Forward pass
+    auto output = conv.forward(Variable(input));
+
+    // Output should be [1, 16, 8, 8] (with padding=1)
+    EXPECT_EQ(output.tensor().shape()[0], 1);
+    EXPECT_EQ(output.tensor().shape()[1], 16);
+    EXPECT_EQ(output.tensor().shape()[2], 8);
+    EXPECT_EQ(output.tensor().shape()[3], 8);
+
+    // Verify output is on CUDA
+    EXPECT_EQ(output.tensor().device().type, Device::Type::CUDA);
+}
+
+TEST(CUDAKernelsTest, Conv2d_Forward_NoPadding) {
+    // Input: [N, C_in, H, W] = [2, 3, 10, 10]
+    auto input = ones({2, 3, 10, 10}, DType::Float32, Device::cuda());
+
+    auto input_data = input.data<float>();
+    std::vector<float> host_input(2 * 3 * 10 * 10, 1.0f);
+    ASSERT_EQ(cudaMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Create Conv2d layer: in_channels=3, out_channels=8, kernel_size=3, padding=0
+    auto conv = nn::Conv2d(3, 8, 3, 1, 0); // stride=1, padding=0
+    conv.to(Device::cuda());
+
+    // Forward pass
+    auto output = conv.forward(Variable(input));
+
+    // Output should be [2, 8, 8, 8] (10 - 3 + 1 = 8)
+    EXPECT_EQ(output.tensor().shape()[0], 2);
+    EXPECT_EQ(output.tensor().shape()[1], 8);
+    EXPECT_EQ(output.tensor().shape()[2], 8);
+    EXPECT_EQ(output.tensor().shape()[3], 8);
+
+    // Verify output is on CUDA
+    EXPECT_EQ(output.tensor().device().type, Device::Type::CUDA);
+}
+
+TEST(CUDAKernelsTest, Conv2d_Forward_Stride2) {
+    // Input: [N, C_in, H, W] = [1, 3, 16, 16]
+    auto input = ones({1, 3, 16, 16}, DType::Float32, Device::cuda());
+
+    auto input_data = input.data<float>();
+    std::vector<float> host_input(1 * 3 * 16 * 16, 1.0f);
+    ASSERT_EQ(cudaMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Create Conv2d layer: in_channels=3, out_channels=8, kernel_size=3, stride=2, padding=1
+    auto conv = nn::Conv2d(3, 8, 3, 2, 1);
+    conv.to(Device::cuda());
+
+    // Forward pass
+    auto output = conv.forward(Variable(input));
+
+    // Output should be [1, 8, 8, 8]: floor((16 + 2*1 - 3) / 2) + 1 = 8
+    EXPECT_EQ(output.tensor().shape()[0], 1);
+    EXPECT_EQ(output.tensor().shape()[1], 8);
+    EXPECT_EQ(output.tensor().shape()[2], 8);
+    EXPECT_EQ(output.tensor().shape()[3], 8);
+
+    // Verify output is on CUDA
+    EXPECT_EQ(output.tensor().device().type, Device::Type::CUDA);
+}
+
+// ============================================================================
+// Multi-Stream Test
+// ============================================================================
+
+TEST(CUDAKernelsTest, MultiStream_Execution) {
+    // Create multiple streams
+    cudaStream_t stream1, stream2, stream3;
+    ASSERT_EQ(cudaStreamCreate(&stream1), cudaSuccess);
+    ASSERT_EQ(cudaStreamCreate(&stream2), cudaSuccess);
+    ASSERT_EQ(cudaStreamCreate(&stream3), cudaSuccess);
+
+    const int64_t size = 1000000;
+
+    // Allocate tensors
+    auto a1 = randn({size}, DType::Float32, Device::cuda());
+    auto b1 = randn({size}, DType::Float32, Device::cuda());
+
+    auto a2 = randn({size}, DType::Float32, Device::cuda());
+    auto b2 = randn({size}, DType::Float32, Device::cuda());
+
+    auto a3 = randn({size}, DType::Float32, Device::cuda());
+    auto b3 = randn({size}, DType::Float32, Device::cuda());
+
+    // Launch operations on different streams concurrently
+    // Note: Actual stream assignment would need backend support
+    auto c1 = add(a1, b1);
+    auto c2 = mul(a2, b2);
+    auto c3 = sub(a3, b3);
+
+    // Synchronize all streams
+    ASSERT_EQ(cudaStreamSynchronize(stream1), cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream2), cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream3), cudaSuccess);
+
+    // Verify results
+    EXPECT_EQ(c1.numel(), size);
+    EXPECT_EQ(c2.numel(), size);
+    EXPECT_EQ(c3.numel(), size);
+
+    // Cleanup
+    ASSERT_EQ(cudaStreamDestroy(stream1), cudaSuccess);
+    ASSERT_EQ(cudaStreamDestroy(stream2), cudaSuccess);
+    ASSERT_EQ(cudaStreamDestroy(stream3), cudaSuccess);
 }
 
 // ============================================================================

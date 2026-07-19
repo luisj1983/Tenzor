@@ -598,6 +598,17 @@ auto GlooBackend::initialize(
     master_addr_ = master_addr;
     master_port_ = master_port;
 
+    // See rendezvous_generation_'s declaration for why: every initialize()
+    // call gets its own rendezvous store directory so a stale file left by a
+    // peer's still-in-flight finalize() from a PREVIOUS init/destroy cycle on
+    // the same master_port_ can never be mistaken for this cycle's fresh one.
+    // A plain process-local counter stays in sync across ranks because every
+    // rank in a given multi-process run executes the same deterministic
+    // sequence of initialize()/finalize() calls (one pair per TEST_F case
+    // that uses a real process group).
+    static std::atomic<uint64_t> next_rendezvous_generation{0};
+    rendezvous_generation_ = next_rendezvous_generation.fetch_add(1, std::memory_order_relaxed);
+
     // Initialize TCP connections
     init_connections();
 
@@ -911,6 +922,13 @@ auto GlooBackend::finalize() -> void {
     std::error_code ec;
     std::filesystem::remove(own_rank_file, ec);  // ignore errors during cleanup
 
+    // Each initialize() now uses its own per-generation store directory (see
+    // rendezvous_generation_), so nothing else will ever reuse this one --
+    // best-effort remove it once empty. remove() (not remove_all) only
+    // succeeds on an empty directory, so this is a no-op (silently ignored
+    // via ec) until every rank has removed its own file above.
+    std::filesystem::remove(store_path, ec);
+
     initialized_ = false;
 }
 
@@ -976,53 +994,75 @@ auto GlooBackend::init_connections() -> void {
     // Use ordered connections to avoid deadlock:
     // - Lower ranks connect to higher ranks
     // - Higher ranks accept from lower ranks
-    for (int peer_rank = 0; peer_rank < world_size_; ++peer_rank) {
-        if (peer_rank == rank_) {
-            continue;
+    //
+    // MULTI-RANK HARNESS FINDING: the accept loop used to iterate peer_rank
+    // in ascending order and assume the Nth accept() call would be from the
+    // Nth lower peer_rank -- but accept() has no way to control WHICH queued
+    // connection it hands back; that's purely a function of real connection
+    // timing across independent processes. With exactly one lower peer
+    // (world_size <= 2, e.g. every test in this codebase before the
+    // multi-rank harness existed to actually run with world_size >= 3) the
+    // ambiguity can't manifest -- there's only one possible peer to accept.
+    // With two or more lower ranks racing to connect, a higher-numbered lower
+    // rank can win the race and connect first, so accept() hands back ITS
+    // connection while the loop is still expecting peer_rank 0's -- the
+    // handshake then (correctly) detects the mismatch and throws "Handshake
+    // failed: expected rank X but got Y". Reproduced deterministically with a
+    // real 4-process Gloo run. Fixed by accepting exactly `rank_` connections
+    // (the number of lower ranks) without assuming which order they arrive
+    // in, and placing each into connections_[] by the rank id its own
+    // handshake reports, rather than by loop position.
+    const int num_lower_peers = rank_;  // ranks [0, rank_) connect to us
+    for (int i = 0; i < num_lower_peers; ++i) {
+        int client_fd = accept(server_socket_, nullptr, nullptr);
+        if (client_fd < 0) {
+            throw std::runtime_error("Failed to accept connection from a lower rank");
         }
 
-        if (peer_rank < rank_) {
-            // Accept connection from lower rank
-            int client_fd = accept(server_socket_, nullptr, nullptr);
-            if (client_fd < 0) {
-                throw std::runtime_error("Failed to accept connection from rank " + std::to_string(peer_rank));
-            }
-
-            // Receive peer rank ID for verification. Use a full-read loop
-            // (recv_all) rather than a single ::recv: the 4-byte rank id can be
-            // split across TCP segments, and a single recv returning n<4 would
-            // spuriously fail the handshake for a valid peer.
-            int received_rank = -1;
-            try {
-                // Rank id travels as a big-endian uint32 (endian-independent wire).
-                uint32_t rr_wire = 0;
-                recv_all(client_fd, &rr_wire, sizeof(rr_wire), "handshake rank id");
-                received_rank = static_cast<int>(bswap_if_le32(rr_wire));
-            } catch (...) {
-                ::close(client_fd);
-                throw;
-            }
-            if (received_rank != peer_rank) {
-                ::close(client_fd);
-                throw std::runtime_error("Handshake failed: expected rank " + std::to_string(peer_rank) +
-                                       " but got " + std::to_string(received_rank));
-            }
-
-            // Send our rank ID (full-transfer write; a short send would
-            // truncate the peer's matching recv and fail its rank check).
-            try {
-                uint32_t rank_wire = bswap_if_le32(static_cast<uint32_t>(rank_));
-                send_all(client_fd, &rank_wire, sizeof(rank_wire), "handshake rank id");
-            } catch (...) {
-                ::close(client_fd);
-                throw;
-            }
-
-            connections_[peer_rank] = std::make_shared<TCPConnection>(client_fd);
-        } else {
-            // Connect to higher rank
-            connections_[peer_rank] = connect_to_rank(peer_rank);
+        // Receive peer rank ID for verification. Use a full-read loop
+        // (recv_all) rather than a single ::recv: the 4-byte rank id can be
+        // split across TCP segments, and a single recv returning n<4 would
+        // spuriously fail the handshake for a valid peer.
+        int received_rank = -1;
+        try {
+            // Rank id travels as a big-endian uint32 (endian-independent wire).
+            uint32_t rr_wire = 0;
+            recv_all(client_fd, &rr_wire, sizeof(rr_wire), "handshake rank id");
+            received_rank = static_cast<int>(bswap_if_le32(rr_wire));
+        } catch (...) {
+            ::close(client_fd);
+            throw;
         }
+        if (received_rank < 0 || received_rank >= rank_) {
+            ::close(client_fd);
+            throw std::runtime_error("Handshake failed: connecting peer reported rank " +
+                                   std::to_string(received_rank) + ", which is not a valid "
+                                   "lower rank for this process (rank " + std::to_string(rank_) + ")");
+        }
+        if (connections_[received_rank]) {
+            ::close(client_fd);
+            throw std::runtime_error("Handshake failed: duplicate connection from rank " +
+                                   std::to_string(received_rank));
+        }
+
+        // Send our rank ID (full-transfer write; a short send would
+        // truncate the peer's matching recv and fail its rank check).
+        try {
+            uint32_t rank_wire = bswap_if_le32(static_cast<uint32_t>(rank_));
+            send_all(client_fd, &rank_wire, sizeof(rank_wire), "handshake rank id");
+        } catch (...) {
+            ::close(client_fd);
+            throw;
+        }
+
+        connections_[received_rank] = std::make_shared<TCPConnection>(client_fd);
+    }
+
+    // Connect to every higher rank. We control the order of our own outbound
+    // connect() calls, so no analogous ambiguity applies here -- each dials a
+    // specific, known peer address.
+    for (int peer_rank = rank_ + 1; peer_rank < world_size_; ++peer_rank) {
+        connections_[peer_rank] = connect_to_rank(peer_rank);
     }
 }
 
@@ -1151,10 +1191,12 @@ auto GlooBackend::rendezvous_store_path() const -> std::string {
     // wrong directory and leaks rank files that can poison a later run on the
     // same port.
     if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && xdg[0]) {
-        return std::string(xdg) + "/tenzor_rendezvous_" + std::to_string(master_port_);
+        return std::string(xdg) + "/tenzor_rendezvous_" + std::to_string(master_port_) +
+               "_gen" + std::to_string(rendezvous_generation_);
     }
     return "/tmp/tenzor_rendezvous_" + std::to_string(getuid()) +
-           "_" + std::to_string(master_port_);
+           "_" + std::to_string(master_port_) +
+           "_gen" + std::to_string(rendezvous_generation_);
 }
 
 auto GlooBackend::write_port_to_store(int rank, int port) -> void {

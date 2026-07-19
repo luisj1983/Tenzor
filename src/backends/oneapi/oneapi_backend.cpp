@@ -127,6 +127,18 @@ static void configure_sycl_persistent_cache() {
     setenv("SYCL_CACHE_PERSISTENT", "1", /*overwrite=*/0);
 }
 
+namespace {
+// Per-thread "current OneAPI device" bookkeeping for
+// OneAPIBackend::set_device()/get_current_device() (see finding: these
+// silently inherited the CPU-backend no-op default despite OneAPI genuinely
+// supporting multiple physical devices). thread_local matches
+// device_guard.cpp's own current_device_index() per-thread model.
+auto current_device_index() -> int32_t& {
+    static thread_local int32_t index = 0;
+    return index;
+}
+}  // namespace
+
 /**
  * @brief OneAPI/SYCL backend implementation for Intel GPUs and CPUs.
  *
@@ -301,6 +313,28 @@ public:
 
     auto is_available() const -> bool override {
         return !devices_.empty();
+    }
+
+    // SYCL has no global/thread "current device" concept (every queue is
+    // bound to an explicit device at construction, unlike CUDA/ROCm's
+    // cudaSetDevice/hipSetDevice thread-local context) -- the inherited
+    // Backend::set_device()/get_current_device() no-op silently made OneAPI
+    // report "always device 0" despite genuinely supporting multiple
+    // physical devices (device_count() > 1, same as Vulkan). This per-thread
+    // bookkeeping honors the documented Backend contract so WorkerPool's
+    // switch_device() (src/core/device_guard.cpp) behaves the same way for
+    // OneAPI as it does for CUDA/ROCm/MPS.
+    auto set_device(int32_t device_id) -> void override {
+        if (device_id < 0 || device_id >= device_count()) {
+            throw std::out_of_range("OneAPIBackend::set_device: invalid device ID " +
+                                     std::to_string(device_id) + " (available: 0-" +
+                                     std::to_string(device_count() - 1) + ")");
+        }
+        current_device_index() = device_id;
+    }
+
+    auto get_current_device() const -> int32_t override {
+        return current_device_index();
     }
 
     auto get_device_info(int32_t device_id) const -> tenzor::DeviceInfo override {

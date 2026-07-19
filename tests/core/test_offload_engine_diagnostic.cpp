@@ -15,6 +15,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "../backend_test_fixture.hpp"  // FINDING 25: BackendTest -- parametrized GPU device
 #include <chrono>
 #include <random>
 #include <thread>
@@ -24,19 +25,17 @@
 
 using namespace tenzor;
 using namespace tenzor::core;
+using namespace tenzor::testing;
 
-class OffloadEngineDiagnosticTest : public ::testing::Test {
+/**
+ * FINDING 25: was TEST_F over a hardcoded Device::cuda(), so OffloadEngine's
+ * real ROCm/Vulkan/OneAPI TransferEngine-backed paths got zero diagnostic
+ * exercise. Now TEST_P over BackendTest, parametrized across every GPU
+ * backend below -- the inherited `device` member is the parametrized GPU
+ * device.
+ */
+class OffloadEngineDiagnosticTest : public BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
-    }
-
-    void SetUp() override {
-        auto* backend = backend_registry().get_backend("cuda");
-        cuda_available_ = (backend != nullptr && backend->is_available());
-    }
-
-    bool cuda_available_ = false;
 
     // Create tensor with deterministic pattern based on seed
     Tensor createDeterministicTensor(const std::vector<int64_t>& shape, uint32_t seed) {
@@ -83,8 +82,7 @@ protected:
 // TEST 1: Data Integrity Under Stress
 // =============================================================================
 
-TEST_F(OffloadEngineDiagnosticTest, DataIntegrity_ManyRoundTrips) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, DataIntegrity_ManyRoundTrips) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 256 * 1024 * 1024;
@@ -108,7 +106,7 @@ TEST_F(OffloadEngineDiagnosticTest, DataIntegrity_ManyRoundTrips) {
             double original_checksum = computeChecksum(original);
 
             // Move to GPU
-            Tensor gpu_tensor = original.to(Device::cuda());
+            Tensor gpu_tensor = original.to(device);
 
             // Offload back to CPU via engine
             Tensor offloaded = engine.offload_to_cpu(gpu_tensor);
@@ -134,8 +132,7 @@ TEST_F(OffloadEngineDiagnosticTest, DataIntegrity_ManyRoundTrips) {
               << " round-trips with verified data integrity\n" << std::endl;
 }
 
-TEST_F(OffloadEngineDiagnosticTest, DataIntegrity_ConcurrentTransfers) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, DataIntegrity_ConcurrentTransfers) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 512 * 1024 * 1024;
@@ -155,7 +152,7 @@ TEST_F(OffloadEngineDiagnosticTest, DataIntegrity_ConcurrentTransfers) {
     for (int i = 0; i < num_concurrent; ++i) {
         Tensor cpu = createDeterministicTensor({256, 128}, 12345 + i);
         expected_checksums.push_back(computeChecksum(cpu));
-        gpu_tensors.push_back(cpu.to(Device::cuda()));
+        gpu_tensors.push_back(cpu.to(device));
     }
 
     // Launch all async transfers
@@ -180,8 +177,7 @@ TEST_F(OffloadEngineDiagnosticTest, DataIntegrity_ConcurrentTransfers) {
 // TEST 2: Memory Pressure Auto-Offload
 // =============================================================================
 
-TEST_F(OffloadEngineDiagnosticTest, AutoOffload_TriggersUnderPressure) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, AutoOffload_TriggersUnderPressure) {
 
     // Configure with low threshold to easily trigger
     OffloadEngine::Config config;
@@ -197,7 +193,7 @@ TEST_F(OffloadEngineDiagnosticTest, AutoOffload_TriggersUnderPressure) {
     // Register tensors with different priorities
     std::vector<Tensor> tensors;
     for (int i = 0; i < 5; ++i) {
-        tensors.push_back(createDeterministicTensor({256, 128}, 1000 + i).to(Device::cuda()));
+        tensors.push_back(createDeterministicTensor({256, 128}, 1000 + i).to(device));
     }
 
     // Register for auto-offload
@@ -234,8 +230,7 @@ TEST_F(OffloadEngineDiagnosticTest, AutoOffload_TriggersUnderPressure) {
     }
 }
 
-TEST_F(OffloadEngineDiagnosticTest, AutoOffload_PriorityOrder) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, AutoOffload_PriorityOrder) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 64 * 1024 * 1024;
@@ -246,8 +241,8 @@ TEST_F(OffloadEngineDiagnosticTest, AutoOffload_PriorityOrder) {
     std::cout << "\n=== Priority-Based Offload Order Test ===" << std::endl;
 
     // Create tensors and track their state
-    Tensor low_priority = createDeterministicTensor({128, 64}, 100).to(Device::cuda());
-    Tensor high_priority = createDeterministicTensor({128, 64}, 200).to(Device::cuda());
+    Tensor low_priority = createDeterministicTensor({128, 64}, 100).to(device);
+    Tensor high_priority = createDeterministicTensor({128, 64}, 200).to(device);
 
     // Register with different priorities
     engine.register_auto_offload(&low_priority, OffloadPriority::LOW);
@@ -258,15 +253,15 @@ TEST_F(OffloadEngineDiagnosticTest, AutoOffload_PriorityOrder) {
 
     // LOW priority should be offloaded first (moved to CPU)
     bool low_on_cpu = (low_priority.device().type == Device::Type::CPU);
-    bool high_on_cuda = (high_priority.device().type == Device::Type::CUDA);
+    bool high_on_gpu = (high_priority.device().type == device.type);
 
     std::cout << "  LOW priority tensor on CPU: " << (low_on_cpu ? "YES" : "NO") << std::endl;
-    std::cout << "  HIGH priority tensor on CUDA: " << (high_on_cuda ? "YES" : "NO") << std::endl;
+    std::cout << "  HIGH priority tensor on GPU: " << (high_on_gpu ? "YES" : "NO") << std::endl;
 
     // At minimum, if any offloading happened, LOW should go before HIGH
-    if (low_on_cpu && high_on_cuda) {
+    if (low_on_cpu && high_on_gpu) {
         std::cout << "  PASSED: Priority order respected\n" << std::endl;
-    } else if (!low_on_cpu && !high_on_cuda) {
+    } else if (!low_on_cpu && !high_on_gpu) {
         std::cout << "  NOTE: Neither offloaded (pressure may be below threshold)\n" << std::endl;
     }
 
@@ -278,8 +273,7 @@ TEST_F(OffloadEngineDiagnosticTest, AutoOffload_PriorityOrder) {
 // TEST 3: Prefetch Effectiveness
 // =============================================================================
 
-TEST_F(OffloadEngineDiagnosticTest, Prefetch_HidesLatency) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, Prefetch_HidesLatency) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 256 * 1024 * 1024;
@@ -300,7 +294,7 @@ TEST_F(OffloadEngineDiagnosticTest, Prefetch_HidesLatency) {
     // Scenario 1: Without prefetch (synchronous loads)
     auto start_sync = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_layers; ++i) {
-        Tensor gpu = engine.load_to_gpu(layer_weights[i]);
+        Tensor gpu = engine.load_to_gpu(layer_weights[i], device);
         // Simulate compute
         std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
@@ -319,7 +313,7 @@ TEST_F(OffloadEngineDiagnosticTest, Prefetch_HidesLatency) {
 
     for (int i = 0; i < num_layers; ++i) {
         // Load current layer (should be ready from prefetch)
-        Tensor gpu = engine.load_to_gpu(layer_weights[i]);
+        Tensor gpu = engine.load_to_gpu(layer_weights[i], device);
 
         // Prefetch next layer while computing
         if (i + 4 < num_layers) {
@@ -349,8 +343,7 @@ TEST_F(OffloadEngineDiagnosticTest, Prefetch_HidesLatency) {
 // TEST 4: Training Simulation
 // =============================================================================
 
-TEST_F(OffloadEngineDiagnosticTest, TrainingSimulation_ZeROStyleOffload) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, TrainingSimulation_ZeROStyleOffload) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 512 * 1024 * 1024;
@@ -394,7 +387,7 @@ TEST_F(OffloadEngineDiagnosticTest, TrainingSimulation_ZeROStyleOffload) {
             }
 
             // Load current layer to GPU
-            Tensor gpu_weights = engine.load_to_gpu(layers[i].weights);
+            Tensor gpu_weights = engine.load_to_gpu(layers[i].weights, device);
 
             // Simulate forward computation (just verify data)
             double checksum = computeChecksum(gpu_weights);
@@ -408,7 +401,7 @@ TEST_F(OffloadEngineDiagnosticTest, TrainingSimulation_ZeROStyleOffload) {
         // Optimizer step: load optimizer states, update, offload
         for (int i = num_layers - 1; i >= 0; --i) {
             // Load optimizer state to GPU
-            Tensor gpu_opt_state = engine.load_to_gpu(layers[i].optimizer_state);
+            Tensor gpu_opt_state = engine.load_to_gpu(layers[i].optimizer_state, device);
 
             // Simulate optimizer update
             // (In reality: momentum = beta * momentum + grad; weight -= lr * momentum)
@@ -444,8 +437,7 @@ TEST_F(OffloadEngineDiagnosticTest, TrainingSimulation_ZeROStyleOffload) {
 // TEST 5: Edge Cases and Error Handling
 // =============================================================================
 
-TEST_F(OffloadEngineDiagnosticTest, EdgeCase_EmptyTensor) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, EdgeCase_EmptyTensor) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 64 * 1024 * 1024;
@@ -455,7 +447,7 @@ TEST_F(OffloadEngineDiagnosticTest, EdgeCase_EmptyTensor) {
 
     // Create empty tensor (0 elements)
     Tensor empty_cpu({0}, DType::Float32, Device::cpu());
-    Tensor empty_gpu = empty_cpu.to(Device::cuda());
+    Tensor empty_gpu = empty_cpu.to(device);
 
     // These should not crash
     ASSERT_NO_THROW({
@@ -466,8 +458,7 @@ TEST_F(OffloadEngineDiagnosticTest, EdgeCase_EmptyTensor) {
     std::cout << "  PASSED: Empty tensor handled correctly\n" << std::endl;
 }
 
-TEST_F(OffloadEngineDiagnosticTest, EdgeCase_VeryLargeTensor) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, EdgeCase_VeryLargeTensor) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 1024 * 1024 * 1024;  // 1 GB pinned
@@ -482,7 +473,7 @@ TEST_F(OffloadEngineDiagnosticTest, EdgeCase_VeryLargeTensor) {
 
     std::cout << "  Tensor size: " << (large.numel() * sizeof(float) / (1024.0 * 1024.0)) << " MB" << std::endl;
 
-    Tensor gpu = large.to(Device::cuda());
+    Tensor gpu = large.to(device);
     Tensor offloaded = engine.offload_to_cpu(gpu);
 
     double final_checksum = computeChecksum(offloaded);
@@ -491,8 +482,7 @@ TEST_F(OffloadEngineDiagnosticTest, EdgeCase_VeryLargeTensor) {
     std::cout << "  PASSED: Large tensor transferred correctly\n" << std::endl;
 }
 
-TEST_F(OffloadEngineDiagnosticTest, EdgeCase_RapidRegistrationUnregistration) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, EdgeCase_RapidRegistrationUnregistration) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 128 * 1024 * 1024;
@@ -504,7 +494,7 @@ TEST_F(OffloadEngineDiagnosticTest, EdgeCase_RapidRegistrationUnregistration) {
     const int iterations = 100;
     std::vector<Tensor> tensors;
     for (int i = 0; i < 10; ++i) {
-        tensors.push_back(createDeterministicTensor({64, 32}, 7000 + i).to(Device::cuda()));
+        tensors.push_back(createDeterministicTensor({64, 32}, 7000 + i).to(device));
     }
 
     for (int iter = 0; iter < iterations; ++iter) {
@@ -530,8 +520,7 @@ TEST_F(OffloadEngineDiagnosticTest, EdgeCase_RapidRegistrationUnregistration) {
 // TEST 6: Bandwidth and Performance Baseline
 // =============================================================================
 
-TEST_F(OffloadEngineDiagnosticTest, Performance_BandwidthBaseline) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineDiagnosticTest, Performance_BandwidthBaseline) {
 
     OffloadEngine::Config config;
     config.pinned_memory_size = 1024 * 1024 * 1024;
@@ -552,11 +541,11 @@ TEST_F(OffloadEngineDiagnosticTest, Performance_BandwidthBaseline) {
 
         // Warm up
         Tensor warmup = createDeterministicTensor(shape, 1);
-        Tensor warmup_gpu = warmup.to(Device::cuda());
+        Tensor warmup_gpu = warmup.to(device);
         engine.offload_to_cpu(warmup_gpu);
 
         // GPU -> CPU benchmark
-        Tensor gpu_tensor = createDeterministicTensor(shape, 2).to(Device::cuda());
+        Tensor gpu_tensor = createDeterministicTensor(shape, 2).to(device);
         auto start = std::chrono::high_resolution_clock::now();
         Tensor cpu_result = engine.offload_to_cpu(gpu_tensor);
         auto end = std::chrono::high_resolution_clock::now();
@@ -566,7 +555,7 @@ TEST_F(OffloadEngineDiagnosticTest, Performance_BandwidthBaseline) {
         // CPU -> GPU benchmark
         Tensor cpu_tensor = createDeterministicTensor(shape, 3);
         start = std::chrono::high_resolution_clock::now();
-        Tensor gpu_result = engine.load_to_gpu(cpu_tensor);
+        Tensor gpu_result = engine.load_to_gpu(cpu_tensor, device);
         end = std::chrono::high_resolution_clock::now();
         double time_c2g = std::chrono::duration<double>(end - start).count();
         double bw_c2g = (mb / 1024.0) / time_c2g;
@@ -582,6 +571,17 @@ TEST_F(OffloadEngineDiagnosticTest, Performance_BandwidthBaseline) {
 // =============================================================================
 // MAIN
 // =============================================================================
+
+// FINDING 25: exercise every real (non-stub) OffloadEngine/TransferEngine GPU
+// backend, not just CUDA.
+INSTANTIATE_TEST_SUITE_P(
+    GpuBackends,
+    OffloadEngineDiagnosticTest,
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    }
+);
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

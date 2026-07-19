@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -627,6 +628,28 @@ double getenv_double(const char* name, double dflt) {
     try { return std::stod(s); } catch (...) { return dflt; }
 }
 
+// Finding 35: captured_at_iso8601 was written at record time but never read
+// by any check, so a baseline (perf_baseline.json's one entry was already 32
+// days old at the time of that finding) is trusted indefinitely with no
+// expiry — unlike golden tensors (golden_util.hpp's maybe_load), which
+// refuse anything older than TENZOR_GOLDEN_MAX_AGE_DAYS. Mirrors that same
+// refuse-and-warn pattern: parse "YYYY-MM-DDTHH:MM:SS[.ffffff]Z" (UTC) and
+// return the age in days, or -1.0 if the field is missing/unparseable (in
+// which case the caller treats the baseline as untrusted, same as stale).
+double baseline_age_days(const std::string& iso8601) {
+    if (iso8601.empty()) return -1.0;
+    std::tm tm{};
+    std::istringstream ss(iso8601);
+    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+    if (ss.fail()) return -1.0;
+    std::time_t captured = timegm(&tm);
+    if (captured == static_cast<std::time_t>(-1)) return -1.0;
+    std::time_t now = std::time(nullptr);
+    double seconds = std::difftime(now, captured);
+    if (seconds < 0.0) return -1.0;  // clock skew / future timestamp: don't trust
+    return seconds / 86400.0;
+}
+
 }  // namespace
 
 namespace {
@@ -688,8 +711,35 @@ TEST(PerformanceRegression, DISABLED_BaselineRegressionCheck) {
     const std::string host(host_buf);
 
     // Per-host baseline body (the object containing this host's "ops").
-    const std::string host_body = body.empty() ? std::string{}
-                                               : extract_host_body(body, host);
+    std::string host_body = body.empty() ? std::string{}
+                                         : extract_host_body(body, host);
+
+    // Staleness guard (Finding 35): a committed baseline with no expiry is
+    // trusted forever even as hardware/drivers/compilers drift underneath
+    // it. Mirrors golden_util.hpp's maybe_load age check -- refuse a stale
+    // baseline (treat it the same as "no baseline for this host") rather
+    // than silently comparing against numbers that may no longer be
+    // representative.
+    int max_age_days = 90;
+    if (const char* v = std::getenv("TENZOR_PERF_BASELINE_MAX_AGE_DAYS")) {
+        try { max_age_days = std::max(1, std::stoi(v)); } catch (...) {}
+    }
+    if (!host_body.empty()) {
+        double age_days = baseline_age_days(extract_string(host_body, "captured_at_iso8601"));
+        if (age_days < 0.0) {
+            std::cout << "[PERF BASELINE] host '" << host
+                      << "' entry has no parseable captured_at_iso8601; "
+                         "treating as untrusted (same as no baseline).\n";
+            host_body.clear();
+        } else if (age_days > static_cast<double>(max_age_days)) {
+            std::cout << "[PERF BASELINE STALE] host '" << host << "' baseline is "
+                      << static_cast<long>(age_days) << " days old (max="
+                      << max_age_days << "). Refusing to enforce against it; "
+                         "regenerate with `python tools/regen_perf_baseline.py` "
+                         "(override via TENZOR_PERF_BASELINE_MAX_AGE_DAYS).\n";
+            host_body.clear();
+        }
+    }
     const bool host_has_baseline = !host_body.empty();
 
     // Enforce when explicitly opted in OR when this host has a committed
@@ -714,6 +764,13 @@ TEST(PerformanceRegression, DISABLED_BaselineRegressionCheck) {
     // lower these via TENZOR_PERF_REGRESSION_RTOL / _P99_RTOL in that job.
     const double rtol     = getenv_double("TENZOR_PERF_REGRESSION_RTOL",     2.0);
     const double p99_rtol = getenv_double("TENZOR_PERF_REGRESSION_P99_RTOL", 3.0);
+    // Finding 34: ElementwiseAdd/ReductionSum/Softmax/LayerNorm were
+    // permanently advisory-only (never gated on any backend) because their
+    // sub-millisecond wall-clock measurements are noisier than MatMul/Conv2d.
+    // Gate them too, but at a much looser default so genuine gross
+    // regressions are still caught without flaking on ordinary OS jitter.
+    const double fast_op_rtol     = getenv_double("TENZOR_PERF_REGRESSION_FAST_OP_RTOL",     5.0);
+    const double fast_op_p99_rtol = getenv_double("TENZOR_PERF_REGRESSION_FAST_OP_P99_RTOL", 8.0);
 
     // Representative shapes per op. Inputs are built once on CPU and re-staged
     // to each backend inside the loop.
@@ -806,48 +863,60 @@ TEST(PerformanceRegression, DISABLED_BaselineRegressionCheck) {
                           << backend_name(backend) << " — skipping comparison)\n";
                 continue;
             }
-            // Enforce ONLY on ops whose wall-clock measurement is reliable on a
-            // shared, non-frequency-pinned host. The sub-millisecond ops here
-            // (elementwise/reduction/softmax/layernorm, ~10-300us) are dominated
-            // by per-call sync latency and OS scheduler jitter — their run-to-run
-            // variance exceeds any meaningful regression threshold, so gating them
-            // would flake. They are reported as ADVISORY (trend only). MatMul
-            // (~0.7ms) and Conv2d are stable enough to gate. To enforce the fast
-            // ops too, run on a dedicated pinned runner with enlarged sizes (see
-            // the threshold comment above) and add them here.
-            const bool enforced_op = (op.key.rfind("MatMul", 0) == 0 ||
-                                      op.key.rfind("Conv2d", 0) == 0);
-            if (!enforced_op) {
+            // MatMul (~0.7ms) and Conv2d are stable enough to gate at the tight
+            // default rtol/p99_rtol above. The sub-millisecond ops
+            // (elementwise/reduction/softmax/layernorm, ~10-300us) are
+            // dominated by per-call sync latency and OS scheduler jitter on a
+            // shared, non-frequency-pinned host — their normal run-to-run
+            // variance can exceed the tight default, so gating them at the
+            // same threshold would flake. Rather than leaving them
+            // permanently advisory-only (zero regression signal for 4 of 6 op
+            // families on every backend), gate them too but at a much looser,
+            // separately-tunable threshold (TENZOR_PERF_REGRESSION_FAST_OP_RTOL
+            // / _FAST_OP_P99_RTOL) that still catches a genuine multi-x
+            // blowup while tolerating ordinary jitter. To tighten these to the
+            // MatMul/Conv2d-grade default, run on a dedicated pinned runner
+            // with enlarged sizes (see the threshold comment above) and lower
+            // the env vars accordingly for that job.
+            const bool tight_op = (op.key.rfind("MatMul", 0) == 0 ||
+                                   op.key.rfind("Conv2d", 0) == 0);
+            const double op_rtol     = tight_op ? rtol     : fast_op_rtol;
+            const double op_p99_rtol = tight_op ? p99_rtol : fast_op_p99_rtol;
+            const char* op_rtol_env  = tight_op ? "TENZOR_PERF_REGRESSION_RTOL"
+                                                 : "TENZOR_PERF_REGRESSION_FAST_OP_RTOL";
+            const char* op_p99_env   = tight_op ? "TENZOR_PERF_REGRESSION_P99_RTOL"
+                                                 : "TENZOR_PERF_REGRESSION_FAST_OP_P99_RTOL";
+            if (!tight_op) {
                 double ratio = entry->median_ms > 0.0 ? st.median / entry->median_ms : 0.0;
-                std::cout << "  (advisory, not gated) " << op.key << " on "
+                std::cout << "  (gated at loose fast-op threshold) " << op.key << " on "
                           << backend_name(backend) << " median " << st.median
                           << "ms vs baseline " << entry->median_ms << "ms ("
                           << std::setprecision(2) << ratio << "x)\n"
                           << std::setprecision(3);
-                continue;
             }
             any_compared = true;
-            EXPECT_LT(st.median, entry->median_ms * rtol)
+            EXPECT_LT(st.median, entry->median_ms * op_rtol)
                 << op.key << " median regression on " << backend_name(backend)
                 << ": current " << st.median << "ms vs baseline " << entry->median_ms
-                << "ms (rtol=" << rtol << "). Set TENZOR_PERF_REGRESSION_RTOL to relax.";
+                << "ms (rtol=" << op_rtol << "). Set " << op_rtol_env << " to relax.";
             // p99 IS gated, with a deliberately generous multiplier (default
-            // 3.0x via TENZOR_PERF_REGRESSION_P99_RTOL). On a non-realtime,
+            // 3.0x via TENZOR_PERF_REGRESSION_P99_RTOL, or the looser fast-op
+            // default for the 4 noisy families above). On a non-realtime,
             // shared kernel a single scheduler preemption inflates p99, so a
             // tight bound would flake — but a fully-ungated p99 (the old
             // `(void)p99_rtol;`) let a real tail-latency regression pass
-            // invisibly. The 3x default catches a genuine 3x+ tail blowup
+            // invisibly. The default catches a genuine multi-x tail blowup
             // while tolerating ordinary OS jitter; raise it on a noisy host.
-            EXPECT_LT(st.p99, entry->p99_ms * p99_rtol)
+            EXPECT_LT(st.p99, entry->p99_ms * op_p99_rtol)
                 << op.key << " p99 regression on " << backend_name(backend)
                 << ": current " << st.p99 << "ms vs baseline " << entry->p99_ms
-                << "ms (p99_rtol=" << p99_rtol
-                << "). Set TENZOR_PERF_REGRESSION_P99_RTOL to relax on a noisy host.";
+                << "ms (p99_rtol=" << op_p99_rtol
+                << "). Set " << op_p99_env << " to relax on a noisy host.";
         }
     }
 
     if (!enforce) {
-        SKIP_WITH_REASON(tenzor::testing::SkipReason::KnownBug,
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::MissingPerfBaseline,
             "perf enforcement off (TENZOR_PERF_ENFORCE unset and host '"
             << host << "' has no committed baseline). Timings printed; "
             "regenerate the per-host baseline with "
@@ -855,7 +924,7 @@ TEST(PerformanceRegression, DISABLED_BaselineRegressionCheck) {
         return;
     }
     if (!any_compared) {
-        SKIP_WITH_REASON(tenzor::testing::SkipReason::KnownBug,
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::MissingPerfBaseline,
             "perf enforcement requested but no matching baseline entries for host '"
             << host << "'. Regenerate with `python tools/regen_perf_baseline.py`.");
         return;

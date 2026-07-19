@@ -38,7 +38,7 @@ TEST_P(DistributionsParity, Normal_LogProb) {
         ref = n.log_prob(value);
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             D::Normal n(loc.to(backends[i]), scale.to(backends[i]));
             auto got = n.log_prob(value.to(backends[i]));
@@ -68,7 +68,7 @@ TEST_P(DistributionsParity, Normal_Entropy) {
         ref = n.entropy();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             D::Normal n(loc.to(backends[i]), scale.to(backends[i]));
             auto got = n.entropy();
@@ -103,7 +103,7 @@ TEST_P(DistributionsParity, Uniform_LogProb) {
         ref = u.log_prob(value);
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             D::Uniform u(low.to(backends[i]), high.to(backends[i]));
             auto got = u.log_prob(value.to(backends[i]));
@@ -133,7 +133,7 @@ TEST_P(DistributionsParity, Uniform_Entropy) {
         ref = u.entropy();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             D::Uniform u(low.to(backends[i]), high.to(backends[i]));
             auto got = u.entropy();
@@ -167,7 +167,7 @@ TEST_P(DistributionsParity, Exponential_LogProb) {
         ref = e.log_prob(value);
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             D::Exponential e(rate.to(backends[i]));
             auto got = e.log_prob(value.to(backends[i]));

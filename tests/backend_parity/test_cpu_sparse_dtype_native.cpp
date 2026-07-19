@@ -199,43 +199,54 @@ TEST_F(CpuSparseDtypeNative, SpMM_F16_NativeMatchesF32) {
 // F034: integer & complex SpMM/SpMV now run natively on CUDA (cuSPARSE has no
 // integer path and complex was rejected). Verify the GPU result matches the CPU
 // reference element-wise.
+//
+// Finding 44: this coverage originally existed for CUDA only, despite ROCm
+// (rocSPARSE) and OneAPI (oneMKL-sparse) being, like cuSPARSE, float/double-
+// oriented sparse BLAS libraries with the identical historical restriction
+// on integer and complex dtypes -- sparse OpIds 460-464 are registered in
+// every backend's dispatch table (CLAUDE.md), so a ROCm- or OneAPI-specific
+// silent widen-narrow-through-Float32 (corrupting Int64 beyond 2^24) or
+// mishandled complex dtype had zero test signal. Refactored into shared
+// parametrized helpers so CUDA/ROCm/OneAPI all get the identical checks
+// instead of hand-duplicating each backend's block.
 // ---------------------------------------------------------------------------
 namespace {
-static bool has_cuda_dev() {
-    try { auto t = zeros({1}, DType::Float32, Device::cuda(0)); (void)t; return true; }
+auto device_available(const Device& dev) -> bool {
+    try { auto t = zeros({1}, DType::Float32, dev); (void)t; return true; }
     catch (...) { return false; }
 }
-}  // namespace
 
-TEST_F(CpuSparseDtypeNative, SpMV_Int32_CudaMatchesCpu) {
-    if (!has_cuda_dev()) GTEST_SKIP();
+void run_spmv_int32_matches_cpu(const Device& dev) {
+    if (!device_available(dev)) GTEST_SKIP() << dev.to_string() << " not available";
     auto sp = build_csr_4x4(DType::Int32);
     auto vec = zeros({4}, DType::Int32, Device::cpu());
     auto* v = vec.data<int32_t>(); v[0] = 1; v[1] = 2; v[2] = 3; v[3] = 4;
     Tensor ref = sparse::spmv(sp, vec);
-    Tensor out = sparse::spmv(sp.to(Device::cuda(0)), vec.to(Device::cuda(0))).to(Device::cpu());
+    Tensor out = sparse::spmv(sp.to(dev), vec.to(dev)).to(Device::cpu());
     ASSERT_EQ(out.dtype(), DType::Int32);
     ASSERT_EQ(ref.numel(), out.numel());
     for (int64_t i = 0; i < ref.numel(); ++i)
-        EXPECT_EQ(ref.data<int32_t>()[i], out.data<int32_t>()[i]) << "spmv i32 " << i;
+        EXPECT_EQ(ref.data<int32_t>()[i], out.data<int32_t>()[i])
+            << "spmv i32 " << i << " on " << dev.to_string();
 }
 
-TEST_F(CpuSparseDtypeNative, SpMM_Int64_CudaMatchesCpu) {
-    if (!has_cuda_dev()) GTEST_SKIP();
+void run_spmm_int64_matches_cpu(const Device& dev) {
+    if (!device_available(dev)) GTEST_SKIP() << dev.to_string() << " not available";
     auto sp = build_csr_4x4(DType::Int64);
     auto dense = zeros({4, 3}, DType::Int64, Device::cpu());
     auto* d = dense.data<int64_t>();
     for (int i = 0; i < 12; ++i) d[i] = (i % 5) - 2;
     Tensor ref = sparse::spmm(sp, dense);
-    Tensor out = sparse::spmm(sp.to(Device::cuda(0)), dense.to(Device::cuda(0))).to(Device::cpu());
+    Tensor out = sparse::spmm(sp.to(dev), dense.to(dev)).to(Device::cpu());
     ASSERT_EQ(out.dtype(), DType::Int64);
     ASSERT_EQ(ref.numel(), out.numel());
     for (int64_t i = 0; i < ref.numel(); ++i)
-        EXPECT_EQ(ref.data<int64_t>()[i], out.data<int64_t>()[i]) << "spmm i64 " << i;
+        EXPECT_EQ(ref.data<int64_t>()[i], out.data<int64_t>()[i])
+            << "spmm i64 " << i << " on " << dev.to_string();
 }
 
-TEST_F(CpuSparseDtypeNative, SpMV_Complex64_CudaMatchesCpu) {
-    if (!has_cuda_dev()) GTEST_SKIP();
+void run_spmv_complex64_matches_cpu(const Device& dev) {
+    if (!device_available(dev)) GTEST_SKIP() << dev.to_string() << " not available";
     auto crow = zeros({3}, DType::Int64, Device::cpu());
     auto col  = zeros({3}, DType::Int64, Device::cpu());
     auto vals = zeros({3}, DType::Complex64, Device::cpu());
@@ -249,19 +260,19 @@ TEST_F(CpuSparseDtypeNative, SpMV_Complex64_CudaMatchesCpu) {
     x.data<std::complex<float>>()[0] = {2.f, 0.f};
     x.data<std::complex<float>>()[1] = {-1.f, 1.f};
     Tensor ref = sparse::spmv(sp, x);
-    Tensor out = sparse::spmv(sp.to(Device::cuda(0)), x.to(Device::cuda(0))).to(Device::cpu());
+    Tensor out = sparse::spmv(sp.to(dev), x.to(dev)).to(Device::cpu());
     ASSERT_EQ(out.dtype(), DType::Complex64);
     ASSERT_EQ(ref.numel(), out.numel());
     for (int64_t i = 0; i < ref.numel(); ++i) {
         auto r = ref.data<std::complex<float>>()[i];
         auto o = out.data<std::complex<float>>()[i];
-        EXPECT_NEAR(r.real(), o.real(), 1e-5f) << "spmv c64 re " << i;
-        EXPECT_NEAR(r.imag(), o.imag(), 1e-5f) << "spmv c64 im " << i;
+        EXPECT_NEAR(r.real(), o.real(), 1e-5f) << "spmv c64 re " << i << " on " << dev.to_string();
+        EXPECT_NEAR(r.imag(), o.imag(), 1e-5f) << "spmv c64 im " << i << " on " << dev.to_string();
     }
 }
 
-TEST_F(CpuSparseDtypeNative, SpMM_Complex128_CudaMatchesCpu) {
-    if (!has_cuda_dev()) GTEST_SKIP();
+void run_spmm_complex128_matches_cpu(const Device& dev) {
+    if (!device_available(dev)) GTEST_SKIP() << dev.to_string() << " not available";
     auto crow = zeros({3}, DType::Int64, Device::cpu());
     auto col  = zeros({3}, DType::Int64, Device::cpu());
     auto vals = zeros({3}, DType::Complex128, Device::cpu());
@@ -275,13 +286,29 @@ TEST_F(CpuSparseDtypeNative, SpMM_Complex128_CudaMatchesCpu) {
     auto* dp = dense.data<std::complex<double>>();
     dp[0] = {1.0, 0.0}; dp[1] = {0.0, 1.0}; dp[2] = {-1.0, 1.0}; dp[3] = {2.0, 0.0};
     Tensor ref = sparse::spmm(sp, dense);
-    Tensor out = sparse::spmm(sp.to(Device::cuda(0)), dense.to(Device::cuda(0))).to(Device::cpu());
+    Tensor out = sparse::spmm(sp.to(dev), dense.to(dev)).to(Device::cpu());
     ASSERT_EQ(out.dtype(), DType::Complex128);
     ASSERT_EQ(ref.numel(), out.numel());
     for (int64_t i = 0; i < ref.numel(); ++i) {
         auto r = ref.data<std::complex<double>>()[i];
         auto o = out.data<std::complex<double>>()[i];
-        EXPECT_NEAR(r.real(), o.real(), 1e-10) << "spmm c128 re " << i;
-        EXPECT_NEAR(r.imag(), o.imag(), 1e-10) << "spmm c128 im " << i;
+        EXPECT_NEAR(r.real(), o.real(), 1e-10) << "spmm c128 re " << i << " on " << dev.to_string();
+        EXPECT_NEAR(r.imag(), o.imag(), 1e-10) << "spmm c128 im " << i << " on " << dev.to_string();
     }
 }
+}  // namespace
+
+TEST_F(CpuSparseDtypeNative, SpMV_Int32_CudaMatchesCpu) { run_spmv_int32_matches_cpu(Device::cuda(0)); }
+TEST_F(CpuSparseDtypeNative, SpMM_Int64_CudaMatchesCpu) { run_spmm_int64_matches_cpu(Device::cuda(0)); }
+TEST_F(CpuSparseDtypeNative, SpMV_Complex64_CudaMatchesCpu) { run_spmv_complex64_matches_cpu(Device::cuda(0)); }
+TEST_F(CpuSparseDtypeNative, SpMM_Complex128_CudaMatchesCpu) { run_spmm_complex128_matches_cpu(Device::cuda(0)); }
+
+TEST_F(CpuSparseDtypeNative, SpMV_Int32_RocmMatchesCpu) { run_spmv_int32_matches_cpu(Device::rocm(0)); }
+TEST_F(CpuSparseDtypeNative, SpMM_Int64_RocmMatchesCpu) { run_spmm_int64_matches_cpu(Device::rocm(0)); }
+TEST_F(CpuSparseDtypeNative, SpMV_Complex64_RocmMatchesCpu) { run_spmv_complex64_matches_cpu(Device::rocm(0)); }
+TEST_F(CpuSparseDtypeNative, SpMM_Complex128_RocmMatchesCpu) { run_spmm_complex128_matches_cpu(Device::rocm(0)); }
+
+TEST_F(CpuSparseDtypeNative, SpMV_Int32_OneApiMatchesCpu) { run_spmv_int32_matches_cpu(Device::oneapi(0)); }
+TEST_F(CpuSparseDtypeNative, SpMM_Int64_OneApiMatchesCpu) { run_spmm_int64_matches_cpu(Device::oneapi(0)); }
+TEST_F(CpuSparseDtypeNative, SpMV_Complex64_OneApiMatchesCpu) { run_spmv_complex64_matches_cpu(Device::oneapi(0)); }
+TEST_F(CpuSparseDtypeNative, SpMM_Complex128_OneApiMatchesCpu) { run_spmm_complex128_matches_cpu(Device::oneapi(0)); }

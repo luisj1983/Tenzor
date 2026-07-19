@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <tenzor/distributed/gradient_compression.hpp>
 #include <tenzor/core/offload_engine.hpp>
+#include "../../backend_test_fixture.hpp"  // FINDING 25: BackendTest -- parametrized GPU device
 
 using namespace tenzor;
 using namespace tenzor::optim;
@@ -63,17 +64,6 @@ protected:
             params.push_back(param);
         }
         return params;
-    }
-
-    // Helper: Check if CUDA is available by attempting to create a tensor
-    static bool cuda_available() {
-        try {
-            // Try to create a small tensor on CUDA
-            auto test_tensor = ones({1}, DType::Float32, Device::cuda(0));
-            return true;
-        } catch (...) {
-            return false;
-        }
     }
 
     ZeROStage1Config default_config;
@@ -484,72 +474,9 @@ TEST_F(ZeROStage1Test, CPUOffloadStepCompletes) {
     EXPECT_NO_THROW(optimizer.step());
 }
 
-TEST_F(ZeROStage1Test, CPUOffloadFromGPU) {
-    // This test requires CUDA - skip if not available
-    if (!cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping GPU offload test";
-    }
-
-    // Create parameters on GPU
-    auto params = create_test_params(10, {128, 128}, Device::cuda(0));
-
-    // Verify params are on GPU
-    for (const auto& param : params) {
-        ASSERT_EQ(param->tensor().device().type, Device::Type::CUDA)
-            << "Parameter should be on GPU before offload";
-    }
-
-    for (auto& param : params) {
-        param->set_grad(ones_like(param->tensor()));
-    }
-
-    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
-
-    ZeROStage1Config config = default_config;
-    config.world_size = 1;
-    config.rank = 0;
-    config.offload_to_cpu = true;
-    config.cpu_offload_threshold = 1024;  // 1KB threshold - triggers offload
-
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
-
-    // Verify offload is enabled
-    EXPECT_TRUE(optimizer.is_cpu_offload_enabled());
-
-    // Step should complete with actual GPU->CPU offload
-    EXPECT_NO_THROW(optimizer.step());
-
-    // Verify local parameters are tracked
-    auto stats = optimizer.get_memory_stats();
-    EXPECT_EQ(stats.num_local_parameters, 10);
-}
-
-TEST_F(ZeROStage1Test, CPUOffloadThresholdRespected) {
-    // This test requires CUDA - skip if not available
-    if (!cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping GPU offload threshold test";
-    }
-
-    // Create small parameters on GPU (below threshold)
-    auto small_params = create_test_params(10, {4, 4}, Device::cuda(0));  // 64 bytes each
-
-    for (auto& param : small_params) {
-        param->set_grad(ones_like(param->tensor()));
-    }
-
-    auto base_optimizer = std::make_unique<Adam>(small_params, 0.001);
-
-    ZeROStage1Config config = default_config;
-    config.world_size = 1;
-    config.rank = 0;
-    config.offload_to_cpu = true;
-    config.cpu_offload_threshold = 1024 * 1024;  // 1MB - larger than params
-
-    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
-
-    // Step should complete - small tensors may not be offloaded
-    EXPECT_NO_THROW(optimizer.step());
-}
+// FINDING 25: CPUOffloadFromGPU / CPUOffloadThresholdRespected moved to the
+// parametrized ZeROStage1GpuOffloadTest fixture at the end of this file (were
+// hardcoded to Device::cuda(0) and skipped entirely off CUDA hardware).
 
 // ============================================================================
 // 7. Optimizer Wrapper Tests
@@ -840,87 +767,9 @@ TEST_F(ZeROStage1Test, MixedPrecisionDisabledKeepsLegacyDtypes) {
 // 12. Int8 Quantization of Offloaded Optimizer States
 // ============================================================================
 
-TEST_F(ZeROStage1Test, QuantizedOffloadStepsCompleteAndPreserveTrajectory) {
-    // Verifies the int8 offload codec end-to-end:
-    //   - offload_states_to_cpu quantizes momentum/variance to int8 + scalar scale,
-    //   - fetch_states_to_gpu dequantizes back to fp32,
-    //   - the optimizer step completes successfully across multiple iterations,
-    //   - param trajectory stays close to the unquantized reference (within int8 noise).
-    if (!cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping GPU offload test";
-    }
-
-    constexpr int n_steps = 3;
-    constexpr int n_params = 4;
-    constexpr float lr = 0.001f;
-
-    // Build two identical setups: one with quantization off, one with it on. We compare
-    // the resulting param values after `n_steps`.
-    auto make_setup = [&](bool quantize) {
-        auto params = create_test_params(n_params, {32, 32}, Device::cuda(0));
-        for (auto& p : params) {
-            p->set_grad(ones_like(p->tensor()));
-        }
-        auto adam = std::make_unique<Adam>(params, lr);
-
-        ZeROStage1Config cfg = default_config;
-        cfg.world_size = 1;
-        cfg.rank = 0;
-        cfg.offload_to_cpu = true;
-        cfg.quantize_offloaded_states_int8 = quantize;
-
-        return std::pair{params, std::make_unique<ZeROStage1Optimizer>(std::move(adam), cfg)};
-    };
-
-    auto [ref_params, ref_opt] = make_setup(false);
-    auto [q_params, q_opt]     = make_setup(true);
-
-    for (int s = 0; s < n_steps; ++s) {
-        ASSERT_NO_THROW(ref_opt->step());
-        ASSERT_NO_THROW(q_opt->step());
-        // Refresh grads each step (Adam has consumed them).
-        for (auto& p : ref_params) p->set_grad(ones_like(p->tensor()));
-        for (auto& p : q_params)   p->set_grad(ones_like(p->tensor()));
-    }
-
-    // Param trajectories should match within int8 quantization noise. With per-tensor
-    // scale and constant grads, the quantization error in m,v stays small relative to
-    // the param magnitudes; a 5% absolute tolerance is a generous bound.
-    for (size_t i = 0; i < ref_params.size(); ++i) {
-        auto ref_cpu = ref_params[i]->tensor().to(Device::cpu());
-        auto q_cpu   = q_params[i]->tensor().to(Device::cpu());
-        ASSERT_EQ(ref_cpu.numel(), q_cpu.numel());
-        const float* a = ref_cpu.data<float>();
-        const float* b = q_cpu.data<float>();
-        for (int64_t k = 0; k < ref_cpu.numel(); ++k) {
-            EXPECT_NEAR(a[k], b[k], 0.05f * std::max(std::abs(a[k]), 1e-3f))
-                << "param[" << i << "][" << k << "] drift exceeded int8 noise budget";
-        }
-    }
-
-    // After step(), the optimizer re-offloads state to CPU as part of its tail. With the
-    // quantization flag on, the CPU-resident momentum/variance tensors should carry Int8
-    // payloads — that's the proof the codec actually fired (and not e.g. silently bypassed).
-    auto sd = q_opt->state_dict();
-    int int8_states_seen = 0;
-    for (const auto& [key, t] : sd) {
-        if (key.rfind("momentum_", 0) == 0 || key.rfind("variance_", 0) == 0) {
-            EXPECT_EQ(t.dtype(), DType::Int8)
-                << "post-step CPU-offloaded state should be int8 quantized";
-            ++int8_states_seen;
-        }
-    }
-    EXPECT_GT(int8_states_seen, 0) << "expected at least one quantized state in state_dict";
-
-    // Reference (no quantization) should still report fp32 states.
-    auto ref_sd = ref_opt->state_dict();
-    for (const auto& [key, t] : ref_sd) {
-        if (key.rfind("momentum_", 0) == 0 || key.rfind("variance_", 0) == 0) {
-            EXPECT_EQ(t.dtype(), DType::Float32)
-                << "reference (no-quant) state should remain fp32 on CPU";
-        }
-    }
-}
+// FINDING 25: QuantizedOffloadStepsCompleteAndPreserveTrajectory moved to the
+// parametrized ZeROStage1GpuOffloadTest fixture at the end of this file (was
+// hardcoded to Device::cuda(0) and skipped entirely off CUDA hardware).
 
 TEST_F(ZeROStage1Test, QuantizationDisabledByDefault) {
     // Sanity: the new flag defaults off and doesn't perturb the legacy CPU offload path.
@@ -1362,30 +1211,9 @@ TEST_F(ZeROStage1Test, CheckpointCrossModeLoadThrows) {
 // 16. ElementLevel + CPU offload smoke test
 // ============================================================================
 
-TEST_F(ZeROStage1Test, ElementLevel_CPUOffload_StepRuns) {
-    // Smoke test: element-mode + CPU offload doesn't crash and produces finite values.
-    if (!cuda_available()) GTEST_SKIP() << "Requires CUDA";
-    auto params = create_test_params(2, {32, 32}, Device::cuda(0));
-    auto base = std::make_unique<Adam>(params, 0.001);
-    ZeROStage1Config cfg = default_config;
-    cfg.partitioning_mode = PartitioningMode::ElementLevel;
-    cfg.offload_to_cpu = true;
-    ZeROStage1Optimizer opt(std::move(base), cfg);
-
-    for (int step = 0; step < 3; ++step) {
-        for (auto& p : params) {
-            Tensor g = ones_like(p->tensor()) * 0.01f;
-            p->set_grad(g);
-        }
-        opt.step();
-    }
-    // Spot-check finite.
-    auto cpu_param = params[0]->tensor().to(Device::cpu()).contiguous().view({-1});
-    const float* d = cpu_param.data<float>();
-    for (int64_t i = 0; i < cpu_param.numel(); ++i) {
-        EXPECT_TRUE(std::isfinite(d[i]));
-    }
-}
+// FINDING 25: ElementLevel_CPUOffload_StepRuns moved to the parametrized
+// ZeROStage1GpuOffloadTest fixture at the end of this file (was hardcoded to
+// Device::cuda(0) and skipped entirely off CUDA hardware).
 
 
 // ============================================================================
@@ -1497,3 +1325,218 @@ TEST_F(ZeROStage1Test, ElementLevelNvmeOffload_MatchesNoOffloadTrajectory) {
     nvme_opt.reset();
     fs::remove_all(nvme_dir);
 }
+
+// ============================================================================
+// GPU Offload Tests (FINDING 25)
+// ============================================================================
+// The four tests below actually exercise ZeRO's GPU->CPU parameter/state
+// offload path (as opposed to the rest of this file, which is backend-
+// agnostic CPU logic and stays TEST_F/::testing::Test). They used to be
+// hardcoded to Device::cuda(0) and skip entirely off CUDA hardware, so
+// ROCm/Vulkan/OneAPI's TransferEngine-backed offload never got exercised.
+// Pulled into their own BackendTest-parametrized fixture rather than
+// converting the whole 60+-case ZeROStage1Test (which would multiply every
+// pure-CPU-logic test by 4 backends for no benefit).
+class ZeROStage1GpuOffloadTest : public tenzor::testing::BackendTest {
+protected:
+    void SetUp() override {
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
+        default_config.world_size = 1;  // Single process mode
+        default_config.rank = 0;
+        default_config.offload_to_cpu = false;
+        default_config.cpu_offload_threshold = 1024;  // 1KB
+        default_config.overlap_comm = true;
+        default_config.pin_memory = true;
+        default_config.process_group = nullptr;  // Single-process mode
+    }
+
+    // Helper: Create test parameters on a specific device
+    auto create_test_params(size_t count, const std::vector<int64_t>& shape,
+                           Device param_device)
+        -> std::vector<std::shared_ptr<Variable>> {
+        std::vector<std::shared_ptr<Variable>> params;
+        params.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            auto param = std::make_shared<Variable>(
+                ones(shape, DType::Float32, param_device),
+                true
+            );
+            params.push_back(param);
+        }
+        return params;
+    }
+
+    ZeROStage1Config default_config;
+};
+
+TEST_P(ZeROStage1GpuOffloadTest, CPUOffloadFromGPU) {
+    // Create parameters on GPU
+    auto params = create_test_params(10, {128, 128}, device);
+
+    // Verify params are on GPU
+    for (const auto& param : params) {
+        ASSERT_EQ(param->tensor().device().type, device.type)
+            << "Parameter should be on GPU before offload";
+    }
+
+    for (auto& param : params) {
+        param->set_grad(ones_like(param->tensor()));
+    }
+
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config config = default_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.offload_to_cpu = true;
+    config.cpu_offload_threshold = 1024;  // 1KB threshold - triggers offload
+
+    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+
+    // Verify offload is enabled
+    EXPECT_TRUE(optimizer.is_cpu_offload_enabled());
+
+    // Step should complete with actual GPU->CPU offload
+    EXPECT_NO_THROW(optimizer.step());
+
+    // Verify local parameters are tracked
+    auto stats = optimizer.get_memory_stats();
+    EXPECT_EQ(stats.num_local_parameters, 10);
+}
+
+TEST_P(ZeROStage1GpuOffloadTest, CPUOffloadThresholdRespected) {
+    // Create small parameters on GPU (below threshold)
+    auto small_params = create_test_params(10, {4, 4}, device);  // 64 bytes each
+
+    for (auto& param : small_params) {
+        param->set_grad(ones_like(param->tensor()));
+    }
+
+    auto base_optimizer = std::make_unique<Adam>(small_params, 0.001);
+
+    ZeROStage1Config config = default_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.offload_to_cpu = true;
+    config.cpu_offload_threshold = 1024 * 1024;  // 1MB - larger than params
+
+    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+
+    // Step should complete - small tensors may not be offloaded
+    EXPECT_NO_THROW(optimizer.step());
+}
+
+TEST_P(ZeROStage1GpuOffloadTest, QuantizedOffloadStepsCompleteAndPreserveTrajectory) {
+    // Verifies the int8 offload codec end-to-end:
+    //   - offload_states_to_cpu quantizes momentum/variance to int8 + scalar scale,
+    //   - fetch_states_to_gpu dequantizes back to fp32,
+    //   - the optimizer step completes successfully across multiple iterations,
+    //   - param trajectory stays close to the unquantized reference (within int8 noise).
+    constexpr int n_steps = 3;
+    constexpr int n_params = 4;
+    constexpr float lr = 0.001f;
+
+    // Build two identical setups: one with quantization off, one with it on. We compare
+    // the resulting param values after `n_steps`.
+    auto make_setup = [&](bool quantize) {
+        auto params = create_test_params(n_params, {32, 32}, device);
+        for (auto& p : params) {
+            p->set_grad(ones_like(p->tensor()));
+        }
+        auto adam = std::make_unique<Adam>(params, lr);
+
+        ZeROStage1Config cfg = default_config;
+        cfg.world_size = 1;
+        cfg.rank = 0;
+        cfg.offload_to_cpu = true;
+        cfg.quantize_offloaded_states_int8 = quantize;
+
+        return std::pair{params, std::make_unique<ZeROStage1Optimizer>(std::move(adam), cfg)};
+    };
+
+    auto [ref_params, ref_opt] = make_setup(false);
+    auto [q_params, q_opt]     = make_setup(true);
+
+    for (int s = 0; s < n_steps; ++s) {
+        ASSERT_NO_THROW(ref_opt->step());
+        ASSERT_NO_THROW(q_opt->step());
+        // Refresh grads each step (Adam has consumed them).
+        for (auto& p : ref_params) p->set_grad(ones_like(p->tensor()));
+        for (auto& p : q_params)   p->set_grad(ones_like(p->tensor()));
+    }
+
+    // Param trajectories should match within int8 quantization noise. With per-tensor
+    // scale and constant grads, the quantization error in m,v stays small relative to
+    // the param magnitudes; a 5% absolute tolerance is a generous bound.
+    for (size_t i = 0; i < ref_params.size(); ++i) {
+        auto ref_cpu = ref_params[i]->tensor().to(Device::cpu());
+        auto q_cpu   = q_params[i]->tensor().to(Device::cpu());
+        ASSERT_EQ(ref_cpu.numel(), q_cpu.numel());
+        const float* a = ref_cpu.data<float>();
+        const float* b = q_cpu.data<float>();
+        for (int64_t k = 0; k < ref_cpu.numel(); ++k) {
+            EXPECT_NEAR(a[k], b[k], 0.05f * std::max(std::abs(a[k]), 1e-3f))
+                << "param[" << i << "][" << k << "] drift exceeded int8 noise budget";
+        }
+    }
+
+    // After step(), the optimizer re-offloads state to CPU as part of its tail. With the
+    // quantization flag on, the CPU-resident momentum/variance tensors should carry Int8
+    // payloads — that's the proof the codec actually fired (and not e.g. silently bypassed).
+    auto sd = q_opt->state_dict();
+    int int8_states_seen = 0;
+    for (const auto& [key, t] : sd) {
+        if (key.rfind("momentum_", 0) == 0 || key.rfind("variance_", 0) == 0) {
+            EXPECT_EQ(t.dtype(), DType::Int8)
+                << "post-step CPU-offloaded state should be int8 quantized";
+            ++int8_states_seen;
+        }
+    }
+    EXPECT_GT(int8_states_seen, 0) << "expected at least one quantized state in state_dict";
+
+    // Reference (no quantization) should still report fp32 states.
+    auto ref_sd = ref_opt->state_dict();
+    for (const auto& [key, t] : ref_sd) {
+        if (key.rfind("momentum_", 0) == 0 || key.rfind("variance_", 0) == 0) {
+            EXPECT_EQ(t.dtype(), DType::Float32)
+                << "reference (no-quant) state should remain fp32 on CPU";
+        }
+    }
+}
+
+TEST_P(ZeROStage1GpuOffloadTest, ElementLevel_CPUOffload_StepRuns) {
+    // Smoke test: element-mode + CPU offload doesn't crash and produces finite values.
+    auto params = create_test_params(2, {32, 32}, device);
+    auto base = std::make_unique<Adam>(params, 0.001);
+    ZeROStage1Config cfg = default_config;
+    cfg.partitioning_mode = PartitioningMode::ElementLevel;
+    cfg.offload_to_cpu = true;
+    ZeROStage1Optimizer opt(std::move(base), cfg);
+
+    for (int step = 0; step < 3; ++step) {
+        for (auto& p : params) {
+            Tensor g = ones_like(p->tensor()) * 0.01f;
+            p->set_grad(g);
+        }
+        opt.step();
+    }
+    // Spot-check finite.
+    auto cpu_param = params[0]->tensor().to(Device::cpu()).contiguous().view({-1});
+    const float* d = cpu_param.data<float>();
+    for (int64_t i = 0; i < cpu_param.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(d[i]));
+    }
+}
+
+// FINDING 25: exercise every real (non-stub) ZeRO GPU-offload backend, not
+// just CUDA.
+INSTANTIATE_TEST_SUITE_P(
+    GpuBackends,
+    ZeROStage1GpuOffloadTest,
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    }
+);

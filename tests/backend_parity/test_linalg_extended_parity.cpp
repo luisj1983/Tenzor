@@ -67,7 +67,7 @@ TEST_P(LinalgExtendedParity, LstSq_Residual) {
         ref_sol = sol;
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto [sol, _] = tenzor::linalg::lstsq(A.to(backends[i]), B.to(backends[i]));
             backends[i].synchronize();

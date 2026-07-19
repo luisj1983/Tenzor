@@ -27,48 +27,15 @@
 #include <numeric>
 #include <iostream>
 
-#if defined(TENZOR_USE_CUDA)
-    #include <cuda_runtime.h>
-    #define DDP_CUDA_CHECK(call) \
-        do { \
-            cudaError_t err = call; \
-            if (err != cudaSuccess) { \
-                throw std::runtime_error( \
-                    std::string("CUDA error in DDP: ") + \
-                    cudaGetErrorString(err) + \
-                    " at " + __FILE__ + ":" + std::to_string(__LINE__) \
-                ); \
-            } \
-        } while(0)
-#elif defined(TENZOR_USE_ROCM)
-    #include <hip/hip_runtime.h>
-    // Map CUDA API names to HIP equivalents
-    #define cudaStream_t hipStream_t
-    #define cudaEvent_t hipEvent_t
-    #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
-    #define cudaStreamNonBlocking hipStreamNonBlocking
-    #define cudaStreamDestroy hipStreamDestroy
-    #define cudaStreamSynchronize hipStreamSynchronize
-    #define cudaStreamWaitEvent hipStreamWaitEvent
-    #define cudaEventCreate hipEventCreate
-    #define cudaEventCreateWithFlags hipEventCreateWithFlags
-    #define cudaEventDestroy hipEventDestroy
-    #define cudaEventRecord hipEventRecord
-    #define cudaEventDisableTiming hipEventDisableTiming
-    #define cudaSuccess hipSuccess
-    #define cudaGetErrorString hipGetErrorString
-    #define DDP_CUDA_CHECK(call) \
-        do { \
-            hipError_t err = call; \
-            if (err != hipSuccess) { \
-                throw std::runtime_error( \
-                    std::string("HIP error in DDP: ") + \
-                    hipGetErrorString(err) + \
-                    " at " + __FILE__ + ":" + std::to_string(__LINE__) \
-                ); \
-            } \
-        } while(0)
-#endif
+// FINDING 60 (resolved): stream/event creation used to be picked at compile
+// time via #if defined(TENZOR_USE_CUDA) #elif defined(TENZOR_USE_ROCM),
+// which on this project's combined CUDA+ROCm build always resolved to CUDA
+// (TENZOR_USE_CUDA is project-wide) regardless of what GPU the model
+// actually lived on, and could not safely be fixed by also defining
+// TENZOR_USE_ROCM (header collision with <cuda_runtime.h>, see
+// transfer_engine.hpp's FINDING 60 comment). gpu_stream_ops.hpp dispatches
+// at runtime instead, on comm_device_type_ (set in init_comm_resources()).
+#include "tenzor/core/gpu_stream_ops.hpp"
 
 namespace tenzor::distributed {
 
@@ -110,20 +77,29 @@ DistributedDataParallel::~DistributedDataParallel() {
 // ============================================================================
 
 auto DistributedDataParallel::init_comm_resources() -> void {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     if (!use_gpu_comm_) {
         return;
     }
 
-    // Audit D.9: one dedicated non-blocking CUDA stream per gradient
-    // bucket. Mirrors PyTorch DDP's reducer.cpp where each bucket
-    // gets its own NCCL stream so distinct buckets can all-reduce
-    // concurrently and overlap with backward compute on stream 0.
-    //
-    // cudaStreamNonBlocking ensures these streams do NOT implicitly
-    // synchronize with the default (stream 0) compute stream -- the
-    // only ordering enforced is via the per-bucket event recorded
-    // below and waited on in sync_comm().
+    // Determine the actual GPU vendor from the model's own parameters at
+    // runtime (FINDING 60) -- like PyTorch DDP, a rank's model is assumed to
+    // live on exactly one local GPU, so the first parameter found decides
+    // the vendor for every bucket stream/event created below.
+    comm_device_type_ = Device::Type::CUDA;
+    for (const auto& bucket : buckets_) {
+        if (!bucket.params.empty() && bucket.params.front()) {
+            comm_device_type_ = bucket.params.front()->tensor().device().type;
+            break;
+        }
+    }
+
+    // Audit D.9: one dedicated non-blocking stream per gradient bucket.
+    // Mirrors PyTorch DDP's reducer.cpp where each bucket gets its own NCCL
+    // stream so distinct buckets can all-reduce concurrently and overlap
+    // with backward compute on the default stream. The stream is
+    // non-blocking so it does NOT implicitly synchronize with the default
+    // (stream 0) compute stream -- the only ordering enforced is via the
+    // per-bucket event recorded below and waited on in sync_comm().
     // Audit N.1: pre-size the per-bucket stream/event vectors to exactly
     // buckets_.size() and assert that every slot is populated with a
     // non-null handle before we leave init. The async all-reduce path
@@ -135,17 +111,10 @@ auto DistributedDataParallel::init_comm_resources() -> void {
     bucket_streams_.assign(buckets_.size(), nullptr);
     bucket_events_.assign(buckets_.size(), nullptr);
     for (size_t i = 0; i < buckets_.size(); ++i) {
-        cudaStream_t stream = nullptr;
-        DDP_CUDA_CHECK(cudaStreamCreateWithFlags(&stream,
-                                                 cudaStreamNonBlocking));
-        bucket_streams_[i] = static_cast<void*>(stream);
-
-        // Events use cudaEventDisableTiming for lower overhead since
-        // we only need ordering guarantees, not timing.
-        cudaEvent_t event = nullptr;
-        DDP_CUDA_CHECK(cudaEventCreateWithFlags(&event,
-                                                 cudaEventDisableTiming));
-        bucket_events_[i] = static_cast<void*>(event);
+        bucket_streams_[i] = core::gpu_stream::create_stream(comm_device_type_);
+        // Events use timing disabled for lower overhead since we only need
+        // ordering guarantees, not timing.
+        bucket_events_[i] = core::gpu_stream::create_event(comm_device_type_);
     }
     // Audit N.1: post-condition for the async path. The async dispatch
     // assumes (a) sizes match and (b) every slot is non-null. If either
@@ -158,34 +127,24 @@ auto DistributedDataParallel::init_comm_resources() -> void {
         assert(bucket_events_[i] != nullptr &&
                "DDP bucket event init produced a null handle");
     }
-#else
-    // CPU-only build: no stream resources needed
-    (void)use_gpu_comm_;
-#endif
 }
 
 auto DistributedDataParallel::destroy_comm_resources() -> void {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     if (!use_gpu_comm_) {
         return;
     }
 
     // Destroy per-bucket events
     for (void* evt : bucket_events_) {
-        if (evt) {
-            cudaEventDestroy(static_cast<cudaEvent_t>(evt));
-        }
+        core::gpu_stream::destroy_event(evt, comm_device_type_);
     }
     bucket_events_.clear();
 
     // Destroy per-bucket communication streams
     for (void* s : bucket_streams_) {
-        if (s) {
-            cudaStreamDestroy(static_cast<cudaStream_t>(s));
-        }
+        core::gpu_stream::destroy_stream(s, comm_device_type_);
     }
     bucket_streams_.clear();
-#endif
 }
 
 // ============================================================================
@@ -258,7 +217,16 @@ auto DistributedDataParallel::register_grad_hooks() -> void {
                 param->register_hook(
                     [this, captured_ptr](const Tensor& grad) -> Tensor {
                         if (auto_sync_enabled_) {
-                            mark_param_ready(captured_ptr);
+                            // mark_param_ready's return value MUST become
+                            // this hook's return value when present -- see
+                            // its doc comment (ddp.hpp) for why silently
+                            // discarding it (as this used to) corrupts the
+                            // gradient of whichever parameter's hook happens
+                            // to fill its bucket.
+                            auto reduced = mark_param_ready(captured_ptr, grad);
+                            if (reduced.has_value()) {
+                                return *reduced;
+                            }
                         }
                         return grad;
                     }
@@ -268,7 +236,9 @@ auto DistributedDataParallel::register_grad_hooks() -> void {
     }
 }
 
-auto DistributedDataParallel::mark_param_ready(const void* param_ptr) -> void {
+auto DistributedDataParallel::mark_param_ready(const void* param_ptr,
+                                               const Tensor& current_grad)
+    -> std::optional<Tensor> {
     size_t bucket_idx = 0;
     bool should_reduce = false;
     {
@@ -276,15 +246,22 @@ auto DistributedDataParallel::mark_param_ready(const void* param_ptr) -> void {
 
         auto it = param_to_bucket_.find(param_ptr);
         if (it == param_to_bucket_.end()) {
-            return; // Unknown parameter, skip
+            return std::nullopt; // Unknown parameter, skip
         }
 
         bucket_idx = it->second;
         GradBucket& bucket = buckets_[bucket_idx];
 
         if (bucket.ready) {
-            return; // Already all-reduced this iteration
+            return std::nullopt; // Already all-reduced this iteration
         }
+
+        // The autograd engine runs this hook BEFORE writing current_grad
+        // into param->grad() (see GradBucket::pending_grad_override's doc
+        // comment) -- stash it so pack_bucket_flat() (called by the
+        // all_reduce below) uses the correct, current value for THIS
+        // parameter instead of a stale/absent param->grad() read.
+        bucket.pending_grad_override[param_ptr] = current_grad;
 
         bucket.pending_count++;
 
@@ -302,11 +279,44 @@ auto DistributedDataParallel::mark_param_ready(const void* param_ptr) -> void {
     }
 
     if (should_reduce) {
-        // On GPU backends this launches the NCCL all-reduce on the dedicated
-        // comm stream (overlapping backward); on others it runs the synchronous
-        // collective — now without holding bucket_mutex_.
+        // On GPU backends (without a compressor_) this launches the NCCL
+        // all-reduce on the dedicated comm stream and returns immediately
+        // (overlapping backward); completion is awaited later by
+        // sync_comm(), well after backward() has fully returned, so there
+        // is no accumulate-after-hook race to worry about there. On CPU
+        // (or a GPU backend with compressor_ set -- all_reduce_bucket_async
+        // routes that case through the same synchronous all_reduce_bucket
+        // regardless of use_gpu_comm_), the collective — and
+        // unpack_bucket_flat()'s param->set_grad() for every param in the
+        // bucket — complete synchronously, INSIDE this call, while the
+        // autograd engine is still in the middle of processing this exact
+        // parameter's hook.
+        //
+        // The autograd engine (engine.cpp) runs `input_grads[i] =
+        // grad_to_apply` (the hook's RETURN VALUE) and then
+        // accumulate_unlocked() immediately after this hook returns. If
+        // the hook simply returned the original (un-reduced) `grad`, that
+        // accumulate step would either overwrite the just-written reduced
+        // value (grad_ was nullopt before this backward pass) or SUM the
+        // un-reduced local grad on top of it (grad_ already had a value
+        // from a prior accumulation this pass) — either way silently
+        // corrupting exactly the one parameter whose hook filled the
+        // bucket. So for the synchronous case, look up and return the
+        // now-correct post-reduction value for THIS param so the caller's
+        // hook propagates it instead of the stale `current_grad`.
         all_reduce_bucket_async(buckets_[bucket_idx], bucket_idx);
+
+        const bool ran_synchronously = !use_gpu_comm_ || (compressor_ != nullptr);
+        if (ran_synchronously) {
+            std::lock_guard<std::mutex> lock(bucket_mutex_);
+            for (auto& p : buckets_[bucket_idx].params) {
+                if (p && static_cast<const void*>(p->tensor().data_ptr()) == param_ptr) {
+                    return p->grad();
+                }
+            }
+        }
     }
+    return std::nullopt;
 }
 
 auto DistributedDataParallel::synchronize_gradients() -> void {
@@ -395,9 +405,16 @@ auto pack_bucket_flat(GradBucket& bucket) -> void {
     std::vector<Plan> plans;
     for (size_t i = 0; i < bucket.params.size(); ++i) {
         auto& p = bucket.params[i];
-        if (!p || !p->has_grad()) continue;
-        // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
-        const Tensor g = p->grad().value();
+        if (!p) continue;
+        // The parameter whose hook just filled this bucket may not have
+        // param->grad() populated yet (see GradBucket::pending_grad_override);
+        // use the hook-supplied value for it, param->grad() for every other
+        // (already-accumulated) parameter.
+        auto override_it = bucket.pending_grad_override.find(
+            static_cast<const void*>(p->tensor().data_ptr()));
+        const bool has_override = override_it != bucket.pending_grad_override.end();
+        if (!has_override && !p->has_grad()) continue;
+        const Tensor g = has_override ? override_it->second : p->grad().value();
         const size_t n = static_cast<size_t>(g.numel());
         const DType dt = g.dtype();
         const Device dev = g.device();
@@ -426,8 +443,14 @@ auto pack_bucket_flat(GradBucket& bucket) -> void {
         for (size_t k = 0; k < grp.param_indices.size(); ++k) {
             const size_t pi = grp.param_indices[k];
             const size_t n  = grp.numels[k];
+            auto& p = bucket.params[pi];
+            // Same override as the first pass above: the just-fired
+            // parameter's param->grad() isn't populated yet.
+            auto override_it = bucket.pending_grad_override.find(
+                static_cast<const void*>(p->tensor().data_ptr()));
             // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
-            const Tensor g = bucket.params[pi]->grad().value();
+            const Tensor g = (override_it != bucket.pending_grad_override.end())
+                ? override_it->second : p->grad().value();
             Tensor g_flat = g.reshape({static_cast<int64_t>(n)}).contiguous();
             grp.flat = slice_scatter(grp.flat, g_flat, /*dim=*/0,
                                      static_cast<int64_t>(offset),
@@ -437,6 +460,7 @@ auto pack_bucket_flat(GradBucket& bucket) -> void {
         }
         bucket.dtype_groups.push_back(std::move(grp));
     }
+    bucket.pending_grad_override.clear();
 }
 
 /// Scatter the reduced flat buffers back into per-parameter grads.
@@ -485,7 +509,6 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         return;
     }
 
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     // Audit D.9: each bucket all-reduces on its OWN dedicated stream
     // (PyTorch DDP reducer.cpp pattern). Distinct buckets' collectives
     // can therefore run concurrently and overlap with backward
@@ -517,9 +540,9 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         pg_->all_reduce_async(grp.flat, ReduceOp::SUM, this_bucket_stream);
     }
 
-    // Record a CUDA event on THIS bucket's stream after its
-    // all-reduce(s) complete. The default compute stream will later
-    // cudaStreamWaitEvent on this event before the optimizer step.
+    // Record an event on THIS bucket's stream after its all-reduce(s)
+    // complete. The default compute stream will later wait on this event
+    // before the optimizer step (see sync_comm()).
     //
     // Audit N.1: debug-build assertion that bucket_idx is in bounds
     // before the async path runs. init_comm_resources() pre-sizes
@@ -540,8 +563,8 @@ auto DistributedDataParallel::all_reduce_bucket_async(
     // slot, so a recorded-but-uncounted event is harmless while a
     // counted-but-unrecorded event would wait on a stale event from
     // a previous step. We therefore record FIRST and only bump the
-    // counter once the record has succeeded (DDP_CUDA_CHECK throws
-    // on failure, aborting before fetch_add).
+    // counter once the record has succeeded (gpu_stream::record_event
+    // throws on failure, aborting before fetch_add).
     //
     // The fetch_add uses memory_order_release so that the matching
     // memory_order_acquire load in sync_comm() observes every prior
@@ -549,17 +572,12 @@ auto DistributedDataParallel::all_reduce_bucket_async(
     // it sees a non-zero counter — i.e. the counter is the
     // synchronisation point that publishes the recorded events.
     if (bucket_idx < bucket_events_.size() && bucket_events_[bucket_idx]) {
-        cudaEvent_t event = static_cast<cudaEvent_t>(bucket_events_[bucket_idx]);
-        cudaStream_t stream = static_cast<cudaStream_t>(this_bucket_stream);
-        DDP_CUDA_CHECK(cudaEventRecord(event, stream));
+        core::gpu_stream::record_event(bucket_events_[bucket_idx], this_bucket_stream,
+                                        comm_device_type_);
         pending_async_ops_.fetch_add(1, std::memory_order_release);
     }
 
     bucket.ready = true;
-#else
-    // Should not reach here (use_gpu_comm_ would be false without CUDA/ROCm)
-    all_reduce_bucket(bucket);
-#endif
 }
 
 auto DistributedDataParallel::sync_comm() -> void {
@@ -568,7 +586,6 @@ auto DistributedDataParallel::sync_comm() -> void {
         return;
     }
 
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     // Audit N.1: pair the acquire-load here with the release-fetch_add in
     // all_reduce_bucket_async(). Acquire semantics guarantee that if we
     // observe pending_async_ops_ > 0, we also observe every
@@ -586,15 +603,13 @@ auto DistributedDataParallel::sync_comm() -> void {
     // step (running on stream 0) is guaranteed to observe the
     // fully-reduced, averaged gradients for every bucket.
     //
-    // cudaStreamWaitEvent(0, event, 0) is a non-blocking GPU-side
-    // wait -- the CPU thread returns immediately, and the GPU
-    // stalls stream 0 only if the corresponding bucket event has
+    // stream_wait_event(nullptr, event, ...) is a non-blocking GPU-side
+    // wait on the default stream -- the CPU thread returns immediately, and
+    // the GPU stalls stream 0 only if the corresponding bucket event has
     // not yet been reached on its bucket stream.
     for (size_t i = 0; i < bucket_events_.size(); ++i) {
         if (bucket_events_[i]) {
-            cudaEvent_t event = static_cast<cudaEvent_t>(bucket_events_[i]);
-            // Stream 0 (default compute stream) waits on the bucket event
-            DDP_CUDA_CHECK(cudaStreamWaitEvent(nullptr, event, 0));
+            core::gpu_stream::stream_wait_event(nullptr, bucket_events_[i], comm_device_type_);
         }
     }
 
@@ -617,7 +632,6 @@ auto DistributedDataParallel::sync_comm() -> void {
     // (e.g. the next sync_comm() entry, or reset_buckets() before the
     // next step) so observers see the just-completed event waits.
     pending_async_ops_.store(0, std::memory_order_release);
-#endif
 }
 
 // ============================================================================

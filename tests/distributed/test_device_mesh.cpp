@@ -14,6 +14,7 @@
 #include <tenzor/distributed/process_group.hpp>
 #include <tenzor/distributed/distributed.hpp>  // for ReduceOp definition
 #include <tenzor/ops/creation.hpp>  // for zeros()
+#include <cstdlib>
 
 using namespace tenzor;
 using namespace tenzor::distributed;
@@ -30,8 +31,13 @@ protected:
 
 // Single-rank fake PG: mimics WS=1, returns the input unchanged. Used to
 // verify that `set_process_group` / `process_group` / `process_group_for_dim`
-// route correctly. Multi-rank correctness of the collectives themselves is
-// covered by the multi-process distributed test job (planned in plan K3).
+// route correctly. Multi-rank correctness of the collectives themselves --
+// and in particular whether GlooProcessGroup::split() actually partitions
+// real ranks into independent sub-groups rather than SplittablePG's fake
+// stub -- is covered by MultiRankDeviceMeshTest below: a real 4-process
+// GlooProcessGroup, launched via tests/distributed/run_multirank_test.sh
+// (FINDING 21 "plan K3" -- the multi-process C++ test job this file used to
+// defer to but which never existed).
 class SingleRankFakePG : public tenzor::distributed::ProcessGroupBase {
 public:
     int seen_alltoall = 0;
@@ -389,4 +395,105 @@ TEST_F(DeviceMeshTest, ProcessGroupForDim_KeyMatchesAxisCoord) {
     (void)mesh.process_group_for_dim("tp");
     EXPECT_EQ(pg->last_color, 1);
     EXPECT_EQ(pg->last_key, 1);
+}
+
+// ============================================================================
+// Multi-rank tests (real GlooProcessGroup, real OS processes) — FINDING 21
+// ============================================================================
+// SplittablePG's fake split() just fabricates a stub sub-PG with a given
+// world_size -- it never actually negotiates group membership between real
+// peers. GlooProcessGroup::split() does real work here (see its own header
+// comment): it all_gathers (rank, color, key) triples over the PARENT group,
+// computes new rank/size locally per color, and spins a fresh rendezvous on
+// a per-color derived port. That negotiation can only be wrong in a way that
+// involves multiple real processes -- e.g. two different colors' ranks
+// cross-talking, or a sub-group's rank/world_size disagreeing with what its
+// peers computed.
+namespace {
+
+class MultiRankDeviceMeshTest : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() { tenzor::initialize(); }
+
+    void SetUp() override {
+        const char* rank_env = std::getenv("RANK");
+        const char* world_size_env = std::getenv("WORLD_SIZE");
+        if (!rank_env || !world_size_env) {
+            GTEST_SKIP() << "Distributed environment not available (RANK, WORLD_SIZE not set)";
+        }
+        rank_ = std::atoi(rank_env);
+        world_size_ = std::atoi(world_size_env);
+        if (world_size_ != 4) {
+            GTEST_SKIP() << "MultiRankDeviceMeshTest is written for exactly 4 ranks";
+        }
+
+        const char* addr_env = std::getenv("MASTER_ADDR");
+        const char* port_env = std::getenv("MASTER_PORT");
+        std::string addr = addr_env ? addr_env : "127.0.0.1";
+        int port = port_env ? std::atoi(port_env) : 29500;
+        pg_ = std::make_shared<GlooProcessGroup>(rank_, world_size_, addr, port);
+    }
+
+    void TearDown() override {
+        if (pg_) {
+            pg_->barrier();
+            pg_.reset();
+        }
+    }
+
+    int rank_{-1};
+    int world_size_{-1};
+    std::shared_ptr<GlooProcessGroup> pg_;
+};
+
+} // namespace
+
+// 2x2 mesh over 4 real ranks: "dp" is the row axis, "tp" is the column axis.
+// mesh_rank = coord (dp_coord, tp_coord) = (rank/2, rank%2), so ranks {0,1}
+// share dp_coord=0 (tp sub-group A) and ranks {2,3} share dp_coord=1 (tp
+// sub-group B). Splitting on "tp" must produce two INDEPENDENT 2-rank
+// sub-groups -- verified with a real all_reduce inside the sub-group: each
+// sub-group rank contributes (sub_rank+1), so a correctly isolated 2-rank
+// sub-group always sums to 1+2=3, regardless of which color it is. If
+// split() ever let the two colors' ranks talk to each other (or miscounted
+// world_size), this would either hang (waiting on a peer that isn't really
+// in this sub-group) or observe a wrong sum.
+TEST_F(MultiRankDeviceMeshTest, SplitProducesIndependentSubGroupsAcrossRealRanks) {
+    DeviceMesh mesh(Device::Type::CPU, {2, 2}, {"dp", "tp"}, /*mesh_rank=*/rank_);
+    mesh.set_process_group(pg_);
+
+    auto tp_sub = mesh.process_group_for_dim("tp");
+    ASSERT_NE(tp_sub, nullptr);
+    EXPECT_EQ(tp_sub->world_size(), 2);
+
+    int expected_color = rank_ / 2;
+    int expected_key = rank_ % 2;
+    EXPECT_EQ(tp_sub->rank(), expected_key)
+        << "rank " << rank_ << " (color " << expected_color << ")";
+
+    auto local = full({4}, static_cast<double>(tp_sub->rank() + 1),
+                      DType::Float32, Device::cpu());
+    tp_sub->all_reduce(local, ReduceOp::SUM);
+
+    auto cpu_local = local.to(Device::cpu()).contiguous();
+    const float* p = cpu_local.data<float>();
+    for (int64_t i = 0; i < cpu_local.numel(); ++i) {
+        EXPECT_FLOAT_EQ(p[i], 3.0f)
+            << "rank " << rank_ << " (color " << expected_color
+            << "): sub-group all_reduce should sum exactly its own 2 members (1+2=3)";
+    }
+}
+
+// process_group_for_dim() caches the sub-PG: calling it twice for the same
+// dim on the same rank must not re-split (matching the single-process
+// ProcessGroupForDim_MultiDMesh_CallsSplitOnce contract), verified here
+// against the REAL GlooProcessGroup::split() implementation.
+TEST_F(MultiRankDeviceMeshTest, ProcessGroupForDimIsCachedWithRealSplit) {
+    DeviceMesh mesh(Device::Type::CPU, {2, 2}, {"dp", "tp"}, /*mesh_rank=*/rank_);
+    mesh.set_process_group(pg_);
+
+    auto tp_sub_1 = mesh.process_group_for_dim("tp");
+    auto tp_sub_2 = mesh.process_group_for_dim("tp");
+    EXPECT_EQ(tp_sub_1.get(), tp_sub_2.get())
+        << "rank " << rank_ << ": second process_group_for_dim call should be cached";
 }

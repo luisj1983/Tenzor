@@ -430,7 +430,7 @@ TEST_P(VisionFusedParity, NMS) {
 
     Tensor ref = ops::nms(boxes, scores, 0.5);
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto out = ops::nms(boxes.to(backends[i]), scores.to(backends[i]),
                                  0.5);
@@ -473,7 +473,7 @@ TEST_P(VisionFusedParity, ROIAlign) {
         ref = roi.forward(Variable(features, false), rois).tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::detection::ROIAlign roi_dev(4, 4, 1.0, 2, true);
             roi_dev.to(backends[i]);
@@ -514,7 +514,7 @@ TEST_P(VisionFusedParity, ROIAlign_Float64_NonPow2SpatialScale) {
         ref = roi.forward(Variable(features, false), rois).tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::detection::ROIAlign roi_dev(4, 4, 1.0 / 3.0, 2, true);
             roi_dev.to(backends[i]);
@@ -562,7 +562,7 @@ TEST_P(VisionFusedParity, ROIAlign_DefaultAttrsMatchAcrossBackends) {
     Tensor ref = dispatch(OpId::ROIAlignForward,
         std::vector<Tensor>{features, rois}, attrs)[0];
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto features_dev = features.to(backends[i]);
             auto rois_dev = rois.to(backends[i]);

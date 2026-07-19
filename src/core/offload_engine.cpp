@@ -4,6 +4,8 @@
  */
 
 #include "tenzor/core/offload_engine.hpp"
+#include "tenzor/backend/loader_fwd.hpp"
+#include "tenzor/backend/backend.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <sstream>
@@ -11,13 +13,43 @@
 namespace tenzor {
 namespace core {
 
+namespace {
+
+// FINDING 25: default_gpu_device_ used to unconditionally hardcode
+// Device::cuda(0) regardless of which GPU backend was actually built/
+// available -- get_gpu_memory_pressure() (below) was already fixed to read
+// THIS field generically ("use default GPU device type instead of hardcoding
+// CUDA", see its own comment) but the field's own initialization never was.
+// On any build where CUDA isn't the active backend, every caller of the
+// convenience (device-less) load_to_gpu()/load_to_gpu_async() overloads
+// silently targeted a nonexistent CUDA device instead of the real GPU the
+// caller's tensors are actually on. Auto-detect the first available backend,
+// preferring CUDA when multiple are present -- matches the same preference
+// order ProcessGroup::create_process_group()'s Backend::NCCL case already
+// uses (src/distributed/distributed.cpp) when resolving "the" GPU backend on
+// a combined-backend host. Falls back to Device::cuda(0) (the historical
+// default) when no GPU backend is available at all, preserving the existing
+// error-at-first-use behavior for CPU-only builds.
+auto detect_default_gpu_device() -> Device {
+    for (Device::Type type : {Device::Type::CUDA, Device::Type::ROCm,
+                               Device::Type::Vulkan, Device::Type::OneAPI}) {
+        Backend* backend = try_get_backend(type);
+        if (backend != nullptr && backend->is_available()) {
+            return Device{type, 0};
+        }
+    }
+    return Device::cuda(0);
+}
+
+}  // namespace
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
 
 OffloadEngine::OffloadEngine(const Config& config)
     : config_(config)
-    , default_gpu_device_(Device::cuda(0))
+    , default_gpu_device_(detect_default_gpu_device())
 {
     // Validate configuration
     if (config_.pinned_memory_size == 0) {
@@ -249,9 +281,39 @@ auto OffloadEngine::prefetch_to_gpu(const std::vector<Tensor*>& tensors) -> void
 
     std::lock_guard<std::mutex> lock(prefetch_mutex_);
 
+    // FINDING (multi-backend stress test): the depth bound below used to check
+    // ONLY prefetch_queue_.size() -- the PENDING request queue. Once the
+    // worker thread drains a request, it moves into in_flight_prefetches_
+    // (an issued, real GPU allocation awaiting an explicit wait_for_prefetch()/
+    // synchronize() to commit and release it), which had NO size bound at
+    // all. A caller that queues prefetches faster than it drains them via
+    // wait_for_prefetch()/synchronize() (e.g. one prefetch call per loop
+    // iteration, never explicitly waited on) accumulated real, unbounded GPU
+    // memory in in_flight_prefetches_ -- prefetch_depth was therefore not
+    // actually limiting outstanding GPU memory, just how fast new requests
+    // got pulled off the queue. Reproduced concretely: a 20-chunk x 512MB
+    // offload stress loop leaked ~10GB of never-committed prefetch transfers
+    // on the default GPU device. CUDA's driver silently tolerated the
+    // resulting VRAM overcommit (paging), masking the leak; Vulkan's
+    // vkAllocateMemory has no such fallback and hard-failed with
+    // VK_ERROR_OUT_OF_DEVICE_MEMORY once physical VRAM was exhausted --
+    // exposing a real resource-safety bug common to every backend, not a
+    // Vulkan-specific one. Fixed by bounding total outstanding prefetch work
+    // (queued + in-flight, both real GPU-memory-holding states) by
+    // prefetch_depth, matching the doc-comment's evident intent.
+    size_t in_flight_count = 0;
+    {
+        std::lock_guard<std::mutex> ifl_lock(in_flight_mutex_);
+        in_flight_count = in_flight_prefetches_.size();
+    }
+    auto at_capacity = [&]() {
+        return prefetch_queue_.size() + in_flight_count
+               >= static_cast<size_t>(config_.prefetch_depth);
+    };
+
     // Check queue depth limit
-    if (prefetch_queue_.size() >= static_cast<size_t>(config_.prefetch_depth)) {
-        return;  // Queue full, skip prefetch
+    if (at_capacity()) {
+        return;  // Outstanding prefetch work (queued + in-flight) at capacity
     }
 
     // Add tensors to prefetch queue
@@ -260,8 +322,8 @@ auto OffloadEngine::prefetch_to_gpu(const std::vector<Tensor*>& tensors) -> void
         // so a single multi-tensor call could otherwise overshoot prefetch_depth by
         // up to (batch size - 1). Stop pushing once the queue reaches the configured
         // depth so backpressure is honored exactly.
-        if (prefetch_queue_.size() >= static_cast<size_t>(config_.prefetch_depth)) {
-            break;  // Queue full; drop the remaining hints (prefetch is best-effort)
+        if (at_capacity()) {
+            break;  // At capacity; drop the remaining hints (prefetch is best-effort)
         }
 
         if (tensor == nullptr) {

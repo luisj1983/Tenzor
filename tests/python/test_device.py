@@ -95,6 +95,75 @@ def test_cuda_graceful_skip():
     print("  CUDA graceful skip OK")
 
 
+def test_vulkan_graceful_skip():
+    """Vulkan counterpart to test_cuda_graceful_skip. Previously only CUDA
+    and MPS had round-trip/graceful-skip coverage in this file despite
+    Vulkan/ROCm/OneAPI being real, Python-bound backends via the same
+    DeviceType/Device.<backend>() binding surface -- a regression in any of
+    their Python-level Device plumbing specifically shipped with zero
+    Python-level signal here.
+    """
+    print("Testing Vulkan availability check...")
+    has_vulkan = tz.vulkan_is_available()
+    print(f"  Vulkan available: {has_vulkan}")
+
+    if has_vulkan:
+        t = tz.ones([2, 3])
+        vulkan_dev = tz.Device(tz.DeviceType.Vulkan, 0)
+        t_gpu = t.to(vulkan_dev)
+        assert t_gpu.device.type == tz.DeviceType.Vulkan
+        print("  Vulkan tensor creation OK")
+
+        t_cpu = t_gpu.to(tz.Device(tz.DeviceType.CPU, 0))
+        assert t_cpu.device.type == tz.DeviceType.CPU
+        print("  Vulkan->CPU transfer OK")
+    else:
+        print("  Skipping Vulkan tests (no GPU)")
+    print("  Vulkan graceful skip OK")
+
+
+def test_rocm_graceful_skip():
+    """ROCm counterpart to test_cuda_graceful_skip. See test_vulkan_graceful_skip."""
+    print("Testing ROCm availability check...")
+    has_rocm = tz.rocm_is_available()
+    print(f"  ROCm available: {has_rocm}")
+
+    if has_rocm:
+        t = tz.ones([2, 3])
+        rocm_dev = tz.Device(tz.DeviceType.ROCm, 0)
+        t_gpu = t.to(rocm_dev)
+        assert t_gpu.device.type == tz.DeviceType.ROCm
+        print("  ROCm tensor creation OK")
+
+        t_cpu = t_gpu.to(tz.Device(tz.DeviceType.CPU, 0))
+        assert t_cpu.device.type == tz.DeviceType.CPU
+        print("  ROCm->CPU transfer OK")
+    else:
+        print("  Skipping ROCm tests (no GPU)")
+    print("  ROCm graceful skip OK")
+
+
+def test_oneapi_graceful_skip():
+    """OneAPI counterpart to test_cuda_graceful_skip. See test_vulkan_graceful_skip."""
+    print("Testing OneAPI availability check...")
+    has_oneapi = tz.oneapi_is_available()
+    print(f"  OneAPI available: {has_oneapi}")
+
+    if has_oneapi:
+        t = tz.ones([2, 3])
+        oneapi_dev = tz.Device(tz.DeviceType.OneAPI, 0)
+        t_gpu = t.to(oneapi_dev)
+        assert t_gpu.device.type == tz.DeviceType.OneAPI
+        print("  OneAPI tensor creation OK")
+
+        t_cpu = t_gpu.to(tz.Device(tz.DeviceType.CPU, 0))
+        assert t_cpu.device.type == tz.DeviceType.CPU
+        print("  OneAPI->CPU transfer OK")
+    else:
+        print("  Skipping OneAPI tests (no GPU)")
+    print("  OneAPI graceful skip OK")
+
+
 def test_device_construction():
     """Test Device object construction."""
     print("Testing Device construction...")
@@ -146,6 +215,9 @@ def main():
         test_variable_device()
         test_module_cpu()
         test_cuda_graceful_skip()
+        test_vulkan_graceful_skip()
+        test_rocm_graceful_skip()
+        test_oneapi_graceful_skip()
         test_device_construction()
         test_mps_device_type_registered()
 

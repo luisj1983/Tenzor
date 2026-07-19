@@ -293,8 +293,23 @@ auto SparseTensor::from_dense(const Tensor& dense, SparseLayout layout) -> Spars
     }
 
     // mask = (dense != 0). Compare against a zero scalar of matching dtype.
-    Tensor zero_scalar = zeros({}, dense_cont.dtype(), dev);
-    Tensor mask = ne(dense_cont, zero_scalar);  // shape == dense shape, Bool
+    // `ne` has no Complex64/Complex128 comparison kernel on any backend
+    // (ordering-style equality isn't generally defined for complex values),
+    // so from_dense() unconditionally threw on complex input, forcing every
+    // caller — including sparse_triangular_solve's own complex-dtype tests —
+    // to hand-build CSR components instead. "Nonzero" is still well-defined
+    // for complex via magnitude (abs(z) == 0 <=> z == 0), and abs() already
+    // has real/complex dispatch everywhere, so route complex dtypes through
+    // abs() first and compare the resulting real-valued tensor.
+    Tensor mask;
+    if (dense_cont.dtype() == DType::Complex64 || dense_cont.dtype() == DType::Complex128) {
+        Tensor abs_dense = abs(dense_cont);
+        Tensor zero_scalar_real = zeros({}, abs_dense.dtype(), dev);
+        mask = ne(abs_dense, zero_scalar_real);  // shape == dense shape, Bool
+    } else {
+        Tensor zero_scalar = zeros({}, dense_cont.dtype(), dev);
+        mask = ne(dense_cont, zero_scalar);  // shape == dense shape, Bool
+    }
 
     // Multi-dim coordinates of nonzero entries: shape (nnz, ndim) Int64.
     Tensor coords = nonzero(mask);

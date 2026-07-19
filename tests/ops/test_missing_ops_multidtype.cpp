@@ -317,13 +317,6 @@ TEST_P(MissingOpsMultiDTypeTest, MaskedScatter) {
 }
 
 TEST_P(MissingOpsMultiDTypeTest, TrilTriuIndices) {
-    // These are device-agnostic creation helpers (return Int64 by default).
-    // We run on CPU only since there's no meaningful cross-device comparison;
-    // the test validates the algorithm, not backend parity.
-    if (device().type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::BackendUnavailable,
-                         "tril_indices/triu_indices are CPU-backed helpers");
-    }
     auto tril = tril_indices(3, 3, 0);
     auto triu = triu_indices(3, 3, 0);
     EXPECT_EQ(tril.shape()[0], 2);          // [row_coords, col_coords]

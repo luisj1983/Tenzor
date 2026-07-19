@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/nn/optim/scheduler.hpp>
 #include <cmath>
 #include <numbers>
@@ -59,6 +60,12 @@ protected:
         dtype = param.dtype;
         rtol = param.rtol;
         atol = param.atol;
+
+        // Retrofits this hand-rolled fixture with the same TENZOR_SKIP_BACKENDS/
+        // TENZOR_REQUIRE_MULTI_BACKEND handling BackendTest/MultiBackendDTypeTest
+        // get for free, so a silently-broken GPU driver escalates to a hard
+        // failure under TENZOR_REQUIRE_MULTI_BACKEND=1 instead of a quiet skip.
+        HONOR_BACKEND_ENV_VARS(param.backend_name);
 
         if (param.backend_name == "cpu") {
             device = Device::cpu();
@@ -135,12 +142,20 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, ReduceLROnPlateau_BasicMinMode) {
     scheduler.step(0.9);  // Improvement
     EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.1);
 
-    // No improvement for patience epochs
-    scheduler.step(0.91);  // No improvement
+    // No improvement for patience epochs. Reduction fires when
+    // num_bad_epochs strictly EXCEEDS patience (ReduceLROnPlateau::step,
+    // scheduler_advanced.cpp — matches PyTorch: patience=2 means the first
+    // 2 bad epochs are ignored, reduction happens on the 3rd), so this
+    // needs 3 non-improving step() calls, not 2.
+    scheduler.step(0.91);  // No improvement, bad_epochs=1
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 1);
 
+    scheduler.step(0.92);  // No improvement, bad_epochs=2 (== patience, not yet > patience)
+    EXPECT_EQ(scheduler.get_num_bad_epochs(), 2);
+    EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.1);
+
     // Trigger LR reduction
-    scheduler.step(0.92);  // No improvement, triggers reduction
+    scheduler.step(0.93);  // No improvement, bad_epochs=3 > patience(2), triggers reduction
     EXPECT_NEAR(scheduler.get_last_lr(), 0.01, 1e-9);
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 0);
 }
@@ -156,12 +171,17 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, ReduceLROnPlateau_MaxMode) {
     scheduler.step(0.8);  // Improvement
     EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.01);
 
-    // No improvement for patience epochs
+    // No improvement for patience epochs. patience=3 here, and reduction
+    // fires only once num_bad_epochs strictly EXCEEDS patience (see the
+    // BasicMinMode comment above), so this needs 4 non-improving steps.
     scheduler.step(0.79);
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 1);
     scheduler.step(0.78);
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 2);
-    scheduler.step(0.77);  // Triggers reduction
+    scheduler.step(0.77);
+    EXPECT_EQ(scheduler.get_num_bad_epochs(), 3);
+    EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.01);
+    scheduler.step(0.76);  // 4th non-improving step, bad_epochs=4 > patience(3), triggers reduction
     EXPECT_NEAR(scheduler.get_last_lr(), 0.005, 1e-9);
 }
 
@@ -172,7 +192,11 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, ReduceLROnPlateau_Cooldown) {
 
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2, 1e-4, "rel", 2);  // cooldown=2
 
-    // Trigger reduction
+    // Trigger reduction. patience=2 here, and reduction fires only once
+    // num_bad_epochs strictly EXCEEDS patience (see BasicMinMode's comment),
+    // so this needs 4 step() calls: the first sets the baseline, the next
+    // 3 are non-improving (bad_epochs 1, 2, 3 — 3 > patience(2) triggers).
+    scheduler.step(1.0);
     scheduler.step(1.0);
     scheduler.step(1.0);
     scheduler.step(1.0);
@@ -475,7 +499,14 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, ReduceLROnPlateau_Training_Simulation) {
     auto optimizer = SGD(params, 0.1);
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.5, 3);
 
-    std::vector<double> val_losses = {1.0, 0.9, 0.85, 0.84, 0.84, 0.84, 0.84, 0.83};
+    // patience=3: reduction fires only once num_bad_epochs strictly EXCEEDS
+    // patience (ReduceLROnPlateau::step — matches PyTorch), i.e. on the 4th
+    // consecutive non-improving epoch. Losses improve through epoch 3
+    // (0.84 < 0.84's-predecessor*(1-rel_threshold)), then plateau at 0.84
+    // for epochs 4-7 (4 consecutive non-improving epochs: bad_epochs goes
+    // 1,2,3,4 — the reduction triggers on epoch 7, not epoch 6), then
+    // improves again at the end.
+    std::vector<double> val_losses = {1.0, 0.9, 0.85, 0.84, 0.84, 0.84, 0.84, 0.84, 0.83};
 
     double last_lr = 0.1;
     for (size_t epoch = 0; epoch < val_losses.size(); epoch++) {
@@ -483,7 +514,7 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, ReduceLROnPlateau_Training_Simulation) {
         optimizer.step();
         scheduler.step(val_losses[epoch]);
 
-        if (epoch < 6) {
+        if (epoch < 7) {
             EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), last_lr);
         } else {
             last_lr = 0.05;

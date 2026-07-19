@@ -315,6 +315,13 @@ private:
     /** @brief Whether the process group uses GPU backend */
     bool use_gpu_comm_{false};
 
+    /**
+     * @brief GPU vendor comm_stream_/comm_event_ were created for, determined
+     * at runtime from the module's own parameters (see init_comm_resources()
+     * / FINDING 60 in findings.txt).
+     */
+    Device::Type comm_device_type_{Device::Type::CPU};
+
     /** @brief Dedicated communication stream (void* to avoid cuda header) */
     void* comm_stream_{nullptr};
 

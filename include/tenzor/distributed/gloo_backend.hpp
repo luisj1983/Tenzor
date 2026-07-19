@@ -198,6 +198,20 @@ private:
     std::string master_addr_;
     int master_port_{29500};
 
+    // MULTI-RANK HARNESS FINDING: a fresh GlooBackend gets initialize()'d and
+    // finalize()'d once per TEST_F case that runs a real multi-process
+    // collective, all reusing the SAME master_port_ (fixed for the whole
+    // binary run via the MASTER_PORT env var). finalize() removes only this
+    // rank's own rendezvous file, so a rank that races ahead into the NEXT
+    // test's init_connections()/read_port_from_store() can observe a peer's
+    // STALE file from the PREVIOUS test (not yet unlinked by that peer's own,
+    // still-in-flight finalize()) and connect to an already-closed port
+    // ("Failed to connect to rank N"). Reproduced deterministically in a real
+    // 4-process Gloo run (14 sequential TEST_F cases). Fixed by making every
+    // initialize() use a distinct rendezvous store directory, so a stale file
+    // from an earlier generation can never even be found under the new path.
+    uint64_t rendezvous_generation_{0};
+
     // TCP connections to other ranks
     std::vector<std::shared_ptr<TCPConnection>> connections_;
     std::unique_ptr<RendezvousStore> store_;

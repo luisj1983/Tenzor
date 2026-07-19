@@ -359,6 +359,35 @@ auto ModelRepository::load_model(const std::string& name, const std::string& pat
         // guard either (R1-02). CompiledModule::load() gives this serving path
         // the same safety net the documented save()/load() API already has.
         auto module = jit::CompiledModule::load(path);
+
+        // Fail fast, at load time, instead of deferring to the first
+        // inference request: a CompiledModule loaded from disk cannot
+        // retrace (its constants/weights are baked at trace-time device --
+        // see CompiledModule::throw_if_loaded_shape_mismatch), so serving
+        // it on a DIFFERENT device than it was traced/saved on would
+        // otherwise appear to load successfully and only fail confusingly
+        // once the first real request arrived with an input placed on
+        // `device` (the exact device tensor_from_json places every
+        // inference request's input on -- server.cpp's predict handler).
+        // A model with dynamic dims configured before it was saved can
+        // legitimately retrace, so this check only applies to the common
+        // (non-dynamic) case, matching throw_if_loaded_shape_mismatch's own
+        // bypass condition.
+        if (!module->has_dynamic_shapes()) {
+            for (const auto& loaded_dev : module->loaded_devices()) {
+                if (loaded_dev.type != device.type || loaded_dev.index != device.index) {
+                    throw std::invalid_argument(
+                        "ModelRepository::load_model: model '" + name + "' at '" +
+                        path + "' was traced/saved for device " +
+                        loaded_dev.to_string() + " but was requested on " +
+                        device.to_string() + "; a loaded model cannot be "
+                        "retraced to a different device. Re-trace/re-export "
+                        "the model on the target device, or load it with "
+                        "device=" + loaded_dev.to_string() + ".");
+                }
+            }
+        }
+
         module->optimize_for_inference();
 
         entry->module = std::move(module);

@@ -116,7 +116,7 @@ void maxpool3d_halfdtype_parity(PoolMake make_pool,
         ref = pool.forward(Variable(input_f32, false)).tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto pool = make_pool();
             pool.to(backends[i]);
@@ -392,7 +392,7 @@ void pool_grad_parity(PoolT make_pool,
         ref_grad = v.grad().value();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto pool = make_pool();
             pool.to(backends[i]);
@@ -525,7 +525,7 @@ TEST_P(NNPoolingParity, MaxPool2d_Float64_NearTieBackward) {
     ASSERT_DOUBLE_EQ(ref_grad.data<double>()[1], 1.0);
 
     auto backends = get_available_backends();
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::MaxPool2d pool(2);
             pool.to(backends[i]);
@@ -615,7 +615,7 @@ TEST_P(NNPoolingParity, FractionalMaxPool3d) {
         ref = out.tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto [out, _] = nn::functional::fractional_max_pool3d(
                 Variable(input.to(backends[i]), false),
@@ -667,7 +667,7 @@ TEST_P(NNPoolingParity, MaxUnpool2d) {
         ref = un.tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto un = nn::functional::max_unpool2d(
                 Variable(pooled.to(backends[i]), false),
@@ -708,7 +708,7 @@ TEST_P(NNPoolingParity, MaxUnpool1d) {
         ref = un.tensor();
     }
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto un = nn::functional::max_unpool1d(
                 Variable(pooled.to(backends[i]), false),

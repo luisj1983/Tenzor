@@ -38,7 +38,7 @@ TEST_P(NNRNNParity, LSTMCell) {
                                         Variable(c, false));
     auto ref = ref_h.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LSTMCell cell_dev(32, 64);
             auto params_src = cell.parameters();
@@ -62,7 +62,7 @@ TEST_P(NNRNNParity, LSTMCell) {
             // real divergence here was inf / ~3.3 magnitude, orders larger.
             EXPECT_TENSORS_CLOSE(ref, out_h.tensor(), 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LSTMCell failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -80,7 +80,7 @@ TEST_P(NNRNNParity, GRUCell) {
 
     auto ref = cell.forward(Variable(input, false), Variable(h, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::GRUCell cell_dev(32, 64);
             auto params_src = cell.parameters();
@@ -101,7 +101,7 @@ TEST_P(NNRNNParity, GRUCell) {
             // it; a real divergence here was inf / ~3.3, orders larger.
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "GRUCell failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -119,7 +119,7 @@ TEST_P(NNRNNParity, RNNCell) {
 
     auto ref = cell.forward(Variable(input, false), Variable(h, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::RNNCell cell_dev(32, 64);
             auto params_src = cell.parameters();
@@ -140,7 +140,7 @@ TEST_P(NNRNNParity, RNNCell) {
             // failures were inf / ~3.3 magnitude, orders larger.
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "RNNCell failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -159,7 +159,7 @@ TEST_P(NNRNNParity, LSTM_MultiLayer) {
 
     auto ref = layer.forward_impl(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LSTM layer_dev(32, 64, 2);
             auto params_src = layer.parameters();
@@ -176,7 +176,7 @@ TEST_P(NNRNNParity, LSTM_MultiLayer) {
             // Float32 multi-step drift bound on Vulkan's tiled matmul.
             EXPECT_TENSORS_CLOSE(ref, output, 3e-1f, 3e-1f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LSTM_MultiLayer failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -191,7 +191,7 @@ TEST_P(NNRNNParity, GRU_MultiLayer) {
 
     auto ref = layer.forward_impl(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::GRU layer_dev(32, 64, 2);
             auto params_src = layer.parameters();
@@ -208,7 +208,7 @@ TEST_P(NNRNNParity, GRU_MultiLayer) {
             // LSTM_Dropout_Eval. Use the same realistic Float32 tolerance.
             EXPECT_TENSORS_CLOSE(ref, output, 3e-1f, 3e-1f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "GRU_MultiLayer failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -222,7 +222,7 @@ TEST_P(NNRNNParity, RNN) {
 
     auto ref = layer.forward_impl(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::RNN layer_dev(32, 64);
             auto params_src = layer.parameters();
@@ -236,7 +236,7 @@ TEST_P(NNRNNParity, RNN) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "RNN failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -252,7 +252,7 @@ TEST_P(NNRNNParity, LSTM_Bidirectional) {
 
     auto ref = layer.forward_impl(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LSTM layer_dev(32, 64, 1, true, false, 0.0, true);
             auto params_src = layer.parameters();
@@ -266,7 +266,7 @@ TEST_P(NNRNNParity, LSTM_Bidirectional) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-2f, 1e-2f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LSTM_Bidirectional failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -283,7 +283,7 @@ TEST_P(NNRNNParity, LSTM_Dropout_Eval) {
 
     auto ref = layer.forward_impl(Variable(input, false)).tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LSTM layer_dev(32, 64, 2, true, false, 0.5, false);
             layer_dev.eval();
@@ -307,7 +307,7 @@ TEST_P(NNRNNParity, LSTM_Dropout_Eval) {
             // LSTM kernel that matches the cell-level numerics of cuDNN.
             EXPECT_TENSORS_CLOSE(ref, output, 3e-1f, 3e-1f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LSTM_Dropout_Eval failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -337,7 +337,7 @@ TEST_P(NNRNNParity, LSTMCell_Sequence) {
     auto [h3, c3] = cell.forward(Variable(x3, false), h2, c2);
     auto ref = h3.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::LSTMCell cell_dev(32, 64);
             auto params_src = cell.parameters();
@@ -361,7 +361,7 @@ TEST_P(NNRNNParity, LSTMCell_Sequence) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, dh3.tensor(), 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LSTMCell_Sequence failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
@@ -386,7 +386,7 @@ TEST_P(NNRNNParity, GRUCell_Sequence) {
     auto h3 = cell.forward(Variable(x3, false), h2);
     auto ref = h3.tensor();
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::GRUCell cell_dev(32, 64);
             auto params_src = cell.parameters();
@@ -409,7 +409,7 @@ TEST_P(NNRNNParity, GRUCell_Sequence) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, dh3.tensor(), 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "GRUCell_Sequence failed on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }

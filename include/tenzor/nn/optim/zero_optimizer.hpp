@@ -667,6 +667,10 @@ protected:
     // line 404 starts protected); the explicit re-declaration below is just for clarity.
     bool use_gpu_comm_{false};                      ///< Process group supports async stream
     void* comm_stream_{nullptr};                    ///< Dedicated comm stream (cudaStream_t)
+    /// GPU vendor comm_stream_ was created for, determined at runtime from
+    /// the optimizer's own parameters (see the constructors / FINDING 60 in
+    /// findings.txt).
+    Device::Type comm_device_type_{Device::Type::CPU};
 
     bool async_all_reduce_in_flight_{false};        ///< Set by issue_async_all_reduce_*
     // Compressor outputs survive across the issue/wait boundary so decompress can run

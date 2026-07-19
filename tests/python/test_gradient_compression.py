@@ -85,12 +85,33 @@ def test_topk_compressor_custom_ratio_25pct():
     )
 
 
-def test_topk_compressor_compression_ratio_smaller_than_one():
-    """TopK is sparser than dense storage → compression_ratio < 1."""
+def test_topk_compressor_compression_ratio_is_honest_dense_ratio():
+    """compression_ratio reflects bytes actually placed on the wire, not the
+    logical top-K sparsity.
+
+    TopKCompressor.compress (gradient_compression.cpp) deliberately emits a
+    full-size, original-dtype DENSE tensor with zeros in the pruned
+    positions -- it does not pack the result into a smaller sparse
+    (values+indices) wire representation. compression_ratio is documented
+    there as "compressed_size / original_size, i.e. the fraction of bytes
+    actually placed on the wire": since the dense all-reduce path sends the
+    same byte count either way, the honest, transport-realized ratio is
+    1.0, not k/numel -- reporting k/numel would advertise a bandwidth
+    saving this code path doesn't deliver, and ZeRO's gradient-bucketing
+    consumer relies on this exact value to size receive buffers correctly.
+    This test previously asserted compression_ratio < 1.0, which
+    contradicted that documented, intentional design (root-caused while
+    fixing an unrelated tz.reshape(Variable, ...) binding gap that this
+    file's TopKCompressor.compress call transitively exercises).
+    test_topk_compressor_custom_ratio_25pct above is the test that actually
+    verifies the top-K masking logic (checking the zero fraction in the
+    returned data), which is the correct way to observe TopK's logical
+    sparsity.
+    """
     comp = tz.distributed.TopKCompressor(ratio=0.05)
     grad = tz.randn([32, 32], dtype=tz.dtype.float32)
     compressed = comp.compress(grad)
-    assert compressed.compression_ratio < 1.0
+    assert compressed.compression_ratio == pytest.approx(1.0)
 
 
 def test_topk_compressor_reset():

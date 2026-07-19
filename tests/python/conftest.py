@@ -79,7 +79,7 @@ ALL_DEVICES = [
 
 # CPU + any GPU backends actually present on the host. Handy when you want
 # to skip a test entirely unless there's at least one GPU.
-AVAILABLE_DEVICES = ["cpu"] + [
+AVAILABLE_DEVICES = (["cpu"] if "cpu" not in _SKIP_BACKENDS else []) + [
     name for name, check in (
         ("cuda",   lambda: tz.cuda_is_available()),
         ("vulkan", lambda: tz.vulkan_is_available()),
@@ -177,3 +177,44 @@ def pg():
         tz.distributed.destroy_process_group()
     except Exception:
         pass
+
+
+# FINDING 9: python/bindings/bindings_distributed.cpp's init_process_group()
+# defaults its backend arg to "nccl" (a real, Python-exposed backend), but no
+# Python test ever constructed a process group with it before this fixture —
+# the `pg` fixture above always hardcodes "gloo". Skips (rather than fails)
+# when neither CUDA nor ROCm is available, since NCCL/RCCL are GPU-only.
+#
+# Caveat: on a host with BOTH CUDA and ROCm present, ProcessGroup::
+# create_process_group()'s Backend::NCCL case (src/distributed/distributed.cpp)
+# resolves the active GPU backend via the registry and tries CUDA first,
+# falling back to ROCm only when no CUDA backend is registered — so this
+# fixture exercises whichever one wins that lookup (CUDA on a dual-GPU box),
+# not both. Backend-specific isolation (as done at the C++ layer in
+# tests/distributed/test_nccl_backend_smoke_rocm.cpp, a separate executable
+# linking only tenzor_backend_rocm) isn't practical for a shared pytest
+# process without forking, since NCCLBackend is a distinct compiled type per
+# backend DSO.
+@pytest.fixture
+def pg_nccl():
+    """Single-rank NCCL/RCCL process group; skips if no CUDA or ROCm GPU."""
+    if not (tz.cuda_is_available() or tz.rocm_is_available()):
+        pytest.skip("NCCL/RCCL requires CUDA or ROCm; neither is available")
+    try:
+        tz.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
+    except Exception as exc:
+        pytest.skip(f"init_process_group(backend='nccl') unavailable: {exc}")
+    yield tz.distributed.get_process_group()
+    try:
+        tz.distributed.destroy_process_group()
+    except Exception:
+        pass
+
+
+def gpu_device():
+    """First available GPU device (CUDA preferred, else ROCm), or None."""
+    if tz.cuda_is_available():
+        return tz.Device.cuda(0)
+    if tz.rocm_is_available():
+        return tz.Device.rocm(0)
+    return None

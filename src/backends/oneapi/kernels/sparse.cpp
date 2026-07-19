@@ -200,8 +200,46 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
                 }
                 y_ptr[row] = sum;
             }).wait();
+    } else if (vals.dtype() == DType::Int32) {
+        // Finding 44: oneMKL sparse is (like cuSPARSE historically) float/
+        // double-only; unlike the F16/BF16/complex cases above, integer
+        // accumulation has no precision-widening or missing-device-type
+        // concern -- SYCL device code handles int32_t/int64_t arithmetic
+        // natively, so this is a direct port of the Float32 branch above,
+        // matching CPU/CUDA/ROCm's native Int32 SpMV support.
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
+        auto* val_ptr = vals.data<std::int32_t>();
+        auto* x_ptr = x_cont.data<std::int32_t>();
+        auto* y_ptr = y.data<std::int32_t>();
+
+        queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
+            [=](sycl::id<1> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                std::int32_t sum = 0;
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * x_ptr[col_ptr[j]];
+                }
+                y_ptr[row] = sum;
+            }).wait();
+    } else if (vals.dtype() == DType::Int64) {
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
+        auto* val_ptr = vals.data<std::int64_t>();
+        auto* x_ptr = x_cont.data<std::int64_t>();
+        auto* y_ptr = y.data<std::int64_t>();
+
+        queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
+            [=](sycl::id<1> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                std::int64_t sum = 0;
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * x_ptr[col_ptr[j]];
+                }
+                y_ptr[row] = sum;
+            }).wait();
     } else {
-        throw std::runtime_error("oneapi spmv_kernel: unsupported dtype (requires Float32 or Float64)");
+        throw std::runtime_error("oneapi spmv_kernel: unsupported dtype (requires Float32, Float64, Int32, or Int64)");
     }
 
     return y;
@@ -308,8 +346,45 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
                 }
                 c_ptr[row * n + c] = sum;
             }).wait();
+    } else if (vals.dtype() == DType::Int32) {
+        // Finding 44: see spmv_kernel's Int32 branch above for the
+        // rationale -- direct port of the Float32 branch, no precision-
+        // widening concern for integer accumulation.
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
+        auto* val_ptr = vals.data<std::int32_t>();
+        auto* b_ptr = B_cont.data<std::int32_t>();
+        auto* c_ptr = C.data<std::int32_t>();
+
+        queue.parallel_for(sycl::range<2>(static_cast<size_t>(m), static_cast<size_t>(n)),
+            [=](sycl::id<2> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                int64_t c = static_cast<int64_t>(idx[1]);
+                std::int32_t sum = 0;
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * b_ptr[col_ptr[j] * n + c];
+                }
+                c_ptr[row * n + c] = sum;
+            }).wait();
+    } else if (vals.dtype() == DType::Int64) {
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
+        auto* val_ptr = vals.data<std::int64_t>();
+        auto* b_ptr = B_cont.data<std::int64_t>();
+        auto* c_ptr = C.data<std::int64_t>();
+
+        queue.parallel_for(sycl::range<2>(static_cast<size_t>(m), static_cast<size_t>(n)),
+            [=](sycl::id<2> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                int64_t c = static_cast<int64_t>(idx[1]);
+                std::int64_t sum = 0;
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * b_ptr[col_ptr[j] * n + c];
+                }
+                c_ptr[row * n + c] = sum;
+            }).wait();
     } else {
-        throw std::runtime_error("oneapi spmm_kernel: unsupported dtype (requires Float32 or Float64)");
+        throw std::runtime_error("oneapi spmm_kernel: unsupported dtype (requires Float32, Float64, Int32, or Int64)");
     }
 
     return C;

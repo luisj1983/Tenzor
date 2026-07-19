@@ -42,6 +42,18 @@
 #  endif
 #endif
 
+namespace {
+// Per-thread "current Vulkan device" bookkeeping for
+// VulkanBackend::set_device()/get_current_device() (see finding: these
+// silently inherited the CPU-backend no-op default despite Vulkan
+// genuinely supporting multiple physical devices). thread_local matches
+// device_guard.cpp's own current_device_index() per-thread model.
+auto current_device_index() -> int32_t& {
+    static thread_local int32_t index = 0;
+    return index;
+}
+}  // namespace
+
 namespace tenzor {
 
 VulkanBackend::VulkanBackend() {
@@ -814,6 +826,25 @@ auto VulkanBackend::device_count() const -> int32_t {
 
 auto VulkanBackend::is_available() const -> bool {
     return !devices_.empty();
+}
+
+auto VulkanBackend::set_device(int32_t device_id) -> void {
+    if (device_id < 0 || device_id >= device_count()) {
+        throw std::out_of_range("VulkanBackend::set_device: invalid device ID " +
+                                 std::to_string(device_id) + " (available: 0-" +
+                                 std::to_string(device_count() - 1) + ")");
+    }
+    // Vulkan itself has no global/thread "current device" -- every allocate/
+    // copy/synchronize call already takes an explicit device_id resolved
+    // from the Tensor's own Device{Vulkan, index}. This per-thread index only
+    // makes get_current_device() (and thus WorkerPool/DeviceGuard callers
+    // that query it) truthful instead of the inherited CPU-backend no-op
+    // that always reported device 0.
+    current_device_index() = device_id;
+}
+
+auto VulkanBackend::get_current_device() const -> int32_t {
+    return current_device_index();
 }
 
 auto VulkanBackend::get_device_info(int32_t device_id) const -> DeviceInfo {

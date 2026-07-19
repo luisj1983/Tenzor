@@ -339,8 +339,97 @@ add_custom_command(
     VERBATIM
 )
 
+# RCCL collective library — owns the ROCm twin of the CUDA backend's NCCL
+# wiring (src/backends/cuda/CMakeLists.txt). nccl_backend.cpp/
+# nccl_process_group.cpp are shared, source-compatible across NVIDIA
+# NCCL / AMD RCCL (same nccl* ABI — see nccl_backend.cpp's own comment); this
+# backend DSO owns the RCCL twin (hipStream_t) exactly as that comment always
+# said it would, but never actually wired up. Compiled as separate objects
+# (not folded into rocm_backend.cpp.o) so TENZOR_HAS_NCCL/TENZOR_USE_ROCM can
+# be scoped to just these two TUs, matching the CUDA side's per-file
+# COMPILE_DEFINITIONS scoping — rocm_backend.cpp itself does not need either
+# define: NCCLBackend's stub ncclComm_t/ncclUniqueId typedefs (used when
+# TENZOR_HAS_NCCL is undefined) are byte-for-byte layout-identical to the
+# real RCCL/NCCL typedefs, so `new NCCLBackend()` from an unguarded TU is
+# ABI-safe either way — the same trick the CUDA backend already relies on.
+option(TENZOR_REQUIRE_RCCL "Require RCCL library (fail if not found)" OFF)
+find_package(rccl QUIET CONFIG PATHS /opt/rocm)
+set(ROCM_NCCL_DEFS
+    -DTENZOR_ROCM_BACKEND
+    -DUSE_PROF_API=1
+    -D__HIP_PLATFORM_AMD__=1
+    -Dtenzor_backend_rocm_EXPORTS
+)
+if(rccl_FOUND)
+    list(APPEND ROCM_NCCL_DEFS -DTENZOR_HAS_NCCL -DTENZOR_USE_ROCM)
+    # Exposed so tests/distributed/CMakeLists.txt can tell whether
+    # tenzor_backend_rocm.so actually has NCCLProcessGroup compiled in (its
+    # declaration in process_group.hpp is itself gated on #ifdef
+    # TENZOR_HAS_NCCL, so a test referencing the class needs to know this
+    # too, not just link the DSO).
+    set(TENZOR_ROCM_RCCL_AVAILABLE ON CACHE INTERNAL "ROCm backend built with real RCCL")
+    message(STATUS "ROCm Backend: RCCL support enabled")
+else()
+    set(TENZOR_ROCM_RCCL_AVAILABLE OFF CACHE INTERNAL "ROCm backend built with real RCCL")
+    if(TENZOR_REQUIRE_RCCL)
+        message(FATAL_ERROR "RCCL library required (-DTENZOR_REQUIRE_RCCL=ON) but not found. "
+                "Set CMAKE_PREFIX_PATH or install RCCL.")
+    else()
+        message(STATUS "ROCm Backend: RCCL not found — collective backend compiled as no-op stub. "
+                "Set -DTENZOR_REQUIRE_RCCL=ON to make this an error.")
+    endif()
+endif()
+
+set(ROCM_NCCL_BACKEND_OBJ "${CMAKE_CURRENT_BINARY_DIR}/nccl_backend.cpp.o")
+add_custom_command(
+    OUTPUT ${ROCM_NCCL_BACKEND_OBJ}
+    COMMAND ${CMAKE_CXX_COMPILER}
+        -c ${PROJECT_SOURCE_DIR}/src/distributed/nccl_backend.cpp
+        -o ${ROCM_NCCL_BACKEND_OBJ}
+        -std=c++23 -fPIC
+        ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
+        -Wall -Wextra -pedantic
+        -fopenmp
+        -I${PROJECT_SOURCE_DIR}/include
+        -isystem ${ROCM_PATH}/include
+        ${ROCM_NCCL_DEFS}
+    DEPENDS
+        ${PROJECT_SOURCE_DIR}/src/distributed/nccl_backend.cpp
+        ${PROJECT_SOURCE_DIR}/include/tenzor/distributed/nccl_backend.hpp
+        ${PROJECT_SOURCE_DIR}/include/tenzor/distributed/distributed.hpp
+    COMMENT "Compiling nccl_backend.cpp (pure C++, RCCL collective backend)"
+    VERBATIM
+)
+
+set(ROCM_NCCL_PG_OBJ "${CMAKE_CURRENT_BINARY_DIR}/nccl_process_group.cpp.o")
+add_custom_command(
+    OUTPUT ${ROCM_NCCL_PG_OBJ}
+    COMMAND ${CMAKE_CXX_COMPILER}
+        -c ${PROJECT_SOURCE_DIR}/src/distributed/nccl_process_group.cpp
+        -o ${ROCM_NCCL_PG_OBJ}
+        -std=c++23 -fPIC
+        ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
+        -Wall -Wextra -pedantic
+        -fopenmp
+        -I${PROJECT_SOURCE_DIR}/include
+        -isystem ${ROCM_PATH}/include
+        ${ROCM_NCCL_DEFS}
+    DEPENDS
+        ${PROJECT_SOURCE_DIR}/src/distributed/nccl_process_group.cpp
+        ${PROJECT_SOURCE_DIR}/include/tenzor/distributed/process_group.hpp
+        ${PROJECT_SOURCE_DIR}/include/tenzor/distributed/nccl_backend.hpp
+    COMMENT "Compiling nccl_process_group.cpp (pure C++, RCCL collective backend)"
+    VERBATIM
+)
+
 # Create ROCm backend shared library using the manually compiled objects
-add_library(tenzor_backend_rocm SHARED ${ROCM_BACKEND_OBJ} ${ROCM_KERNEL_REGISTRY_OBJ} ${ROCM_HIP_GRAPH_IMPL_OBJ})
+add_library(tenzor_backend_rocm SHARED
+    ${ROCM_BACKEND_OBJ}
+    ${ROCM_KERNEL_REGISTRY_OBJ}
+    ${ROCM_HIP_GRAPH_IMPL_OBJ}
+    ${ROCM_NCCL_BACKEND_OBJ}
+    ${ROCM_NCCL_PG_OBJ}
+)
 
 # Set target properties
 set_target_properties(tenzor_backend_rocm PROPERTIES
@@ -370,6 +459,14 @@ target_link_libraries(tenzor_backend_rocm PRIVATE
     hip::host
     $<TARGET_NAME_IF_EXISTS:hip::amdhip64>
 )
+
+# Link RCCL if available (equivalent to NCCL)
+if(rccl_FOUND)
+    target_link_libraries(tenzor_backend_rocm PRIVATE roc::rccl)
+    message(STATUS "ROCm Backend: RCCL support linked into tenzor_backend_rocm")
+else()
+    message(STATUS "ROCm Backend: RCCL not found")
+endif()
 
 # Link rocBLAS if available (equivalent to cuBLAS)
 if(rocblas_FOUND)

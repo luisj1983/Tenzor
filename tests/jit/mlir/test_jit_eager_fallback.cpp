@@ -1328,3 +1328,123 @@ TEST(JitRocmArch, ConcurrentSharedHalDeviceCreationIsRaceFree) {
     std::error_code ec;
     fs::remove_all(opts.cache_dir, ec);
 }
+
+// Finding 43: TracedFnRunsExactlyOnceOnEagerFallback (above) only ever ran
+// on llvm-cpu, despite UnloweredOpDegradesToEager_Cuda/_Rocm/_Vulkan (also
+// in this file) proving the identical C2 unlowered-op fallback path is
+// separately reachable on all three GPU targets. Parameterized so the
+// invocation-counter check -- the only thing in this file that can actually
+// detect a double-exec regression (a double-exec bug "produced CORRECT
+// numbers" per the comment above) -- runs on every target, not just CPU.
+void run_c2_counter_check(const std::string& target) {
+    ensure_core_init();
+    if (!target_runnable(target)) {
+        if (::tenzor::testing::golden::require_multi_backend() && target != "llvm-cpu") {
+            FAIL() << "target " << target << " required by "
+                      "TENZOR_REQUIRE_MULTI_BACKEND but not runnable here";
+        }
+        GTEST_SKIP() << "target not runnable here: " << target;
+    }
+    const auto dev = device_for_target(target);
+    if (dev.type != ::tenzor::Device::Type::CPU) {
+        const auto backends = ::tenzor::testing::get_available_backends();
+        const bool have_backend = std::any_of(
+            backends.begin(), backends.end(),
+            [&](const ::tenzor::Device& d) { return d.type == dev.type; });
+        if (!have_backend) {
+            if (::tenzor::testing::golden::require_multi_backend()) {
+                FAIL() << "Tenzor backend for target " << target
+                       << " required by TENZOR_REQUIRE_MULTI_BACKEND but not "
+                          "registered";
+            }
+            GTEST_SKIP() << "no Tenzor backend registered for target: " << target;
+        }
+    }
+
+    auto counter = std::make_shared<int>(0);
+    auto counting_fn =
+        [counter](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+            ++(*counter);
+            return ::tenzor::tanh(x);  // no StableHLO lowering -> eager fallback
+        };
+    auto x = ::tenzor::Variable(
+        ::tenzor::full({4}, 0.3F, ::tenzor::DType::Float32, dev), false);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend       = "mlir";
+    cfg.target        = target;
+    cfg.strict        = false;
+    cfg.enable_fusion = false;  // keep the Tanh node intact so lowering fails
+    ::tenzor::jit::CompiledFunction compiled(
+        ::tenzor::jit::CompiledFunction::FnType(counting_fn), cfg);
+
+    (void)compiled(x);
+    EXPECT_EQ(*counter, 1)
+        << "traced fn ran " << *counter << " times on the eager-fallback path "
+           "(target=" << target << "); it must run EXACTLY once "
+           "(double-exec regression)";
+}
+TEST(JitEagerFallback, TracedFnRunsExactlyOnceOnEagerFallback_Cuda) {
+    run_c2_counter_check("cuda");
+}
+TEST(JitEagerFallback, TracedFnRunsExactlyOnceOnEagerFallback_Rocm) {
+    run_c2_counter_check("rocm");
+}
+TEST(JitEagerFallback, TracedFnRunsExactlyOnceOnEagerFallback_Vulkan) {
+    run_c2_counter_check("vulkan-spirv");
+}
+
+// Finding 42: grad_invoke (src/jit/compile.cpp, cited there as "JIT-071")
+// has THREE separate double-exec-avoidance fallback branches -- exactly the
+// same bug class the C2 eager-fallback counter tests above exist to catch
+// -- but until this test, nothing in tests/jit/ ever exercised it with an
+// invocation counter (or at all). grad_invoke is reached automatically by
+// CompiledFunction::operator() whenever an input (or a captured parameter)
+// requires_grad -- it is backend-agnostic (replays through the autograd-
+// aware interpreter, never IREE), so a single CPU exercise already covers
+// every backend's training path, matching how grad_invoke itself is
+// documented as "the SINGLE shared, backend-agnostic training path" for
+// both nvrtc- and mlir-configured functions alike.
+//
+// This exercises grad_invoke's graph-break/empty-trace fallback branch
+// specifically: an unlowerable-for-MLIR op (Tanh, same trick as the C2
+// tests above) with requires_grad=true routes through grad_invoke instead
+// of the inference mlir_invoke path, and trace_and_compile's grad-mode
+// trace can't produce a compiled graph for the same underlying reason the
+// inference path can't -- falling back to eager autograd on the same
+// device, reusing the (grad-enabled) result captured during the trace
+// attempt rather than re-running fn_ a second time.
+TEST(JitEagerFallback, GradInvokeTracedFnRunsExactlyOnceOnFallback) {
+    ensure_core_init();
+    auto counter = std::make_shared<int>(0);
+    auto counting_fn =
+        [counter](const ::tenzor::Variable& x) -> ::tenzor::Variable {
+            ++(*counter);
+            return ::tenzor::tanh(x);  // no StableHLO lowering -> eager fallback
+        };
+    // requires_grad=true is what routes CompiledFunction::operator() through
+    // grad_invoke instead of the inference mlir_invoke/nvrtc path (see
+    // compile.cpp:448-461's any_requires_grad check).
+    auto x = ::tenzor::Variable(
+        ::tenzor::full({4}, 0.3F, ::tenzor::DType::Float32), /*requires_grad=*/true);
+
+    ::tenzor::jit::CompileConfig cfg;
+    cfg.backend       = "mlir";
+    cfg.target        = "llvm-cpu";
+    cfg.strict        = false;
+    cfg.enable_fusion = false;  // keep the Tanh node intact so lowering fails
+    ::tenzor::jit::CompiledFunction compiled(
+        ::tenzor::jit::CompiledFunction::FnType(counting_fn), cfg);
+
+    ::tenzor::Variable out;
+    ASSERT_NO_THROW({ out = compiled(x); })
+        << "non-strict grad_invoke must degrade to eager autograd, not throw";
+    EXPECT_EQ(*counter, 1)
+        << "traced fn ran " << *counter << " times on grad_invoke's "
+           "eager-autograd fallback path; it must run EXACTLY once "
+           "(JIT-071 double-exec regression)";
+    // The fallback must still produce a real, usable (grad-enabled) result,
+    // not just avoid the double-exec -- an empty/detached Variable would
+    // silently break .backward() for training callers.
+    EXPECT_TRUE(out.tensor().is_valid());
+}

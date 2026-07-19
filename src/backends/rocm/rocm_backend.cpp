@@ -4,6 +4,7 @@
 #include "tenzor/backend/rocm_caching_allocator.hip.hpp"
 #include "tenzor/core/device_guard.hpp"
 #include "tenzor/utils/logging.hpp"
+#include "tenzor/distributed/nccl_backend.hpp"
 #include <hip/hip_runtime.h>
 #include <stdexcept>
 #include <cstdlib>
@@ -59,6 +60,18 @@ ROCmBackend::ROCmBackend() {
             std::string("Failed to initialize ROCm backend: ") + hipGetErrorString(err)
         );
     }
+}
+
+// The RCCL collective implementation is linked into this backend DSO
+// (tenzor_backend_rocm links roc::rccl PRIVATE). The distributed factory
+// resolves the active GPU backend through the BackendLoader registry and
+// asks it for a CommunicationBackend through this hook; we hand back a heap
+// NCCLBackend that the factory wraps in a unique_ptr. Returns a stub-backed
+// NCCLBackend with no real collective support when this DSO was built
+// without RCCL (surfaced as a clear error by the caller) — mirrors
+// src/backends/cuda/cuda_backend.cpp's equivalent override exactly.
+auto ROCmBackend::create_comm_backend() -> void* {
+    return new tenzor::distributed::NCCLBackend();
 }
 
 auto ROCmBackend::name() const -> std::string_view {

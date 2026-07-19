@@ -302,7 +302,7 @@ TEST_P(QuantizationParity, AWQ_BackendInputParity) {
         AWQQuantizer q_ref(cfg);
         auto ref = q_ref.quantize_layer(weight, act_scales);
 
-        for (size_t i = 1; i < backends.size(); ++i) {
+        for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
             auto weight_dev = weight.to(backends[i]);
             auto scales_dev = act_scales.to(backends[i]);
             AWQQuantizer q_dev(cfg);
@@ -369,7 +369,7 @@ TEST_P(QuantizationParity, GPTQ_BackendInputParity) {
         GPTQQuantizer q_ref(cfg);
         auto ref = q_ref.quantize_layer(weight, hessian_cpu);
 
-        for (size_t i = 1; i < backends.size(); ++i) {
+        for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
             auto weight_dev = weight.to(backends[i]);
             auto hessian_dev = hessian_cpu.to(backends[i]);
             GPTQQuantizer q_dev(cfg);

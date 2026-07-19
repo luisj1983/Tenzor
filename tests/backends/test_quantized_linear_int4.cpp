@@ -406,3 +406,228 @@ TEST(QuantizedLinearInt4Cuda, AsymmetricInputZeroPointMatchesReference) {
         EXPECT_NEAR(ref[i], op[i], 1e-3f)
             << "int4 quant linear (asymmetric input zp) elem " << i;
 }
+
+// F031 parity fix: ROCm had no dedicated INT4 kernel at all -- the registry
+// unconditionally routed QInt4x2 weights through quantized_linear_hip (the
+// plain INT8 kernel), which reads `in_features` int8 bytes per output row
+// from a weight buffer that (for QInt4x2) only has `in_features/2` bytes per
+// row: a heap OOB read of up to 2x the allocated buffer for any INT4-
+// quantized model run on ROCm. Mirrors QuantizedLinearInt4Cuda above.
+TEST(QuantizedLinearInt4Rocm, DispatchMatchesCpuKernel) {
+    using namespace tenzor;
+    initialize();
+    bool has_rocm = false;
+    try { auto t = zeros({1}, DType::Float32, Device::rocm(0)); (void)t; has_rocm = true; }
+    catch (...) {}
+    if (!has_rocm) GTEST_SKIP();
+
+    const int64_t B = 3, K = 32, O = 8, PK = K / 2;
+    std::vector<int8_t> input(static_cast<size_t>(B * K));
+    for (int64_t i = 0; i < B * K; ++i) input[i] = static_cast<int8_t>((i % 17) - 8);
+    std::vector<int8_t> weights(static_cast<size_t>(O * K));
+    for (int64_t i = 0; i < O * K; ++i) weights[i] = static_cast<int8_t>((i % 15) - 7);
+
+    std::vector<uint8_t> packed(static_cast<size_t>(O * PK));
+    for (int64_t o = 0; o < O; ++o)
+        for (int64_t p = 0; p < PK; ++p)
+            packed[o * PK + p] = pack_pair(weights[o * K + 2 * p], weights[o * K + 2 * p + 1]);
+
+    const float in_scale = 0.05f, w_scale = 0.03f, out_scale = 1.0f;
+    std::vector<float> ref(static_cast<size_t>(B * O), 0.0f);
+    tenzor::nn::quantization::kernels::quantized_linear_int4_kernel(
+        input.data(), packed.data(), nullptr, ref.data(), B, K, O, in_scale, w_scale, out_scale);
+
+    Tensor in_t({B, K}, DType::Int8, Device::cpu());
+    std::memcpy(in_t.data_ptr(), input.data(), static_cast<size_t>(B * K));
+    Tensor w_t({O, PK}, DType::QInt4x2, Device::cpu());
+    std::memcpy(w_t.data_ptr(), packed.data(), static_cast<size_t>(O * PK));
+
+    auto in_rocm = in_t.to(Device::rocm(0));
+    auto w_rocm = w_t.to(Device::rocm(0));
+    OpAttributes attrs;
+    attrs.set(AttrKey::InputScale,   static_cast<double>(in_scale));
+    attrs.set(AttrKey::WeightScaleQ, static_cast<double>(w_scale));
+    attrs.set(AttrKey::OutputScale,  static_cast<double>(out_scale));
+    std::vector<Tensor> ins = {in_rocm, w_rocm};
+    Tensor out = dispatch(OpId::QuantizedLinear, ins, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(out.numel(), static_cast<int64_t>(ref.size()));
+    const float* op = out.data<float>();
+    for (size_t i = 0; i < ref.size(); ++i)
+        EXPECT_NEAR(ref[i], op[i], 1e-3f) << "int4 quant linear elem " << i;
+}
+
+// Same nonzero-input_zp correction check as QuantizedLinearInt4Cuda's
+// AsymmetricInputZeroPointMatchesReference, on ROCm.
+TEST(QuantizedLinearInt4Rocm, AsymmetricInputZeroPointMatchesReference) {
+    using namespace tenzor;
+    initialize();
+    bool has_rocm = false;
+    try { auto t = zeros({1}, DType::Float32, Device::rocm(0)); (void)t; has_rocm = true; }
+    catch (...) {}
+    if (!has_rocm) GTEST_SKIP();
+
+    const int64_t B = 3, K = 32, O = 8, PK = K / 2;
+    const int32_t input_zp = 5;  // nonzero asymmetric activation zero-point
+    std::vector<int8_t> input(static_cast<size_t>(B * K));
+    for (int64_t i = 0; i < B * K; ++i) input[i] = static_cast<int8_t>((i % 17) - 8);
+    std::vector<int8_t> weights(static_cast<size_t>(O * K));
+    for (int64_t i = 0; i < O * K; ++i) weights[i] = static_cast<int8_t>((i % 15) - 7);
+
+    std::vector<uint8_t> packed(static_cast<size_t>(O * PK));
+    for (int64_t o = 0; o < O; ++o)
+        for (int64_t p = 0; p < PK; ++p)
+            packed[o * PK + p] = pack_pair(weights[o * K + 2 * p], weights[o * K + 2 * p + 1]);
+
+    const float in_scale = 0.05f, w_scale = 0.03f, out_scale = 1.0f;
+    const float combined_scale = in_scale * w_scale / out_scale;
+
+    // Hand-computed reference: sum(q_i*q_w) - input_zp*sum_w (INT4 weights are
+    // symmetric so there is no weight-side zero-point term).
+    std::vector<float> ref(static_cast<size_t>(B * O), 0.0f);
+    for (int64_t b = 0; b < B; ++b) {
+        for (int64_t o = 0; o < O; ++o) {
+            int64_t acc = 0;
+            int64_t sum_w = 0;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += static_cast<int64_t>(input[b * K + k]) *
+                       static_cast<int64_t>(weights[o * K + k]);
+                sum_w += weights[o * K + k];
+            }
+            int64_t corrected = acc - static_cast<int64_t>(input_zp) * sum_w;
+            ref[b * O + o] = static_cast<float>(corrected) * combined_scale;
+        }
+    }
+
+    Tensor in_t({B, K}, DType::Int8, Device::cpu());
+    std::memcpy(in_t.data_ptr(), input.data(), static_cast<size_t>(B * K));
+    Tensor w_t({O, PK}, DType::QInt4x2, Device::cpu());
+    std::memcpy(w_t.data_ptr(), packed.data(), static_cast<size_t>(O * PK));
+
+    auto in_rocm = in_t.to(Device::rocm(0));
+    auto w_rocm = w_t.to(Device::rocm(0));
+    OpAttributes attrs;
+    attrs.set(AttrKey::InputScale,     static_cast<double>(in_scale));
+    attrs.set(AttrKey::WeightScaleQ,   static_cast<double>(w_scale));
+    attrs.set(AttrKey::OutputScale,    static_cast<double>(out_scale));
+    attrs.set(AttrKey::InputZeroPoint, static_cast<int64_t>(input_zp));
+    std::vector<Tensor> ins = {in_rocm, w_rocm};
+    Tensor out = dispatch(OpId::QuantizedLinear, ins, attrs)[0].to(Device::cpu());
+
+    ASSERT_EQ(out.numel(), static_cast<int64_t>(ref.size()));
+    const float* op = out.data<float>();
+    for (size_t i = 0; i < ref.size(); ++i)
+        EXPECT_NEAR(ref[i], op[i], 1e-3f)
+            << "int4 quant linear (asymmetric input zp) elem " << i;
+}
+
+// F031 parity fix: OneAPI's quantized_linear_kernel had no QInt4x2 branch at
+// all -- its dtype dispatch chain ended in an unconditional
+// `throw std::runtime_error("quantized_linear: requires Int8 input and
+// weight")`, so the entire INT4-quantized-Linear feature hard-failed on
+// OneAPI. Mirrors QuantizedLinearInt4Cuda/Rocm above.
+TEST(QuantizedLinearInt4OneApi, DispatchMatchesCpuKernel) {
+    using namespace tenzor;
+    initialize();
+    bool has_oneapi = false;
+    try { auto t = zeros({1}, DType::Float32, Device::oneapi(0)); (void)t; has_oneapi = true; }
+    catch (...) {}
+    if (!has_oneapi) GTEST_SKIP();
+
+    const int64_t B = 3, K = 32, O = 8, PK = K / 2;
+    std::vector<int8_t> input(static_cast<size_t>(B * K));
+    for (int64_t i = 0; i < B * K; ++i) input[i] = static_cast<int8_t>((i % 17) - 8);
+    std::vector<int8_t> weights(static_cast<size_t>(O * K));
+    for (int64_t i = 0; i < O * K; ++i) weights[i] = static_cast<int8_t>((i % 15) - 7);
+
+    std::vector<uint8_t> packed(static_cast<size_t>(O * PK));
+    for (int64_t o = 0; o < O; ++o)
+        for (int64_t p = 0; p < PK; ++p)
+            packed[o * PK + p] = pack_pair(weights[o * K + 2 * p], weights[o * K + 2 * p + 1]);
+
+    const float in_scale = 0.05f, w_scale = 0.03f, out_scale = 1.0f;
+    std::vector<float> ref(static_cast<size_t>(B * O), 0.0f);
+    tenzor::nn::quantization::kernels::quantized_linear_int4_kernel(
+        input.data(), packed.data(), nullptr, ref.data(), B, K, O, in_scale, w_scale, out_scale);
+
+    Tensor in_t2({B, K}, DType::Int8, Device::cpu());
+    std::memcpy(in_t2.data_ptr(), input.data(), static_cast<size_t>(B * K));
+    Tensor w_t2({O, PK}, DType::QInt4x2, Device::cpu());
+    std::memcpy(w_t2.data_ptr(), packed.data(), static_cast<size_t>(O * PK));
+
+    auto in_oneapi = in_t2.to(Device::oneapi(0));
+    auto w_oneapi = w_t2.to(Device::oneapi(0));
+    OpAttributes attrs2;
+    attrs2.set(AttrKey::InputScale,   static_cast<double>(in_scale));
+    attrs2.set(AttrKey::WeightScaleQ, static_cast<double>(w_scale));
+    attrs2.set(AttrKey::OutputScale,  static_cast<double>(out_scale));
+    std::vector<Tensor> ins2 = {in_oneapi, w_oneapi};
+    Tensor out2 = dispatch(OpId::QuantizedLinear, ins2, attrs2)[0].to(Device::cpu());
+
+    ASSERT_EQ(out2.numel(), static_cast<int64_t>(ref.size()));
+    const float* op2 = out2.data<float>();
+    for (size_t i = 0; i < ref.size(); ++i)
+        EXPECT_NEAR(ref[i], op2[i], 1e-3f) << "int4 quant linear elem " << i;
+}
+
+// Same nonzero-input_zp correction check as the CUDA/ROCm counterparts, on
+// OneAPI.
+TEST(QuantizedLinearInt4OneApi, AsymmetricInputZeroPointMatchesReference) {
+    using namespace tenzor;
+    initialize();
+    bool has_oneapi = false;
+    try { auto t = zeros({1}, DType::Float32, Device::oneapi(0)); (void)t; has_oneapi = true; }
+    catch (...) {}
+    if (!has_oneapi) GTEST_SKIP();
+
+    const int64_t B = 3, K = 32, O = 8, PK = K / 2;
+    const int32_t input_zp2 = 5;  // nonzero asymmetric activation zero-point
+    std::vector<int8_t> input(static_cast<size_t>(B * K));
+    for (int64_t i = 0; i < B * K; ++i) input[i] = static_cast<int8_t>((i % 17) - 8);
+    std::vector<int8_t> weights(static_cast<size_t>(O * K));
+    for (int64_t i = 0; i < O * K; ++i) weights[i] = static_cast<int8_t>((i % 15) - 7);
+
+    std::vector<uint8_t> packed(static_cast<size_t>(O * PK));
+    for (int64_t o = 0; o < O; ++o)
+        for (int64_t p = 0; p < PK; ++p)
+            packed[o * PK + p] = pack_pair(weights[o * K + 2 * p], weights[o * K + 2 * p + 1]);
+
+    const float in_scale = 0.05f, w_scale = 0.03f, out_scale = 1.0f;
+    const float combined_scale2 = in_scale * w_scale / out_scale;
+
+    std::vector<float> ref(static_cast<size_t>(B * O), 0.0f);
+    for (int64_t b = 0; b < B; ++b) {
+        for (int64_t o = 0; o < O; ++o) {
+            int64_t acc = 0;
+            int64_t sum_w = 0;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += static_cast<int64_t>(input[b * K + k]) *
+                       static_cast<int64_t>(weights[o * K + k]);
+                sum_w += weights[o * K + k];
+            }
+            int64_t corrected = acc - static_cast<int64_t>(input_zp2) * sum_w;
+            ref[b * O + o] = static_cast<float>(corrected) * combined_scale2;
+        }
+    }
+
+    Tensor in_t2({B, K}, DType::Int8, Device::cpu());
+    std::memcpy(in_t2.data_ptr(), input.data(), static_cast<size_t>(B * K));
+    Tensor w_t2({O, PK}, DType::QInt4x2, Device::cpu());
+    std::memcpy(w_t2.data_ptr(), packed.data(), static_cast<size_t>(O * PK));
+
+    auto in_oneapi = in_t2.to(Device::oneapi(0));
+    auto w_oneapi = w_t2.to(Device::oneapi(0));
+    OpAttributes attrs2;
+    attrs2.set(AttrKey::InputScale,     static_cast<double>(in_scale));
+    attrs2.set(AttrKey::WeightScaleQ,   static_cast<double>(w_scale));
+    attrs2.set(AttrKey::OutputScale,    static_cast<double>(out_scale));
+    attrs2.set(AttrKey::InputZeroPoint, static_cast<int64_t>(input_zp2));
+    std::vector<Tensor> ins2 = {in_oneapi, w_oneapi};
+    Tensor out2 = dispatch(OpId::QuantizedLinear, ins2, attrs2)[0].to(Device::cpu());
+
+    ASSERT_EQ(out2.numel(), static_cast<int64_t>(ref.size()));
+    const float* op2 = out2.data<float>();
+    for (size_t i = 0; i < ref.size(); ++i)
+        EXPECT_NEAR(ref[i], op2[i], 1e-3f)
+            << "int4 quant linear (asymmetric input zp) elem " << i;
+}

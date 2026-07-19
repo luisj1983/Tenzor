@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/nn/loss/losses.hpp>
 #include <tenzor/nn/loss/contrastive.hpp>
 #include <tenzor/nn/activations/activations.hpp>
@@ -64,6 +65,12 @@ protected:
         dtype = param.dtype;
         rtol = param.rtol;
         atol = param.atol;
+
+        // Retrofits this hand-rolled fixture with the same TENZOR_SKIP_BACKENDS/
+        // TENZOR_REQUIRE_MULTI_BACKEND handling BackendTest/MultiBackendDTypeTest
+        // get for free, so a silently-broken GPU driver escalates to a hard
+        // failure under TENZOR_REQUIRE_MULTI_BACKEND=1 instead of a quiet skip.
+        HONOR_BACKEND_ENV_VARS(param.backend_name);
 
         if (param.backend_name == "cpu") {
             device = Device::cpu();

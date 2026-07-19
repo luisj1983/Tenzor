@@ -89,12 +89,11 @@ TEST(ServingTest, ModelStateEnum) {
 // saved with dynamic dims and served through ModelRepository::load_model
 // silently reverted to its trace-time concrete batch size with no error.
 namespace {
-auto build_relu_graph() -> std::shared_ptr<tenzor::jit::Graph> {
+auto build_relu_graph(tenzor::Device device = tenzor::Device::cpu())
+    -> std::shared_ptr<tenzor::jit::Graph> {
     auto g = std::make_shared<tenzor::jit::Graph>();
-    auto x = g->create_value("x", {4, 8}, tenzor::DType::Float32,
-                             tenzor::Device::cpu());
-    auto y = g->create_value("y", {4, 8}, tenzor::DType::Float32,
-                             tenzor::Device::cpu());
+    auto x = g->create_value("x", {4, 8}, tenzor::DType::Float32, device);
+    auto y = g->create_value("y", {4, 8}, tenzor::DType::Float32, device);
     auto relu = g->create_node(tenzor::jit::OpType::ReLU, "relu");
     relu->add_input(x);
     relu->add_output(y);
@@ -188,3 +187,133 @@ TEST(ServingTest, LoadModelRejectsDtypeMismatchOnNonDynamicModel) {
 
     repo.unload_model("static_relu");
 }
+
+namespace {
+auto device_available(const tenzor::Device& dev) -> bool {
+    try {
+        auto t = tenzor::zeros({2, 2}, tenzor::DType::Float32, dev);
+        (void)t;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+auto short_device_name(tenzor::Device::Type t) -> std::string {
+    switch (t) {
+        case tenzor::Device::Type::CUDA:   return "cuda";
+        case tenzor::Device::Type::ROCm:   return "rocm";
+        case tenzor::Device::Type::Vulkan: return "vulkan";
+        case tenzor::Device::Type::OneAPI: return "oneapi";
+        case tenzor::Device::Type::MPS:    return "mps";
+        default:                          return "cpu";
+    }
+}
+}  // namespace
+
+// Finding 41: ModelRepository::load_model's Device parameter (stored as
+// entry->device, and later used at src/serving/server.cpp:1065 to place
+// every inference request's input tensor via tensor_from_json) was only
+// ever exercised with Device::cpu() anywhere in this file -- a bug specific
+// to how load_model/predict-path input placement behaves for a non-CPU
+// device would ship with zero signal from tests/serving/. Parameterized
+// over every non-CPU backend the same way tests/backend_parity/ does.
+class ModelRepositoryDeviceTest : public ::testing::TestWithParam<tenzor::Device::Type> {};
+
+TEST_P(ModelRepositoryDeviceTest, LoadModelAndForwardOnNonCpuDevice) {
+    const tenzor::Device dev{GetParam(), 0};
+    if (!device_available(dev)) {
+        GTEST_SKIP() << dev.to_string() << " not available";
+    }
+
+    // Trace/build the graph's inputs ON the target device -- a loaded
+    // CompiledModule cannot retrace to a different device than it was
+    // saved for (see the fail-fast check now in
+    // ModelRepository::load_model), so this test exercises the correct,
+    // supported usage: load_model's device parameter must match how the
+    // model was actually traced/saved.
+    auto g = build_relu_graph(dev);
+    auto module = std::make_shared<tenzor::jit::CompiledModule>(g);
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("tenzor_r1_41_" + std::to_string(::getpid()) + "_" +
+                       std::to_string(static_cast<int>(GetParam())) + ".tzg");
+    module->save(path.string());
+
+    ModelRepository repo;
+    BatchConfig batch_config;
+    ASSERT_NO_THROW(repo.load_model("nc_relu", path.string(), dev, batch_config))
+        << "load_model must accept a non-CPU device";
+    std::filesystem::remove(path);
+
+    auto entry = repo.get_model("nc_relu");
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->module, nullptr);
+    EXPECT_EQ(entry->device.type, dev.type)
+        << "ModelEntry::device must reflect the device load_model was called with";
+
+    // Mirrors the real inference path (server.cpp:1063-1065): the input
+    // tensor is placed on entry->device (here: the same non-CPU device),
+    // not necessarily the device the module was saved/traced on.
+    auto raw = tenzor::randn({4, 8}, tenzor::DType::Float32, dev);
+    auto input = tenzor::Variable(raw, /*requires_grad=*/false);
+    tenzor::Variable out;
+    ASSERT_NO_THROW({ out = entry->module->forward(input); })
+        << "forward() with an input placed on entry->device must not throw "
+           "for " << dev.to_string();
+    EXPECT_EQ(out.tensor().shape()[0], 4);
+    EXPECT_EQ(out.tensor().device().type, dev.type)
+        << "output should stay on the serving device, not silently migrate";
+
+    // ReLU(x) must be non-negative everywhere -- correctness, not just
+    // "didn't throw", so a backend that silently produces garbage (rather
+    // than a clean device-mismatch exception) is still caught.
+    auto out_cpu = out.tensor().to(tenzor::Device::cpu()).contiguous();
+    const float* data = out_cpu.data<float>();
+    for (int64_t i = 0; i < out_cpu.numel(); ++i) {
+        EXPECT_GE(data[i], 0.0f) << "ReLU output must be non-negative at index " << i;
+    }
+
+    repo.unload_model("nc_relu");
+}
+
+// Regression for the bug LoadModelAndForwardOnNonCpuDevice above uncovered:
+// ModelRepository::load_model's `device` parameter used to be pure metadata
+// (stored on ModelEntry, never validated against how the model file was
+// actually traced/saved) -- requesting device=cuda for a CPU-traced model
+// loaded "successfully" and only failed, confusingly, on the FIRST real
+// inference request (server.cpp's predict handler places every request's
+// input on model->device before calling forward()). Fixed by validating at
+// load_model() time and failing immediately with a clear message.
+TEST(ServingTest, LoadModelRejectsDeviceMismatchImmediately) {
+    if (!device_available(tenzor::Device::cuda(0))) {
+        GTEST_SKIP() << "cuda:0 not available";
+    }
+    auto g = build_relu_graph(tenzor::Device::cpu());  // traced/saved for CPU
+    auto module = std::make_shared<tenzor::jit::CompiledModule>(g);
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("tenzor_r1_41_mismatch_" + std::to_string(::getpid()) + ".tzg");
+    module->save(path.string());
+
+    ModelRepository repo;
+    BatchConfig batch_config;
+    EXPECT_THROW(
+        repo.load_model("mismatch_relu", path.string(), tenzor::Device::cuda(0), batch_config),
+        std::invalid_argument)
+        << "load_model must reject device=cuda for a model traced/saved on cpu "
+           "immediately, not defer the failure to the first inference request";
+    std::filesystem::remove(path);
+
+    EXPECT_EQ(repo.get_model("mismatch_relu"), nullptr)
+        << "a model that failed the device check must not be registered";
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllNonCpuBackends, ModelRepositoryDeviceTest,
+    ::testing::Values(tenzor::Device::Type::CUDA, tenzor::Device::Type::ROCm,
+                      tenzor::Device::Type::Vulkan, tenzor::Device::Type::OneAPI,
+                      tenzor::Device::Type::MPS),
+    [](const ::testing::TestParamInfo<tenzor::Device::Type>& info) {
+        return short_device_name(info.param);
+    });

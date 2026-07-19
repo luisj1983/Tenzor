@@ -1278,6 +1278,23 @@ public:
     auto has_dynamic_shapes() const -> bool { return !dynamic_dims_.empty(); }
 
     /**
+     * @brief The per-input devices this module was traced/saved for.
+     *
+     * Only meaningful for a module loaded from disk via load() (empty for a
+     * freshly-traced, in-process module). A loaded, non-dynamic-shaped
+     * module cannot retrace (see throw_if_loaded_shape_mismatch): its
+     * constants/weights are baked at these devices, so forward() throws if
+     * called with inputs on a different device. Callers that place a loaded
+     * model into service on a caller-supplied device (e.g.
+     * ModelRepository::load_model) should compare against this and fail
+     * fast at load time instead of deferring to the first mismatched
+     * inference request.
+     *
+     * @return Empty vector if this module was never loaded from disk.
+     */
+    auto loaded_devices() const -> const std::vector<Device>& { return loaded_input_devices_; }
+
+    /**
      * @brief Get the underlying IR graph.
      *
      * @return Shared pointer to the graph

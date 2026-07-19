@@ -212,7 +212,7 @@ inline Device device_from_name(const std::string& name) {
  */
 inline std::vector<Device> get_available_backends() {
     std::vector<Device> backends;
-    backends.push_back(Device::cpu());
+    if (!is_backend_skipped_by_env("cpu")) backends.push_back(Device::cpu());
 
     if (has_cuda()) backends.push_back(Device::cuda(0));
     if (has_oneapi()) backends.push_back(Device::oneapi(0));
@@ -221,6 +221,25 @@ inline std::vector<Device> get_available_backends() {
     if (has_mps()) backends.push_back(Device::mps(0));
 
     return backends;
+}
+
+/**
+ * @brief Index of the first non-CPU entry in a `get_available_backends()`
+ * result, for the common `for (size_t i = <start>; i < backends.size(); ++i)`
+ * loop that skips backends[0] because its own reference value was already
+ * computed directly on CPU outside the loop.
+ *
+ * get_available_backends() always places CPU at index 0 when present (never
+ * elsewhere), so this is a plain "was index 0 CPU?" check — but callers used
+ * to hardcode `i = 1`, which silently skipped testing the first *GPU*
+ * backend once CPU became excludable via TENZOR_SKIP_BACKENDS=cpu (CPU no
+ * longer guaranteed to occupy index 0). Using this helper instead of a
+ * literal `1` keeps the "skip the redundant CPU slot" behavior when CPU is
+ * present, and correctly starts at 0 — testing every backend in the list —
+ * when it's been skipped.
+ */
+inline size_t first_gpu_index(const std::vector<Device>& backends) {
+    return (!backends.empty() && backends[0].type == Device::Type::CPU) ? 1 : 0;
 }
 
 /**
@@ -261,7 +280,7 @@ inline std::vector<Device> get_available_backends() {
  */
 inline std::vector<Device> get_available_backends_all_devices() {
     std::vector<Device> backends;
-    backends.push_back(Device::cpu());
+    if (!is_backend_skipped_by_env("cpu")) backends.push_back(Device::cpu());
 
     struct BackendInfo { Device::Type type; };
     for (auto type : {Device::Type::CUDA, Device::Type::OneAPI,
@@ -285,7 +304,8 @@ inline std::vector<Device> get_available_backends_all_devices() {
  * @return Vector of backend name strings (e.g., {"cpu", "cuda", "vulkan"})
  */
 inline std::vector<std::string> get_available_backend_names() {
-    std::vector<std::string> names = {"cpu"};
+    std::vector<std::string> names;
+    if (!is_backend_skipped_by_env("cpu")) names.push_back("cpu");
     if (has_cuda()) names.push_back("cuda");
     if (has_oneapi()) names.push_back("oneapi");
     if (has_vulkan()) names.push_back("vulkan");
@@ -300,7 +320,8 @@ inline std::vector<std::string> get_available_backend_names() {
  * @return Vector like {"cpu", "cuda:0", "cuda:1", "rocm:0"}
  */
 inline std::vector<std::string> get_available_backend_names_all_devices() {
-    std::vector<std::string> names = {"cpu"};
+    std::vector<std::string> names;
+    if (!is_backend_skipped_by_env("cpu")) names.push_back("cpu");
 
     struct BackendInfo { const char* name; Device::Type type; };
     constexpr BackendInfo infos[] = {
@@ -842,6 +863,33 @@ void test_operation_parity_backends(Op operation,
             golden::maybe_record(test_name, inputs, result);
             return;
         }
+        // Finding 58: every committed golden is recorded from a live CPU
+        // result (golden_util.hpp's write_golden always converts to CPU
+        // before serializing), and the ENTIRE point of comparing a live
+        // result against one is that CPU-vs-CPU numerics are bit/ULP-stable
+        // across runs. Today this call site only ever reaches here with
+        // backend==CPU because get_available_backends() unconditionally
+        // pushes CPU first when `backends` is empty -- but that's an
+        // incidental property of the caller, not something this function
+        // enforces. A future call site that passes an explicit non-CPU-only
+        // `backends` list (e.g. {Device::vulkan(0)}) would silently compare
+        // a live GPU result against a CPU-recorded golden via tensors_close
+        // below: legitimate CPU-vs-GPU numeric divergence (different
+        // reduction order, fused-multiply-add, etc.) would then surface as
+        // a confusing "golden parity failed" with no indication the real
+        // problem is comparing across backends, not a correctness bug. Fail
+        // loudly and specifically instead.
+        if (backend.type != Device::Type::CPU) {
+            FAIL() << test_name << ": golden fallback requires the single "
+                       "available backend to be CPU (every committed golden "
+                       "is a CPU-recorded reference), but got "
+                    << backend_name(backend) << ". This indicates a caller "
+                       "passed an explicit non-CPU-only `backends` list to "
+                       "test_operation_parity_backends() with fewer than 2 "
+                       "backends -- fix the call site, don't rely on the "
+                       "golden fallback for a non-CPU-only backend set.";
+            return;
+        }
         if (auto golden_result = golden::maybe_load(test_name, inputs)) {
             golden::note_comparison();
             if (!tensors_close(result, *golden_result, rtol, atol)) {
@@ -916,7 +964,13 @@ void test_operation_parity_backends(Op operation,
         if (!close) {
             float max_diff = max_abs_diff(reference, result);
 
-            FAIL() << test_name << " parity failed:\n"
+            // ADD_FAILURE (not FAIL) so a mismatch on one backend doesn't
+            // return from the function and skip comparing the rest —
+            // FAIL()/ASSERT_* do an implicit `return;`, which previously
+            // meant only the first mismatching backend in iteration order
+            // was ever reported per test run (see test_nn_norm_parity.cpp's
+            // local fix for the same pattern).
+            ADD_FAILURE() << test_name << " parity failed:\n"
                   << "  Reference backend: " << backend_name(reference_backend) << "\n"
                   << "  Test backend: " << backend_name(backend) << "\n"
                   << "  Max absolute difference: " << std::scientific << max_diff << "\n"
@@ -993,12 +1047,14 @@ void test_operation_parity_single(Op operation,
     target.synchronize();
     if (!tensors_close(cpu_result, target_result, rtol, atol)) {
         float max_diff = max_abs_diff(cpu_result, target_result);
-        FAIL() << test_name << " single-backend parity failed:\n"
+        // ADD_FAILURE (not FAIL) and no early return: a cpu-vs-target
+        // mismatch shouldn't skip the cross-backend loop below, which
+        // checks every other backend pairing and may surface a distinct bug.
+        ADD_FAILURE() << test_name << " single-backend parity failed:\n"
                << "  Reference: cpu\n"
                << "  Test backend: " << backend_name(target) << "\n"
                << "  Max absolute difference: " << std::scientific << max_diff << "\n"
                << "  Tolerance: rtol=" << rtol << ", atol=" << atol;
-        return;
     }
 
     // Cross-backend check: also compare the target against every other
@@ -1024,7 +1080,10 @@ void test_operation_parity_single(Op operation,
             other.synchronize();
             if (!tensors_close(target_result, other_result, rtol, atol)) {
                 float max_diff = max_abs_diff(target_result, other_result);
-                FAIL() << test_name << " cross-backend parity failed:\n"
+                // ADD_FAILURE, not FAIL: this runs inside a loop over every
+                // other backend — an early return would skip checking the
+                // remaining pairs.
+                ADD_FAILURE() << test_name << " cross-backend parity failed:\n"
                        << "  Backend A: " << backend_name(target) << "\n"
                        << "  Backend B: " << backend_name(other) << "\n"
                        << "  Max absolute difference: " << std::scientific << max_diff << "\n"
@@ -1051,11 +1110,57 @@ void test_operation_parity_cross_backend(Op operation,
                                          const std::string& test_name = "Operation") {
     if (backends.empty()) backends = get_available_backends();
     if (backends.size() < 2) {
+        // Golden fallback: on a single-backend host, compare the lone
+        // backend's result against a recorded golden instead of skipping
+        // outright. Mirrors test_operation_parity_backends's fallback above
+        // (see FINDING 16 in findings.txt: this helper previously only
+        // called golden::require_multi_backend() to pick SKIP vs FAIL, never
+        // actually recording or replaying a golden).
+        if (backends.empty()) {
+            GTEST_SKIP() << "No backends available: " << test_name;
+            return;
+        }
+        const auto& backend = backends[0];
+        std::vector<Tensor> backend_inputs;
+        backend_inputs.reserve(inputs.size());
+        for (const auto& t : inputs) backend_inputs.push_back(t.to(backend));
+        auto result = operation(backend_inputs);
+        backend.synchronize();
+
+        if (golden::recording_enabled() && backend.type == Device::Type::CPU) {
+            golden::maybe_record(test_name, inputs, result);
+            return;
+        }
+        // Every committed golden is CPU-recorded (golden_util.hpp's
+        // write_golden always converts to CPU before serializing); comparing
+        // a live non-CPU result against one would conflate legitimate
+        // cross-backend numeric divergence with an actual regression (see
+        // the identical guard in test_operation_parity_backends above).
+        if (backend.type != Device::Type::CPU) {
+            FAIL() << test_name << ": golden fallback requires the single "
+                       "available backend to be CPU (every committed golden "
+                       "is a CPU-recorded reference), but got "
+                    << backend_name(backend) << ".";
+            return;
+        }
+        if (auto golden_result = golden::maybe_load(test_name, inputs)) {
+            golden::note_comparison();
+            if (!tensors_close(result, *golden_result, rtol, atol)) {
+                float max_diff = max_abs_diff(result, *golden_result);
+                FAIL() << test_name << " golden parity failed:\n"
+                       << "  Backend: " << backend_name(backend) << "\n"
+                       << "  Max absolute difference: " << std::scientific << max_diff << "\n"
+                       << "  Tolerance: rtol=" << rtol << ", atol=" << atol;
+            }
+            return;
+        }
         if (golden::require_multi_backend()) {
             FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1)"
                    << " for cross-backend parity: " << test_name;
         }
-        GTEST_SKIP() << "Need 2+ backends for cross-backend parity: " << test_name;
+        GTEST_SKIP() << "Need 2+ backends for cross-backend parity (or a "
+                        "recorded golden — set TENZOR_RECORD_GOLDENS=1 on a "
+                        "multi-backend host to record): " << test_name;
         return;
     }
     std::vector<Tensor> results;
@@ -1074,10 +1179,24 @@ void test_operation_parity_cross_backend(Op operation,
         }
     }
     if (results.size() < 2) { GTEST_SKIP() << "Need 2+ successful"; return; }
+
+    // Persist a CPU result as the golden for future single-backend runs,
+    // mirroring test_operation_parity_backends (see FINDING 16).
+    if (golden::recording_enabled()) {
+        for (size_t i = 0; i < used.size(); ++i) {
+            if (used[i].type == Device::Type::CPU) {
+                golden::maybe_record(test_name, inputs, results[i]);
+                break;
+            }
+        }
+    }
+
     for (size_t i = 0; i < results.size(); ++i) {
         for (size_t j = i + 1; j < results.size(); ++j) {
             if (!tensors_close(results[i], results[j], rtol, atol)) {
-                FAIL() << test_name << " cross-backend parity failed:\n"
+                // ADD_FAILURE, not FAIL: nested loop over every backend
+                // pair — an early return would skip the remaining pairs.
+                ADD_FAILURE() << test_name << " cross-backend parity failed:\n"
                        << "  A: " << backend_name(used[i]) << "\n"
                        << "  B: " << backend_name(used[j]) << "\n"
                        << "  Max diff: " << std::scientific
@@ -1205,23 +1324,34 @@ void test_gradient_parity(
     for (size_t i = 1; i < runs.size(); ++i) {
         const auto& cur = runs[i];
 
-        // Forward parity
+        // Forward parity. ADD_FAILURE, not FAIL: this runs inside the
+        // per-backend `i` loop — an early return would skip every backend
+        // after this one.
         if (!tensors_close(ref.output, cur.output, rtol_fwd, atol_fwd)) {
             float diff = max_abs_diff(ref.output, cur.output);
-            FAIL() << test_name << " forward parity failed:\n"
+            ADD_FAILURE() << test_name << " forward parity failed:\n"
                    << "  Reference backend: " << backend_name(ref.backend) << "\n"
                    << "  Test backend: " << backend_name(cur.backend) << "\n"
                    << "  Max absolute difference: " << std::scientific << diff << "\n"
                    << "  Tolerance: rtol=" << rtol_fwd << ", atol=" << atol_fwd;
         }
 
-        // Gradient parity (per input)
-        ASSERT_EQ(ref.grads.size(), cur.grads.size())
+        // Gradient parity (per input). EXPECT_EQ + explicit `continue`
+        // (not ASSERT_EQ) so a count mismatch on one backend records a
+        // failure and moves on to the next backend in the outer loop
+        // instead of returning from the whole function; the continue still
+        // guards the per-input loop below from indexing cur.grads
+        // out-of-bounds when the counts genuinely differ.
+        EXPECT_EQ(ref.grads.size(), cur.grads.size())
             << test_name << " gradient count differs between backends";
+        if (ref.grads.size() != cur.grads.size()) continue;
         for (size_t g = 0; g < ref.grads.size(); ++g) {
             if (!tensors_close(ref.grads[g], cur.grads[g], rtol_bwd, atol_bwd)) {
                 float diff = max_abs_diff(ref.grads[g], cur.grads[g]);
-                FAIL() << test_name << " backward parity failed on input #" << g << ":\n"
+                // ADD_FAILURE, not FAIL: inner loop over every input's
+                // gradient — an early return would skip the rest of this
+                // backend's inputs and every subsequent backend.
+                ADD_FAILURE() << test_name << " backward parity failed on input #" << g << ":\n"
                        << "  Reference backend: " << backend_name(ref.backend) << "\n"
                        << "  Test backend: " << backend_name(cur.backend) << "\n"
                        << "  Max absolute difference: " << std::scientific << diff << "\n"

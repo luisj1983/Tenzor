@@ -5,9 +5,22 @@
  * Tests the engine's ability to handle workloads that exceed GPU memory,
  * simulating real ZeRO-style training where model parameters must be
  * offloaded and cycled through GPU memory.
+ *
+ * FINDING 25: was TEST_F over a hardcoded Device::cuda() / "cuda" backend
+ * gate, so OffloadEngine's real ROCm/Vulkan/OneAPI TransferEngine-backed
+ * paths never got stress-tested at all. Now TEST_P over BackendTest,
+ * parametrized across every GPU backend below -- the inherited `device`
+ * member is the parametrized GPU device. load_to_gpu/load_to_gpu_async calls
+ * use the explicit-device overload so they actually target `device` instead
+ * of OffloadEngine's own default_gpu_device_ (which prefers CUDA on a
+ * combined-backend host regardless of which backend is under test -- see the
+ * same note in test_offload_engine.cpp). prefetch_to_gpu has no
+ * explicit-device overload, so (matching that same file's accepted
+ * precedent) it always targets default_gpu_device_ rather than `device`.
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"  // FINDING 25: BackendTest -- parametrized GPU device
 #include "tenzor/core/offload_engine.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/tenzor.hpp"
@@ -20,19 +33,14 @@
 
 using namespace tenzor;
 using namespace tenzor::core;
+using namespace tenzor::testing;
 
-class OffloadEngineStressTest : public ::testing::Test {
+class OffloadEngineStressTest : public BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
-    }
-
     void SetUp() override {
-        auto* backend = backend_registry().get_backend("cuda");
-        cuda_available_ = (backend != nullptr && backend->is_available());
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-
-    bool cuda_available_ = false;
 
     // Create tensor with deterministic pattern
     Tensor createTensor(const std::vector<int64_t>& shape, uint32_t seed) {
@@ -67,8 +75,7 @@ protected:
 // STRESS TEST: Process 2x GPU Memory Worth of Data
 // =============================================================================
 
-TEST_F(OffloadEngineStressTest, ProcessDataLargerThanGPU_Sequential) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineStressTest, ProcessDataLargerThanGPU_Sequential) {
 
     std::cout << "\n" << std::string(60, '=') << std::endl;
     std::cout << "STRESS TEST: Sequential Processing > GPU Memory" << std::endl;
@@ -130,7 +137,7 @@ TEST_F(OffloadEngineStressTest, ProcessDataLargerThanGPU_Sequential) {
         }
 
         // Load to GPU
-        Tensor gpu_chunk = engine.load_to_gpu(cpu_chunks[i]);
+        Tensor gpu_chunk = engine.load_to_gpu(cpu_chunks[i], device);
         total_bytes_transferred += gpu_chunk.numel() * sizeof(float);
 
         // Simulate computation (in real use, would do forward/backward pass)
@@ -180,8 +187,7 @@ TEST_F(OffloadEngineStressTest, ProcessDataLargerThanGPU_Sequential) {
     }
 }
 
-TEST_F(OffloadEngineStressTest, ProcessDataLargerThanGPU_Concurrent) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineStressTest, ProcessDataLargerThanGPU_Concurrent) {
 
     std::cout << "\n" << std::string(60, '=') << std::endl;
     std::cout << "STRESS TEST: Concurrent Async Processing > GPU Memory" << std::endl;
@@ -240,7 +246,7 @@ TEST_F(OffloadEngineStressTest, ProcessDataLargerThanGPU_Concurrent) {
     while (completed < NUM_CHUNKS) {
         // Start new uploads if we have capacity
         while (upload_handles.size() < MAX_IN_FLIGHT && next_upload < NUM_CHUNKS) {
-            upload_handles.push_back(engine.load_to_gpu_async(cpu_chunks[next_upload]));
+            upload_handles.push_back(engine.load_to_gpu_async(cpu_chunks[next_upload], device));
             pending_chunks.push_back(next_upload);
             total_bytes += cpu_chunks[next_upload].numel() * sizeof(float);
             next_upload++;
@@ -308,8 +314,7 @@ TEST_F(OffloadEngineStressTest, ProcessDataLargerThanGPU_Concurrent) {
     }
 }
 
-TEST_F(OffloadEngineStressTest, SimulateLargeModelTraining) {
-    if (!cuda_available_) GTEST_SKIP() << "CUDA not available";
+TEST_P(OffloadEngineStressTest, SimulateLargeModelTraining) {
 
     std::cout << "\n" << std::string(60, '=') << std::endl;
     std::cout << "STRESS TEST: Simulated Large Model Training" << std::endl;
@@ -379,7 +384,7 @@ TEST_F(OffloadEngineStressTest, SimulateLargeModelTraining) {
             }
 
             // Load current weights to GPU
-            Tensor gpu_weights = engine.load_to_gpu(layers[i].weights);
+            Tensor gpu_weights = engine.load_to_gpu(layers[i].weights, device);
             total_bytes += gpu_weights.numel() * sizeof(float);
 
             // Verify weights integrity
@@ -398,7 +403,7 @@ TEST_F(OffloadEngineStressTest, SimulateLargeModelTraining) {
         // Load gradients, compute, offload
         for (int i = NUM_LAYERS - 1; i >= 0; --i) {
             // Load gradient to GPU for backward computation
-            Tensor gpu_grad = engine.load_to_gpu(layers[i].gradients);
+            Tensor gpu_grad = engine.load_to_gpu(layers[i].gradients, device);
             total_bytes += gpu_grad.numel() * sizeof(float);
 
             // "Compute" backward pass (simulated)
@@ -415,7 +420,7 @@ TEST_F(OffloadEngineStressTest, SimulateLargeModelTraining) {
         // Load optimizer state + weights + gradients, update, offload
         for (int i = 0; i < NUM_LAYERS; ++i) {
             // Load optimizer state
-            Tensor gpu_opt = engine.load_to_gpu(layers[i].optimizer_state);
+            Tensor gpu_opt = engine.load_to_gpu(layers[i].optimizer_state, device);
             total_bytes += gpu_opt.numel() * sizeof(float);
 
             // "Update" optimizer state (simulated)
@@ -453,6 +458,17 @@ TEST_F(OffloadEngineStressTest, SimulateLargeModelTraining) {
         std::cout << "\n  *** PASSED: Large model training simulation completed ***" << std::endl;
     }
 }
+
+// FINDING 25: exercise every real (non-stub) OffloadEngine/TransferEngine GPU
+// backend, not just CUDA.
+INSTANTIATE_TEST_SUITE_P(
+    GpuBackends,
+    OffloadEngineStressTest,
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    }
+);
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

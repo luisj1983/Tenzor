@@ -6392,9 +6392,21 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float f) {
     } else {
         int32_t new_exp = static_cast<int32_t>(exp) - 127 + 7;
         if (new_exp >= 0xF) {
-            // Clamp to max finite (exp=0xE, mantissa=0x7 = 448)
-            h_exp = 0xE;
-            h_mantissa = 0x7;
+            // Overflow: clamp to E4M3's true max finite value, exp=0xF,
+            // mantissa=0x6 = 2^(15-7)*(1+6/8) = 448 (matches NVIDIA's native
+            // E4M3 and src/core/dtype.cpp's FP8_E4M3 reference). This
+            // previously clamped to exp=0xE/mantissa=0x7 (= 240, a stale
+            // PyTorch-style saturation value the comment here mislabeled as
+            // "448") -- since fp8_scaling.cpp's quantize_to_fp8 deliberately
+            // scales its input so the tensor's max element lands exactly at
+            // fp8_max_value()==448 before calling .to(fp8_dtype), 448.0
+            // itself hits this branch (new_exp==0xF), so ANY per-tensor-
+            // scaled quantize_to_fp8 call on CUDA silently lost ~46% of its
+            // top-of-range magnitude on round-trip (found via a device-
+            // parameterized gradcheck: e4m3 roundtrip of 2.0 came back as
+            // 1.0714... == 2.0 * 240/448).
+            h_exp = 0xF;
+            h_mantissa = 0x6;
         } else if (new_exp <= 0) {
             if (new_exp >= -3) {
                 uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
@@ -6432,12 +6444,19 @@ __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
             f_exp = 127 - 7 - e;
             f_mantissa = (m & 0x7) << 20;
         }
-    } else if (exp == 0xF && mantissa != 0) {
-        // NaN
+    } else if (exp == 0xF && mantissa == 0x7) {
+        // NaN — only this exact bit pattern (exp=0xF AND mantissa=0x7) is
+        // reserved for NaN in NVIDIA's E4M3 (matches dtype.cpp's FP8_E4M3
+        // reference). This previously matched ANY nonzero mantissa at
+        // exp=0xF, which incorrectly decoded the valid finite values
+        // 256/288/320/352/384/416/448 (mantissa 0x0-0x6) as NaN -- exactly
+        // the bit pattern float_to_fp8_e4m3's overflow-clamp fix above now
+        // produces for max-finite (exp=0xF, mantissa=0x6).
         f_exp = 0xFF;
-        f_mantissa = mantissa << 20;
+        f_mantissa = 0x700000;
     } else {
-        // Normalized (exp=0xF with mantissa=0 is max finite, not inf)
+        // Normalized (exp=0xF with mantissa < 0x7 is legal finite, not NaN;
+        // the general rebias formula below handles it correctly).
         f_exp = exp - 7 + 127;
         f_mantissa = mantissa << 20;
     }

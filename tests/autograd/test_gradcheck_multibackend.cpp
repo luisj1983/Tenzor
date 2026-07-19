@@ -208,10 +208,6 @@ TEST_P(GradCheckMultiBackendTest, Tanh) {
 
 TEST_P(GradCheckMultiBackendTest, GeLU) {
     if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
-    if (device().type == Device::Type::Vulkan && dtype() == DType::Float64) {
-        // Vulkan gelu Float64 has precision issue. Filed separately.
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Vulkan Float64 gelu gradcheck precision"); return;
-    }
     auto x = Variable(randn({6}, dtype(), device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(nn::functional::gelu(v));
@@ -306,11 +302,14 @@ TEST_P(GradCheckMultiBackendTest, Softplus) {
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
-// LayerNorm gradcheck — passes on CPU/CUDA/OneAPI Float32/Float64.
-// Re-validated after dispatcher cleanup (Phase 24-followup #38). Vulkan
-// and ROCm still produce wrong analytical gradient compared to numerical
-// — issue is in those backends' layer_norm_backward kernels themselves
-// (not the dispatcher), tracked in #38.
+// LayerNorm gradcheck — passes on CPU/CUDA/OneAPI/Vulkan Float32/Float64,
+// and on ROCm Float32. This comment previously claimed Vulkan (both
+// dtypes) and ROCm (both dtypes) "still produce wrong analytical gradient"
+// per #38 — stale: re-verified directly (ran this exact test filtered to
+// each backend/dtype) and Vulkan F32/F64 and ROCm F32 all pass the
+// unguarded EXPECT_TRUE(gradcheck(...)) below with no skip. Only ROCm
+// Float64's layer_norm_backward kernel still has a genuine precision issue
+// (guarded below, still tracked as #38).
 TEST_P(GradCheckMultiBackendTest, LayerNorm) {
     if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
     // ROCm Float64 LayerNorm backward kernel itself has a precision issue —

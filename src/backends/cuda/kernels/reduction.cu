@@ -4951,6 +4951,80 @@ __global__ void abs_max_reduce_kernel(const T* input, T* output, int64_t n) {
     }
 }
 
+// p == -inf full-reduction norm: per-block partial min(|x|). Mirrors
+// abs_max_reduce_kernel above — combines with the existing (unscaled)
+// min_reduce_kernel for the final global min(|x|).
+template<typename T>
+__global__ void abs_min_reduce_kernel(const T* input, T* output, int64_t n) {
+    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    T thread_min = sentinel_max<T>();
+    for (int64_t i = idx; i < n; i += grid_size) {
+        T a = abs(input[i]);
+        thread_min = cuda_min_val(a, thread_min);
+    }
+
+    shared[tid] = thread_min;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = cuda_min_val(shared[tid], shared[tid + stride]);
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+
+    if (tid < WARP_SIZE) {
+        T val = shared[tid];
+        val = warp_reduce_min(val);
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// p == 0 full-reduction "norm": per-block partial count of nonzero elements
+// (the general pow(|x|,p) formula gives pow(x,0)==1 for every element
+// including zero, which would wrongly return n instead of the count).
+// Combines with the existing sum_reduce_kernel for the final total.
+template<typename T>
+__global__ void count_nonzero_norm_reduce_kernel(const T* input, T* output, int64_t n) {
+    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    T thread_count = T(0);
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (input[i] != T(0)) thread_count = thread_count + T(1);
+    }
+
+    shared[tid] = thread_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = shared[tid] + shared[tid + stride];
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+
+    if (tid < WARP_SIZE) {
+        T val = shared[tid];
+        val = warp_reduce_sum(val);
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
 // Phase 2 (p==2): per-block sum((|x|/max)^2). `max_val_ptr` is produced by
 // abs_max_reduce_kernel + max_reduce_kernel above, already resident on device.
 template<typename T>
@@ -5168,7 +5242,51 @@ __global__ void norm_along_dim_kernel(
     using Acc = typename AccumType<T>::type;
     Acc acc = Acc(0);
 
-    if (p == 1.0f) {
+    if (p == 0.0f) {
+        // L0 "norm": count of nonzero elements. The general pow(r,p) branch
+        // below gives pow(x,0)==1 for every element (including zero), which
+        // would wrongly return dim_size instead of the nonzero count —
+        // mirrors CPU's norm_kernel_dim p==0.0f branch (reduction.cpp).
+        int64_t count = 0;
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            if (Acc(input[in_idx]) != Acc(0)) ++count;
+        }
+        output[out_idx] = T(Acc(count));
+    } else if (isinf(p) && signbit(p)) {
+        // p == -inf: min(|x|) over the slice — mirrors CPU's
+        // std::isinf(p) && std::signbit(p) branch.
+        Acc m = Acc(INFINITY);
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            Acc av = Acc(input[in_idx]);
+            Acc a = av < Acc(0) ? -av : av;
+            if (a < m) m = a;
+        }
+        output[out_idx] = T(m);
+    } else if (isinf(p)) {
+        // p == +inf: max(|x|) over the slice.
+        Acc m = Acc(0);
+        for (int64_t i = 0; i < dim_size; i++) {
+            indices[dim] = i;
+            int64_t in_idx = 0;
+            for (int64_t d = 0; d < ndim; d++) {
+                in_idx += indices[d] * meta.strides[d];
+            }
+            Acc av = Acc(input[in_idx]);
+            Acc a = av < Acc(0) ? -av : av;
+            if (a > m) m = a;
+        }
+        output[out_idx] = T(m);
+    } else if (p == 1.0f) {
         // L1 norm: sum of |x|
         for (int64_t i = 0; i < dim_size; i++) {
             indices[dim] = i;
@@ -5354,7 +5472,46 @@ auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, cu
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (p == 1.0f) {
+            if (p == 0.0f) {
+                // L0 "norm": count of nonzero elements.
+                if (num_blocks == 1) {
+                    count_nonzero_norm_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
+                } else {
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
+                    count_nonzero_norm_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
+                    sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            } else if (std::isinf(p) && std::signbit(p)) {
+                // p == -inf: min(|x|).
+                if (num_blocks == 1) {
+                    abs_min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
+                } else {
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
+                    abs_min_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
+                    min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            } else if (std::isinf(p)) {
+                // p == +inf: max(|x|).
+                if (num_blocks == 1) {
+                    abs_max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
+                } else {
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(float));
+                    auto* d_temp = static_cast<float*>(d_temp_guard.get());
+                    abs_max_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
+                    max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            } else if (p == 1.0f) {
                 // L1 norm
                 if (num_blocks == 1) {
                     l1_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
@@ -5383,7 +5540,46 @@ auto norm_kernel(const Tensor& input_raw, float p, int64_t dim, bool keepdim, cu
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (p == 1.0f) {
+            if (p == 0.0f) {
+                // L0 "norm": count of nonzero elements.
+                if (num_blocks == 1) {
+                    count_nonzero_norm_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
+                } else {
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
+                    count_nonzero_norm_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
+                    sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            } else if (std::isinf(p) && std::signbit(p)) {
+                // p == -inf: min(|x|).
+                if (num_blocks == 1) {
+                    abs_min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
+                } else {
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
+                    abs_min_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
+                    min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            } else if (std::isinf(p)) {
+                // p == +inf: max(|x|).
+                if (num_blocks == 1) {
+                    abs_max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);
+                    CUDA_CHECK(cudaGetLastError());
+                } else {
+                    backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(double));
+                    auto* d_temp = static_cast<double*>(d_temp_guard.get());
+                    abs_max_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, d_temp, n);
+                    CUDA_CHECK(cudaGetLastError());
+                    max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, output_data, num_blocks);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            } else if (p == 1.0f) {
                 // L1 norm
                 if (num_blocks == 1) {
                     l1_norm_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(input_data, output_data, n);

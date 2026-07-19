@@ -223,11 +223,18 @@ inline uint64_t fingerprint_inputs(std::string_view test_name,
         auto dtype = static_cast<uint32_t>(t.dtype());
         h ^= fnv1a64(shape.data(), shape.size() * sizeof(int64_t));
         h ^= fnv1a64(&dtype, sizeof(dtype));
-        // Move to CPU for a stable byte image. Parity tests generate contiguous
-        // inputs via generate_test_tensor, so we don't force a contiguous copy
-        // here — if a non-contiguous tensor is ever passed, its strided byte
-        // layout will still hash deterministically for a given test.
-        Tensor cpu = t.device().type == Device::Type::CPU ? t : t.to(Device::cpu());
+        // Move to CPU and force a contiguous copy for a stable byte image.
+        // A non-contiguous/narrowed view's data_ptr() can start at a nonzero
+        // storage offset with strides that don't pack `numel` elements into
+        // the next `numel * dtype_size` bytes — reading that raw range (the
+        // previous behavior) hashes whatever bytes happen to follow the
+        // offset, not the view's actual logical elements, so two views with
+        // identical logical content but different offsets/strides would
+        // silently miss each other (or, worse, pick up unrelated
+        // neighboring-tensor bytes). .contiguous() is a no-op copy when the
+        // tensor already is one (the common case).
+        Tensor cpu_view = t.device().type == Device::Type::CPU ? t : t.to(Device::cpu());
+        Tensor cpu = cpu_view.contiguous();
         const void* ptr = cpu.data_ptr();
         std::size_t bytes = static_cast<std::size_t>(cpu.numel()) * ::tenzor::dtype_size(cpu.dtype());
         if (ptr && bytes) h ^= fnv1a64(ptr, bytes);
@@ -244,13 +251,30 @@ inline std::string golden_path(std::string_view test_name, uint64_t fingerprint)
 // -- Read / write ------------------------------------------------------------
 
 inline constexpr uint32_t kMagic = 0x444c4754; // 'TGLD' little-endian
-inline constexpr uint32_t kVersion = 1;
+// v2 (FINDING 18): added a recorded_at_epoch_seconds field right after
+// `version`. The staleness check in maybe_load() used to be based on
+// std::filesystem::last_write_time(), which actions/checkout@v4 resets to
+// checkout time (making the 30-day gate inert in CI, the one place it needs
+// to fire) while spuriously firing on long-lived local dev checkouts where
+// real mtimes are preserved (backwards from intent). Recording "when was
+// this golden content actually captured" INSIDE the file itself, as data
+// that survives git checkout/clone/tarball-extraction unchanged, fixes both
+// directions at once — no filesystem metadata dependency at all. v1 files
+// (pre-migration) are no longer accepted by read_golden(); the entire
+// existing golden corpus was migrated to v2 with a real recorded_at derived
+// from `git log` at the time this version was introduced (see
+// tools/migrate_goldens_v2.py, not part of the normal build).
+inline constexpr uint32_t kVersion = 2;
 
 /**
  * Write `t` to `path`. Creates parent dirs. Overwrites existing.
- * Returns true on success.
+ * `recorded_at_epoch` defaults to now; the migration tool passes an
+ * explicit git-derived timestamp instead. Returns true on success.
  */
-inline bool write_golden(const std::string& path, const Tensor& t) {
+inline bool write_golden(const std::string& path, const Tensor& t,
+                          uint64_t recorded_at_epoch =
+                              static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                  std::chrono::system_clock::now().time_since_epoch()).count())) {
     namespace fs = std::filesystem;
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
@@ -267,11 +291,13 @@ inline bool write_golden(const std::string& path, const Tensor& t) {
     if (!os) return false;
     uint32_t magic = kMagic;
     uint32_t version = kVersion;
+    uint64_t recorded_at = recorded_at_epoch;
     uint32_t dtype = static_cast<uint32_t>(cpu.dtype());
     auto shape_vec = cpu.shape();
     uint32_t rank = static_cast<uint32_t>(shape_vec.size());
     os.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     os.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    os.write(reinterpret_cast<const char*>(&recorded_at), sizeof(recorded_at));
     os.write(reinterpret_cast<const char*>(&dtype), sizeof(dtype));
     os.write(reinterpret_cast<const char*>(&rank), sizeof(rank));
     for (int64_t d : shape_vec) {
@@ -286,14 +312,35 @@ inline bool write_golden(const std::string& path, const Tensor& t) {
 }
 
 /**
+ * Peek just the header of a golden file to get its embedded recorded_at
+ * timestamp, without decoding the (possibly large) tensor payload. Used by
+ * maybe_load()'s staleness gate so a stale file is rejected cheaply.
+ * Returns nullopt if the file doesn't exist, is corrupt, or predates v2
+ * (magic/version mismatch).
+ */
+inline std::optional<uint64_t> read_golden_recorded_at(const std::string& path) {
+    std::ifstream is(path, std::ios::binary);
+    if (!is) return std::nullopt;
+    uint32_t magic = 0, version = 0;
+    uint64_t recorded_at = 0;
+    is.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    is.read(reinterpret_cast<char*>(&version), sizeof(version));
+    is.read(reinterpret_cast<char*>(&recorded_at), sizeof(recorded_at));
+    if (!is || magic != kMagic || version != kVersion) return std::nullopt;
+    return recorded_at;
+}
+
+/**
  * Load tensor from `path`. Returns nullopt on any error.
  */
 inline std::optional<Tensor> read_golden(const std::string& path) {
     std::ifstream is(path, std::ios::binary);
     if (!is) return std::nullopt;
     uint32_t magic = 0, version = 0, dtype_raw = 0, rank = 0;
+    uint64_t recorded_at = 0;
     is.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     is.read(reinterpret_cast<char*>(&version), sizeof(version));
+    is.read(reinterpret_cast<char*>(&recorded_at), sizeof(recorded_at));
     is.read(reinterpret_cast<char*>(&dtype_raw), sizeof(dtype_raw));
     is.read(reinterpret_cast<char*>(&rank), sizeof(rank));
     if (!is || magic != kMagic || version != kVersion) return std::nullopt;
@@ -357,19 +404,21 @@ inline std::optional<Tensor> maybe_load(std::string_view test_name,
     uint64_t fp = fingerprint_inputs(test_name, inputs);
     std::string path = golden_path(test_name, fp);
 
-    // Staleness guard: refuse goldens older than max-age days.
+    // Staleness guard: refuse goldens older than max-age days. Based on the
+    // recorded_at timestamp EMBEDDED in the golden file's own content (see
+    // the kVersion=2 comment above), not filesystem mtime — immune to
+    // actions/checkout@v4 resetting mtimes to checkout time (which made this
+    // gate permanently inert in CI) and to local dev checkouts preserving
+    // real (old) mtimes for perfectly valid, unchanged content (which made
+    // it spuriously fire there instead).
     int max_age_days = 30;
     if (const char* v = std::getenv("TENZOR_GOLDEN_MAX_AGE_DAYS")) {
         try { max_age_days = std::max(1, std::stoi(v)); } catch (...) {}
     }
-    std::error_code ec;
-    auto ftime = std::filesystem::last_write_time(path, ec);
-    if (!ec) {
-        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-            ftime - std::filesystem::file_time_type::clock::now()
-                  + std::chrono::system_clock::now());
-        auto age = std::chrono::system_clock::now() - sctp;
-        auto age_days = std::chrono::duration_cast<std::chrono::hours>(age).count() / 24;
+    if (auto recorded_at = read_golden_recorded_at(path)) {
+        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        auto age_days = (now - static_cast<int64_t>(*recorded_at)) / 86400;
         if (age_days > max_age_days) {
             std::cerr << "[GOLDEN STALE] " << path << " is " << age_days
                       << " days old (max=" << max_age_days

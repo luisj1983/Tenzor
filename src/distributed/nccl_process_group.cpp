@@ -50,6 +50,17 @@
             } while(0)
     #elif defined(TENZOR_USE_ROCM)
         #include <hip/hip_runtime.h>
+        // Map CUDA runtime API names to HIP equivalents (same technique as
+        // ddp.cpp/fsdp.cpp/zero_optimizer.cpp and nccl_backend.cpp in this
+        // codebase) so the collective body below, written against the cuda*
+        // names, compiles unchanged for ROCm.
+        #define cudaStream_t hipStream_t
+        #define cudaSetDevice hipSetDevice
+        #define cudaGetDevice hipGetDevice
+        #define cudaDeviceSynchronize hipDeviceSynchronize
+        #define cudaMemcpyAsync hipMemcpyAsync
+        #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+        #define cudaStreamSynchronize hipStreamSynchronize
         #define NCCL_PG_GPU_CHECK(call) \
             do { \
                 hipError_t err = call; \

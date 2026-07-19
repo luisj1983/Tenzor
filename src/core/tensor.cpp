@@ -745,8 +745,21 @@ auto Tensor::item() const -> T {
         // Single-element transfer: copy just sizeof(T) bytes instead of entire tensor
         T value;
         auto* backend = backend_registry().get_backend(device().type);
-        backend->copy(&value, data_ptr(), sizeof(T), CopyKind::DeviceToHost);
+        // Synchronize BEFORE the copy, not after: this tensor's single element
+        // may have just been written by a kernel on a stream the copy's own
+        // internal sync doesn't cover (confirmed for ROCm -- its
+        // DeviceToHost copy only hipStreamSynchronize()s the null/default
+        // stream, not the whole device; a reduction kernel dispatched on a
+        // different stream could still be in flight, so the old
+        // copy-then-synchronize order could read a stale/uninitialized
+        // value). A trailing synchronize() only proves the copy itself
+        // finished, not that the source was fully written before it started.
+        // This surfaced as OffloadContext's Int8-with-scale round trip
+        // reading item<float>() on a just-computed on-device max(abs(t))
+        // scalar and getting 0 / a stale value on ROCm, corrupting the
+        // dequantized data (FINDING 25).
         backend->synchronize(device().index);
+        backend->copy(&value, data_ptr(), sizeof(T), CopyKind::DeviceToHost);
         return value;
     }
     return *data<T>();

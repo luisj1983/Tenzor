@@ -10,8 +10,13 @@
  *       trainable parameter that has a gradient.
  *   (3) the per-parameter gradient written back has the *sharded* shape.
  *
- * Real multi-rank reduction semantics are validated by the multi-process
- * distributed test job (plan K3); here we check the wiring contract.
+ * Real multi-rank reduction semantics (does backward_hook's AVG actually
+ * average across real, independent ranks, not just replay a hand-rolled
+ * "self-as-everyone" fake) are validated by MultiRankB4Test below: a real
+ * 2-process GlooProcessGroup, launched via
+ * tests/distributed/run_multirank_test.sh (FINDING 21 "plan K3" -- the
+ * multi-process C++ test job this file used to defer to but which never
+ * existed); here we check the wiring contract.
  */
 
 #include <gtest/gtest.h>
@@ -24,6 +29,7 @@
 #include <tenzor/nn/module.hpp>
 #include <tenzor/nn/layers/linear.hpp>
 #include <tenzor/ops/creation.hpp>
+#include <cstdlib>
 
 using namespace tenzor;
 using namespace tenzor::distributed;
@@ -234,4 +240,131 @@ TEST_F(B4Test, MissingPG_AnyCollective_Throws) {
     // The first collective FSDP2 needs (all-gather to unshard) must throw
     // a clear error because no PG is attached.
     EXPECT_THROW(fsdp.summon_full_params(), std::runtime_error);
+}
+
+// ============================================================================
+// Multi-rank tests (real GlooProcessGroup, real OS processes) — FINDING 21
+// ============================================================================
+namespace {
+
+class MultiRankB4Test : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() { tenzor::initialize(); }
+
+    void SetUp() override {
+        const char* rank_env = std::getenv("RANK");
+        const char* world_size_env = std::getenv("WORLD_SIZE");
+        if (!rank_env || !world_size_env) {
+            GTEST_SKIP() << "Distributed environment not available (RANK, WORLD_SIZE not set)";
+        }
+        rank_ = std::atoi(rank_env);
+        world_size_ = std::atoi(world_size_env);
+        if (world_size_ < 2) {
+            GTEST_SKIP() << "Need at least 2 processes for multi-rank B4 tests";
+        }
+
+        const char* addr_env = std::getenv("MASTER_ADDR");
+        const char* port_env = std::getenv("MASTER_PORT");
+        std::string addr = addr_env ? addr_env : "127.0.0.1";
+        int port = port_env ? std::atoi(port_env) : 29500;
+        pg_ = std::make_shared<GlooProcessGroup>(rank_, world_size_, addr, port);
+
+        mesh_ = std::make_shared<DeviceMesh>(
+            Device::Type::CPU, std::vector<int64_t>{world_size_},
+            std::vector<std::string>{"dp"}, /*mesh_rank=*/rank_);
+        mesh_->set_process_group(pg_);
+    }
+
+    void TearDown() override {
+        if (pg_) {
+            pg_->barrier();
+            pg_.reset();
+        }
+    }
+
+    int rank_{-1};
+    int world_size_{-1};
+    std::shared_ptr<GlooProcessGroup> pg_;
+    std::shared_ptr<DeviceMesh> mesh_;
+};
+
+} // namespace
+
+// Every rank shards the SAME logical parameters along dim 0 into
+// world_size chunks; each rank's local shard must have the correct size
+// regardless of what its peers are doing (a real, per-rank structural
+// check, not a value-correctness one).
+TEST_F(MultiRankB4Test, ShardParameters_ShardsAlongDim0OnEveryRank) {
+    auto mlp = std::make_shared<TwoLinearMLP>();
+
+    FSDP2Config cfg;
+    cfg.mesh = mesh_;
+    cfg.shard_mesh_dim = "dp";
+    FSDP2 fsdp(mlp, cfg);
+
+    auto named = mlp->named_parameters();
+    std::vector<std::vector<int64_t>> pre_shapes;
+    for (auto& [name, p] : named) {
+        if (p) pre_shapes.push_back(std::vector<int64_t>(
+            p->tensor().shape().begin(), p->tensor().shape().end()));
+    }
+
+    fsdp.shard_parameters();
+    auto sharded = fsdp.sharded_parameters();
+    ASSERT_FALSE(sharded.empty());
+
+    for (size_t i = 0; i < sharded.size() && i < pre_shapes.size(); ++i) {
+        const auto& local = sharded[i].local_tensor();
+        ASSERT_FALSE(local.shape().empty());
+        EXPECT_EQ(local.shape()[0], pre_shapes[i][0] / world_size_)
+            << "rank " << rank_ << " param " << i << " not sharded on dim 0";
+    }
+}
+
+// backward_hook()'s gradient reduction is a REAL cross-rank average, not
+// DoublingPG/FsdpFakePG's "self-as-everyone" simulation. Every rank plants a
+// DIFFERENT known gradient (ones() * (rank+1)) so the correct averaged
+// result depends on every rank's real participation: AVG over ranks
+// contributing 1, 2, ..., world_size is (world_size+1)/2.
+TEST_F(MultiRankB4Test, BackwardHookAveragesGradientAcrossRealRanks) {
+    auto mlp = std::make_shared<TwoLinearMLP>();
+
+    FSDP2Config cfg;
+    cfg.mesh = mesh_;
+    cfg.shard_mesh_dim = "dp";
+    cfg.reshard_after_forward = false;
+    FSDP2 fsdp(mlp, cfg);
+    fsdp.shard_parameters();
+    fsdp.summon_full_params();
+
+    std::unordered_map<std::string, std::vector<int64_t>> pre_grad_shape;
+    for (auto& [name, p] : mlp->named_parameters()) {
+        if (!p || !p->requires_grad()) continue;
+        std::vector<int64_t> shape(p->tensor().shape().begin(),
+                                   p->tensor().shape().end());
+        pre_grad_shape[name] = shape;
+        auto g = full(shape, static_cast<double>(rank_ + 1),
+                      p->tensor().dtype(), p->tensor().device());
+        p->set_grad(g);
+    }
+
+    fsdp.backward_hook();
+
+    double expected_avg = (world_size_ + 1) / 2.0;
+    for (auto& [name, p] : mlp->named_parameters()) {
+        if (!p || !p->requires_grad()) continue;
+        auto& g_opt = p->mutable_grad();
+        ASSERT_TRUE(g_opt.has_value()) << "no grad for " << name;
+        const auto& g_shape = g_opt->shape();
+        ASSERT_FALSE(g_shape.empty());
+        EXPECT_EQ(g_shape[0], pre_grad_shape[name][0] / world_size_)
+            << "rank " << rank_ << " param '" << name << "' grad not sharded on dim 0";
+
+        auto cpu_grad = g_opt->to(Device::cpu()).contiguous();
+        const float* gp = cpu_grad.data<float>();
+        for (int64_t i = 0; i < cpu_grad.numel(); ++i) {
+            EXPECT_NEAR(gp[i], static_cast<float>(expected_avg), 1e-4f)
+                << "rank " << rank_ << " param '" << name << "' element " << i;
+        }
+    }
 }

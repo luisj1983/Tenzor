@@ -35,7 +35,7 @@ TEST_P(Phase5Parity, ALiBi_Bias) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::ALiBi alibi_dev(4);
             auto bias = alibi_dev.get_bias(8, 8, backends[i], DType::Float32);
@@ -73,7 +73,7 @@ TEST_P(Phase5Parity, RoPE_Forward) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::RoPE rope_dev(8, 16);
             rope_dev.to(backends[i]);
@@ -99,7 +99,7 @@ TEST_P(Phase5Parity, RoPE_WithOffset) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             nn::RoPE rope_dev(8, 32);
             rope_dev.to(backends[i]);
@@ -130,7 +130,7 @@ TEST_P(Phase5Parity, HannWindow) {
     const int64_t N = 64;
     auto ref = tenzor::hann_window(N, true, DType::Float32, Device::cpu());
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto win = tenzor::hann_window(N, true, DType::Float32, backends[i]);
             backends[i].synchronize();
@@ -153,7 +153,7 @@ TEST_P(Phase5Parity, HammingWindow) {
     auto ref = tenzor::hamming_window(N, true, 0.54, 0.46,
                                        DType::Float32, Device::cpu());
 
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         try {
             auto win = tenzor::hamming_window(N, true, 0.54, 0.46,
                                                DType::Float32, backends[i]);

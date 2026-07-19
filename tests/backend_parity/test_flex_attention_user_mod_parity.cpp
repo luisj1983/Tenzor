@@ -202,3 +202,47 @@ TEST_F(FlexAttentionUserModParity, Vulkan_Backward_SlidingWindowMatchesCPU) {
         check_close(cpu_t, gpu_t, 5e-4f);
     }
 }
+
+// FINDING 10: forward regression tests existed for both Vulkan and ROCm
+// (Vulkan_Forward_UserModMatchesCPU / ROCm_Forward_UserModMatchesCPU above),
+// and the file comment already documents that the sliding-window backward
+// bug previously threw on BOTH Vulkan and ROCm, but only the Vulkan side got
+// a backward regression test. Mirrors Vulkan_Backward_SlidingWindowMatchesCPU
+// exactly, targeting ROCm instead.
+TEST_F(FlexAttentionUserModParity, ROCm_Backward_SlidingWindowMatchesCPU) {
+    if (!has_device(Device::Type::ROCm)) GTEST_SKIP() << "ROCm not available";
+
+    auto Q_cpu = random_qkv({2, 8, 4}, Device::cpu());
+    auto K_cpu = random_qkv({2, 8, 4}, Device::cpu());
+    auto V_cpu = random_qkv({2, 8, 4}, Device::cpu());
+    auto dO_cpu = random_qkv({2, 8, 4}, Device::cpu());
+    auto O_cpu = random_qkv({2, 8, 4}, Device::cpu());  // placeholder; backward only uses scores/V
+
+    constexpr float scale = 0.5f;
+    constexpr int64_t window = 4;
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Scale, static_cast<double>(scale));
+    attrs.set(AttrKey::ScoreModId, static_cast<int64_t>(2));
+    attrs.set(AttrKey::WindowSize, window);
+
+    std::vector<Tensor> cpu_inputs = {dO_cpu, Q_cpu, K_cpu, V_cpu, O_cpu};
+    std::vector<Tensor> cpu_grads =
+        dispatch(OpId::FlexAttentionBackward, cpu_inputs, attrs);
+    ASSERT_GE(cpu_grads.size(), 3u);  // dQ, dK, dV
+
+    auto dO_gpu = dO_cpu.to(Device::rocm(0));
+    auto Q_gpu = Q_cpu.to(Device::rocm(0));
+    auto K_gpu = K_cpu.to(Device::rocm(0));
+    auto V_gpu = V_cpu.to(Device::rocm(0));
+    auto O_gpu = O_cpu.to(Device::rocm(0));
+    std::vector<Tensor> gpu_inputs = {dO_gpu, Q_gpu, K_gpu, V_gpu, O_gpu};
+    auto gpu_grads = dispatch(OpId::FlexAttentionBackward, gpu_inputs, attrs);
+    ASSERT_GE(gpu_grads.size(), 3u);
+
+    for (int i = 0; i < 3; ++i) {
+        Tensor cpu_t = cpu_grads[i];
+        Tensor gpu_t = gpu_grads[i].to(Device::cpu());
+        check_close(cpu_t, gpu_t, 5e-4f);
+    }
+}

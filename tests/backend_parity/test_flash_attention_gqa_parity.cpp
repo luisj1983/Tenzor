@@ -279,9 +279,15 @@ TEST_F(FlashAttentionGqaParity, CpuBackwardGqaMatchesManuallyExpandedReference) 
 // "Shapes are not broadcastable" instead of computing attention. This test
 // exercises exactly that combination (dropout_p > 0, is_training = true,
 // H_kv=2 < H_q=4) on every backend that implements a real dropout path and
-// verifies: (a) it no longer throws, (b) OneAPI and Vulkan -- which share
-// the same Philox counter convention documented in their kernel comments --
-// produce numerically consistent output for the same fixed RNG seed.
+// verifies: (a) it no longer throws, (b) all four GPU backends -- CUDA,
+// ROCm, OneAPI, and Vulkan all implement the identical Philox4x32-10
+// counter-based RNG (see the "same algorithm as CPU"/"CUDA device port of
+// CPU Philox4x32" comments in fused_ops.cu and fused_ops.hip.cpp) -- produce
+// numerically consistent output for the same fixed RNG seed. CUDA and ROCm
+// were previously left out of this list even though they qualify per the
+// test's own stated scope ("every backend that implements a real dropout
+// path" — both register OpId::FlashAttention with real DropoutP/IsTraining
+// handling).
 TEST_F(FlashAttentionGqaParity, DropoutTrainingGqaDoesNotThrowAndAgreesAcrossBackends) {
     constexpr int64_t kBatch = 1, kHq = 4, kHkv = 2, kSeq = 8, kDim = 16;
     auto Q_cpu = random_f32({kBatch, kHq, kSeq, kDim}, Device::cpu());
@@ -295,7 +301,8 @@ TEST_F(FlashAttentionGqaParity, DropoutTrainingGqaDoesNotThrowAndAgreesAcrossBac
     attrs.set(AttrKey::IsTraining, true);
     attrs.set(AttrKey::Seed, static_cast<int64_t>(0x5EED));
 
-    std::vector<Device> devices = {Device::oneapi(0), Device::vulkan(0)};
+    std::vector<Device> devices = {Device::cuda(0), Device::rocm(0),
+                                    Device::oneapi(0), Device::vulkan(0)};
     std::vector<std::pair<std::string, Tensor>> results;
 
     for (const auto& dev : devices) {
@@ -318,15 +325,26 @@ TEST_F(FlashAttentionGqaParity, DropoutTrainingGqaDoesNotThrowAndAgreesAcrossBac
     }
 
     if (results.size() < 2) {
-        GTEST_SKIP() << "Need both OneAPI and Vulkan to cross-check the shared Philox "
-                        "dropout convention; only " << results.size() << " available";
+        GTEST_SKIP() << "Need at least 2 of {CUDA, ROCm, OneAPI, Vulkan} to "
+                        "cross-check the shared Philox dropout convention; only "
+                     << results.size() << " available";
     }
+    // Compare every available backend pair against the first (not just a
+    // single fixed pair) — with up to 4 backends now in the list, an
+    // ADD_FAILURE per mismatching pair (not FAIL, which would abort the
+    // loop) ensures a divergence on e.g. ROCm doesn't hide a separate one
+    // on Vulkan in the same run.
     const auto& [ref_name, ref_out] = results[0];
-    const auto& [name, out] = results[1];
     auto* rp = ref_out.data<float>();
-    auto* op = out.data<float>();
-    for (int64_t k = 0; k < ref_out.numel(); ++k) {
-        EXPECT_NEAR(rp[k], op[k], 5e-3f) << ref_name << " vs " << name << " elem " << k;
+    for (size_t i = 1; i < results.size(); ++i) {
+        const auto& [name, out] = results[i];
+        auto* op = out.data<float>();
+        for (int64_t k = 0; k < ref_out.numel(); ++k) {
+            if (std::abs(rp[k] - op[k]) > 5e-3f) {
+                ADD_FAILURE() << ref_name << " vs " << name << " elem " << k
+                              << ": " << rp[k] << " vs " << op[k];
+            }
+        }
     }
 }
 

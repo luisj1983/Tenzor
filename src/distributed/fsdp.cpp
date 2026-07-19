@@ -25,47 +25,12 @@
 #include <numeric>
 #include <cstring>
 
-#if defined(TENZOR_USE_CUDA)
-    #include <cuda_runtime.h>
-    #define FSDP_CUDA_CHECK(call) \
-        do { \
-            cudaError_t err = call; \
-            if (err != cudaSuccess) { \
-                throw std::runtime_error( \
-                    std::string("CUDA error in FSDP: ") + \
-                    cudaGetErrorString(err) + \
-                    " at " + __FILE__ + ":" + std::to_string(__LINE__) \
-                ); \
-            } \
-        } while(0)
-#elif defined(TENZOR_USE_ROCM)
-    #include <hip/hip_runtime.h>
-    #define cudaStream_t hipStream_t
-    #define cudaEvent_t hipEvent_t
-    #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
-    #define cudaStreamNonBlocking hipStreamNonBlocking
-    #define cudaStreamDestroy hipStreamDestroy
-    #define cudaStreamSynchronize hipStreamSynchronize
-    #define cudaStreamWaitEvent hipStreamWaitEvent
-    #define cudaEventCreate hipEventCreate
-    #define cudaEventCreateWithFlags hipEventCreateWithFlags
-    #define cudaEventDestroy hipEventDestroy
-    #define cudaEventRecord hipEventRecord
-    #define cudaEventDisableTiming hipEventDisableTiming
-    #define cudaSuccess hipSuccess
-    #define cudaGetErrorString hipGetErrorString
-    #define FSDP_CUDA_CHECK(call) \
-        do { \
-            hipError_t err = call; \
-            if (err != hipSuccess) { \
-                throw std::runtime_error( \
-                    std::string("HIP error in FSDP: ") + \
-                    hipGetErrorString(err) + \
-                    " at " + __FILE__ + ":" + std::to_string(__LINE__) \
-                ); \
-            } \
-        } while(0)
-#endif
+// FINDING 60 (resolved): see the equivalent comment in ddp.cpp -- stream/
+// event creation used to be picked at compile time via #if
+// defined(TENZOR_USE_CUDA) #elif defined(TENZOR_USE_ROCM), which could never
+// reach the ROCm branch on this project's combined CUDA+ROCm build.
+// gpu_stream_ops.hpp dispatches at runtime instead, on comm_device_type_.
+#include "tenzor/core/gpu_stream_ops.hpp"
 
 namespace tenzor::distributed {
 
@@ -688,39 +653,34 @@ auto FSDPUnit::reload_from_cpu() -> void {
 // ============================================================================
 
 auto FSDPUnit::init_comm_resources() -> void {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     if (!use_gpu_comm_) {
         return;
     }
 
-    cudaStream_t stream = nullptr;
-    FSDP_CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-    comm_stream_ = static_cast<void*>(stream);
+    // Determine the actual GPU vendor from this unit's own sharded parameter
+    // buffer at runtime (FINDING 60) -- comm_stream_/comm_event_ are only
+    // ever valid for this device type.
+    comm_device_type_ = local_shard_.is_valid() ? local_shard_.device().type
+                                                 : Device::Type::CUDA;
 
-    cudaEvent_t event = nullptr;
-    FSDP_CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
-    comm_event_ = static_cast<void*>(event);
-#else
-    (void)use_gpu_comm_;
-#endif
+    comm_stream_ = core::gpu_stream::create_stream(comm_device_type_);
+    comm_event_ = core::gpu_stream::create_event(comm_device_type_);
 }
 
 auto FSDPUnit::destroy_comm_resources() -> void {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     if (!use_gpu_comm_) {
         return;
     }
 
     if (comm_event_) {
-        cudaEventDestroy(static_cast<cudaEvent_t>(comm_event_));
+        core::gpu_stream::destroy_event(comm_event_, comm_device_type_);
         comm_event_ = nullptr;
     }
 
     if (comm_stream_) {
-        cudaStreamDestroy(static_cast<cudaStream_t>(comm_stream_));
+        core::gpu_stream::destroy_stream(comm_stream_, comm_device_type_);
         comm_stream_ = nullptr;
     }
-#endif
 }
 
 // ============================================================================

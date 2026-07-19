@@ -976,7 +976,9 @@ public:
  * @brief Real part gradient function.
  *
  * Forward: y = real(z)
- * Backward (Wirtinger): dL/d(conj(z)) = 0.5 * dL/dy (broadcast to complex)
+ * Backward: grad_z = complex(grad_y, 0) (PyTorch contract, audit-7 DD.1 —
+ * no 0.5 Wirtinger factor; see RealBackward::backward in
+ * function_elementwise.cpp).
  */
 class RealBackward : public Function {
 public:
@@ -984,9 +986,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    // Real-part projection is linear (grad propagates as 0.5 * grad cast to
-    // the complex dtype); second derivative is structurally zero. Declare
-    // the higher-order wrapping as a stub explicitly.
+    // Real-part projection is linear (grad propagates as grad_y cast to the
+    // complex dtype via complex(grad_y, 0)); second derivative is
+    // structurally zero. Declare the higher-order wrapping as a stub
+    // explicitly.
     auto is_higher_order_stub() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Real; }
     DType input_dtype_;
@@ -996,7 +999,9 @@ public:
  * @brief Imaginary part gradient function.
  *
  * Forward: y = imag(z)
- * Backward (Wirtinger): dL/d(conj(z)) = -0.5j * dL/dy (broadcast to complex)
+ * Backward: grad_z = complex(0, grad_y) (PyTorch contract, audit-7 DD.2 —
+ * no -0.5j Wirtinger factor; see ImagBackward::backward in
+ * function_elementwise.cpp).
  */
 class ImagBackward : public Function {
 public:
@@ -1004,9 +1009,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    // Imag-part projection is linear (grad propagates as a scaled-and-negated
-    // cast into the complex dtype); second derivative is structurally zero.
-    // Declare the higher-order wrapping as a stub explicitly.
+    // Imag-part projection is linear (grad propagates as grad_y cast into
+    // the complex dtype via complex(0, grad_y)); second derivative is
+    // structurally zero. Declare the higher-order wrapping as a stub
+    // explicitly.
     auto is_higher_order_stub() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Imag; }
     DType input_dtype_;

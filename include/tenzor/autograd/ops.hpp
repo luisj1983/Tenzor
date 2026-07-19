@@ -1252,6 +1252,24 @@ auto view_as_complex(const Variable& input) -> Variable;
 auto conj(const Variable& input) -> Variable;
 
 /**
+ * @brief Real part of a complex tensor, with gradient tracking.
+ *
+ * Variable-level wrapper around tenzor::real routed through RealBackward
+ * so real(z) is differentiable (grad_z = complex(grad_y, 0), see
+ * RealBackward's doc comment in function.hpp).
+ */
+auto real(const Variable& input) -> Variable;
+
+/**
+ * @brief Imaginary part of a complex tensor, with gradient tracking.
+ *
+ * Variable-level wrapper around tenzor::imag routed through ImagBackward
+ * so imag(z) is differentiable (grad_z = complex(0, grad_y), see
+ * ImagBackward's doc comment in function.hpp).
+ */
+auto imag(const Variable& input) -> Variable;
+
+/**
  * @brief Sample input at non-integer grid locations with gradient tracking.
  *
  * Variable wrapper around tenzor::grid_sample. Backward via GridSampleBackward

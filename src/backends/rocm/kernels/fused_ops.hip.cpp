@@ -7,6 +7,8 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"  // tenzor::slice / tenzor::slice_scatter for
+                                     // fused_attention_hip's head_dim padding
 #include "../hip_buffer.hpp"
 // Note: NOT including tenzor/ops/math.hpp here — its tenzor::sqrt/exp/etc.
 // declarations collide with HIP device sqrt/exp inside the __global__ kernels
@@ -2062,8 +2064,23 @@ auto fused_attention_hip(
 
     // Use tiled Flash Attention v2 for supported head dimensions
     bool use_tiled = (d_k == 32 || d_k == 64 || d_k == 128) && d_k == d_v;
+    // Non-native head_dim with matching Q/K and V dims: pad up to the
+    // nearest natively-tiled HEAD_DIM {32,64,128} and run the real tiled
+    // dropout kernel instead of falling through to the composed-ops path
+    // below, which does not implement dropout at all (dropout_p/rng_seed
+    // were accepted but silently unused there). Zeros in the padded columns
+    // are numerically identity for the Q·K dot product and the P@V
+    // accumulation, so this is an exact reformulation, not an approximation
+    // — mirrors fused_attention_cuda's own padding strategy
+    // (cuda/kernels/fused_ops.cu) so CUDA and ROCm apply dropout identically
+    // for every head_dim, not just {32,64,128}. Found via
+    // DropoutTrainingGqaDoesNotThrowAndAgreesAcrossBackends (kDim=16):
+    // CUDA padded to 32 and ran the tiled dropout kernel; ROCm silently
+    // dropped into the no-dropout composed path, producing a completely
+    // different (dropout-free) result for the same seed.
+    bool use_padded_tiled = !use_tiled && (d_k == d_v);
 
-    if (use_tiled) {
+    if (use_tiled || use_padded_tiled) {
         // Flash Attention v2: tiled, O(1) memory per query row
         constexpr int Bc = 32;
         int seq_len_int = static_cast<int>(seq_len);
@@ -2086,30 +2103,68 @@ auto fused_attention_hip(
             return (2 * Bc * k_stride + hd + Bc + Bc + Bc) * sizeof(float);
         };
 
-        const float* q_ptr = Q.data<float>();
-        const float* k_ptr = K.data<float>();
-        const float* v_ptr = V.data<float>();
-        float* o_ptr = output.data<float>();
+        int launch_hd = static_cast<int>(d_k);
+        Tensor Qs = Q, Ks = K, Vs = V;
+        Tensor padded_output;
+
+        if (use_padded_tiled) {
+            launch_hd = (d_k <= 32) ? 32 : (d_k <= 64) ? 64 : 128;
+            auto pad_last = [&](const Tensor& t) -> Tensor {
+                Tensor padded = create_hip_zeros(
+                    {t.shape()[0], t.shape()[1], static_cast<int64_t>(launch_hd)},
+                    t.dtype(), t.device());
+                return tenzor::slice_scatter(padded, t, /*dim=*/2, /*start=*/0, /*end=*/d_k);
+            };
+            Qs = pad_last(Q);
+            Ks = pad_last(K);
+            Vs = pad_last(V);
+            padded_output = create_hip_zeros(
+                {batch_size, seq_len, static_cast<int64_t>(launch_hd)}, Q.dtype(), Q.device());
+        }
+
+        const float* q_ptr = Qs.data<float>();
+        const float* k_ptr = Ks.data<float>();
+        const float* v_ptr = Vs.data<float>();
+        float* o_ptr = use_padded_tiled ? padded_output.data<float>() : output.data<float>();
         float* l_ptr = lse.data<float>();
 
-        if (d_k == 32) {
+        if (launch_hd == 32) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<32, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(32), rocm_current_stream(),
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, kv_len_int, scale, causal, dropout_p, rng_seed);
-        } else if (d_k == 64) {
+        } else if (launch_hd == 64) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<64, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(64), rocm_current_stream(),
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, kv_len_int, scale, causal, dropout_p, rng_seed);
-        } else if (d_k == 128) {
+        } else if (launch_hd == 128) {
             hipLaunchKernelGGL(
                 HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<128, BLOCK_SIZE>),
                 grid, threads, compute_fwd_smem(128), rocm_current_stream(),
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, kv_len_int, scale, causal, dropout_p, rng_seed);
         }
         HIP_CHECK(hipGetLastError());
+
+        if (use_padded_tiled) {
+            output = tenzor::slice(padded_output, /*dim=*/2, /*start=*/0, /*end=*/d_v).contiguous();
+        }
     } else {
+        // Composed-ops fallback: only reached when Q/K head_dim differs from
+        // V's head_dim (d_k != d_v) — the tiled kernel (native or padded)
+        // assumes a single HEAD_DIM shared by Q/K/V. Dropout is not
+        // implemented on this path; reject rather than silently no-op it —
+        // this previously accepted dropout_p/rng_seed for ANY head_dim
+        // outside {32,64,128} (including the much more common d_k==d_v case,
+        // now routed through the padded tiled kernel above) and silently
+        // computed plain dropout-free attention instead.
+        if (dropout_p > 0.0f && rng_seed != 0u) {
+            throw std::runtime_error(
+                "fused_attention_hip: dropout is not supported when Q/K "
+                "head_dim differs from V head_dim (composed-ops fallback "
+                "has no dropout kernel); use a matching head_dim to enable "
+                "the tiled dropout kernel.");
+        }
         // Composed-ops fallback for unsupported head_dim (d_k != {32,64,128} or
         // d_k != d_v). Replaces the previous naive fused_attention_kernel which
         // had the audit H6 bug class: shared_scores stale-write inside the

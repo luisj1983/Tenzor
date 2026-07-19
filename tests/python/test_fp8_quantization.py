@@ -68,3 +68,53 @@ def test_fp8_quantize_dequantize_roundtrip_e5m2():
     # of its range — one mantissa bit means worst-case 25% relative error.
     # Keep the tolerance loose for E5M2 specifically.
     assert float(restored[0].item()) == pytest.approx(128.0, rel=0.25)
+
+
+# ---------------------------------------------------------------------------
+# Cross-backend coverage.
+#
+# Every test above implicitly runs on the default device only (never
+# CUDA/Vulkan/OneAPI/ROCm explicitly), despite real FP8 cast/quantize kernels
+# existing on CUDA (src/backends/cuda/kernels/transform.cu, math.cu), Vulkan
+# (src/backends/vulkan/kernels/cast_fp8e4m3_f32.comp, cast_fp8e5m2_f32.comp,
+# cast_f32_fp8e4m3.comp and siblings), and OneAPI
+# (oneapi_kernel_registry.cpp's explicit is_fp8() dispatch helpers) -- an
+# FP8 cast/quantize bug specific to any of those kernels would ship with
+# zero Python-level signal. Mirrors test_backend_parity.py's device/
+# _resolve_device pattern (this file also imports the raw tenzor_core
+# module rather than the wrapped tenzor package, so it needs its own copy
+# rather than conftest.py's string-based ``device`` fixture).
+# ---------------------------------------------------------------------------
+
+NON_CPU_BACKENDS = ["cuda", "vulkan", "oneapi", "rocm", "mps"]
+
+
+def _resolve_device(device_name):
+    ctor = {
+        "cuda":   tz.Device.cuda,
+        "vulkan": tz.Device.vulkan,
+        "oneapi": tz.Device.oneapi,
+        "rocm":   tz.Device.rocm,
+        "mps":    tz.Device.mps,
+    }[device_name]
+    return ctor(0)
+
+
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_fp8_quantize_dequantize_roundtrip_e4m3_device(device):
+    dev = _resolve_device(device)
+    x = tz.full([8], 2.0, tz.dtype.float32, dev)
+    fp8_tensor, params = tz.quantize_to_fp8(x, tz.dtype.fp8_e4m3)
+    assert params.amax == pytest.approx(2.0, rel=1e-3)
+    restored = tz.dequantize_from_fp8(fp8_tensor, params.scale)
+    assert float(restored[0].to(tz.Device.cpu()).item()) == pytest.approx(2.0, rel=1e-3)
+
+
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_fp8_quantize_dequantize_roundtrip_e5m2_device(device):
+    dev = _resolve_device(device)
+    x = tz.full([8], 128.0, tz.dtype.float32, dev)
+    fp8_tensor, params = tz.quantize_to_fp8(x, tz.dtype.fp8_e5m2)
+    assert params.amax == pytest.approx(128.0, rel=1e-3)
+    restored = tz.dequantize_from_fp8(fp8_tensor, params.scale)
+    assert float(restored[0].to(tz.Device.cpu()).item()) == pytest.approx(128.0, rel=0.25)

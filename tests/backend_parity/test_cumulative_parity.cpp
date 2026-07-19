@@ -172,7 +172,7 @@ TEST_P(CumulativeParity, CumSumDim1_OnesRegression) {
     auto a_cpu = ones({2, 6}, DType::Float32, Device::cpu());
     auto cs_cpu = tensor_cumsum(a_cpu, 1);
     // Expect [[1,2,3,4,5,6], [1,2,3,4,5,6]]
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         auto a_dev = a_cpu.to(backends[i]);
         auto cs_dev = tensor_cumsum(a_dev, 1);
         backends[i].synchronize();
@@ -204,7 +204,7 @@ TEST_P(CumulativeParity, FlipDim1_Regression) {
     REQUIRE_MULTI_BACKEND_OR_SKIP("cumulative parity");
     auto a_cpu = randn({4, 6}, DType::Float32, Device::cpu());
     auto flipped_cpu = flip(a_cpu, std::vector<int64_t>{1});
-    for (size_t i = 1; i < backends.size(); ++i) {
+    for (size_t i = first_gpu_index(backends); i < backends.size(); ++i) {
         auto a_dev = a_cpu.to(backends[i]);
         auto flipped_dev = flip(a_dev, std::vector<int64_t>{1});
         backends[i].synchronize();

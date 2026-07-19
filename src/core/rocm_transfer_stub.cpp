@@ -14,5 +14,14 @@ auto d2h_async(void*, const void*, std::size_t, int) -> void* { return nullptr; 
 auto event_sync(void*) -> void {}
 auto event_ready(void*) -> bool { return true; }
 
+auto stream_create() -> void* { return nullptr; }
+auto stream_destroy(void*) -> void {}
+auto event_create() -> void* { return nullptr; }
+auto event_destroy(void*) -> void {}
+auto event_record(void*, void*) -> void {}
+auto stream_wait_event(void*, void*) -> void {}
+auto stream_synchronize(void*) -> void {}
+auto mem_get_info(int, std::size_t*, std::size_t*) -> bool { return false; }
+
 }  // namespace rocm_transfer
 }  // namespace tenzor
