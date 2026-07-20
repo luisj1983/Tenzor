@@ -32,7 +32,8 @@ namespace {
 // error-at-first-use behavior for CPU-only builds.
 auto detect_default_gpu_device() -> Device {
     for (Device::Type type : {Device::Type::CUDA, Device::Type::ROCm,
-                               Device::Type::Vulkan, Device::Type::OneAPI}) {
+                               Device::Type::Vulkan, Device::Type::OneAPI,
+                               Device::Type::MPS}) {
         Backend* backend = try_get_backend(type);
         if (backend != nullptr && backend->is_available()) {
             return Device{type, 0};
@@ -557,7 +558,8 @@ auto OffloadEngine::is_over_threshold() const -> bool {
     // via load_to_gpu(cpu_tensor, device), and auto-offload must trigger for whichever
     // backend is actually over threshold, not only the auto-detected default one.
     for (Device::Type type : {Device::Type::CUDA, Device::Type::ROCm,
-                               Device::Type::Vulkan, Device::Type::OneAPI}) {
+                               Device::Type::Vulkan, Device::Type::OneAPI,
+                               Device::Type::MPS}) {
         if (memory_manager_->get_memory_pressure(type) > config_.memory_fraction) {
             return true;
         }

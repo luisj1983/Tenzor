@@ -31,7 +31,7 @@ examples/
 Build the examples with CMake:
 
 ```bash
-cd tenzor/build
+cd Tenzor/build
 cmake .. -DTENZOR_BUILD_EXAMPLES=ON
 cmake --build .
 
@@ -43,7 +43,7 @@ cmake --build .
 ### Python Examples
 
 ```bash
-cd tenzor/examples/python
+cd Tenzor/examples/python
 
 # Basic tensor operations
 python 01_tensor_basics.py
@@ -64,6 +64,9 @@ python 04_mnist_mlp.py
 | `serialization_example.cpp` | Save and load models |
 | `tensorboard_example.cpp` | TensorBoard logging integration |
 | `custom_op_example.cpp` | Creating custom operations |
+| `callback_demo.cpp` | Training callback hooks |
+| `demo_split_operation.cpp` | Tensor split operation demo |
+| `quantization_example.cpp` | INT8 quantization walkthrough |
 
 ### Tutorials (`cpp/tutorials/`)
 
@@ -94,6 +97,22 @@ Each showcase demonstrates the same task at three abstraction levels:
 | `09_dropout_regularization/` | Dropout for regularization |
 | `10_custom_loss/` | Custom loss functions |
 | `11_chat_ai/` | Simple chatbot |
+| `12_residual_network/` | Residual (skip) connections |
+| `13_variational_autoencoder/` | Variational autoencoder (VAE) |
+| `14_gan/` | Generative adversarial network |
+| `15_lstm_text/` | LSTM text generation |
+| `16_self_attention/` | Self-attention mechanism |
+| `17_word_embedding/` | Word embeddings |
+| `18_transfer_learning/` | Transfer learning / fine-tuning |
+| `19_layer_normalization/` | Layer normalization |
+| `20_multitask_learning/` | Multi-task learning |
+| `21_siamese_network/` | Siamese network |
+| `22_hierarchical_reasoning/` | Hierarchical Reasoning Model (HRM) |
+
+Each showcase example doubles as a regression test: `autograd_runner.{cpp,hpp}`
+wires the showcase's forward/backward pass into ctest and asserts the loss
+decreases end-to-end, so a showcase directory going stale or its loss
+plateauing fails CI, not just a docs check.
 
 ### NLP Examples (`cpp/nlp/`)
 
@@ -186,7 +205,7 @@ cmake --build .
 
 - Tenzor library (built and installed)
 - C++23 compatible compiler
-- Python 3.8+ (for Python examples)
+- Python 3.9 - 3.13 (for Python examples; matches `requires-python` in `pyproject.toml`)
 - CUDA 12.0+ (for GPU examples, optional)
 
 ## Contributing

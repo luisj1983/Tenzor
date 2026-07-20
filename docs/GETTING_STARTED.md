@@ -288,13 +288,18 @@ detached = x.detach()
 
 class MLP : public nn::Module {
 public:
-    MLP(int64_t input_size, int64_t hidden_size, int64_t output_size) {
-        fc1 = register_module("fc1", std::make_shared<nn::Linear>(input_size, hidden_size));
-        fc2 = register_module("fc2", std::make_shared<nn::Linear>(hidden_size, output_size));
-        relu = std::make_shared<nn::ReLU>();
+    MLP(int64_t input_size, int64_t hidden_size, int64_t output_size)
+        : fc1(std::make_shared<nn::Linear>(input_size, hidden_size))
+        , fc2(std::make_shared<nn::Linear>(hidden_size, output_size))
+        , relu(std::make_shared<nn::ReLU>())
+    {
+        register_module("fc1", fc1);
+        register_module("fc2", fc2);
     }
 
-    Variable forward(const Variable& x) override {
+    // Override forward_impl, not forward — Module::forward is a non-virtual
+    // dispatcher that calls forward_impl() internally.
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = relu->forward(fc1->forward(x));
         return fc2->forward(h);
     }
@@ -469,7 +474,7 @@ for epoch in range(10):
 // C++
 auto mse = nn::mse_loss(predictions, targets);
 auto ce = nn::cross_entropy(logits, labels);
-auto bce = nn::binary_cross_entropy(probs, targets);
+auto bce = nn::binary_cross_entropy_with_logits(logits, targets);
 auto nll = nn::nll_loss(log_probs, labels);
 ```
 
@@ -477,7 +482,7 @@ auto nll = nn::nll_loss(log_probs, labels);
 # Python
 mse = tz.nn.mse_loss(predictions, targets)
 ce = tz.nn.cross_entropy(logits, labels)
-bce = tz.nn.binary_cross_entropy(probs, targets)
+bce = tz.nn.functional.binary_cross_entropy_with_logits(logits, targets)
 nll = tz.nn.nll_loss(log_probs, labels)
 ```
 
@@ -527,14 +532,15 @@ model.cuda()
 
 ```cpp
 // C++
-if (cuda_available()) {
-    std::cout << "CUDA devices: " << cuda_device_count() << "\n";
+auto* cuda_backend = tenzor::backend_registry().get_backend("cuda");
+if (cuda_backend != nullptr && cuda_backend->is_available()) {
+    std::cout << "CUDA devices: " << cuda_backend->device_count() << "\n";
 }
 ```
 
 ```python
 # Python
-if tz.cuda_available():
+if tz.cuda_is_available():
     print(f"CUDA devices: {tz.cuda_device_count()}")
 ```
 

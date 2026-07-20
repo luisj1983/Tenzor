@@ -1535,7 +1535,7 @@ TEST_P(ZeROStage1GpuOffloadTest, ElementLevel_CPUOffload_StepRuns) {
 INSTANTIATE_TEST_SUITE_P(
     GpuBackends,
     ZeROStage1GpuOffloadTest,
-    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi", "mps"),
     [](const ::testing::TestParamInfo<std::string>& info) {
         return info.param;
     }

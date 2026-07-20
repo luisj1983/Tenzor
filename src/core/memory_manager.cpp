@@ -26,6 +26,7 @@ MemoryManager::MemoryManager(const Config& config)
     rocm_memory_.memory_limit = config_.rocm_memory_limit;
     oneapi_memory_.memory_limit = config_.oneapi_memory_limit;
     vulkan_memory_.memory_limit = config_.vulkan_memory_limit;
+    mps_memory_.memory_limit = config_.mps_memory_limit;
 
     // Initialize statistics
     stats_ = MemoryStats{};
@@ -106,6 +107,12 @@ auto MemoryManager::register_tensor(Tensor* tensor) -> void {
             stats_.gpu_tensors++;
             stats_.gpu_memory_used += size_bytes;
             break;
+        case Device::Type::MPS:
+            stats_.mps_tensors++;
+            stats_.mps_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
         default:
             break;
     }
@@ -163,6 +170,12 @@ auto MemoryManager::unregister_tensor(Tensor* tensor) -> void {
         case Device::Type::Vulkan:
             stats_.vulkan_tensors--;
             stats_.vulkan_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::MPS:
+            stats_.mps_tensors--;
+            stats_.mps_memory_used -= size_bytes;
             stats_.gpu_tensors--;
             stats_.gpu_memory_used -= size_bytes;
             break;
@@ -247,6 +260,12 @@ auto MemoryManager::update_tensor_location(Tensor* tensor, Device new_location) 
             stats_.gpu_tensors--;
             stats_.gpu_memory_used -= size_bytes;
             break;
+        case Device::Type::MPS:
+            stats_.mps_tensors--;
+            stats_.mps_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
         default:
             break;
     }
@@ -283,6 +302,12 @@ auto MemoryManager::update_tensor_location(Tensor* tensor, Device new_location) 
         case Device::Type::Vulkan:
             stats_.vulkan_tensors++;
             stats_.vulkan_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::MPS:
+            stats_.mps_tensors++;
+            stats_.mps_memory_used += size_bytes;
             stats_.gpu_tensors++;
             stats_.gpu_memory_used += size_bytes;
             break;
@@ -461,10 +486,9 @@ auto MemoryManager::get_device_memory(Device::Type device) -> DeviceMemory& {
             return oneapi_memory_;
         case Device::Type::Vulkan:
             return vulkan_memory_;
+        case Device::Type::MPS:
+            return mps_memory_;
         default:
-            // Do NOT fold unlisted device types (e.g. MPS) into the CPU pool —
-            // that misattributes their memory. There is no bucket for them, so
-            // reject explicitly rather than silently corrupting cpu_memory_ stats.
             throw std::invalid_argument(
                 "MemoryManager::get_device_memory: no memory pool for device type " +
                 std::to_string(static_cast<int>(device)));
@@ -483,10 +507,9 @@ auto MemoryManager::get_device_memory(Device::Type device) const -> const Device
             return oneapi_memory_;
         case Device::Type::Vulkan:
             return vulkan_memory_;
+        case Device::Type::MPS:
+            return mps_memory_;
         default:
-            // Do NOT fold unlisted device types (e.g. MPS) into the CPU pool —
-            // that misattributes their memory. There is no bucket for them, so
-            // reject explicitly rather than silently corrupting cpu_memory_ stats.
             throw std::invalid_argument(
                 "MemoryManager::get_device_memory: no memory pool for device type " +
                 std::to_string(static_cast<int>(device)));
@@ -561,6 +584,15 @@ auto MemoryManager::update_stats(Device::Type device) -> void {
                 stats_.peak_vulkan_memory = device_mem.memory_used;
             }
             break;
+        case Device::Type::MPS:
+            if (device_mem.memory_limit > 0) {
+                stats_.mps_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                            static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_mps_memory) {
+                stats_.peak_mps_memory = device_mem.memory_used;
+            }
+            break;
         default:
             break;
     }
@@ -571,14 +603,16 @@ auto MemoryManager::update_stats(Device::Type device) -> void {
             stats_.cuda_memory_pressure,
             stats_.rocm_memory_pressure,
             stats_.oneapi_memory_pressure,
-            stats_.vulkan_memory_pressure
+            stats_.vulkan_memory_pressure,
+            stats_.mps_memory_pressure
         });
         stats_.gpu_memory_pressure = max_gpu_pressure;
 
         // Update peak GPU memory (sum across all GPU types)
         size_t total_gpu_peak = stats_.peak_cuda_memory + stats_.peak_rocm_memory +
                                stats_.peak_oneapi_memory +
-                               stats_.peak_vulkan_memory;
+                               stats_.peak_vulkan_memory +
+                               stats_.peak_mps_memory;
         if (total_gpu_peak > stats_.peak_gpu_memory) {
             stats_.peak_gpu_memory = total_gpu_peak;
         }

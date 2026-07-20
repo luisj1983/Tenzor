@@ -270,6 +270,44 @@ Linear(256→10)
 
 ---
 
+### 09_rnn_text_classification.py (Advanced)
+**Topics**: Recurrent neural networks, sequence classification
+
+Text classification with an RNN over token sequences.
+
+**Run**:
+```bash
+python examples/python/09_rnn_text_classification.py
+```
+
+---
+
+### 10_distributed_training.py (Expert)
+**Topics**: Multi-process / multi-device distributed training
+
+Distributed data-parallel training setup and a multi-rank training loop.
+
+**Run**:
+```bash
+python examples/python/10_distributed_training.py
+```
+
+---
+
+## Additional Examples
+
+Beyond the numbered tutorials above, this directory (and its subdirectories)
+contains further examples not covered by the walkthroughs:
+
+- `checkpoint_examples.py`, `model_hub_example.py` — model checkpointing and `ModelHub` usage.
+- `onnx_export_demo.py`, `onnx_roundtrip_verification.py` — ONNX import/export.
+- `compression/` — `pruning_example.py`, `distillation_example.py`, `quantization_example.py`, `combined_compression.py`.
+- `cv/` — `classic_models_example.py` (ResNet/VGG/MobileNet).
+- `nlp/` — `bert_example.py`.
+- `training/` — `gpt_text_generation.py`, `gradient_checkpointing.py`, `gru_time_series.py`, `transformer_seq2seq.py`, `unet_semantic_segmentation.py`, `vae_autoencoder.py`, `vit_image_classification.py`, `yolo_object_detection.py`.
+
+See each file's module docstring for what it demonstrates.
+
 ## Learning Path
 
 ### For Beginners:
@@ -285,6 +323,10 @@ Linear(256→10)
 ### For Advanced Users:
 7. Master `08_fashion_mnist_cnn.py` for production-ready training pipelines
 8. Challenge yourself with `07_resnet_cifar10.py` for state-of-the-art architectures
+9. Try `09_rnn_text_classification.py` for sequence models
+
+### For Expert Users:
+10. `10_distributed_training.py` for multi-device distributed training
 
 ## Key Concepts Covered
 
@@ -299,7 +341,7 @@ Linear(256→10)
 
 ## Technical Requirements
 
-- Python 3.8+
+- Python 3.9 - 3.13 (matches `requires-python` in `pyproject.toml`)
 - NumPy (for data generation in examples)
 - Tenzor library (built from source)
 - Optional: CUDA for GPU acceleration

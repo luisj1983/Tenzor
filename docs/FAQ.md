@@ -17,7 +17,7 @@
 
 ### What is Tenzor?
 
-Tenzor is a high-performance tensor computation and deep learning library written in modern C++23. It provides a PyTorch-like API with support for multiple hardware backends (CPU, NVIDIA CUDA, AMD ROCm, Intel OneAPI, Vulkan).
+Tenzor is a high-performance tensor computation and deep learning library written in modern C++23. It provides a PyTorch-like API with support for multiple hardware backends (CPU, NVIDIA CUDA, AMD ROCm, Intel OneAPI, Vulkan, and Apple Metal/MPS).
 
 ### How does Tenzor compare to PyTorch/TensorFlow?
 
@@ -25,7 +25,7 @@ Tenzor is a high-performance tensor computation and deep learning library writte
 |---------|--------|---------|------------|
 | Language | C++23 | Python/C++ | Python/C++ |
 | Performance | Comparable/faster | Baseline | Comparable |
-| Multi-backend | 5 backends | 2 backends | 2 backends |
+| Multi-backend | 6 backends | 2 backends | 2 backends |
 | Binary size | ~50 MB | ~500 MB | ~1 GB |
 | Startup time | <100ms | ~2s | ~3s |
 | Memory footprint | Lower | Baseline | Higher |
@@ -43,7 +43,7 @@ Tenzor is released under the MIT License, allowing free use in both commercial a
 ### What platforms are supported?
 
 - **Linux**: Ubuntu 20.04+, Fedora 35+, Arch Linux (x86_64, ARM64)
-- **macOS**: 12.0+ (Intel and Apple Silicon)
+- **macOS**: 12.0+ (Intel and Apple Silicon) — GPU acceleration via the MPS backend (see [Known Limitations](../README.md) for current MPS parity status)
 - **Windows**: Windows 10+ (x86_64)
 
 ---
@@ -63,7 +63,7 @@ See the [Installation Guide](../INSTALL.md) for detailed instructions. Quick sta
 
 ```bash
 git clone https://github.com/skreamz/Tenzor.git
-cd tenzor && mkdir build && cd build
+cd Tenzor && mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
 sudo cmake --install .
@@ -85,7 +85,7 @@ cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
 ### How do I build without GPU support?
 
 ```bash
-cmake .. -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF
+cmake .. -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_MPS=OFF
 ```
 
 ### Why am I getting C++23 compilation errors?
@@ -144,14 +144,15 @@ x_cpu = x_gpu.cpu()  # Move back to CPU
 
 ```cpp
 // C++
-if (tenzor::cuda_available()) {
-    std::cout << "CUDA available with " << tenzor::cuda_device_count() << " devices\n";
+auto* cuda_backend = tenzor::backend_registry().get_backend("cuda");
+if (cuda_backend != nullptr && cuda_backend->is_available()) {
+    std::cout << "CUDA available with " << cuda_backend->device_count() << " devices\n";
 }
 ```
 
 ```python
 # Python
-if tz.cuda_available():
+if tz.cuda_is_available():
     print(f"CUDA available with {tz.cuda_device_count()} devices")
 ```
 
@@ -161,12 +162,17 @@ if tz.cuda_available():
 ```cpp
 class MyModel : public tenzor::nn::Module {
 public:
-    MyModel() {
-        fc1 = register_module("fc1", std::make_shared<nn::Linear>(784, 128));
-        fc2 = register_module("fc2", std::make_shared<nn::Linear>(128, 10));
+    MyModel()
+        : fc1(std::make_shared<nn::Linear>(784, 128))
+        , fc2(std::make_shared<nn::Linear>(128, 10))
+    {
+        register_module("fc1", fc1);
+        register_module("fc2", fc2);
     }
 
-    Variable forward(const Variable& x) override {
+    // Override forward_impl, not forward — Module::forward is a non-virtual
+    // dispatcher that calls forward_impl() internally.
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = nn::relu(fc1->forward(x));
         return fc2->forward(h);
     }
@@ -241,10 +247,17 @@ Common causes:
 Profile your code:
 ```cpp
 {
-    auto profiler = tenzor::utils::Profiler("forward_pass");
+    auto start = std::chrono::high_resolution_clock::now();
     auto output = model->forward(input);
-}  // Prints timing
+    auto end = std::chrono::high_resolution_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    std::cout << "forward_pass: " << us << " us\n";
+}
 ```
+
+For deeper backward-pass profiling, see `AutogradProfiler` in
+`include/tenzor/autograd/profiler.hpp`, which records per-op timing during
+`backward()` and can emit a Chrome trace.
 
 ### How much VRAM does Tenzor use?
 
@@ -268,8 +281,13 @@ print(f"Cached: {tz.cuda_memory_cached() / 1e9:.2f} GB")
 4. **Clear cache**: `tz.cuda_empty_cache()`
 
 ```python
-# Enable gradient checkpointing
-model.enable_gradient_checkpointing()
+# Enable automatic gradient checkpointing (Python)
+policy = tz.enable_auto_checkpoint(model, strategy="sqrt_n")  # keep `policy` alive
+```
+
+```cpp
+// C++: per-module opt-in
+model->set_gradient_checkpointing(true);
 ```
 
 ---
@@ -339,6 +357,12 @@ source /opt/intel/oneapi/setvars.sh
 sycl-ls
 ```
 
+### MPS backend not working (macOS)
+
+1. **Confirm it was built in**: MPS is `ON` by default on macOS; check your CMake configure log for `MPS backend: ON`, or `-DTENZOR_BUILD_MPS=ON` explicitly.
+2. **Requires a Metal-capable GPU** on macOS 12.0+; Xcode Command Line Tools must be installed (`xcode-select --install`).
+3. MPS is newer than the other backends and not yet at full parity — see the Known Limitations section in the [README](../README.md) for current status.
+
 ---
 
 ## Python Bindings
@@ -347,7 +371,7 @@ sycl-ls
 
 **Solution 1**: Install the package from source (recommended)
 ```bash
-cd tenzor
+cd Tenzor
 pip install .
 ```
 
@@ -416,6 +440,12 @@ for name, param in model.named_parameters():
 ```
 
 ### How do I use pretrained models?
+
+> **Note:** `pretrained=True` triggers a real download via `ModelHub`, but no
+> pretrained weights are currently hosted for this release (see the
+> Changelog's "Planned" section — a pretrained weight hub is upcoming). Expect
+> this call to fail until weights are published; use `pretrained=False` (the
+> default) to get randomly-initialized model definitions today.
 
 ```python
 # Load pretrained ResNet

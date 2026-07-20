@@ -29,7 +29,7 @@ Training BERT with ZeRO Stage 1 (Optimizer State Partitioning).
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 bert_zero_stage1.cpp -ltenzor -o bert_zero_stage1
+g++ -std=c++23 -O3 bert_zero_stage1.cpp -ltenzor -o bert_zero_stage1
 mpirun -np 4 ./bert_zero_stage1
 ```
 
@@ -52,7 +52,7 @@ Training BERT with ZeRO Stage 2 (Gradient + Optimizer State Partitioning).
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 bert_zero_stage2.cpp -ltenzor -o bert_zero_stage2
+g++ -std=c++23 -O3 bert_zero_stage2.cpp -ltenzor -o bert_zero_stage2
 mpirun -np 4 ./bert_zero_stage2
 ```
 
@@ -74,7 +74,7 @@ Training BERT with ZeRO Stage 3 (Full Parameter Partitioning).
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 bert_zero_stage3.cpp -ltenzor -o bert_zero_stage3
+g++ -std=c++23 -O3 bert_zero_stage3.cpp -ltenzor -o bert_zero_stage3
 mpirun -np 8 ./bert_zero_stage3
 ```
 
@@ -99,7 +99,7 @@ Training GPT-2 Medium (350M parameters) with ZeRO Stage 3.
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 gpt_zero_training.cpp -ltenzor -o gpt_zero_training
+g++ -std=c++23 -O3 gpt_zero_training.cpp -ltenzor -o gpt_zero_training
 mpirun -np 8 ./gpt_zero_training
 ```
 
@@ -124,7 +124,7 @@ Integrating custom models with ZeRO optimization.
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 custom_model_zero.cpp -ltenzor -o custom_model_zero
+g++ -std=c++23 -O3 custom_model_zero.cpp -ltenzor -o custom_model_zero
 mpirun -np 4 ./custom_model_zero
 ```
 
@@ -149,7 +149,7 @@ Multi-GPU distributed training configuration.
 **Build & Run:**
 ```bash
 # Single node, 4 GPUs
-g++ -std=c++17 -O3 distributed_training.cpp -ltenzor -o distributed_training
+g++ -std=c++23 -O3 distributed_training.cpp -ltenzor -o distributed_training
 mpirun -np 4 ./distributed_training
 
 # Multi-node (2 nodes, 8 GPUs each)
@@ -180,7 +180,7 @@ Training models larger than GPU memory using CPU offload.
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 cpu_offload_example.cpp -ltenzor -o cpu_offload_example
+g++ -std=c++23 -O3 cpu_offload_example.cpp -ltenzor -o cpu_offload_example
 ./cpu_offload_example  # Single GPU
 ```
 
@@ -206,7 +206,7 @@ Production-grade checkpoint management with ZeRO.
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 checkpoint_example.cpp -ltenzor -o checkpoint_example
+g++ -std=c++23 -O3 checkpoint_example.cpp -ltenzor -o checkpoint_example
 mpirun -np 4 ./checkpoint_example
 ```
 
@@ -231,7 +231,7 @@ Combining FP16/BF16 with ZeRO optimization.
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 mixed_precision_zero.cpp -ltenzor -o mixed_precision_zero
+g++ -std=c++23 -O3 mixed_precision_zero.cpp -ltenzor -o mixed_precision_zero
 mpirun -np 4 ./mixed_precision_zero
 ```
 
@@ -256,7 +256,7 @@ Comprehensive benchmarking of all ZeRO stages.
 
 **Build & Run:**
 ```bash
-g++ -std=c++17 -O3 performance_comparison.cpp -ltenzor -o performance_comparison
+g++ -std=c++23 -O3 performance_comparison.cpp -ltenzor -o performance_comparison
 mpirun -np 8 ./performance_comparison
 ```
 
@@ -280,7 +280,7 @@ ZeRO Stage 3          53.78 ms       597 img/s      281 MB             0 B      
 1. **Install Tenzor:**
 ```bash
 git clone https://github.com/your-org/tenzor.git
-cd tenzor
+cd Tenzor
 mkdir build && cd build
 cmake ..
 make -j$(nproc)
@@ -311,7 +311,7 @@ sudo yum install openmpi-devel
 ```bash
 # Example workflow
 cd examples/zero
-g++ -std=c++17 -O3 bert_zero_stage2.cpp -ltenzor -o bert_zero_stage2
+g++ -std=c++23 -O3 bert_zero_stage2.cpp -ltenzor -o bert_zero_stage2
 mpirun -np 4 ./bert_zero_stage2
 ```
 

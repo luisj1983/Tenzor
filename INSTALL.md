@@ -19,7 +19,7 @@ This guide covers all methods to install Tenzor on your system.
 
 ```bash
 git clone https://github.com/skreamz/Tenzor.git
-cd tenzor
+cd Tenzor
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
@@ -30,7 +30,7 @@ sudo cmake --install .
 
 ```bash
 # From the project root directory
-cd tenzor
+cd Tenzor
 pip install .
 
 # Or for development (editable install)
@@ -115,7 +115,7 @@ brew install cmake ninja python
 
 ```bash
 git clone https://github.com/skreamz/Tenzor.git
-cd tenzor
+cd Tenzor
 ```
 
 ### Step 3: Configure Build
@@ -180,12 +180,11 @@ cmake --install . --prefix /opt/tenzor
 | `TENZOR_BUILD_ROCM` | Enable AMD ROCm backend | ON |
 | `TENZOR_BUILD_ONEAPI` | Enable Intel OneAPI backend | ON |
 | `TENZOR_BUILD_VULKAN` | Enable Vulkan compute backend | ON |
-| `TENZOR_BUILD_MPS` | Enable Apple Metal/MPS backend | ON (macOS only; option not defined elsewhere) |
+| `TENZOR_BUILD_MPS` | Enable Apple Metal/MPS backend | ON (macOS only) |
 | `TENZOR_BUILD_PYTHON` | Build Python bindings | ON |
 | `TENZOR_BUILD_TESTS` | Build test suite | ON |
 | `TENZOR_BUILD_BENCHMARKS` | Build performance benchmarks | ON |
 | `TENZOR_BUILD_EXAMPLES` | Build example programs | ON |
-| `TENZOR_BUILD_DOCS` | Build documentation | OFF |
 | `TENZOR_ENABLE_OPENMP` | Enable OpenMP parallelization | ON |
 | `TENZOR_ENABLE_SIMD` | Enable SIMD optimizations | ON |
 
@@ -277,8 +276,9 @@ Tenzor automatically detects available backends at runtime. You can also explici
 auto tensor = tenzor::zeros({3, 3}, tenzor::DType::Float32, tenzor::Device::cuda(0));
 
 // Check available backends
-if (tenzor::cuda_available()) {
-    std::cout << "CUDA available with " << tenzor::cuda_device_count() << " devices\n";
+auto* cuda_backend = tenzor::backend_registry().get_backend("cuda");
+if (cuda_backend != nullptr && cuda_backend->is_available()) {
+    std::cout << "CUDA available with " << cuda_backend->device_count() << " devices\n";
 }
 ```
 
@@ -286,7 +286,7 @@ if (tenzor::cuda_available()) {
 import tenzor as tz
 
 # Check backends
-print(f"CUDA available: {tz.cuda_available()}")
+print(f"CUDA available: {tz.cuda_is_available()}")
 print(f"Device count: {tz.cuda_device_count()}")
 
 # Use specific device
@@ -311,7 +311,7 @@ This will automatically build the C++ library and install Python bindings:
 
 ```bash
 # From the project root directory
-cd tenzor
+cd Tenzor
 pip install .
 ```
 
@@ -320,7 +320,7 @@ pip install .
 For development with live code updates:
 
 ```bash
-cd tenzor
+cd Tenzor
 pip install -e .
 ```
 
@@ -351,7 +351,7 @@ x = tz.randn([3, 3])
 print(x)
 
 # GPU test (if available)
-if tz.cuda_available():
+if tz.cuda_is_available():
     y = x.cuda()
     print(f"GPU tensor: {y.device}")
 ```

@@ -599,7 +599,7 @@ TEST_P(TransferBenchmarkTest, PCIeUtilization_MaxBandwidth) {
 INSTANTIATE_TEST_SUITE_P(
     GpuBackends,
     TransferBenchmarkTest,
-    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi", "mps"),
     [](const ::testing::TestParamInfo<std::string>& info) {
         return info.param;
     }

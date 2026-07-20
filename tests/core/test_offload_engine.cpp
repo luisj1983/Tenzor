@@ -566,7 +566,7 @@ TEST_P(OffloadEngineTest, Statistics_TrackOperations) {
 INSTANTIATE_TEST_SUITE_P(
     GpuBackends,
     OffloadEngineTest,
-    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi", "mps"),
     [](const ::testing::TestParamInfo<std::string>& info) {
         return info.param;
     }

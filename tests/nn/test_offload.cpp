@@ -941,7 +941,7 @@ TEST_P(ParameterOffloadTest, Int8WithScale_OffloadFetch_FiniteResults) {
 INSTANTIATE_TEST_SUITE_P(
     GpuBackends,
     ParameterOffloadTest,
-    ::testing::Values("cuda", "rocm", "vulkan", "oneapi"),
+    ::testing::Values("cuda", "rocm", "vulkan", "oneapi", "mps"),
     [](const ::testing::TestParamInfo<std::string>& info) {
         return info.param;
     }

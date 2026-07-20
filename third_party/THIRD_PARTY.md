@@ -27,6 +27,13 @@ the top-level CMakeLists.txt.
 | `spdlog` | system `find_package(spdlog)` else FetchContent `v1.14.1` (top-level `CMakeLists.txt::417`) | audit-2 D.1. The FetchContent tag is the upgrade gate. |
 | `fmt` | transitively from spdlog (system or FetchContent) | No direct pin; tracks spdlog. |
 | `pybind11` | `find_package(pybind11 CONFIG)` (top-level `CMakeLists.txt::451`) | System-provided; if a specific version is required for Python ABI parity, add it to `CMakePresets`. |
+| `MKL` | `find_package(MKL CONFIG QUIET)` via `cmake/FindMKL.cmake` | System-provided (e.g. `intel-oneapi-mkl`). Optional unless `TENZOR_REQUIRE_MKL=ON`, in which case its absence is a hard configure error. |
+| `oneDNN` | `cmake/FindOneDNN.cmake` | System-provided. Used for CPU conv/batchnorm/etc. kernels when available. |
+| `GTest` (googletest) | FetchContent, only when `TENZOR_BUILD_TESTS=ON` (top-level `CMakeLists.txt::568`) | Auto-downloaded if no system package is found. |
+| `Threads` / `OpenMP` | `find_package(Threads REQUIRED)` / `find_package(OpenMP)` (`CMakeLists.txt::558-559`) | System toolchain-provided; OpenMP powers CPU kernel parallelism. |
+| `Torch` (LibTorch) | `find_package(Torch REQUIRED)` (`CMakeLists.txt::643`), only for the PyTorch-comparison Python bindings/benchmarks | Optional — only needed when building the PyTorch-comparison path. |
+| `IREECompiler` / `IREERuntime` | `find_package(IREECompiler/IREERuntime CONFIG)` (`CMakeLists.txt::218-244`) | Resolved from the vendored `third_party/iree_dist/` CMake config, not a separate system install — see the vendored-dependency table above for the upgrade gate. |
+| `NCCL` | `cmake/FindNCCL.cmake` | Optional, for distributed multi-GPU CUDA training. |
 
 ## How to bump a vendored dep
 

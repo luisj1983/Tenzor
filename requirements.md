@@ -86,7 +86,7 @@ Disabled with `-DTENZOR_BUILD_ONEAPI=OFF`
 
 ## Optional - ROCm Backend
 
-Disabled by default (`-DTENZOR_BUILD_ROCM=ON` to enable)
+Enabled by default (`-DTENZOR_BUILD_ROCM=OFF` to disable)
 
 | Dependency | Manjaro Package | Notes |
 |---|---|---|
@@ -102,6 +102,19 @@ sudo pacman -S hip-runtime-amd rocblas miopen-hip hiprand
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DTENZOR_BUILD_ROCM=ON \
     -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++
+```
+
+## Optional - MPS Backend (macOS)
+
+Enabled by default on macOS (`-DTENZOR_BUILD_MPS=OFF` to disable); not available on other platforms.
+
+| Dependency | Notes |
+|---|---|
+| Xcode Command Line Tools | Provides the Metal SDK / `clang++` with Objective-C++ support |
+| macOS 12.0+ | Apple Silicon or Intel Mac with a Metal-capable GPU |
+
+```bash
+xcode-select --install
 ```
 
 ## Optional - Python Bindings
@@ -134,7 +147,8 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DTENZOR_BUILD_CUDA=OFF \
     -DTENZOR_BUILD_ONEAPI=OFF \
     -DTENZOR_BUILD_VULKAN=OFF \
-    -DTENZOR_BUILD_ROCM=OFF
+    -DTENZOR_BUILD_ROCM=OFF \
+    -DTENZOR_BUILD_MPS=OFF
 
 # Build
 ninja -C build

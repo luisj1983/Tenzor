@@ -16,7 +16,7 @@ Thank you for your interest in contributing to Tenzor! This document provides gu
 ```bash
 # Clone the repository
 git clone https://github.com/skreamz/Tenzor.git
-cd tenzor
+cd Tenzor
 
 # Create build directory
 mkdir build && cd build
@@ -193,7 +193,7 @@ OpId-based dispatch:
 ```cpp
 auto my_operation(const Tensor& input, float param) -> Tensor {
     OpAttributes attrs;
-    attrs.set(AttrKey::Param, param);
+    attrs.set(AttrKey::Alpha, param);  // pick the AttrKey that fits your op's semantics — see include/tenzor/backend/op_attributes.hpp for the full list
     return dispatch<OpId::MyOperation>({input}, attrs)[0];
 }
 ```
@@ -238,7 +238,7 @@ against the `BackendDispatchTable`:
 ```cpp
 table.register_kernel(OpId::MyOperation,
     [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        return {my_operation_cpu(inputs[0], attrs.get_float(AttrKey::Param))};
+        return {my_operation_cpu(inputs[0], attrs.get_float(AttrKey::Alpha))};
     });
 ```
 
@@ -331,7 +331,7 @@ invoked in CI; use them locally to preview coverage deltas.
 
 1. **Implementation** in `src/ops/` or `src/nn/` as appropriate.
 2. **Kernel registration** on every backend the op supports: `src/backends/
-   {cpu,cuda,rocm,vulkan,oneapi}/<backend>_kernel_registry.cpp`.
+   {cpu,cuda,rocm,vulkan,oneapi,mps}/<backend>_kernel_registry.{cpp,mm}`.
 3. **Unit test** in `tests/ops/` that covers the op's happy path for every
    supported dtype via `MultiBackendDTypeTest`.
 4. **Parity test** in `tests/backend_parity/` using `test_operation_parity`
@@ -364,7 +364,7 @@ required checks by the displayed check name):
 | Job key (yaml)   | Required check name                | Gates on            |
 |------------------|------------------------------------|---------------------|
 | `build-and-smoke`| `Build & Smoke Tests`              | every PR            |
-| `full-cpu-tests` | `CPU Tests (backend_parity)`       | every PR (golden floor) |
+| `full-cpu-tests` | `CPU Tests (unit)`, `CPU Tests (nn)`, `CPU Tests (autograd)`, `CPU Tests (ops)`, `CPU Tests (jit)`, `CPU Tests (core)`, `CPU Tests (backend_parity)`, `CPU Tests (integration)` | every PR (golden floor) — this job is sharded by `matrix.shard`, so each shard is its own check; list all eight if you want full-suite gating |
 | `gpu-smoke`      | `GPU Smoke (self-hosted)`          | every PR            |
 | `gpu-parity`     | `GPU Backend Parity (self-hosted)` | every PR (fast tier)|
 | `python-tests`   | `Python Tests`                     | every PR            |
@@ -391,7 +391,14 @@ gh api -X PUT \
     "strict": true,
     "checks": [
       { "context": "Build & Smoke Tests" },
+      { "context": "CPU Tests (unit)" },
+      { "context": "CPU Tests (nn)" },
+      { "context": "CPU Tests (autograd)" },
+      { "context": "CPU Tests (ops)" },
+      { "context": "CPU Tests (jit)" },
+      { "context": "CPU Tests (core)" },
       { "context": "CPU Tests (backend_parity)" },
+      { "context": "CPU Tests (integration)" },
       { "context": "GPU Smoke (self-hosted)" },
       { "context": "GPU Backend Parity (self-hosted)" },
       { "context": "Python Tests" },

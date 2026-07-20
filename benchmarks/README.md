@@ -64,7 +64,7 @@ The Python benchmark suite provides direct comparison between Tenzor and PyTorch
 ### Usage Examples
 
 ```bash
-# Compare only on CPU
+# Compare only on CPU (choices: all, cpu, cuda, rocm, vulkan, oneapi — no mps yet)
 python run_benchmarks.py --device cpu
 
 # Skip PyTorch comparison (Tenzor only)
@@ -105,6 +105,14 @@ python generate_report.py results/benchmark.json --format all
 ```
 
 ## Benchmark Files
+
+The four below are the original, most-documented suites. `benchmarks/` also
+contains additional C++ benchmarks not detailed here — `benchmark_attention.cpp`,
+`benchmark_compression.cpp`, `benchmark_dispatch.cpp`, `benchmark_embeddings.cpp`,
+`benchmark_mixed_precision.cpp`, `benchmark_models.cpp`, `benchmark_normalization.cpp`,
+`benchmark_rnn.cpp`, `bench_fused_ops.cpp`, and `test_caching_allocator.cpp` — see
+each file's header comment for scope, and `benchmarks/baselines/` /
+`benchmarks/distributed/` for supporting data and distributed-training benchmarks.
 
 ### 1. benchmark_ops.cpp
 **Matrix and tensor operations**
@@ -227,11 +235,10 @@ Bandwidth:     48.12 GB/s
 
 ## Backend Support
 
-Benchmarks automatically use the default device. All backends are supported:
-- **CPU:** Optimized with SIMD
-- **CUDA:** GPU acceleration
-- **OneAPI:** Intel hardware
-- **Vulkan:** Cross-platform GPU
+Benchmarks automatically use the default device. Backends selectable via
+`--device` in the Python suite: `cpu`, `cuda`, `rocm`, `vulkan`, `oneapi`.
+The MPS (Apple Metal) backend exists in the library but is not yet wired
+into `run_benchmarks.py`'s `--device` choices.
 
 ## Statistical Rigor
 
@@ -295,10 +302,6 @@ export CUDA_VISIBLE_DEVICES=0
 - Monitor thermal throttling
 - Ensure no background processes
 
-## Documentation
-
-Full documentation: `docs/BENCHMARK_SUITE_SUMMARY.md`
-
 ## File Structure
 
 ```
@@ -309,7 +312,19 @@ benchmarks/
 ├── benchmark_convolutions.cpp     (convolution ops)
 ├── benchmark_memory.cpp           (memory operations)
 ├── benchmark_training.cpp         (training workflows)
-└── bench_fused_ops.cpp           (fused operations)
+├── benchmark_attention.cpp        (attention mechanisms)
+├── benchmark_compression.cpp      (pruning/distillation)
+├── benchmark_dispatch.cpp         (op dispatch overhead)
+├── benchmark_embeddings.cpp       (embedding lookups)
+├── benchmark_mixed_precision.cpp  (FP16/BF16 paths)
+├── benchmark_models.cpp           (reference model forward/backward)
+├── benchmark_normalization.cpp    (BatchNorm/LayerNorm/etc.)
+├── benchmark_rnn.cpp              (RNN/LSTM/GRU)
+├── bench_fused_ops.cpp            (fused operations)
+├── test_caching_allocator.cpp     (allocator overhead)
+├── baselines/                     (committed perf baselines per host)
+├── distributed/                   (distributed-training benchmarks)
+└── python/                        (Python benchmarks — see bench_*.py, run_benchmarks.py)
 ```
 
 ## Contributing

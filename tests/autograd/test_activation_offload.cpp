@@ -86,7 +86,7 @@ TEST_F(ActivationOffloadTest, NeverPolicyOverridesGlobal) {
 // forward time and the engine reloads them before backward runs.
 // ============================================================================
 //
-// Skipped when no GPU device (CUDA, ROCm, Vulkan, or OneAPI) is available.
+// Skipped when no GPU device (CUDA, ROCm, Vulkan, OneAPI, or MPS) is available.
 
 namespace {
 
@@ -98,7 +98,8 @@ namespace {
 // test regardless of what hardware the CI host actually has.
 auto all_gpu_devices() -> std::vector<Device> {
     std::vector<Device> devices;
-    for (Device d : {Device::cuda(0), Device::rocm(0), Device::vulkan(0), Device::oneapi(0)}) {
+    for (Device d : {Device::cuda(0), Device::rocm(0), Device::vulkan(0), Device::oneapi(0),
+                     Device::mps(0)}) {
         try {
             tenzor::zeros({2}, DType::Float32, d);
             devices.push_back(d);

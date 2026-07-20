@@ -93,11 +93,18 @@ First public alpha release. The library is feature-complete for the listed scope
   fused/flash/flex attention variants, and additional distribution sampling ops.
   Re-verify with `bin/op_coverage_report --json` after configuring the backend set
   you want to inspect.
+- **MPS backend** (Apple Metal) gained new coverage: FlashAttention GQA tests now
+  run on MPS, and `DataParallel` was extended for multi-backend (including MPS)
+  compatibility.
+- **CachingAllocator** for efficient GPU memory management, reducing allocation
+  overhead across backend GPU paths.
 
 ### Fixed
 
 - **CUDA LSTM / GRU forward** no longer throws `cuBLAS INVALID_VALUE`. Root cause was inverted `OP_T` / `OP_N` flags in `cublas_gemm_ex` for the no-transpose default case. Only `lstm_forward_cuda` / `gru_forward_cuda` / `bilstm_forward_cuda` used the broken wrapper; Linear / matmul went through a different known-good path.
 - **CUDA cuDNN SDPA path** now supports FP32 (and BF16) end-to-end on Ampere / Hopper, not just FP16. The `create_sdpa_graph` builder is dtype-parameterized; the dispatch path picks `HALF` / `BFLOAT16` / `FLOAT` from `Q.dtype()`. Added a per-process capability cache so combos cuDNN reports as unsupported on a given device only pay the build/check cost once.
+- **Memory offloading / ZeRO subsystem** backend-parity bugs — cross-backend equality gaps in the distributed and offload test subsystems resolved.
+- **SparseAdd** multi-backend test coverage gaps closed.
 
 ### Known issues
 

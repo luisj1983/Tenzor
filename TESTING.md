@@ -150,12 +150,14 @@ example. Classes whose second derivative is structurally zero
   `tests/backend_parity/parity_test_utils.hpp` so the env-var escalation to
   hard failure is consistent.
 - `STANDARD_BACKENDS` and `ALL_BACKENDS` are hardcoded to `{cpu, cuda,
-  vulkan, oneapi, rocm}`. `INSTANTIATE_TEST_SUITE_P` is evaluated at
+  vulkan, oneapi, rocm, mps}`. `INSTANTIATE_TEST_SUITE_P` is evaluated at
   static-init time — before `tenzor::initialize()` registers backends — so
   runtime discovery there collapses to CPU-only. The fixture's SetUp()
   skips unavailable backends at runtime, honoring
-  `TENZOR_REQUIRE_MULTI_BACKEND` / `TENZOR_SKIP_BACKENDS`. Adding a new
-  backend (Metal, WebGPU, etc.) requires editing this list in
+  `TENZOR_REQUIRE_MULTI_BACKEND` / `TENZOR_SKIP_BACKENDS`. MPS is
+  structurally unbuildable off Apple platforms and is exempted from the
+  hard-fail escalation on non-Apple runners. Adding a further new backend
+  (WebGPU, etc.) requires editing this list in
   `multi_backend_dtype_fixture.hpp` and teaching the SetUp how to build
   its `Device`.
 

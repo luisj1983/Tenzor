@@ -143,44 +143,48 @@ struct Device {
 
 ### Backend Interface (`backend/backend.hpp`)
 
-All backends implement this interface:
+All backends implement this interface (simplified — see `include/tenzor/backend/backend.hpp` for the full set, including stream/event handles for async execution):
 
 ```cpp
 class Backend {
 public:
     virtual ~Backend() = default;
 
-    // Lifecycle
-    virtual void initialize() = 0;
-    virtual void shutdown() = 0;
-    virtual bool is_available() const = 0;
+    // Identity / lifecycle
+    virtual auto name() const -> std::string_view = 0;
+    virtual auto is_available() const -> bool = 0;
+    virtual auto device_count() const -> int32_t = 0;
+    virtual auto get_device_info(int32_t device_id) const -> DeviceInfo = 0;
 
     // Memory management
-    virtual void* allocate(size_t size) = 0;
-    virtual void deallocate(void* ptr) = 0;
-    virtual void copy(void* dst, const void* src, size_t size) = 0;
-
-    // Device info
-    virtual int device_count() const = 0;
-    virtual std::string device_name(int index) const = 0;
-    virtual size_t total_memory(int index) const = 0;
+    virtual auto allocate(size_t bytes, int32_t device_id) -> void* = 0;
+    virtual auto deallocate(void* ptr) -> void = 0;
+    virtual auto copy(void* dst, const void* src, size_t bytes,
+                       /* direction */) -> void = 0;
+    virtual auto synchronize(int32_t device_id) -> void = 0;
 };
 ```
 
-### Operation Registry (`backend/operation_registry.hpp`)
+### Operation Dispatch (`ops/op_id.hpp`, `backend/kernel_registry.hpp`)
 
-Operations are registered and dispatched dynamically:
+Operations are **not** looked up by string-keyed registry. Each op has a
+compile-time `OpId` enum value, and every backend registers a kernel for that
+`OpId` in its own dispatch table at static-init time:
 
 ```cpp
-class OperationRegistry {
-public:
-    template<typename Op>
-    void register_operation(Device::Type device);
+// src/ops/math.cpp — call site
+return dispatch<OpId::MatMul>(inputs)[0];
 
-    template<typename Op>
-    Op* get_operation(Device::Type device);
-};
+// src/backends/cpu/cpu_kernel_registry.cpp — registration
+TENZOR_REGISTER_BINARY_KERNEL(table, MatMul, cpu::matmul_kernel);
 ```
+
+`dispatch<OpId::X>()` looks up the current tensor's device, indexes straight
+into that backend's `BackendDispatchTable` by `OpId` (an O(1) array lookup,
+not a string/hash lookup), and invokes the registered kernel. This is the
+same mechanism used for sparse ops (`OpId`s 460-464) and for every other
+operation in the library — see `CLAUDE.md`'s "Backend Dispatch System"
+section for more detail.
 
 ### Backend Implementations
 
@@ -301,21 +305,26 @@ void Variable::backward() {
 ```cpp
 class Module {
 public:
-    virtual Variable forward(const Variable& input) = 0;
+    // Public dispatcher — non-virtual. Runs pre/post hooks, gradient-checkpoint
+    // logic, etc., then calls forward_impl(). Subclasses do NOT override this.
+    auto forward(const Variable& input) -> Variable;
+
+    // Subclasses override this instead — it's the actual extension point.
+    virtual auto forward_impl(const Variable& input) -> Variable = 0;
 
     // Parameter management
-    std::vector<std::shared_ptr<Variable>> parameters();
-    void register_parameter(const std::string& name, Variable param);
-    void register_module(const std::string& name, std::shared_ptr<Module> module);
+    auto parameters() -> std::vector<std::shared_ptr<Variable>>;
+    auto register_parameter(std::string name, Variable param) -> void;
+    auto register_module(const std::string& name, std::shared_ptr<Module> module) -> void;
 
     // Device transfer
-    void to(Device device);
-    void cuda(int index = 0);
-    void cpu();
+    auto to(Device device) -> void;
+    auto cuda(int index = 0) -> void;
+    auto cpu() -> void;
 
     // Training mode
-    void train(bool mode = true);
-    void eval();
+    auto train(bool mode = true) -> void;
+    auto eval() -> void;
 };
 ```
 
@@ -324,14 +333,19 @@ public:
 ```cpp
 class Linear : public Module {
 public:
-    Linear(int64_t in_features, int64_t out_features, bool bias = true)
-        : weight_(register_parameter("weight",
-            Variable(randn({out_features, in_features}) * std::sqrt(2.0 / in_features), true)))
-        , bias_(bias ? register_parameter("bias", Variable(zeros({out_features}), true)) : nullptr)
-    {}
+    Linear(int64_t in_features, int64_t out_features, bool bias = true) {
+        register_parameter("weight",
+            Variable(randn({out_features, in_features}) * std::sqrt(2.0 / in_features), true));
+        if (bias) {
+            register_parameter("bias", Variable(zeros({out_features}), true));
+        }
+        weight_ = get_parameter("weight");
+        bias_ = get_parameter("bias");  // nullptr if bias == false
+    }
 
-    Variable forward(const Variable& input) override {
-        auto output = matmul(input, weight_.t());
+    // Override forward_impl, not forward — see Module Base Class above.
+    auto forward_impl(const Variable& input) -> Variable override {
+        auto output = matmul(input, weight_->t());
         if (bias_) {
             output = output + *bias_;
         }
@@ -339,8 +353,7 @@ public:
     }
 
 private:
-    Variable weight_;
-    std::shared_ptr<Variable> bias_;
+    std::shared_ptr<Variable> weight_, bias_;
 };
 ```
 
@@ -363,7 +376,7 @@ Module
 
 ## Memory Management
 
-### Caching Allocator (`backend/allocator.hpp`)
+### Caching Allocator (`core/caching_allocator.hpp`, per-backend variants in `backend/{cpu,cuda,rocm,vulkan,oneapi}_caching_allocator.hpp`)
 
 Reduces allocation overhead through caching:
 
@@ -402,6 +415,11 @@ private:
 │  (Round to 256B) │  (Round to 2MB) │  (Exact size)   │
 └──────────────────────────────────────────────────────┘
 ```
+
+> This section covers the per-tensor caching allocator. For sharded/offloaded
+> optimizer state and gradient memory across a distributed job, see the ZeRO
+> stage 1/2/3 examples in `examples/cpp/zero/` — that subsystem has its own
+> backend-parity test coverage and is not part of the caching allocator above.
 
 ### Memory Transfer
 
