@@ -5,6 +5,9 @@
 
 #include "tenzor/nn/parallel/data_parallel.hpp"
 #include "tenzor/core/device.hpp"
+#include "tenzor/core/device_guard.hpp"
+#include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/loader_fwd.hpp"  // try_get_backend()
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/autograd_wrap.hpp"
@@ -15,10 +18,6 @@
 #include <algorithm>
 #include <string>
 #include <functional>
-
-#ifdef TENZOR_USE_CUDA
-#include <cuda_runtime.h>
-#endif
 
 namespace tenzor {
 namespace nn {
@@ -35,20 +34,20 @@ DataParallel::DataParallel(
         throw std::invalid_argument("DataParallel: module cannot be null");
     }
 
+    device_type_ = detect_device_type();
+
     // Auto-detect devices if not provided
     if (device_ids_.empty()) {
-#ifdef TENZOR_USE_CUDA
-        int device_count = 0;
-        cudaError_t err = cudaGetDeviceCount(&device_count);
-        if (err != cudaSuccess || device_count == 0) {
-            throw std::runtime_error("DataParallel: No CUDA devices available");
+        auto* backend = ::tenzor::try_get_backend(device_type_);
+        int32_t device_count = backend ? backend->device_count() : 0;
+        if (device_count == 0) {
+            throw std::runtime_error(
+                "DataParallel: no " + Device{device_type_, 0}.to_string() +
+                " devices available");
         }
         for (int i = 0; i < device_count; ++i) {
             device_ids_.push_back(i);
         }
-#else
-        throw std::runtime_error("DataParallel: CUDA not available, cannot auto-detect devices");
-#endif
     }
 
     if (device_ids_.empty()) {
@@ -89,19 +88,18 @@ DataParallel::DataParallel(
     if (!module_) {
         throw std::invalid_argument("DataParallel: module cannot be null");
     }
+    device_type_ = detect_device_type();
     if (device_ids_.empty()) {
-#ifdef TENZOR_USE_CUDA
-        int device_count = 0;
-        cudaError_t err = cudaGetDeviceCount(&device_count);
-        if (err != cudaSuccess || device_count == 0) {
-            throw std::runtime_error("DataParallel: No CUDA devices available");
+        auto* backend = ::tenzor::try_get_backend(device_type_);
+        int32_t device_count = backend ? backend->device_count() : 0;
+        if (device_count == 0) {
+            throw std::runtime_error(
+                "DataParallel: no " + Device{device_type_, 0}.to_string() +
+                " devices available");
         }
         for (int i = 0; i < device_count; ++i) {
             device_ids_.push_back(i);
         }
-#else
-        throw std::runtime_error("DataParallel: CUDA not available, cannot auto-detect devices");
-#endif
     }
     if (device_ids_.empty()) {
         throw std::invalid_argument("DataParallel: device_ids cannot be empty");
@@ -116,6 +114,32 @@ DataParallel::DataParallel(
     // With pg_ set, MAX/MIN are realizable via real all_reduce; validation
     // accounts for that.
     validate_reduce_op();
+}
+
+auto DataParallel::detect_device_type() const -> Device::Type {
+    // Prefer the device type of the module's own parameters (matches the
+    // convention already used by DistributedDataParallel::init_comm_resources
+    // and ZeROStage1Optimizer's detect_comm_device_type): a module already
+    // resident on ROCm/Vulkan/OneAPI/MPS should drive DataParallel onto that
+    // same backend rather than assuming CUDA.
+    for (const auto& p : module_->parameters()) {
+        if (p && p->tensor().device().type != Device::Type::CPU) {
+            return p->tensor().device().type;
+        }
+    }
+    // No GPU-resident parameter found (e.g. a freshly constructed module):
+    // fall back to whichever GPU backend is actually loaded and has devices,
+    // preferring CUDA to preserve the historical default.
+    for (auto type : {Device::Type::CUDA, Device::Type::ROCm,
+                       Device::Type::Vulkan, Device::Type::OneAPI,
+                       Device::Type::MPS}) {
+        if (auto* backend = ::tenzor::try_get_backend(type)) {
+            if (backend->device_count() > 0) {
+                return type;
+            }
+        }
+    }
+    return Device::Type::CUDA;
 }
 
 auto DataParallel::validate_reduce_op() const -> void {
@@ -279,9 +303,9 @@ auto DataParallel::replicate() -> void {
                     std::to_string(device_id));
             }
             replica->load_state_dict(master_state);
-            // Move all parameters to the target CUDA device. The module's
+            // Move all parameters to the target device. The module's
             // `to(Device)` method walks its parameters + buffers + submodules.
-            replica->to(Device::cuda(device_id));
+            replica->to(Device{device_type_, device_id});
             replicas_.push_back(replica);
         } else {
             // Legacy shared-module path: keep the same module reference on
@@ -510,8 +534,8 @@ auto DataParallel::scatter(const Variable& input) -> std::vector<Variable> {
         // (like PyTorch, which relocates the first chunk too).
         int device_id = device_ids_[i];
         const auto& chunk_dev = chunk.tensor().device();
-        if (chunk_dev.type != Device::Type::CUDA || chunk_dev.index != device_id) {
-            utils::wrap_preserving_grad(chunk, chunk.tensor().cuda(device_id));
+        if (chunk_dev.type != device_type_ || chunk_dev.index != device_id) {
+            utils::wrap_preserving_grad(chunk, chunk.tensor().to(Device{device_type_, device_id}));
         }
 
         scattered_inputs.push_back(std::move(chunk));
@@ -529,7 +553,6 @@ auto DataParallel::parallel_apply(const std::vector<Variable>& inputs) -> std::v
     std::vector<Variable> outputs;
     outputs.reserve(inputs.size());
 
-#ifdef TENZOR_USE_CUDA
     // Strategy: run each replica's forward on its own device, sequentially.
     //
     // The op-dispatch layer does not expose a per-call stream binding, so
@@ -538,38 +561,34 @@ auto DataParallel::parallel_apply(const std::vector<Variable>& inputs) -> std::v
     // streams and recorded start/end events on them, but the forward was never
     // bound to those streams (no StreamGuard / set_stream). Consequently the
     // launches were already sequential, the events tracked *empty* streams, and
-    // cudaEventSynchronize(end_events[i]) could complete before the forward's
-    // real work on the default stream finished — a no-op barrier that risked
-    // gather() reading incomplete results. We replace that misleading machinery
-    // with an honest per-device synchronize on the stream the forward actually
-    // used (the default stream), via cudaDeviceSynchronize.
-    auto cuda_check = [](cudaError_t err, const char* what) {
-        if (err != cudaSuccess) {
-            throw std::runtime_error(
-                std::string("DataParallel::parallel_apply: ") + what + " - " +
-                cudaGetErrorString(err));
-        }
-    };
+    // an event-based sync could complete before the forward's real work on the
+    // default stream finished — a no-op barrier that risked gather() reading
+    // incomplete results. We replace that misleading machinery with an honest
+    // per-device synchronize on the stream the forward actually used (the
+    // default stream), via the backend's own synchronize(device_id) — the same
+    // abstraction DeviceGuard uses, so this works identically on CUDA, ROCm,
+    // Vulkan, OneAPI, and MPS instead of only CUDA.
+    auto* backend = ::tenzor::try_get_backend(device_type_);
+    if (backend == nullptr) {
+        throw std::runtime_error(
+            "DataParallel::parallel_apply: no backend loaded for " +
+            Device{device_type_, 0}.to_string());
+    }
 
     outputs.resize(device_ids_.size());
 
     for (size_t i = 0; i < device_ids_.size(); ++i) {
         // Make device i current so its forward dispatches there, then block
         // until that device's default-stream work completes before moving on.
-        cuda_check(cudaSetDevice(device_ids_[i]), "cudaSetDevice");
+        DeviceGuard guard(Device{device_type_, device_ids_[i]});
         outputs[i] = replicas_[i]->forward(inputs[i]);
-        cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+        backend->synchronize(device_ids_[i]);
     }
 
-    // Reset to master device for the subsequent gather().
-    cuda_check(cudaSetDevice(output_device_), "cudaSetDevice(output)");
-#else
-    // DataParallel requires CUDA for multi-device execution. validate_devices()
-    // (called by both constructors) already throws when CUDA is disabled, so this
-    // branch is unreachable; keep an explicit throw rather than a misleading CPU
-    // "fallback" that falsely implies CPU multi-device support.
-    throw std::runtime_error("DataParallel: CUDA support not enabled");
-#endif
+    // DeviceGuard restores the previously-active device as each guard above
+    // goes out of scope; explicitly (re)select the master device here so the
+    // subsequent gather() dispatches its transfers/cat against it.
+    backend->set_device(output_device_);
 
     return outputs;
 }
@@ -601,11 +620,11 @@ auto DataParallel::gather(const std::vector<Variable>& outputs) -> Variable {
     for (size_t i = 0; i < outputs.size(); ++i) {
         Variable v = outputs[i];
         const auto& dev = v.tensor().device();
-        if (dev.type != Device::Type::CUDA || dev.index != output_device_) {
+        if (dev.type != device_type_ || dev.index != output_device_) {
             // Transfer the underlying tensor to the master device but keep
             // this Variable's grad_fn/requires_grad/hooks intact so the
             // replica's forward graph remains reachable from cat's backward.
-            utils::wrap_preserving_grad(v, v.tensor().cuda(output_device_));
+            utils::wrap_preserving_grad(v, v.tensor().to(Device{device_type_, output_device_}));
         }
         outputs_on_master.push_back(std::move(v));
     }
@@ -706,16 +725,14 @@ auto DataParallel::synchronize_gradients() -> void {
 }
 
 auto DataParallel::validate_devices() -> void {
-#ifdef TENZOR_USE_CUDA
-    int device_count = 0;
-    cudaError_t err = cudaGetDeviceCount(&device_count);
-
-    if (err != cudaSuccess) {
+    auto* backend = ::tenzor::try_get_backend(device_type_);
+    if (backend == nullptr) {
         throw std::runtime_error(
-            "DataParallel: CUDA error - " + std::string(cudaGetErrorString(err))
-        );
+            "DataParallel: no backend loaded for " +
+            Device{device_type_, 0}.to_string());
     }
 
+    int32_t device_count = backend->device_count();
     for (int device_id : device_ids_) {
         if (device_id < 0 || device_id >= device_count) {
             throw std::invalid_argument(
@@ -724,9 +741,6 @@ auto DataParallel::validate_devices() -> void {
             );
         }
     }
-#else
-    throw std::runtime_error("DataParallel: CUDA support not enabled");
-#endif
 }
 
 auto DataParallel::can_split_batch(int64_t batch_size) const -> bool {

@@ -225,6 +225,11 @@ private:
     int output_device_;                        ///< Master GPU device ID
     int dim_;                                  ///< Batch dimension to split
 
+    // Which GPU backend device_ids_/output_device_ index into. Detected once
+    // at construction (see detect_device_type()) rather than assumed to be
+    // CUDA, so DataParallel works uniformly across CUDA/ROCm/Vulkan/OneAPI/MPS.
+    Device::Type device_type_{Device::Type::CUDA};
+
     // Replicated modules (one per device)
     std::vector<std::shared_ptr<Module>> replicas_;
     bool replicas_initialized_{false};
@@ -332,6 +337,19 @@ private:
      * @throws std::runtime_error if CUDA not available or device invalid
      */
     auto validate_devices() -> void;
+
+    /**
+     * @brief Infer which GPU backend device_ids_ refer to.
+     *
+     * Mirrors the convention used by DistributedDataParallel and the ZeRO
+     * optimizer: prefer the device type of the module's own parameters (a
+     * module already resident on ROCm/Vulkan/OneAPI/MPS drives DataParallel
+     * onto that same backend), falling back to whichever GPU backend is
+     * actually loaded, then to CUDA to preserve historical behavior.
+     *
+     * @return The detected backend type.
+     */
+    auto detect_device_type() const -> Device::Type;
 
     /**
      * @brief Validate reduce_op_ against the available reduction path.

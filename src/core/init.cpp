@@ -585,6 +585,62 @@ auto initialize() -> void {
         TENZOR_LOG_INFO("Vulkan backend not found at: {}", vulkan_backend_path.string());
     }
 
+    // Try to load MPS backend if available
+    std::filesystem::path mps_backend_path = bin_path / "tenzor_backend_mps.so";
+
+    if (std::filesystem::exists(mps_backend_path)) {
+        TENZOR_LOG_INFO("Loading MPS backend from: {}", mps_backend_path.string());
+
+        auto mps_result = loader.load_backend(mps_backend_path);
+        if (mps_result) {
+            auto mps_backend_unique = std::move(mps_result.value());
+            auto* mps_backend_ptr = mps_backend_unique.get();
+
+            // Check if MPS is actually available
+            if (mps_backend_ptr->is_available()) {
+                loader.register_backend(mps_backend_ptr->name(), std::move(mps_backend_unique));
+                TENZOR_LOG_INFO("MPS backend registered: {}", mps_backend_ptr->name());
+                TENZOR_LOG_INFO("Found {} MPS device(s)", mps_backend_ptr->device_count());
+
+                auto* mps_backend = mps_backend_ptr;
+
+                // =========================================================================
+                // O(1) DISPATCH TABLE REGISTRATION FOR MPS
+                // =========================================================================
+                DispatchTableRegistry::register_backend(Device::Type::MPS, mps_backend);
+                auto& mps_table = DispatchTableRegistry::get_table(Device::Type::MPS);
+
+                // Use existing library handle (no second dlopen needed)
+                void* mps_handle = loader.last_library_handle();
+                if (mps_handle) {
+                    using RegisterFn = void(*)(BackendDispatchTable*);
+                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(mps_handle, "register_kernels"));
+                    if (register_fn) {
+                        register_fn(&mps_table);
+                        DispatchTableRegistry::mark_ready(Device::Type::MPS);
+                        auto mps_op_count = mps_table.op_count();
+                        TENZOR_LOG_INFO("MPS dispatch table initialized ({} operations registered)", mps_op_count);
+                        if (mps_op_count == 0) {
+                            TENZOR_LOG_WARN("Warning: MPS backend registered 0 operations");
+                        }
+
+                    } else {
+                        TENZOR_LOG_WARN("Warning: Could not find register_kernels in MPS backend");
+                    }
+                } else {
+                    TENZOR_LOG_WARN("Warning: No library handle for MPS backend kernel registration");
+                }
+
+            } else {
+                TENZOR_LOG_INFO("MPS backend loaded but no MPS devices available");
+            }
+        } else {
+            TENZOR_LOG_WARN("Warning: Failed to load MPS backend: {}", mps_result.error());
+        }
+    } else {
+        TENZOR_LOG_INFO("MPS backend not found at: {}", mps_backend_path.string());
+    }
+
     // Now that every backend that intends to register has done so, scan
     // the dispatch tables and report any OpId with zero coverage. This
     // converts late "operation not supported" exceptions into a single
