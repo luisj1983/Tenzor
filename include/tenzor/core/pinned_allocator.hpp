@@ -255,20 +255,25 @@ private:
     auto find_block(void* ptr) -> MemoryBlock*;
 
     /**
-     * @brief Allocate CUDA pinned memory
+     * @brief Allocate GPU-DMA-capable pinned memory (CUDA cudaHostAlloc, ROCm
+     *        hipHostMalloc, or an OS-level mlock/VirtualLock fallback).
      * @param size Size in bytes
+     * @param out_via_rocm Set to true if the allocation used hipHostMalloc
+     *        (ROCm), so free_cuda_pinned() can free it the same way.
      * @return Pointer to allocated memory
      * @throws std::runtime_error on CUDA error
      */
-    auto allocate_cuda_pinned(size_t size) -> void*;
+    auto allocate_cuda_pinned(size_t size, bool& out_via_rocm) -> void*;
 
     /**
-     * @brief Free CUDA pinned memory
+     * @brief Free memory allocated by allocate_cuda_pinned()
      * @param ptr Pointer to free
      * @param size Requested size in bytes used at allocation time (so the full
-     *             locked region can be unlocked on the non-CUDA path)
+     *             locked region can be unlocked on the mlock/VirtualLock path)
+     * @param via_rocm Must match the out_via_rocm value returned by the
+     *        matching allocate_cuda_pinned() call.
      */
-    auto free_cuda_pinned(void* ptr, size_t size) -> void;
+    auto free_cuda_pinned(void* ptr, size_t size, bool via_rocm) -> void;
 
     /**
      * @brief Calculate fragmentation ratio
@@ -286,6 +291,7 @@ private:
         void* base_ptr;                      // Base pointer to pool
         size_t size;                         // Size of this pool
         MemoryBlock* head;                   // Head of free list for this pool
+        bool via_rocm{false};                // true if allocated via hipHostMalloc
     };
     std::vector<PoolRegion> pools_;          // All allocated pools
 

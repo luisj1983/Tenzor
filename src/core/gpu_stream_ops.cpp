@@ -129,15 +129,16 @@ auto mem_get_info(Device device, std::size_t* free_bytes, std::size_t* total_byt
         return cudaMemGetInfo(free_bytes, total_bytes) == cudaSuccess;
     }
 #endif
-    if (device.type == Device::Type::Vulkan || device.type == Device::Type::OneAPI) {
-        // Vulkan/OneAPI have no direct cudaMemGetInfo equivalent reachable from this
-        // header-only core TU without pulling in vendor headers, but both backends
-        // already implement the generic Backend::get_device_info() query (real
-        // hardware-reported total_memory; available_memory is that same backend's own
-        // best-effort free estimate -- Vulkan lacks a portable free-memory query
-        // without the VK_EXT_memory_budget extension, and SYCL has no standard
-        // free-memory query, so each backend reports total_memory as available_memory
-        // there, same as the rest of this codebase's convention for those two
+    if (device.type == Device::Type::Vulkan || device.type == Device::Type::OneAPI ||
+        device.type == Device::Type::MPS) {
+        // Vulkan/OneAPI/MPS have no direct cudaMemGetInfo equivalent reachable from
+        // this header-only core TU without pulling in vendor headers, but all three
+        // backends already implement the generic Backend::get_device_info() query
+        // (real hardware-reported total_memory; available_memory is that same
+        // backend's own best-effort free estimate -- Vulkan lacks a portable
+        // free-memory query without the VK_EXT_memory_budget extension, SYCL has no
+        // standard free-memory query, and MPS/Metal likewise reports total_memory as
+        // available_memory, same as the rest of this codebase's convention for these
         // backends). Route through that instead of a CPU fallback.
         tenzor::Backend* backend = tenzor::try_get_backend(device.type);
         if (backend == nullptr) {

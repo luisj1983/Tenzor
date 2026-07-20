@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <functional>
+#include <optional>
 #include "module.hpp"
 #include "optim/optimizer.hpp"
 #include "amp/autocast.hpp"
@@ -27,8 +28,11 @@ struct MixedPrecisionConfig {
     /// Target dtype for mixed precision (Float16 or BFloat16)
     DType dtype = DType::Float16;
 
-    /// Device type to apply mixed precision (CUDA recommended)
-    Device::Type device_type = Device::Type::CUDA;
+    /// Device type to apply mixed precision to; std::nullopt (default) applies
+    /// autocast to whatever device the model/tensors are actually on (see
+    /// amp::Autocast, whose own nullopt means "any device"). Only set this to
+    /// restrict autocast to one specific device type.
+    std::optional<Device::Type> device_type = std::nullopt;
 
     /// Enable automatic mixed precision
     bool enabled = true;
@@ -51,7 +55,40 @@ struct MixedPrecisionConfig {
     bool use_master_weights = false;
 
     /**
-     * @brief Create default FP16 configuration for CUDA
+     * @brief Create default FP16 configuration, device-agnostic (autocast
+     * applies to whichever device the model/tensors are on).
+     */
+    static auto fp16() -> MixedPrecisionConfig {
+        return MixedPrecisionConfig{
+            DType::Float16,
+            std::nullopt,
+            true,
+            65536.0f,
+            2.0f,
+            0.5f,
+            2000
+        };
+    }
+
+    /**
+     * @brief Create default BFloat16 configuration, device-agnostic.
+     */
+    static auto bfloat16() -> MixedPrecisionConfig {
+        return MixedPrecisionConfig{
+            DType::BFloat16,
+            std::nullopt,
+            true,
+            65536.0f,
+            2.0f,
+            0.5f,
+            2000
+        };
+    }
+
+    /**
+     * @brief Create default FP16 configuration explicitly restricted to CUDA.
+     * Prefer fp16() unless you specifically want autocast to skip non-CUDA
+     * tensors.
      */
     static auto fp16_cuda() -> MixedPrecisionConfig {
         return MixedPrecisionConfig{
@@ -66,7 +103,9 @@ struct MixedPrecisionConfig {
     }
 
     /**
-     * @brief Create BFloat16 configuration for CUDA
+     * @brief Create BFloat16 configuration explicitly restricted to CUDA.
+     * Prefer bfloat16() unless you specifically want autocast to skip
+     * non-CUDA tensors.
      */
     static auto bfloat16_cuda() -> MixedPrecisionConfig {
         return MixedPrecisionConfig{
@@ -81,12 +120,13 @@ struct MixedPrecisionConfig {
     }
 
     /**
-     * @brief Create conservative configuration (slower scale growth)
+     * @brief Create conservative configuration (slower scale growth),
+     * device-agnostic.
      */
     static auto conservative() -> MixedPrecisionConfig {
         return MixedPrecisionConfig{
             DType::Float16,
-            Device::Type::CUDA,
+            std::nullopt,
             true,
             1024.0f,
             1.5f,
@@ -169,7 +209,7 @@ private:
  * };
  *
  * // Create mixed precision trainer
- * auto config = MixedPrecisionConfig::fp16_cuda();
+ * auto config = MixedPrecisionConfig::fp16();
  * MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
  *
  * // Train for 10 epochs
@@ -212,7 +252,7 @@ public:
      * auto loss_fn = [](const Variable& pred, const Variable& target) {
      *     return cross_entropy_loss(pred, target);
      * };
-     * auto config = MixedPrecisionConfig::fp16_cuda();
+     * auto config = MixedPrecisionConfig::fp16();
      * MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
      * @endcode
      */
@@ -221,7 +261,7 @@ public:
         std::shared_ptr<Module> model,
         std::shared_ptr<optim::Optimizer> optimizer,
         LossFn&& loss_fn,
-        const MixedPrecisionConfig& config = MixedPrecisionConfig::fp16_cuda()
+        const MixedPrecisionConfig& config = MixedPrecisionConfig::fp16()
     ) : model_(std::move(model)),
         optimizer_(std::move(optimizer)),
         loss_fn_(std::forward<LossFn>(loss_fn)),
@@ -440,7 +480,7 @@ inline auto create_fp16_trainer(
     std::function<Variable(const Variable&, const Variable&)> loss_fn
 ) -> MixedPrecisionTrainer {
     return MixedPrecisionTrainer(model, optimizer, loss_fn,
-                                  MixedPrecisionConfig::fp16_cuda());
+                                  MixedPrecisionConfig::fp16());
 }
 
 /**
@@ -456,7 +496,7 @@ inline auto create_bfloat16_trainer(
     std::function<Variable(const Variable&, const Variable&)> loss_fn
 ) -> MixedPrecisionTrainer {
     return MixedPrecisionTrainer(model, optimizer, loss_fn,
-                                  MixedPrecisionConfig::bfloat16_cuda());
+                                  MixedPrecisionConfig::bfloat16());
 }
 
 } // namespace nn

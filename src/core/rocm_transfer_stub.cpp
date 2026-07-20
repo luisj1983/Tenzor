@@ -23,5 +23,10 @@ auto stream_wait_event(void*, void*) -> void {}
 auto stream_synchronize(void*) -> void {}
 auto mem_get_info(int, std::size_t*, std::size_t*) -> bool { return false; }
 
+auto host_register(void*, std::size_t) -> bool { return false; }
+auto host_unregister(void*) -> void {}
+auto host_malloc(std::size_t) -> void* { return nullptr; }
+auto host_free(void*) -> void {}
+
 }  // namespace rocm_transfer
 }  // namespace tenzor

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Dict
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -40,13 +40,13 @@ def benchmark_mlp_training_tenzor(
     model = tz.nn.Sequential(*modules)
 
     # Create data and move model to device BEFORE creating optimizer
-    if device == "cuda":
-        x = tz.randn([batch_size, layers[0]]).cuda()
-        y = tz.randn([batch_size, layers[-1]]).cuda()
-        model.cuda()
-    else:
+    if device == "cpu":
         x = tz.randn([batch_size, layers[0]])
         y = tz.randn([batch_size, layers[-1]])
+    else:
+        x = tz.randn([batch_size, layers[0]]).to(device)
+        y = tz.randn([batch_size, layers[-1]]).to(device)
+        model.to(device)
 
     # Create optimizer AFTER model is on the correct device
     optimizer = tz.optim.Adam(model.parameters(), lr=1e-3)
@@ -189,13 +189,13 @@ def benchmark_cnn_training_tenzor(
     )
 
     # Move model to device BEFORE creating optimizer
-    if device == "cuda":
-        x = tz.randn([batch_size, 1, 28, 28]).cuda()
-        y = tz.randn([batch_size, 10]).cuda()
-        model.cuda()
-    else:
+    if device == "cpu":
         x = tz.randn([batch_size, 1, 28, 28])
         y = tz.randn([batch_size, 10])
+    else:
+        x = tz.randn([batch_size, 1, 28, 28]).to(device)
+        y = tz.randn([batch_size, 10]).to(device)
+        model.to(device)
 
     # Create optimizer AFTER model is on the correct device
     optimizer = tz.optim.Adam(model.parameters(), lr=1e-3)
@@ -329,13 +329,13 @@ def benchmark_optimizer_comparison(device: str, config: BenchmarkConfig) -> List
         model = tz.nn.Sequential(*modules)
 
         # Move model to device BEFORE creating optimizer
-        if device == "cuda":
-            x = tz.randn([batch_size, layers[0]]).cuda()
-            y = tz.randn([batch_size, layers[-1]]).cuda()
-            model.cuda()
-        else:
+        if device == "cpu":
             x = tz.randn([batch_size, layers[0]])
             y = tz.randn([batch_size, layers[-1]])
+        else:
+            x = tz.randn([batch_size, layers[0]]).to(device)
+            y = tz.randn([batch_size, layers[-1]]).to(device)
+            model.to(device)
 
         # Create optimizer AFTER model is on the correct device
         optimizer = opt_fn(model.parameters())
@@ -385,48 +385,59 @@ def run_training_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkRes
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+        # PyTorch has no rocm/vulkan/oneapi device type of its own, so the
+        # comparison only ever runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
+
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available, skipping Tenzor benchmarks")
+
+        run_pytorch = config.compare_with_pytorch and pytorch_avail
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}, skipping PyTorch benchmarks")
 
         # MLP training
         print("\n--- MLP Training Benchmarks ---")
-        for mlp_cfg in config.mlp_configs:
-            for batch in [32, 64, 128]:
-                print(f"\n  Tenzor - {mlp_cfg['name']} batch={batch}")
-                tz_result = benchmark_mlp_training_tenzor(mlp_cfg, batch, device, config)
-                all_results.append(tz_result)
-                print_result(tz_result)
+        if tenzor_avail:
+            for mlp_cfg in config.mlp_configs:
+                for batch in [32, 64, 128]:
+                    print(f"\n  Tenzor - {mlp_cfg['name']} batch={batch}")
+                    tz_result = benchmark_mlp_training_tenzor(mlp_cfg, batch, device, config)
+                    all_results.append(tz_result)
+                    print_result(tz_result)
 
-                if config.compare_with_pytorch:
-                    print(f"  PyTorch - {mlp_cfg['name']} batch={batch}")
-                    pt_result = benchmark_mlp_training_pytorch(mlp_cfg, batch, device, config)
-                    if pt_result:
-                        all_results.append(pt_result)
-                        print_result(pt_result, baseline=tz_result)
+                    if run_pytorch:
+                        print(f"  PyTorch - {mlp_cfg['name']} batch={batch}")
+                        pt_result = benchmark_mlp_training_pytorch(mlp_cfg, batch, device, config)
+                        if pt_result:
+                            all_results.append(pt_result)
+                            print_result(pt_result, baseline=tz_result)
 
         # CNN training
         print("\n--- CNN Training Benchmarks ---")
-        for batch in [16, 32, 64]:
-            print(f"\n  Tenzor CNN batch={batch}")
-            tz_cnn = benchmark_cnn_training_tenzor(batch, device, config)
-            all_results.append(tz_cnn)
-            print_result(tz_cnn)
+        if tenzor_avail:
+            for batch in [16, 32, 64]:
+                print(f"\n  Tenzor CNN batch={batch}")
+                tz_cnn = benchmark_cnn_training_tenzor(batch, device, config)
+                all_results.append(tz_cnn)
+                print_result(tz_cnn)
 
-            if config.compare_with_pytorch:
-                print(f"  PyTorch CNN batch={batch}")
-                pt_cnn = benchmark_cnn_training_pytorch(batch, device, config)
-                if pt_cnn:
-                    all_results.append(pt_cnn)
-                    print_result(pt_cnn, baseline=tz_cnn)
+                if run_pytorch:
+                    print(f"  PyTorch CNN batch={batch}")
+                    pt_cnn = benchmark_cnn_training_pytorch(batch, device, config)
+                    if pt_cnn:
+                        all_results.append(pt_cnn)
+                        print_result(pt_cnn, baseline=tz_cnn)
 
         # Optimizer comparison
-        all_results.extend(benchmark_optimizer_comparison(device, config))
+        if tenzor_avail:
+            all_results.extend(benchmark_optimizer_comparison(device, config))
 
     return all_results
 

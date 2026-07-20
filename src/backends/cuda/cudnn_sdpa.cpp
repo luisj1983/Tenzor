@@ -19,7 +19,7 @@
 #include <mutex>
 
 #include "tenzor/core/tensor.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/backend/fused_ops.hpp"
 #include "kernels/cuda_launch_utils.cuh"  // tenzor::cuda::CudaDeviceGuard
 

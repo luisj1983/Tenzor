@@ -16,7 +16,7 @@
 #include <cuda_bf16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "cuda_launch_utils.cuh"
 #include <stdexcept>

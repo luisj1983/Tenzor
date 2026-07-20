@@ -9,15 +9,19 @@ layout(binding = 0) buffer Grad { float64_t grad_data[]; };
 layout(binding = 1) buffer Param { float64_t param_data[]; };
 layout(binding = 2) buffer MomentumBuf { float64_t momentum_buf[]; };
 
+// Hyperparameters are `double` push constants, not `float` — this is the F64
+// kernel; a float32 push constant would cap every downstream float64_t
+// computation to float32 precision regardless of in-shader math (see
+// fused_adam_step_f64.comp for the diagnosis).
 layout(push_constant) uniform PushConstants {
     uint numel;
-    float lr;
-    float momentum;
-    float weight_decay;
-    float dampening;
     uint nesterov;        // 0=off, 1=on
     uint has_momentum;    // 0=no momentum buffer, 1=has momentum
     uint padding;
+    double lr;
+    double momentum;
+    double weight_decay;
+    double dampening;
 } params;
 
 void main() {

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -53,7 +53,7 @@ def benchmark_tenzor_matmul_precision(
 
     results = []
     dtypes = ["float32", "float16"]
-    if device == "cuda":
+    if device != "cpu":
         dtypes.append("bfloat16")
 
     # Skip float16 for large CPU matrices (software emulation is extremely slow)
@@ -67,12 +67,16 @@ def benchmark_tenzor_matmul_precision(
                 continue
 
             try:
-                if device == "cuda":
-                    a = tz.randn([m, k], dtype=dtype).cuda()
-                    b = tz.randn([k, n], dtype=dtype).cuda()
+                # tz.randn requires a tenzor.dtype enum, not a string — this
+                # was broken identically on every backend including CPU
+                # (pre-existing bug found while fixing device handling here).
+                tz_dtype = getattr(tz.dtype, dtype)
+                if device == "cpu":
+                    a = tz.randn([m, k], dtype=tz_dtype)
+                    b = tz.randn([k, n], dtype=tz_dtype)
                 else:
-                    a = tz.randn([m, k], dtype=dtype)
-                    b = tz.randn([k, n], dtype=dtype)
+                    a = tz.randn([m, k], dtype=tz_dtype).to(device)
+                    b = tz.randn([k, n], dtype=tz_dtype).to(device)
 
                 def matmul_fn():
                     return tz.matmul(a, b)
@@ -199,13 +203,20 @@ def benchmark_tenzor_linear_precision(
                 continue
 
             try:
-                linear = tz.nn.Linear(in_feat, out_feat, dtype=dtype)
+                # tz.randn requires a tenzor.dtype enum, not a string, and
+                # nn.Linear's constructor has no dtype kwarg at all (dtype is
+                # set via .to(dtype) like device) — both broken identically
+                # on every backend including CPU (pre-existing bugs found
+                # while fixing device handling here).
+                tz_dtype = getattr(tz.dtype, dtype)
+                linear = tz.nn.Linear(in_feat, out_feat)
+                linear.to(tz_dtype)
 
-                if device == "cuda":
-                    linear.cuda()
-                    x = tz.randn([batch, in_feat], dtype=dtype).cuda()
+                if device == "cpu":
+                    x = tz.randn([batch, in_feat], dtype=tz_dtype)
                 else:
-                    x = tz.randn([batch, in_feat], dtype=dtype)
+                    linear.to(device)
+                    x = tz.randn([batch, in_feat], dtype=tz_dtype).to(device)
 
                 x_var = tz.Variable(x, False)
 
@@ -466,21 +477,28 @@ def run_mixed_precision_benchmarks(config: BenchmarkConfig = None) -> List[Bench
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+        # PyTorch has no rocm/vulkan/oneapi device type of its own, so the
+        # comparison only ever runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
+
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available")
+        run_pytorch = config.compare_with_pytorch and pytorch_avail
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}")
 
         # Matmul precision benchmarks
         print("\n--- Tenzor Matmul (Multi-Precision) ---")
-        tenzor_matmul = benchmark_tenzor_matmul_precision(MATMUL_CONFIGS, device, config)
+        tenzor_matmul = benchmark_tenzor_matmul_precision(MATMUL_CONFIGS, device, config) if tenzor_avail else []
         all_results.extend(tenzor_matmul)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch Matmul (Multi-Precision) ---")
             pytorch_matmul = benchmark_pytorch_matmul_precision(MATMUL_CONFIGS, device, config)
             all_results.extend(pytorch_matmul)
@@ -489,10 +507,10 @@ def run_mixed_precision_benchmarks(config: BenchmarkConfig = None) -> List[Bench
 
         # Linear layer precision
         print("\n--- Tenzor Linear (Multi-Precision) ---")
-        tenzor_linear = benchmark_tenzor_linear_precision(LINEAR_CONFIGS, device, config)
+        tenzor_linear = benchmark_tenzor_linear_precision(LINEAR_CONFIGS, device, config) if tenzor_avail else []
         all_results.extend(tenzor_linear)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch Linear (Multi-Precision) ---")
             pytorch_linear = benchmark_pytorch_linear_precision(LINEAR_CONFIGS, device, config)
             all_results.extend(pytorch_linear)

@@ -187,5 +187,34 @@ auto mem_get_info(int device, std::size_t* free_bytes, std::size_t* total_bytes)
     return hipMemGetInfo(free_bytes, total_bytes) == hipSuccess;
 }
 
+auto host_register(void* ptr, std::size_t size) -> bool {
+    if (ptr == nullptr || size == 0) return false;
+    hipError_t err = hipHostRegister(ptr, size, hipHostRegisterDefault);
+    if (err == hipSuccess) return true;
+    // Clear the error so it doesn't propagate to the next HIP call, mirroring
+    // the CUDA cudaHostRegister failure path in storage.cpp.
+    (void)hipGetLastError();
+    return false;
+}
+
+auto host_unregister(void* ptr) -> void {
+    if (ptr == nullptr) return;
+    (void)hipHostUnregister(ptr);
+}
+
+auto host_malloc(std::size_t size) -> void* {
+    if (size == 0) return nullptr;
+    void* ptr = nullptr;
+    if (hipError_t err = hipHostMalloc(&ptr, size, hipHostMallocPortable); err != hipSuccess) {
+        return nullptr;
+    }
+    return ptr;
+}
+
+auto host_free(void* ptr) -> void {
+    if (ptr == nullptr) return;
+    (void)hipHostFree(ptr);
+}
+
 }  // namespace rocm_transfer
 }  // namespace tenzor

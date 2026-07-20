@@ -999,11 +999,30 @@ auto FusionOptimizer::set_backend(const std::string& backend, bool enable) -> vo
         rocm_enabled_ = enable;
     } else if (backend == "cpu") {
         cpu_enabled_ = enable;
+    } else if (backend == "vulkan") {
+        vulkan_enabled_ = enable;
+    } else if (backend == "oneapi") {
+        oneapi_enabled_ = enable;
+    } else if (backend == "mps") {
+        mps_enabled_ = enable;
     } else if (backend == "all") {
         cuda_enabled_ = enable;
         rocm_enabled_ = enable;
         cpu_enabled_ = enable;
+        vulkan_enabled_ = enable;
+        oneapi_enabled_ = enable;
+        mps_enabled_ = enable;
     }
+}
+
+auto FusionOptimizer::is_backend_enabled(const std::string& backend) const -> bool {
+    if (backend == "cuda") return cuda_enabled_;
+    if (backend == "rocm") return rocm_enabled_;
+    if (backend == "cpu") return cpu_enabled_;
+    if (backend == "vulkan") return vulkan_enabled_;
+    if (backend == "oneapi") return oneapi_enabled_;
+    if (backend == "mps") return mps_enabled_;
+    return true;
 }
 
 auto FusionOptimizer::is_pattern_supported(const std::string& pattern_name) const

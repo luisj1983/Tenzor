@@ -12,19 +12,22 @@ layout(binding = 2) buffer ExpAvg { float64_t exp_avg[]; };          // First mo
 layout(binding = 3) buffer ExpAvgSq { float64_t exp_avg_sq[]; };     // Second moment (v)
 layout(binding = 4) buffer MaxExpAvgSq { float64_t max_exp_avg_sq[]; }; // AMSGrad max(v)
 
+// Hyperparameters are `double` push constants, not `float` — this is the F64
+// kernel; a float32 push constant would cap every downstream float64_t
+// computation to float32 precision regardless of in-shader math (see
+// fused_adam_step_f64.comp for the diagnosis).
 layout(push_constant) uniform PushConstants {
     uint numel;
-    float lr;
-    float beta1;
-    float beta2;
-    float eps;
-    float weight_decay;
-    float bias_correction1;       // 1 - beta1^t
-    float bias_correction2_sqrt;  // sqrt(1 - beta2^t)
     uint decoupled;
     uint amsgrad;
     uint padding0;
-    uint padding1;
+    double lr;
+    double beta1;
+    double beta2;
+    double eps;
+    double weight_decay;
+    double bias_correction1;       // 1 - beta1^t
+    double bias_correction2_sqrt;  // sqrt(1 - beta2^t)
 } params;
 
 void main() {

@@ -1,4 +1,4 @@
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/backend/loader_fwd.hpp"  // is_backend_registry_alive()
 #include <cuda_runtime.h>
 

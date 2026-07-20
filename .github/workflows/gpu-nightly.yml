@@ -36,7 +36,7 @@ jobs:
             -DTENZOR_BUILD_CUDA=ON \
             -DTENZOR_BUILD_ROCM=ON \
             -DTENZOR_BUILD_VULKAN=ON \
-            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_ONEAPI=ON \
             -DTENZOR_BUILD_PYTHON=OFF \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_EXAMPLES=ON
@@ -67,6 +67,10 @@ jobs:
       - name: Run Vulkan parity
         working-directory: build
         run: ctest -R "vulkan|Vulkan" --output-on-failure -j1
+
+      - name: Run OneAPI parity
+        working-directory: build
+        run: ctest -R "oneapi|OneAPI" --output-on-failure -j1
 
       - name: Run cross-backend parity suite
         working-directory: build

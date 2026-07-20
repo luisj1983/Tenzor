@@ -85,9 +85,17 @@ auto AdamAtan2::step_impl() -> void {
         // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
         const Tensor grad_tensor = param.grad().value();
 
-        // Use fused CUDA kernel for CUDA tensors
-        if (param_tensor.device().type == Device::Type::CUDA &&
-            grad_tensor.device().type == Device::Type::CUDA &&
+        // Use fused single-kernel dispatch for CUDA/ROCm/Vulkan/OneAPI (all
+        // share the [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq?]
+        // contract with amsgrad support). MPS's mps_fused_adam_atan2_step
+        // hard-codes a 4-input signature with no amsgrad slot, so it's
+        // intentionally excluded — routing amsgrad=true through it would
+        // silently drop the amsgrad max-tracking; it keeps using the
+        // generic per-op path below (still on-device, not a CPU fallback).
+        if (param_tensor.device().type != Device::Type::CPU &&
+            param_tensor.device().type != Device::Type::MPS &&
+            param_tensor.device().type == grad_tensor.device().type &&
+            is_op_supported(OpId::FusedAdamAtan2Step, param_tensor.device().type) &&
             (param_tensor.dtype() == DType::Float32 || param_tensor.dtype() == DType::Float64)) {
 
             std::vector<Tensor> inputs = {

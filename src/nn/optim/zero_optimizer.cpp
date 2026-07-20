@@ -1903,17 +1903,21 @@ auto ZeROStage1Optimizer::update_partition_adam(
         const Tensor& raw_grad = grad_opt.value();
         Tensor grad = (raw_grad.dtype() != target_dtype) ? raw_grad.to(target_dtype) : raw_grad;
 
-        // Phase B (B1): FusedAdamStep CUDA fast-path. Mirrors src/nn/optim/adam.cpp:30-55.
-        // One kernel instead of ~6 OoP allocations + ops per param. Conditions:
-        //   - target lives on a CUDA device (the fused kernel is CUDA-only today),
-        //   - target dtype is fp32 or fp64 (fused kernel doesn't yet support fp16/bf16),
-        //   - no decoupled weight decay (Adam uses L2 reg via grad mutation, AdamW
-        //     dispatches with Decoupled=true in update_partition_adamw).
+        // Phase B (B1): FusedAdamStep fast-path. Mirrors src/nn/optim/adam.cpp:30-55.
+        // One kernel instead of ~6 OoP allocations + ops per param. FusedAdamStep
+        // is registered on CUDA/ROCm/Vulkan/OneAPI/MPS (not "CUDA-only today" as
+        // this comment used to claim); this Adam variant always dispatches with
+        // amsgrad=false and Decoupled=false (plain L2), which every backend's
+        // kernel — including MPS's simplified one — computes identically, so
+        // MPS is safe to include here (unlike update_partition_adamw below,
+        // which needs Decoupled=true and must exclude MPS). Conditions:
+        //   - target dtype is fp32 or fp64 (fused kernel doesn't yet support fp16/bf16).
         // The master-FP32 + sync-back-to-param logic still wraps this: the fused
         // dispatch updates `target` (which IS partition.master_params[i] when has_master),
         // and the downcast-to-param.tensor() below copies it back to fp16/bf16.
-        if (target.device().type == Device::Type::CUDA &&
-            grad.device().type == Device::Type::CUDA &&
+        if (target.device().type != Device::Type::CPU &&
+            target.device().type == grad.device().type &&
+            is_op_supported(OpId::FusedAdamStep, target.device().type) &&
             (target_dtype == DType::Float32 || target_dtype == DType::Float64)) {
 
             std::vector<Tensor> inputs = {
@@ -2019,10 +2023,16 @@ auto ZeROStage1Optimizer::update_partition_adamw(
         const Tensor& raw_grad = grad_opt.value();
         Tensor grad = (raw_grad.dtype() != target_dtype) ? raw_grad.to(target_dtype) : raw_grad;
 
-        // Phase B (B1): FusedAdamStep CUDA fast-path with Decoupled=true (AdamW path).
-        // See update_partition_adam for full rationale.
-        if (target.device().type == Device::Type::CUDA &&
-            grad.device().type == Device::Type::CUDA &&
+        // Phase B (B1): FusedAdamStep fast-path with Decoupled=true (AdamW path).
+        // See update_partition_adam for full rationale. MPS is intentionally
+        // excluded here (unlike update_partition_adam): its fused kernel
+        // hard-codes plain L2 weight decay with no decoupled option, so
+        // Decoupled=true would silently compute the wrong (non-decoupled)
+        // update on MPS.
+        if (target.device().type != Device::Type::CPU &&
+            target.device().type != Device::Type::MPS &&
+            target.device().type == grad.device().type &&
+            is_op_supported(OpId::FusedAdamStep, target.device().type) &&
             (target_dtype == DType::Float32 || target_dtype == DType::Float64)) {
 
             std::vector<Tensor> inputs = {
@@ -5438,13 +5448,14 @@ auto ZeROStage3Optimizer::check_memory_pressure_locked() -> double {
 
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
     if (param_device.type == Device::Type::CUDA || param_device.type == Device::Type::ROCm ||
-        param_device.type == Device::Type::Vulkan || param_device.type == Device::Type::OneAPI) {
+        param_device.type == Device::Type::Vulkan || param_device.type == Device::Type::OneAPI ||
+        param_device.type == Device::Type::MPS) {
         // Phase C (C7): query the actual device capacity instead of hardcoding 16 GB.
         // On an 80 GB H100 the old 16 GB constant fired the 0.85 threshold at 16% real
         // utilisation; on a 12 GB consumer card it never fired. gpu_stream::mem_get_info
         // dispatches at runtime to cudaMemGetInfo, the isolated-TU ROCm equivalent, or
-        // (for Vulkan/OneAPI) the generic Backend::get_device_info() query, to get the
-        // real (free, total) pair -- all four GPU backends get real pressure-based
+        // (for Vulkan/OneAPI/MPS) the generic Backend::get_device_info() query, to get
+        // the real (free, total) pair -- all five GPU backends get real pressure-based
         // adaptive offload, not just CUDA/ROCm. Falls back to 16 GB only when the
         // runtime call is unavailable or fails.
         size_t free_bytes = 0;

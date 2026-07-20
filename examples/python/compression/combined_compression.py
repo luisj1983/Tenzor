@@ -390,10 +390,8 @@ def main():
     device = tz.Device.cpu()
     if len(sys.argv) > 1:
         backend = sys.argv[1]
-        if backend == "cuda":
-            device = tz.Device.cuda()
-        elif backend == "vulkan":
-            device = tz.Device.vulkan()
+        if backend in ("cuda", "rocm", "vulkan", "oneapi", "mps"):
+            device = getattr(tz.Device, backend)()
 
     print("=" * 50)
     print("  Tenzor Combined Compression")

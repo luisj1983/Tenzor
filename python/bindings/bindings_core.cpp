@@ -414,17 +414,32 @@ void register_core(py::module_& m) {
         return cuda_backend->device_count() > 0;
     }, "Check if CUDA has (or may have) an active driver context — fork() guard for DataLoader");
 
-    // CUDA Graph capture and replay
+    // CUDA/ROCm Graph capture and replay. Named CUDAGraph for backward
+    // compatibility (existing callers construct CUDAGraph(device_id=N) and
+    // get a CUDA graph, unchanged), but it now accepts device_type= to
+    // route to CUDAGraph::create_for() and get a ROCm (HIP) graph instead —
+    // the plain create() this used to call unconditionally always resolved
+    // the CUDA factory regardless of device_type, so CUDAGraph(device_type=
+    // "rocm") previously silently returned a CUDA graph (or nullptr on a
+    // CUDA-less build) instead of a HIP one. Vulkan/OneAPI/MPS have no
+    // graph-capture implementation registered, so those still fail with the
+    // same "not available" error create() already gave for CUDA.
     py::class_<tenzor::CUDAGraph>(m, "CUDAGraph",
-        "Captures a sequence of CUDA operations into a graph for fast replay.\n"
-        "Shapes must be fixed during capture. No host-device sync during capture.")
-        .def(py::init([](int32_t device_id) {
-            auto graph = tenzor::CUDAGraph::create(device_id);
+        "Captures a sequence of GPU operations into a graph for fast replay.\n"
+        "Shapes must be fixed during capture. No host-device sync during capture.\n"
+        "device_type: \"cuda\" (default) or \"rocm\" — the only two backends with\n"
+        "a graph-capture implementation.")
+        .def(py::init([](int32_t device_id, const std::string& device_type) {
+            auto dt = tenzor::Device::from_string(device_type).type;
+            auto graph = tenzor::CUDAGraph::create_for(static_cast<int>(dt), device_id);
             if (!graph) {
-                throw std::runtime_error("CUDA not available or invalid device_id");
+                throw std::runtime_error(
+                    device_type + " graph capture not available (backend not "
+                    "loaded, invalid device_id, or no graph-capture "
+                    "implementation for this backend)");
             }
             return graph;
-        }), py::arg("device_id") = 0)
+        }), py::arg("device_id") = 0, py::arg("device_type") = "cuda")
         // Audit-8 II.10: begin_capture / end_capture / replay are entirely
         // C++/CUDA work that does not touch Python objects — drop the GIL
         // so Python threads (DataLoader workers, DDP comm) can make progress
@@ -466,6 +481,24 @@ void register_core(py::module_& m) {
         PyEvent() = default;
         PyEvent(const std::string& device, int32_t device_id, bool enable_timing) {
             auto& loader = tenzor::backend_registry();
+            if (device.empty()) {
+                // No device requested: auto-detect the first available backend
+                // among the ones Event actually supports, instead of hardcoding
+                // "cuda" (which would silently create a CUDA event on a
+                // ROCm-only or OneAPI-only machine).
+                for (const char* candidate : {"cuda", "rocm", "oneapi"}) {
+                    auto* be = loader.get_backend(candidate);
+                    if (be && be->is_available()) {
+                        handle  = be->create_event(device_id, enable_timing);
+                        backend = be;
+                        return;
+                    }
+                }
+                throw std::runtime_error(
+                    "Event: no available backend among cuda/rocm/oneapi; pass "
+                    "`device=` explicitly if you intended to construct an "
+                    "Event before the relevant backend is loaded/available");
+            }
             auto* be = loader.get_backend(device);
             if (!be || !be->is_available()) {
                 throw std::runtime_error("Backend '" + device + "' is not available");
@@ -515,7 +548,9 @@ void register_core(py::module_& m) {
         "no reliance on Python's ``__del__`` finalizer.")
         .def(py::init([](const std::string& device, int32_t device_id, bool enable_timing) {
             return std::make_unique<PyEvent>(device, device_id, enable_timing);
-        }), py::arg("device") = "cuda", py::arg("device_id") = 0, py::arg("enable_timing") = true)
+        }), py::arg("device") = "", py::arg("device_id") = 0, py::arg("enable_timing") = true,
+            "device: backend name (\"cuda\"/\"rocm\"/\"oneapi\"), or \"\" (default) "
+            "to auto-detect the first available one of those three")
         .def("record", [](PyEvent& self, tenzor::StreamHandle stream) {
             self.backend->record_event(self.handle, stream);
         }, py::arg("stream") = nullptr, "Record event on a stream")
@@ -1253,6 +1288,18 @@ Returns:
         })
         .def_property_readonly("is_cuda", [](const tenzor::Tensor& self) {
             return self.device().type == tenzor::Device::Type::CUDA;
+        })
+        .def_property_readonly("is_rocm", [](const tenzor::Tensor& self) {
+            return self.device().type == tenzor::Device::Type::ROCm;
+        })
+        .def_property_readonly("is_vulkan", [](const tenzor::Tensor& self) {
+            return self.device().type == tenzor::Device::Type::Vulkan;
+        })
+        .def_property_readonly("is_oneapi", [](const tenzor::Tensor& self) {
+            return self.device().type == tenzor::Device::Type::OneAPI;
+        })
+        .def_property_readonly("is_mps", [](const tenzor::Tensor& self) {
+            return self.device().type == tenzor::Device::Type::MPS;
         })
         .def_property_readonly("is_cpu", [](const tenzor::Tensor& self) {
             return self.device().type == tenzor::Device::Type::CPU;
@@ -2578,6 +2625,26 @@ Returns:
              py::gil_scoped_release release;
              return t.cuda(device_id);
              }, py::arg("device_id")=0, "Move tensor to CUDA device")
+        .def("rocm", [](const tenzor::Tensor& t, int32_t device_id) {
+             require_backend_for_device(tenzor::Device::rocm(device_id));
+             py::gil_scoped_release release;
+             return t.rocm(device_id);
+             }, py::arg("device_id")=0, "Move tensor to ROCm device")
+        .def("vulkan", [](const tenzor::Tensor& t, int32_t device_id) {
+             require_backend_for_device(tenzor::Device::vulkan(device_id));
+             py::gil_scoped_release release;
+             return t.vulkan(device_id);
+             }, py::arg("device_id")=0, "Move tensor to Vulkan device")
+        .def("oneapi", [](const tenzor::Tensor& t, int32_t device_id) {
+             require_backend_for_device(tenzor::Device::oneapi(device_id));
+             py::gil_scoped_release release;
+             return t.oneapi(device_id);
+             }, py::arg("device_id")=0, "Move tensor to OneAPI device")
+        .def("mps", [](const tenzor::Tensor& t, int32_t device_id) {
+             require_backend_for_device(tenzor::Device::mps(device_id));
+             py::gil_scoped_release release;
+             return t.mps(device_id);
+             }, py::arg("device_id")=0, "Move tensor to MPS device")
         .def("cpu", [](const tenzor::Tensor& t) {
              return t.cpu();
              }, "Move tensor to CPU",
@@ -5366,6 +5433,18 @@ Returns:
         .def_property_readonly("is_cuda", [](const tenzor::Variable& self) {
             return self.device().type == tenzor::Device::Type::CUDA;
         })
+        .def_property_readonly("is_rocm", [](const tenzor::Variable& self) {
+            return self.device().type == tenzor::Device::Type::ROCm;
+        })
+        .def_property_readonly("is_vulkan", [](const tenzor::Variable& self) {
+            return self.device().type == tenzor::Device::Type::Vulkan;
+        })
+        .def_property_readonly("is_oneapi", [](const tenzor::Variable& self) {
+            return self.device().type == tenzor::Device::Type::OneAPI;
+        })
+        .def_property_readonly("is_mps", [](const tenzor::Variable& self) {
+            return self.device().type == tenzor::Device::Type::MPS;
+        })
         .def_property_readonly("is_cpu", [](const tenzor::Variable& self) {
             return self.device().type == tenzor::Device::Type::CPU;
         })
@@ -5394,6 +5473,30 @@ Returns:
             return tenzor::to_device(self, tenzor::Device::cuda(index));
         }, py::arg("index") = 0,
            "Move to CUDA device (autograd-aware)")
+        .def("rocm", [](const tenzor::Variable& self, int32_t index) {
+            require_backend_for_device(tenzor::Device::rocm(index));
+            py::gil_scoped_release release;
+            return tenzor::to_device(self, tenzor::Device::rocm(index));
+        }, py::arg("index") = 0,
+           "Move to ROCm device (autograd-aware)")
+        .def("vulkan", [](const tenzor::Variable& self, int32_t index) {
+            require_backend_for_device(tenzor::Device::vulkan(index));
+            py::gil_scoped_release release;
+            return tenzor::to_device(self, tenzor::Device::vulkan(index));
+        }, py::arg("index") = 0,
+           "Move to Vulkan device (autograd-aware)")
+        .def("oneapi", [](const tenzor::Variable& self, int32_t index) {
+            require_backend_for_device(tenzor::Device::oneapi(index));
+            py::gil_scoped_release release;
+            return tenzor::to_device(self, tenzor::Device::oneapi(index));
+        }, py::arg("index") = 0,
+           "Move to OneAPI device (autograd-aware)")
+        .def("mps", [](const tenzor::Variable& self, int32_t index) {
+            require_backend_for_device(tenzor::Device::mps(index));
+            py::gil_scoped_release release;
+            return tenzor::to_device(self, tenzor::Device::mps(index));
+        }, py::arg("index") = 0,
+           "Move to MPS device (autograd-aware)")
         .def("cpu", [](const tenzor::Variable& self) {
             return tenzor::to_device(self, tenzor::Device::cpu());
         }, py::call_guard<py::gil_scoped_release>(),

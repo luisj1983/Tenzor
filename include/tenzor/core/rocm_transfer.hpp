@@ -74,5 +74,28 @@ auto stream_synchronize(void* stream) -> void;
 /// when ROCm is unavailable (outputs left untouched).
 auto mem_get_info(int device, std::size_t* free_bytes, std::size_t* total_bytes) -> bool;
 
+// ---------------------------------------------------------------------------
+// Pinned (page-locked) host memory. Mirrors cudaHostRegister/cudaHostAlloc so
+// ROCm gets the same DMA-accelerated transfer path CUDA already has (see
+// findings.txt — pinned memory used to be CUDA-only, silently no-opping on
+// ROCm). Backed by real hipHostRegister/hipHostAlloc calls in
+// rocm_transfer.hip.cpp, reached through this HIP-type-free header.
+// ---------------------------------------------------------------------------
+
+/// Page-lock an existing host allocation (hipHostRegister). Returns false on
+/// failure or when ROCm is unavailable.
+auto host_register(void* ptr, std::size_t size) -> bool;
+
+/// Unregister a pointer previously passed to host_register(). Safe to call
+/// with nullptr (no-op).
+auto host_unregister(void* ptr) -> void;
+
+/// Allocate page-locked host memory (hipHostMalloc, portable across devices).
+/// Returns nullptr on failure or when ROCm is unavailable.
+auto host_malloc(std::size_t size) -> void*;
+
+/// Free memory allocated by host_malloc(). Safe to call with nullptr (no-op).
+auto host_free(void* ptr) -> void;
+
 }  // namespace rocm_transfer
 }  // namespace tenzor

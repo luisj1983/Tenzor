@@ -247,6 +247,13 @@ jobs:
   # obviously-broken GPU backend fails within ~30 min instead of waiting for
   # the full parity sweep (gpu-parity).
   #
+  # ROCm/OneAPI are intentionally NOT in this fast tier (unlike gpu-parity
+  # below, which builds and tests all four) — this is a deliberate scope
+  # tradeoff to keep the smoke job's ~30 min budget, not an oversight. They
+  # still get every-PR coverage from gpu-parity (fast tier) plus the nightly
+  # full sweep; only the "fails within 30 min instead of ~1-2 hr" fast signal
+  # is CUDA/Vulkan-only.
+  #
   # NOTE: this used to share the `gpu-tests` job key with the full parity job
   # below — a YAML duplicate-key collision where one silently shadowed the
   # other. They are now distinct jobs (gpu-smoke + gpu-parity) so both run.
@@ -911,6 +918,18 @@ jobs:
           TENZOR_REQUIRE_MULTI_BACKEND: '1'
         run: ctest -R "rocm|Rocm|hip|Hip" --output-on-failure -j1
 
+      - name: Run Vulkan backend tests
+        working-directory: build
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
+        run: ctest -R "vulkan|Vulkan" --output-on-failure -j1
+
+      - name: Run OneAPI backend tests
+        working-directory: build
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
+        run: ctest -R "oneapi|OneAPI" --output-on-failure -j1
+
       # ---- Performance regression gate (enforced on the self-hosted host) -
       # The host has a committed baseline entry in
       # tests/backend_parity/baselines/perf_baseline.json, so enforcement
@@ -960,6 +979,82 @@ jobs:
 
       - name: Compile CUDA backend
         run: ninja -C build tenzor_backend_cuda
+        timeout-minutes: 15
+
+  # =========================================================================
+  # ROCm/OneAPI Compile Checks: mirror gpu-compile-check above for the other
+  # two GPU backends (no GPU hardware needed, just the toolchain) — before
+  # this, only CUDA got a guaranteed-to-run, GitHub-hosted compile check on
+  # every PR; ROCm/OneAPI compilation was only ever verified by gpu-smoke/
+  # gpu-parity, both gated on the self-hosted GPU runner (see the top-of-file
+  # note — pending registration). These installer steps are standard vendor
+  # apt-repo setup but unverified in this environment (no way to trigger a
+  # live Actions run from here) — check the first CI run of each carefully.
+  # =========================================================================
+  rocm-compile-check:
+    name: ROCm Compile Check
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ROCm toolchain
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key | \
+            gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest jammy main" | \
+            sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get update
+          sudo apt-get install -y rocm-hip-sdk ninja-build libopenblas-dev
+
+      - name: Configure with ROCm
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=ON \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_TESTS=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF
+
+      - name: Compile ROCm backend
+        run: ninja -C build tenzor_backend_rocm
+        timeout-minutes: 15
+
+  oneapi-compile-check:
+    name: OneAPI Compile Check
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OneAPI toolchain
+        run: |
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | \
+            gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | \
+            sudo tee /etc/apt/sources.list.d/oneAPI.list
+          sudo apt-get update
+          sudo apt-get install -y intel-oneapi-compiler-dpcpp-cpp ninja-build libopenblas-dev
+
+      - name: Configure with OneAPI
+        run: |
+          source /opt/intel/oneapi/setvars.sh
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_ONEAPI=ON \
+            -DTENZOR_BUILD_TESTS=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF
+
+      - name: Compile OneAPI backend
+        run: |
+          source /opt/intel/oneapi/setvars.sh
+          ninja -C build tenzor_backend_oneapi
         timeout-minutes: 15
 
   # =========================================================================

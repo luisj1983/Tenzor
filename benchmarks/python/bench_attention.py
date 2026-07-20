@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -83,11 +83,11 @@ def benchmark_tenzor_attention(
             mha.eval()  # Set to inference mode for fused kernel optimization
 
             # Create input and move model to device
-            if device == "cuda":
-                mha.cuda()  # Move model weights to GPU
-                x = tz.randn([batch, seq_len, embed_dim]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, seq_len, embed_dim])
+            else:
+                mha.to(device)  # Move model weights to GPU
+                x = tz.randn([batch, seq_len, embed_dim]).to(device)
 
             x_var = tz.Variable(x, False)
 
@@ -208,14 +208,14 @@ def benchmark_scaled_dot_product_tenzor(
 
     for batch, heads, seq_q, seq_kv, head_dim, name in configs:
         try:
-            if device == "cuda":
-                q = tz.randn([batch, heads, seq_q, head_dim]).cuda()
-                k = tz.randn([batch, heads, seq_kv, head_dim]).cuda()
-                v = tz.randn([batch, heads, seq_kv, head_dim]).cuda()
-            else:
+            if device == "cpu":
                 q = tz.randn([batch, heads, seq_q, head_dim])
                 k = tz.randn([batch, heads, seq_kv, head_dim])
                 v = tz.randn([batch, heads, seq_kv, head_dim])
+            else:
+                q = tz.randn([batch, heads, seq_q, head_dim]).to(device)
+                k = tz.randn([batch, heads, seq_kv, head_dim]).to(device)
+                v = tz.randn([batch, heads, seq_kv, head_dim]).to(device)
 
             scale = 1.0 / (head_dim ** 0.5)
 
@@ -344,41 +344,45 @@ def run_attention_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkRe
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        # Check CUDA availability for both frameworks
-        if device == "cuda":
-            tenzor_cuda = check_tenzor_cuda_available()
-            pytorch_cuda = check_pytorch_cuda_available()
+        # Check availability for both frameworks. PyTorch has no rocm/vulkan/
+        # oneapi device type of its own (a ROCm PyTorch build still uses
+        # "cuda" as its device string), so the PyTorch comparison only ever
+        # runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
 
-            if not tenzor_cuda and not pytorch_cuda:
-                print("CUDA not available for either framework, skipping...")
-                continue
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
 
-            if not tenzor_cuda:
-                print("  [WARNING] Tenzor CUDA not available")
-            if not pytorch_cuda and config.compare_with_pytorch:
-                print("  [WARNING] PyTorch CUDA not available")
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available")
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}")
 
         # Clear GPU memory before starting
-        if device == "cuda":
+        if device != "cpu":
             clear_gpu_memory()
 
         # Multi-head attention benchmarks
         print("\n--- Tenzor Multi-Head Attention ---")
-        if device != "cuda" or check_tenzor_cuda_available():
+        if tenzor_avail:
             tenzor_mha = benchmark_tenzor_attention(ATTENTION_CONFIGS, device, config)
             all_results.extend(tenzor_mha)
         else:
             tenzor_mha = []
-            print("  [SKIP] Tenzor CUDA not available")
+            print(f"  [SKIP] Tenzor {device} not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Multi-Head Attention ---")
-            if device != "cuda" or check_pytorch_cuda_available():
+            if pytorch_avail:
                 pytorch_mha = benchmark_pytorch_attention(ATTENTION_CONFIGS, device, config)
                 all_results.extend(pytorch_mha)
             else:
                 pytorch_mha = []
-                print("  [SKIP] PyTorch CUDA not available")
+                print(f"  [SKIP] PyTorch {device} not available")
 
             # Print comparison (only if both have results)
             if tenzor_mha and pytorch_mha:
@@ -395,21 +399,21 @@ def run_attention_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkRe
 
         # Scaled dot-product attention benchmarks
         print("\n--- Tenzor Scaled Dot-Product Attention ---")
-        if device != "cuda" or check_tenzor_cuda_available():
+        if tenzor_avail:
             tenzor_sdp = benchmark_scaled_dot_product_tenzor(device, config)
             all_results.extend(tenzor_sdp)
         else:
             tenzor_sdp = []
-            print("  [SKIP] Tenzor CUDA not available")
+            print(f"  [SKIP] Tenzor {device} not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Scaled Dot-Product Attention ---")
-            if device != "cuda" or check_pytorch_cuda_available():
+            if pytorch_avail:
                 pytorch_sdp = benchmark_scaled_dot_product_pytorch(device, config)
                 all_results.extend(pytorch_sdp)
             else:
                 pytorch_sdp = []
-                print("  [SKIP] PyTorch CUDA not available")
+                print(f"  [SKIP] PyTorch {device} not available")
 
             # Print comparison (only if both have results)
             if tenzor_sdp and pytorch_sdp:

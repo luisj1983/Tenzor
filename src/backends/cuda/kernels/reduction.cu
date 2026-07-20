@@ -1,5 +1,5 @@
 #include "tenzor/core/tensor.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include <cuda_runtime.h>

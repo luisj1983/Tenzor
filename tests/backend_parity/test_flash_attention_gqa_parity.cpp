@@ -143,7 +143,7 @@ TEST_F(FlashAttentionGqaParity, DirectGqaCallAgreesAcrossBackends) {
     Tensor reference;
     std::string reference_backend;
     std::vector<Device> devices = {Device::cpu(), Device::cuda(0), Device::rocm(0),
-                                    Device::vulkan(0), Device::oneapi(0)};
+                                    Device::vulkan(0), Device::oneapi(0), Device::mps(0)};
     std::vector<std::pair<std::string, Tensor>> results;
 
     for (const auto& dev : devices) {
@@ -301,6 +301,11 @@ TEST_F(FlashAttentionGqaParity, DropoutTrainingGqaDoesNotThrowAndAgreesAcrossBac
     attrs.set(AttrKey::IsTraining, true);
     attrs.set(AttrKey::Seed, static_cast<int64_t>(0x5EED));
 
+    // MPS intentionally excluded here (unlike the other GQA FlashAttention
+    // tests in this file): this cross-check compares bitwise-identical RNG
+    // output under the shared Philox dropout convention, and the MPS backend
+    // has no Philox implementation (uses Metal's own RNG), so including it
+    // would fail on a real implementation difference, not a bug.
     std::vector<Device> devices = {Device::cuda(0), Device::rocm(0),
                                     Device::oneapi(0), Device::vulkan(0)};
     std::vector<std::pair<std::string, Tensor>> results;

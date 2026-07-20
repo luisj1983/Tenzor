@@ -12,19 +12,23 @@ layout(binding = 2) buffer ExpAvg { float64_t exp_avg[]; };          // First mo
 layout(binding = 3) buffer ExpAvgSq { float64_t exp_avg_sq[]; };     // Second moment (v)
 layout(binding = 4) buffer MaxExpAvgSq { float64_t max_exp_avg_sq[]; }; // AMSGrad max(v)
 
+// Scalar hyperparameters are pushed as `double`, not `float`: this is the F64
+// kernel, and a float32 push constant would silently cap every downstream
+// float64_t computation to float32 precision no matter how the in-shader math
+// is refined — this was found to be the actual source of a ~float32-ULP
+// trajectory drift vs. CUDA/ROCm/OneAPI in ZeRO Adam multi-step tests.
 layout(push_constant) uniform PushConstants {
     uint numel;
-    float lr;
-    float beta1;
-    float beta2;
-    float eps;
-    float weight_decay;
-    float bias_correction1;  // 1 - beta1^t (precomputed on host)
-    float bias_correction2_sqrt;  // sqrt(1 - beta2^t) (precomputed on host)
     uint decoupled;          // 0=L2, 1=decoupled (AdamW)
     uint amsgrad;            // 0=off, 1=on
     uint padding0;
-    uint padding1;
+    double lr;
+    double beta1;
+    double beta2;
+    double eps;
+    double weight_decay;
+    double bias_correction1;  // 1 - beta1^t (precomputed on host)
+    double bias_correction2_sqrt;  // sqrt(1 - beta2^t) (precomputed on host)
 } params;
 
 void main() {
@@ -76,12 +80,23 @@ void main() {
     // Vulkan). GLSL sqrt isn't overloaded for float64_t in the base spec, so
     // we Newton-Raphson refine a float-precision initial guess in F64:
     //   inv = 1 / sqrt(float(x));                    # float-precision guess
-    //   inv = inv * (1.5 - 0.5 * x * inv * inv);     # one F64 NR iteration
-    // The single iteration adds ~24 bits of precision (doubles each step), so
-    // the result is accurate to ~48 bits of mantissa — well within F64's 52.
-    // Two iterations would saturate at ~52 bits but are usually overkill.
-    float64_t denom_v_d = denom_v;
+    //   inv = inv * (1.5 - 0.5 * x * inv * inv);     # F64 NR iteration
+    // Each iteration doubles the correct bits (~24-bit guess -> ~48 after one
+    // iteration -> saturates at F64's ~52-bit mantissa after two), so two
+    // iterations are applied to reach full double precision. One iteration
+    // measurably deviated from CUDA/ROCm/OneAPI's true-F64 trajectories in
+    // ZeRO Adam multi-step tests (~2.4e-7 drift after a few steps).
+    // Clamp away from exact zero before the reciprocal-sqrt: denom_v is 0
+    // whenever every gradient seen so far for this element is exactly 0 (a
+    // dead ReLU unit is the common case), and 1/sqrt(0) = inf, then the
+    // Newton-Raphson refinement below computes 0 * inf = NaN, silently
+    // poisoning the parameter on the very first optimizer step. 1e-30
+    // survives the float32 downcast (min normal float32 ~1.18e-38) so the
+    // reciprocal stays finite; it's many orders below any real eps (~1e-8),
+    // so this has no effect on real (non-zero) values.
+    float64_t denom_v_d = max(denom_v, float64_t(1e-30));
     float64_t inv_sqrt = float64_t(1.0) / float64_t(sqrt(float(denom_v_d)));
+    inv_sqrt = inv_sqrt * (float64_t(1.5) - float64_t(0.5) * denom_v_d * inv_sqrt * inv_sqrt);
     inv_sqrt = inv_sqrt * (float64_t(1.5) - float64_t(0.5) * denom_v_d * inv_sqrt * inv_sqrt);
     float64_t sqrt_denom = denom_v_d * inv_sqrt;  // x * (1/sqrt(x)) = sqrt(x), refined
     float64_t denom_d = sqrt_denom / bc2s_d + eps_d;

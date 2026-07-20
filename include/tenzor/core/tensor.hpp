@@ -600,6 +600,34 @@ public:
     auto cuda(int32_t device_id = 0) const -> Tensor;
 
     /**
+     * @brief Move tensor to a ROCm (HIP) device.
+     * @param device_id GPU device index (default: 0)
+     * @return New tensor on the ROCm device
+     */
+    auto rocm(int32_t device_id = 0) const -> Tensor;
+
+    /**
+     * @brief Move tensor to a Vulkan device.
+     * @param device_id GPU device index (default: 0)
+     * @return New tensor on the Vulkan device
+     */
+    auto vulkan(int32_t device_id = 0) const -> Tensor;
+
+    /**
+     * @brief Move tensor to a OneAPI (SYCL) device.
+     * @param device_id GPU device index (default: 0)
+     * @return New tensor on the OneAPI device
+     */
+    auto oneapi(int32_t device_id = 0) const -> Tensor;
+
+    /**
+     * @brief Move tensor to an Apple MPS device.
+     * @param device_id GPU device index (default: 0)
+     * @return New tensor on the MPS device
+     */
+    auto mps(int32_t device_id = 0) const -> Tensor;
+
+    /**
      * @brief Move tensor to CPU.
      *
      * @return New tensor on CPU

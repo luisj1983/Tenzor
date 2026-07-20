@@ -152,8 +152,8 @@ public:
     auto size_bytes() const -> size_t override { return size_; }
     auto device() const -> Device override { return device_; }
 
-    // Pinned-memory support. Only effective for CPU storage when the
-    // build has CUDA available; see storage.cpp for the implementation.
+    // Pinned-memory support. Only effective for CPU storage when the build
+    // has CUDA and/or ROCm available; see storage.cpp for the implementation.
     auto is_pinned() const -> bool override { return pinned_; }
     auto pin() -> bool override;
 
@@ -162,6 +162,7 @@ private:
     size_t size_{0};                              ///< Size in bytes
     Device device_;                               ///< Device specification
     bool pinned_{false};                          ///< CPU storage has been page-locked
+    bool pinned_via_rocm_{false};                 ///< true if pinned via hipHostRegister (vs cudaHostRegister)
 };
 
 /**

@@ -136,9 +136,20 @@ auto Adam::step_impl() -> void {
         const Tensor grad = param.grad().value();
         HP hp = resolve(i);
 
-        // ── CUDA path: fused single-kernel dispatch ──────────────────────────
-        if (param.tensor().device().type == Device::Type::CUDA &&
-            grad.device().type == Device::Type::CUDA &&
+        // ── Fused single-kernel dispatch: CUDA/ROCm/Vulkan/OneAPI all share
+        // the same [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq?]
+        // contract with full amsgrad/decoupled(AdamW) support, so they take
+        // this path. MPS's kernel (mps_fused_adam_step) hard-codes plain Adam
+        // math with no amsgrad or decoupled-weight-decay support, so it's
+        // intentionally excluded — routing amsgrad=true or AdamW's
+        // Decoupled=true through it would silently compute the wrong update.
+        // It keeps using the generic per-op path below (still runs entirely
+        // on the MPS device, not a CPU fallback). CPU also keeps its
+        // existing per-op path unchanged. ─────────────
+        if (param.tensor().device().type != Device::Type::CPU &&
+            param.tensor().device().type != Device::Type::MPS &&
+            param.tensor().device().type == grad.device().type &&
+            is_op_supported(OpId::FusedAdamStep, param.tensor().device().type) &&
             (param.tensor().dtype() == DType::Float32 || param.tensor().dtype() == DType::Float64)) {
 
             std::vector<Tensor> inputs = {
@@ -617,9 +628,18 @@ auto AdamW::step_impl() -> void {
         // Dangling-reference fix: grad() returns optional<Tensor> by value; bind by value, not reference.
         const Tensor grad = param.grad().value();
 
-        // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
-        if (param.tensor().device().type == Device::Type::CUDA &&
-            grad.device().type == Device::Type::CUDA &&
+        // Use fused single-kernel dispatch for CUDA/ROCm/Vulkan/OneAPI (single
+        // kernel vs ~15 kernels; all share the amsgrad/decoupled-capable
+        // contract). MPS is intentionally excluded — its kernel hard-codes
+        // plain Adam math with no decoupled-weight-decay support, so routing
+        // AdamW's Decoupled=true through it would silently compute plain L2
+        // weight decay instead (wrong update); it keeps using the generic
+        // per-op path below (still on-device, not a CPU fallback). CPU also
+        // keeps its existing per-op path unchanged.
+        if (param.tensor().device().type != Device::Type::CPU &&
+            param.tensor().device().type != Device::Type::MPS &&
+            param.tensor().device().type == grad.device().type &&
+            is_op_supported(OpId::FusedAdamStep, param.tensor().device().type) &&
             (param.tensor().dtype() == DType::Float32 || param.tensor().dtype() == DType::Float64)) {
 
             // Prepare inputs for dispatch

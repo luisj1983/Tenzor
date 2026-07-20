@@ -603,13 +603,31 @@ Block* RocmCachingAllocator::try_allocate_from_cache(size_t size, int device, hi
         // stream could overwrite data the old stream's kernels are still
         // reading/writing (cross-stream use-after-free). Same-stream events need
         // no wait: in-stream ordering already serializes the reuse, so the
-        // single-stream fast path inserts zero synchronization. Consumed events
-        // are recycled for re-recording.
+        // single-stream fast path inserts zero synchronization.
+        //
+        // A pending event that is still in flight on another stream must NOT
+        // be dropped here if the block goes on to be split below: the
+        // remainder block covers memory that was part of the same freed
+        // region, so it can still be touched by that other stream's
+        // in-flight work. Unconditionally recycling every pending event
+        // (as this used to do) silently lost that gating for the remainder —
+        // a real cross-stream use-after-free/race once the remainder was
+        // handed to a third stream with no memory barrier against the
+        // original freeing stream's still-in-flight work. Mirrors the CUDA
+        // reference allocator's carried-event handoff
+        // (cuda_caching_allocator.cpp try_allocate_from_cache).
+        std::vector<std::pair<hipStream_t, hipEvent_t>> carried;
         for (auto& pe : block->pending_events) {
-            if (pe.first != stream && pe.second != nullptr) {
-                (void)hipStreamWaitEvent(stream, pe.second, 0);
+            if (pe.first == stream) {
+                recycle_event(device_alloc.event_pool, pe.second);      // same stream: ordered
+            } else if (pe.second != nullptr && hipEventQuery(pe.second) == hipSuccess) {
+                recycle_event(device_alloc.event_pool, pe.second);      // already complete
+            } else {
+                if (pe.second != nullptr) {
+                    (void)hipStreamWaitEvent(stream, pe.second, 0);     // gate the new stream
+                }
+                carried.push_back(pe);                                  // keep for the remainder
             }
-            recycle_event(device_alloc.event_pool, pe.second);
         }
         block->pending_events.clear();
         // The block now belongs to the requesting stream (keeps stream_blocks
@@ -617,8 +635,34 @@ Block* RocmCachingAllocator::try_allocate_from_cache(size_t size, int device, hi
         block->stream = stream;
 
         // Try to split if block is too large
+        bool did_split = false;
         if (block->size >= size + min_split_size_) {
-            split_block(block, size);
+            did_split = split_block(block, size);
+        }
+
+        if (did_split && !carried.empty()) {
+            // The returned portion is used on `stream` and is already gated by
+            // the waits issued above. The remainder went back to the free pool
+            // still covering the in-flight range, so hand the unfinished events
+            // to it for correct future cross-stream gating.
+            void* rem_ptr = static_cast<char*>(block->ptr) + block->size;
+            auto rem_it = device_alloc.blocks_by_addr.find(rem_ptr);
+            if (rem_it != device_alloc.blocks_by_addr.end()) {
+                Block* remainder = rem_it->second;
+                for (const auto& e : carried) {
+                    remainder->pending_events.push_back(e);
+                }
+            } else {
+                for (const auto& e : carried) {
+                    recycle_event(device_alloc.event_pool, e.second);
+                }
+            }
+        } else {
+            // No remainder: the returned block already waited on `stream`, so
+            // the still-pending events are no longer needed — recycle them.
+            for (const auto& e : carried) {
+                recycle_event(device_alloc.event_pool, e.second);
+            }
         }
 
         return block;

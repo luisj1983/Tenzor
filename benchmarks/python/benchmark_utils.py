@@ -24,47 +24,42 @@ import subprocess
 
 
 # =============================================================================
-# CUDA Synchronization Helpers
+# Device Synchronization / Availability Helpers
+#
+# Tenzor's Python API doesn't expose a per-backend synchronize() (only a
+# generic, already-device-agnostic empty_cache() and is_backend_available()),
+# so unlike PyTorch (CUDA-only sync API) there's no separate "cuda" special
+# case needed on the Tenzor side beyond what check_tenzor_device_available
+# already does. GPU timings for tenzor ops rely on the fact that its ops
+# execute synchronously from Python's perspective; if a real async/stream API
+# is added later, wire it in here for all backends, not just CUDA.
 # =============================================================================
 
 def get_tenzor_sync_fn(device: str) -> Optional[Callable]:
-    """Get the appropriate synchronization function for Tenzor CUDA operations.
+    """Get the appropriate synchronization function for Tenzor GPU operations.
 
-    Returns None for CPU, or a sync function for CUDA.
-    For CUDA, falls back to PyTorch's sync if Tenzor doesn't expose one,
-    since they typically share the same CUDA context.
+    Returns None for CPU. Tenzor's Python bindings don't expose a per-device
+    synchronize() for any backend (CUDA included) — ops execute synchronously
+    from Python's perspective, so there's nothing to wait on here. This
+    previously special-cased "cuda" and fell back to torch.cuda.synchronize(),
+    which does nothing useful for tenzor's own (non-shared) CUDA context and
+    silently did nothing at all for rocm/vulkan/oneapi.
     """
-    if device != "cuda":
+    if device == "cpu":
         return None
-
-    try:
-        import tenzor as tz
-        # Try different possible sync methods Tenzor might have
-        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'synchronize'):
-            return tz.cuda.synchronize
-        elif hasattr(tz, 'synchronize'):
-            return tz.synchronize
-        elif hasattr(tz, 'sync'):
-            return tz.sync
-    except ImportError:
-        pass
-
-    # Fallback: use PyTorch's sync if available (they share CUDA context)
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return torch.cuda.synchronize
-    except ImportError:
-        pass
-
-    # Last resort: warn that timing may be inaccurate
-    print("  [WARNING] No CUDA sync function found for Tenzor. GPU timings may be inaccurate.")
     return None
 
 
 def get_pytorch_sync_fn(device: str) -> Optional[Callable]:
-    """Get the appropriate synchronization function for PyTorch CUDA operations."""
-    if device != "cuda":
+    """Get the appropriate synchronization function for PyTorch operations.
+
+    PyTorch's own API is CUDA-only (torch.cuda.synchronize) — this is not a
+    tenzor device-hardcoding issue, just what PyTorch itself exposes. Note
+    that ROCm PyTorch builds report torch.version.hip and still use the
+    torch.cuda.* namespace, so "cuda" here also covers a ROCm-PyTorch build
+    when device == "rocm" is being compared against it.
+    """
+    if device not in ("cuda", "rocm"):
         return None
 
     try:
@@ -76,28 +71,24 @@ def get_pytorch_sync_fn(device: str) -> Optional[Callable]:
     return None
 
 
-def check_tenzor_cuda_available() -> bool:
-    """Check if Tenzor has CUDA support available."""
+def check_tenzor_device_available(device: str) -> bool:
+    """Check if Tenzor has the given backend available (cpu/cuda/rocm/vulkan/oneapi)."""
+    if device == "cpu":
+        return True
     try:
         import tenzor as tz
-        tz.initialize()  # Ensure backends are loaded before checking CUDA
-        # Try different possible ways Tenzor might expose CUDA availability
-        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'is_available'):
-            return tz.cuda.is_available()
-        elif hasattr(tz, 'is_cuda_available'):
-            return tz.is_cuda_available()
-        elif hasattr(tz, 'cuda_available'):
-            return tz.cuda_available()
-        else:
-            # Try to create a CUDA tensor as a test
-            try:
-                test = tz.randn([2, 2]).cuda()
-                del test
-                return True
-            except Exception:
-                return False
+        tz.initialize()
+        return tz.is_backend_available(device)
     except ImportError:
         return False
+    except Exception:
+        return False
+
+
+def check_tenzor_cuda_available() -> bool:
+    """Check if Tenzor has CUDA support available. Kept for existing callers;
+    prefer check_tenzor_device_available(device) for any backend."""
+    return check_tenzor_device_available("cuda")
 
 
 def check_pytorch_cuda_available() -> bool:
@@ -110,10 +101,10 @@ def check_pytorch_cuda_available() -> bool:
 
 
 def clear_gpu_memory():
-    """Clear GPU memory caches for both frameworks."""
+    """Clear GPU memory caches for both frameworks, across all backends."""
     gc.collect()
 
-    # Clear PyTorch cache
+    # Clear PyTorch cache (CUDA-only API — see get_pytorch_sync_fn note)
     try:
         import torch
         if torch.cuda.is_available():
@@ -122,13 +113,15 @@ def clear_gpu_memory():
     except ImportError:
         pass
 
-    # Clear Tenzor cache if available
+    # Clear Tenzor cache. empty_cache() is already backend-generic (releases
+    # cached memory on whichever devices are active), unlike the old
+    # tz.cuda.empty_cache()/tz.cuda.synchronize() lookup this replaces, which
+    # only ever found anything on a CUDA build and left ROCm/Vulkan/OneAPI
+    # memory pools never cleared between benchmark runs.
     try:
         import tenzor as tz
-        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'empty_cache'):
-            tz.cuda.empty_cache()
-        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'synchronize'):
-            tz.cuda.synchronize()
+        if hasattr(tz, 'empty_cache'):
+            tz.empty_cache()
     except ImportError:
         pass
 

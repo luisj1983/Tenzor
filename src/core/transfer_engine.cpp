@@ -254,10 +254,15 @@ TransferState::~TransferState() {
     //
     // ROCm async path (HIP-isolated): wait for the DMA, then release the event.
     // No-op if wait() already finalized it (nulls rocm_event) or on non-ROCm
-    // builds (stub). Must precede freeing `source`/`result` below.
+    // builds (stub). Must precede freeing `source`/`result` below. The pinned
+    // D2H path may have a pending pinned->dst host copy that no wait()/
+    // is_ready() ever ran — finalize it now (the DMA has just synced above)
+    // so any holder of `result` sees the transferred bytes, and before
+    // `pinned_buffer` is returned to the pool for reuse below.
     if (rocm_event != nullptr) {
         tenzor::rocm_transfer::event_sync(rocm_event);
         rocm_event = nullptr;
+        finalize_deferred_copy();
     }
 #ifdef TENZOR_USE_ONEAPI
     if (has_sycl_event) {
@@ -334,6 +339,10 @@ auto TransferHandle::is_ready() const -> bool {
     // ROCm async path (HIP-isolated): non-blocking completion query.
     if (state_->rocm_event != nullptr) {
         if (tenzor::rocm_transfer::event_ready(state_->rocm_event)) {
+            // Event signalled => device->pinned DMA done (if pinned staging
+            // was used for D2H). Run the deferred pinned->dst host copy
+            // before publishing completion, same as the CUDA path below.
+            state_->finalize_deferred_copy();
             state_->completed.store(true, std::memory_order_release);
             return true;
         }
@@ -392,6 +401,7 @@ auto TransferHandle::wait() -> void {
     if (state_->rocm_event != nullptr) {
         tenzor::rocm_transfer::event_sync(state_->rocm_event);
         state_->rocm_event = nullptr;
+        state_->finalize_deferred_copy();
         state_->completed.store(true, std::memory_order_release);
         state_->cv.notify_all();
         return;
@@ -491,10 +501,13 @@ TransferEngine::TransferEngine(const Config& config)
     }
 
     initialize_cuda_resources();
-    // ROCm resources: no per-engine init needed. The isolated-TU
+    // ROCm resources: no per-engine stream/event init needed. The isolated-TU
     // rocm_transfer:: path (see the file-top comment) owns its own
     // streams/event pool internally (rocm_transfer.hip.cpp's g_streams/
-    // g_event_pool), so there is nothing for TransferEngine itself to set up.
+    // g_event_pool), so there is nothing for TransferEngine itself to set up
+    // there. The pinned-buffer pool is per-engine, though, so it does need
+    // its own initializer (mirrors initialize_cuda_resources' pinned pool).
+    initialize_rocm_pinned_pool();
 
 #ifdef TENZOR_USE_ONEAPI
     initialize_oneapi_resources();
@@ -586,12 +599,43 @@ auto TransferEngine::initialize_cuda_resources() -> void {
             void* ptr = nullptr;
             cudaError_t err = cudaMallocHost(&ptr, size);
             if (err == cudaSuccess) {
-                pinned_buffers_.push_back({ptr, size, false});
+                pinned_buffers_.push_back({ptr, size, false, false});
                 total_allocated += size;
             }
         }
     }
 #endif
+}
+
+auto TransferEngine::initialize_rocm_pinned_pool() -> void {
+    // Pre-warms the pinned-buffer pool with hipHostMalloc allocations the same
+    // way initialize_cuda_resources() does for cudaMallocHost, so ROCm
+    // transfers get the same DMA-accelerated staging buffers CUDA already
+    // has (see findings.txt — this pool used to be CUDA-only, leaving
+    // get_pinned_buffer() to return nullptr unconditionally on ROCm and
+    // silently fall back to unpinned copies). No-op when ROCm isn't linked in.
+    if (!config_.use_pinned_memory || config_.pinned_pool_size == 0) {
+        return;
+    }
+    if (!rocm_transfer::available()) {
+        return;
+    }
+    std::vector<size_t> buffer_sizes = {
+        1 * 1024 * 1024,
+        4 * 1024 * 1024,
+        16 * 1024 * 1024,
+        64 * 1024 * 1024
+    };
+    size_t total_allocated = 0;
+    for (size_t size : buffer_sizes) {
+        if (total_allocated + size > config_.pinned_pool_size) {
+            break;
+        }
+        if (void* ptr = rocm_transfer::host_malloc(size)) {
+            pinned_buffers_.push_back({ptr, size, false, true});
+            total_allocated += size;
+        }
+    }
 }
 
 auto TransferEngine::cleanup_cuda_resources() -> void {
@@ -607,12 +651,21 @@ auto TransferEngine::cleanup_cuda_resources() -> void {
     event_pool_.clear();
 
     for (auto& buffer : pinned_buffers_) {
-        if (buffer.ptr) {
+        if (buffer.ptr && !buffer.via_rocm) {
             cudaFreeHost(buffer.ptr);
         }
     }
-    pinned_buffers_.clear();
 #endif
+    cleanup_rocm_pinned_pool();
+    pinned_buffers_.clear();
+}
+
+auto TransferEngine::cleanup_rocm_pinned_pool() -> void {
+    for (auto& buffer : pinned_buffers_) {
+        if (buffer.ptr && buffer.via_rocm) {
+            rocm_transfer::host_free(buffer.ptr);
+        }
+    }
 }
 
 // FINDING 60: initialize_rocm_resources()/cleanup_rocm_resources() removed.
@@ -683,9 +736,13 @@ auto TransferEngine::get_pinned_buffer(size_t size) -> void* {
             for (auto it = pinned_buffers_.begin();
                  it != pinned_buffers_.end() && reserved_bytes() + size > cap; ) {
                 if (!it->in_use) {
+                    if (it->via_rocm) {
+                        rocm_transfer::host_free(it->ptr);
+                    } else {
 #ifdef TENZOR_USE_CUDA
-                    cudaFreeHost(it->ptr);
+                        cudaFreeHost(it->ptr);
 #endif
+                    }
                     it = pinned_buffers_.erase(it);
                 } else {
                     ++it;
@@ -702,9 +759,14 @@ auto TransferEngine::get_pinned_buffer(size_t size) -> void* {
 #ifdef TENZOR_USE_CUDA
         cudaError_t err = cudaMallocHost(&result, size);
         if (err == cudaSuccess) {
-            pinned_buffers_.push_back({result, size, true});
+            pinned_buffers_.push_back({result, size, true, false});
         } else {
             result = nullptr;
+        }
+#else
+        if (void* rocm_ptr = rocm_transfer::host_malloc(size)) {
+            result = rocm_ptr;
+            pinned_buffers_.push_back({result, size, true, true});
         }
 #endif
     }
@@ -972,8 +1034,23 @@ auto TransferEngine::cpu_to_gpu_async(
         // the contiguous buffer in state->source until the async DMA completes.
         Tensor src = cpu_tensor.contiguous();
         size_t bytes = src.numel() * dtype_size(src.dtype());
+
+        // Stage through a pinned (hipHostRegister'd) buffer when available so
+        // the H2D DMA is real zero-copy-capable pinned-memory DMA instead of
+        // a pageable-memory copy the driver has to stage internally itself.
+        // The host->pinned memcpy happens synchronously right here (before
+        // the async device DMA is issued), so there's no lifetime hazard —
+        // unlike the D2H direction below, no deferred copy is needed.
+        const void* h2d_src_ptr = src.data_ptr();
+        void* pinned = config_.use_pinned_memory ? get_pinned_buffer(bytes) : nullptr;
+        if (pinned) {
+            std::memcpy(pinned, src.data_ptr(), bytes);
+            h2d_src_ptr = pinned;
+            state->pinned_buffer = pinned;
+        }
+
         void* ev = tenzor::rocm_transfer::h2d_async(
-            gpu_tensor.data_ptr(), src.data_ptr(), bytes, gpu_device.index);
+            gpu_tensor.data_ptr(), h2d_src_ptr, bytes, gpu_device.index);
         state->result = gpu_tensor;
         state->source = src;  // keep contiguous source alive until DMA completes
         state->rocm_event = ev;
@@ -1086,11 +1163,27 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
         Tensor cpu_result = allocate_tensor(shape_vec, src.dtype(), Device::cpu());
         size_t bytes = src.numel() * dtype_size(src.dtype());
+
+        // Stage the D2H DMA through a pinned buffer when available (real
+        // DMA-capable pinned memory, same as the H2D direction above). Unlike
+        // H2D, the DMA lands bytes in `pinned` asynchronously, so the final
+        // pinned->cpu_result host memcpy can't happen here — it must be
+        // deferred until the event actually signals (wait()/is_ready()/dtor
+        // via finalize_deferred_copy(), same mechanism the CUDA D2H path
+        // already uses). Doing the memcpy here unconditionally would race the
+        // in-flight DMA and silently copy stale/partial bytes.
+        void* pinned = config_.use_pinned_memory ? get_pinned_buffer(bytes) : nullptr;
+        void* d2h_dst_ptr = pinned ? pinned : cpu_result.data_ptr();
         void* ev = tenzor::rocm_transfer::d2h_async(
-            cpu_result.data_ptr(), src.data_ptr(), bytes, src.device().index);
+            d2h_dst_ptr, src.data_ptr(), bytes, src.device().index);
         state->result = cpu_result;
         state->source = src;  // keep contiguous source alive until DMA completes
         state->rocm_event = ev;
+        if (pinned) {
+            state->pinned_buffer = pinned;
+            state->deferred_dst = cpu_result.data_ptr();
+            state->deferred_bytes = bytes;
+        }
         if (ev == nullptr) {
             state->completed.store(true, std::memory_order_release);
         } else {
@@ -1359,6 +1452,14 @@ auto TransferEngine::drain_rocm_pending_states() -> void {
         if (state->rocm_event != nullptr) {
             tenzor::rocm_transfer::event_sync(state->rocm_event);
             state->rocm_event = nullptr;
+            // Finalize the deferred pinned->dst host copy (if the D2H path
+            // staged through a pinned buffer) before publishing completion —
+            // same requirement as wait()/is_ready()/dtor. Draining here
+            // without this would let a caller observe completed=true (and
+            // read `result`) before the pinned bytes were ever copied into
+            // it, a real stale/uninitialized-data bug for whoever drains via
+            // this path instead of TransferHandle::wait()/is_ready().
+            state->finalize_deferred_copy();
             state->completed.store(true, std::memory_order_release);
             state->cv.notify_all();
         }

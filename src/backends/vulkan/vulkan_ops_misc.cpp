@@ -3238,7 +3238,12 @@ auto VulkanBackend::dispatchFusedRMSPropStep(
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
+    // F64 uses a double-precision push-constant layout (see
+    // fused_rmsprop_step_f64.comp): a float32 push constant would cap every
+    // downstream float64_t computation to float32 precision no matter how
+    // the in-shader math is done.
+    bool is_f64 = (dt == DType::Float64);
+    struct PushConstantsF32 {
         uint32_t numel;
         float lr;
         float alpha;
@@ -3247,15 +3252,47 @@ auto VulkanBackend::dispatchFusedRMSPropStep(
         float momentum;
         uint32_t centered;
         uint32_t has_momentum;
-    } pc = {};
-    pc.numel = static_cast<uint32_t>(numel);
-    pc.lr = static_cast<float>(lr);
-    pc.alpha = static_cast<float>(alpha);
-    pc.eps = static_cast<float>(eps);
-    pc.weight_decay = static_cast<float>(weight_decay);
-    pc.momentum = static_cast<float>(momentum);
-    pc.centered = centered ? 1u : 0u;
-    pc.has_momentum = has_momentum ? 1u : 0u;
+    };
+    struct PushConstantsF64 {
+        uint32_t numel;
+        uint32_t centered;
+        uint32_t has_momentum;
+        uint32_t padding0;
+        double lr;
+        double alpha;
+        double eps;
+        double weight_decay;
+        double momentum;
+    };
+
+    const void* pc_ptr = nullptr;
+    size_t pc_size = 0;
+    PushConstantsF32 pc32{};
+    PushConstantsF64 pc64{};
+    if (is_f64) {
+        pc64.numel = static_cast<uint32_t>(numel);
+        pc64.centered = centered ? 1u : 0u;
+        pc64.has_momentum = has_momentum ? 1u : 0u;
+        pc64.padding0 = 0;
+        pc64.lr = lr;
+        pc64.alpha = alpha;
+        pc64.eps = eps;
+        pc64.weight_decay = weight_decay;
+        pc64.momentum = momentum;
+        pc_ptr = &pc64;
+        pc_size = sizeof(pc64);
+    } else {
+        pc32.numel = static_cast<uint32_t>(numel);
+        pc32.lr = static_cast<float>(lr);
+        pc32.alpha = static_cast<float>(alpha);
+        pc32.eps = static_cast<float>(eps);
+        pc32.weight_decay = static_cast<float>(weight_decay);
+        pc32.momentum = static_cast<float>(momentum);
+        pc32.centered = centered ? 1u : 0u;
+        pc32.has_momentum = has_momentum ? 1u : 0u;
+        pc_ptr = &pc32;
+        pc_size = sizeof(pc32);
+    }
 
     // Half shaders process 2 elements per invocation (packed uint32 words);
     // scale the dispatch count to cover (numel+1)/2 words.
@@ -3266,7 +3303,7 @@ auto VulkanBackend::dispatchFusedRMSPropStep(
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(pc), &pc);
+                       0, static_cast<uint32_t>(pc_size), pc_ptr);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -3320,19 +3357,50 @@ auto VulkanBackend::dispatchFusedAdadeltaStep(
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
+    // F64 uses a double-precision push-constant layout (see
+    // fused_adadelta_step_f64.comp): a float32 push constant would cap every
+    // downstream float64_t computation to float32 precision no matter how
+    // the in-shader math is done.
+    bool is_f64 = (dt == DType::Float64);
+    struct PushConstantsF32 {
         uint32_t numel;
         float lr;
         float rho;
         float eps;
         float weight_decay;
         uint32_t padding0, padding1, padding2;
-    } pc = {};
-    pc.numel = static_cast<uint32_t>(numel);
-    pc.lr = static_cast<float>(lr);
-    pc.rho = static_cast<float>(rho);
-    pc.eps = static_cast<float>(eps);
-    pc.weight_decay = static_cast<float>(weight_decay);
+    };
+    struct PushConstantsF64 {
+        uint32_t numel;
+        uint32_t padding0;
+        double lr;
+        double rho;
+        double eps;
+        double weight_decay;
+    };
+
+    const void* pc_ptr = nullptr;
+    size_t pc_size = 0;
+    PushConstantsF32 pc32{};
+    PushConstantsF64 pc64{};
+    if (is_f64) {
+        pc64.numel = static_cast<uint32_t>(numel);
+        pc64.padding0 = 0;
+        pc64.lr = lr;
+        pc64.rho = rho;
+        pc64.eps = eps;
+        pc64.weight_decay = weight_decay;
+        pc_ptr = &pc64;
+        pc_size = sizeof(pc64);
+    } else {
+        pc32.numel = static_cast<uint32_t>(numel);
+        pc32.lr = static_cast<float>(lr);
+        pc32.rho = static_cast<float>(rho);
+        pc32.eps = static_cast<float>(eps);
+        pc32.weight_decay = static_cast<float>(weight_decay);
+        pc_ptr = &pc32;
+        pc_size = sizeof(pc32);
+    }
 
     // Half shaders process 2 elements per invocation (packed uint32 words);
     // scale the dispatch count accordingly.
@@ -3343,7 +3411,7 @@ auto VulkanBackend::dispatchFusedAdadeltaStep(
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(pc), &pc);
+                       0, static_cast<uint32_t>(pc_size), pc_ptr);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -3401,16 +3469,45 @@ auto VulkanBackend::dispatchFusedAdagradStep(
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
+    // F64 uses a double-precision push-constant layout (see
+    // fused_adagrad_step_f64.comp): a float32 push constant would cap every
+    // downstream float64_t computation to float32 precision no matter how
+    // the in-shader math is done.
+    bool is_f64 = (dt == DType::Float64);
+    struct PushConstantsF32 {
         uint32_t numel;
         float lr;
         float eps;
         float weight_decay;
-    } pc = {};
-    pc.numel = static_cast<uint32_t>(numel);
-    pc.lr = static_cast<float>(lr);
-    pc.eps = static_cast<float>(eps);
-    pc.weight_decay = static_cast<float>(weight_decay);
+    };
+    struct PushConstantsF64 {
+        uint32_t numel;
+        uint32_t padding0;
+        double lr;
+        double eps;
+        double weight_decay;
+    };
+
+    const void* pc_ptr = nullptr;
+    size_t pc_size = 0;
+    PushConstantsF32 pc32{};
+    PushConstantsF64 pc64{};
+    if (is_f64) {
+        pc64.numel = static_cast<uint32_t>(numel);
+        pc64.padding0 = 0;
+        pc64.lr = lr;
+        pc64.eps = eps;
+        pc64.weight_decay = weight_decay;
+        pc_ptr = &pc64;
+        pc_size = sizeof(pc64);
+    } else {
+        pc32.numel = static_cast<uint32_t>(numel);
+        pc32.lr = static_cast<float>(lr);
+        pc32.eps = static_cast<float>(eps);
+        pc32.weight_decay = static_cast<float>(weight_decay);
+        pc_ptr = &pc32;
+        pc_size = sizeof(pc32);
+    }
 
     // Half shaders process 2 elements per invocation (packed uint32 words);
     // scale the dispatch count to cover (numel+1)/2 words.
@@ -3421,7 +3518,7 @@ auto VulkanBackend::dispatchFusedAdagradStep(
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(pc), &pc);
+                       0, static_cast<uint32_t>(pc_size), pc_ptr);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);

@@ -1194,6 +1194,22 @@ auto Tensor::cuda(int32_t device_id) const -> Tensor {
     return to(Device::cuda(device_id));
 }
 
+auto Tensor::rocm(int32_t device_id) const -> Tensor {
+    return to(Device::rocm(device_id));
+}
+
+auto Tensor::vulkan(int32_t device_id) const -> Tensor {
+    return to(Device::vulkan(device_id));
+}
+
+auto Tensor::oneapi(int32_t device_id) const -> Tensor {
+    return to(Device::oneapi(device_id));
+}
+
+auto Tensor::mps(int32_t device_id) const -> Tensor {
+    return to(Device::mps(device_id));
+}
+
 auto Tensor::cpu() const -> Tensor {
     return to(Device::cpu());
 }

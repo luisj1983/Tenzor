@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -52,11 +52,11 @@ def benchmark_tenzor_embedding(
             embedding = tz.nn.Embedding(vocab_size, embed_dim)
 
             # Create random token indices
-            if device == "cuda":
-                embedding.cuda()
-                indices = tz.randint(0, vocab_size, [batch, seq_len]).cuda()
-            else:
+            if device == "cpu":
                 indices = tz.randint(0, vocab_size, [batch, seq_len])
+            else:
+                embedding.to(device)
+                indices = tz.randint(0, vocab_size, [batch, seq_len]).to(device)
 
             # Match the PyTorch harness: inference forward under no_grad (so we
             # don't build an autograd graph we never use) and synchronize each
@@ -172,11 +172,11 @@ def benchmark_tenzor_embedding_backward(
         try:
             embedding = tz.nn.Embedding(vocab_size, embed_dim)
 
-            if device == "cuda":
-                embedding.cuda()
-                indices = tz.randint(0, vocab_size, [batch, seq_len]).cuda()
-            else:
+            if device == "cpu":
                 indices = tz.randint(0, vocab_size, [batch, seq_len])
+            else:
+                embedding.to(device)
+                indices = tz.randint(0, vocab_size, [batch, seq_len]).to(device)
 
             # Match the PyTorch harness: zero grads each iteration (otherwise the
             # weight grad re-accumulates a full [vocab, dim] add every step,
@@ -290,12 +290,16 @@ def benchmark_tenzor_position_embedding(
         try:
             pos_embedding = tz.nn.Embedding(max_pos, embed_dim)
 
-            # Create position indices
+            # Create position indices. arange() defaults to Float32; Embedding
+            # requires Int32/Int64 indices (pre-existing bug found while
+            # fixing device handling here — this failed identically on every
+            # backend including CPU, not device-specific).
             seq_len = min(max_pos, 512)
-            if device == "cuda":
-                positions = tz.arange(0, seq_len).cuda().expand(batch, seq_len)
+            if device == "cpu":
+                positions = tz.arange(0, seq_len, dtype=tz.dtype.int64).expand([batch, seq_len])
             else:
-                positions = tz.arange(0, seq_len).expand(batch, seq_len)
+                pos_embedding.to(device)
+                positions = tz.arange(0, seq_len, dtype=tz.dtype.int64).to(device).expand([batch, seq_len])
 
             def pos_embed_fn():
                 return pos_embedding.forward(positions)
@@ -462,50 +466,56 @@ def run_embedding_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkRe
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+        # PyTorch has no rocm/vulkan/oneapi device type of its own, so the
+        # comparison only ever runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
+
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available")
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}")
 
         # Token embedding forward
         print("\n--- Tenzor Embedding (Forward) ---")
-        tenzor_embed = benchmark_tenzor_embedding(EMBEDDING_CONFIGS, device, config)
-        all_results.extend(tenzor_embed)
+        tenzor_embed = benchmark_tenzor_embedding(EMBEDDING_CONFIGS, device, config) if tenzor_avail else []
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Embedding (Forward) ---")
-            pytorch_embed = benchmark_pytorch_embedding(EMBEDDING_CONFIGS, device, config)
+            pytorch_embed = benchmark_pytorch_embedding(EMBEDDING_CONFIGS, device, config) if pytorch_avail else []
             all_results.extend(pytorch_embed)
             print_comparison(tenzor_embed, pytorch_embed, "Embedding Forward")
+        all_results.extend(tenzor_embed)
 
         # Token embedding backward
         print("\n--- Tenzor Embedding (Backward) ---")
-        tenzor_embed_bwd = benchmark_tenzor_embedding_backward(EMBEDDING_CONFIGS, device, config)
-        all_results.extend(tenzor_embed_bwd)
+        tenzor_embed_bwd = benchmark_tenzor_embedding_backward(EMBEDDING_CONFIGS, device, config) if tenzor_avail else []
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Embedding (Backward) ---")
-            pytorch_embed_bwd = benchmark_pytorch_embedding_backward(EMBEDDING_CONFIGS, device, config)
+            pytorch_embed_bwd = benchmark_pytorch_embedding_backward(EMBEDDING_CONFIGS, device, config) if pytorch_avail else []
             all_results.extend(pytorch_embed_bwd)
             print_comparison(tenzor_embed_bwd, pytorch_embed_bwd, "Embedding Backward")
+        all_results.extend(tenzor_embed_bwd)
 
         # Position embedding
         print("\n--- Tenzor Position Embedding ---")
-        tenzor_pos = benchmark_tenzor_position_embedding(POSITION_CONFIGS, device, config)
-        all_results.extend(tenzor_pos)
+        tenzor_pos = benchmark_tenzor_position_embedding(POSITION_CONFIGS, device, config) if tenzor_avail else []
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Position Embedding ---")
-            pytorch_pos = benchmark_pytorch_position_embedding(POSITION_CONFIGS, device, config)
+            pytorch_pos = benchmark_pytorch_position_embedding(POSITION_CONFIGS, device, config) if pytorch_avail else []
             all_results.extend(pytorch_pos)
             print_comparison(tenzor_pos, pytorch_pos, "Position Embedding")
+        all_results.extend(tenzor_pos)
 
         # Combined embedding (PyTorch reference)
-        if config.compare_with_pytorch:
+        if config.compare_with_pytorch and pytorch_avail:
             print("\n--- Combined Token+Position Embedding (PyTorch) ---")
             combined_results = benchmark_combined_embedding(device, config)
             all_results.extend(combined_results)

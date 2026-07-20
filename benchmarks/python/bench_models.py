@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -70,11 +70,11 @@ def benchmark_tenzor_mlp(
 
             model = tz.nn.Sequential(*layers)
 
-            if device == "cuda":
-                model.cuda()  # Move model to CUDA!
-                x = tz.randn([batch_size, layer_sizes[0]]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch_size, layer_sizes[0]])
+            else:
+                model.to(device)  # Move model to device!
+                x = tz.randn([batch_size, layer_sizes[0]]).to(device)
 
             x_var = tz.Variable(x, training)
 
@@ -244,11 +244,11 @@ def benchmark_tenzor_transformer(
             encoder = tz.nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
             encoder.eval()  # Set to eval mode
 
-            if device == "cuda":
-                encoder.cuda()  # Move model to CUDA!
-                x = tz.randn([batch, seq_len, embed_dim]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, seq_len, embed_dim])
+            else:
+                encoder.to(device)  # Move model to device!
+                x = tz.randn([batch, seq_len, embed_dim]).to(device)
 
             x_var = tz.Variable(x, False)
 
@@ -458,21 +458,28 @@ def run_model_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+        # PyTorch has no rocm/vulkan/oneapi device type of its own, so the
+        # comparison only ever runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
+
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available")
+        run_pytorch = config.compare_with_pytorch and pytorch_avail
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}")
 
         # MLP Inference
         print("\n--- Tenzor MLP (Inference) ---")
-        tenzor_mlp_eval = benchmark_tenzor_mlp(MLP_CONFIGS, device, config, training=False)
+        tenzor_mlp_eval = benchmark_tenzor_mlp(MLP_CONFIGS, device, config, training=False) if tenzor_avail else []
         all_results.extend(tenzor_mlp_eval)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch MLP (Inference) ---")
             pytorch_mlp_eval = benchmark_pytorch_mlp(MLP_CONFIGS, device, config, training=False)
             all_results.extend(pytorch_mlp_eval)
@@ -480,10 +487,10 @@ def run_model_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult
 
         # MLP Training
         print("\n--- Tenzor MLP (Training) ---")
-        tenzor_mlp_train = benchmark_tenzor_mlp(MLP_CONFIGS, device, config, training=True)
+        tenzor_mlp_train = benchmark_tenzor_mlp(MLP_CONFIGS, device, config, training=True) if tenzor_avail else []
         all_results.extend(tenzor_mlp_train)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch MLP (Training) ---")
             pytorch_mlp_train = benchmark_pytorch_mlp(MLP_CONFIGS, device, config, training=True)
             all_results.extend(pytorch_mlp_train)
@@ -491,17 +498,17 @@ def run_model_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult
 
         # Transformer Encoder
         print("\n--- Tenzor Transformer Encoder ---")
-        tenzor_transformer = benchmark_tenzor_transformer(TRANSFORMER_CONFIGS, device, config)
+        tenzor_transformer = benchmark_tenzor_transformer(TRANSFORMER_CONFIGS, device, config) if tenzor_avail else []
         all_results.extend(tenzor_transformer)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch Transformer Encoder ---")
             pytorch_transformer = benchmark_pytorch_transformer(TRANSFORMER_CONFIGS, device, config)
             all_results.extend(pytorch_transformer)
             print_comparison(tenzor_transformer, pytorch_transformer, "Transformer Encoder")
 
         # ResNet (PyTorch reference only)
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch ResNet (Reference) ---")
             resnet_results = benchmark_pytorch_resnet(CNN_CONFIGS, device, config)
             all_results.extend(resnet_results)

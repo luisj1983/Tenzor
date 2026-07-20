@@ -602,11 +602,24 @@ auto MPIBackend::finalize() -> void {
 }
 
 auto MPIBackend::supports_device(Device::Type device_type) const -> bool {
-    // MPI natively supports CPU. GPU is supported via staging or CUDA-aware MPI.
+    // MPI natively supports CPU. GPU is supported via staging (get_send_ptr/
+    // get_recv_ptr's `tensor.to(Device::cpu())` fallback below, which is
+    // fully device-generic) or CUDA-aware MPI's GPU-direct path for CUDA
+    // specifically. This is not limited to CUDA/ROCm -- Vulkan/OneAPI/MPS
+    // tensors stage through host memory exactly the same way. get_send_ptr/
+    // get_recv_ptr explicitly check `device().type == Device::Type::CUDA`
+    // before trusting the cuda_aware_ flag (previously they trusted
+    // cuda_aware_ alone, which is a process-global flag independent of the
+    // tensor's actual device -- a real bug: a ROCm/Vulkan/OneAPI/MPS tensor
+    // on a CUDA-aware-MPI build would have skipped staging and handed MPI a
+    // non-CUDA pointer). So there is no reason to reject any of these
+    // device types here.
     if (device_type == Device::Type::CPU) {
         return true;
     }
-    if (device_type == Device::Type::CUDA || device_type == Device::Type::ROCm) {
+    if (device_type == Device::Type::CUDA || device_type == Device::Type::ROCm ||
+        device_type == Device::Type::Vulkan || device_type == Device::Type::OneAPI ||
+        device_type == Device::Type::MPS) {
         return true;  // We handle staging transparently
     }
     return false;
@@ -678,7 +691,18 @@ auto MPIBackend::detect_cuda_aware() -> bool {
 }
 
 auto MPIBackend::get_send_ptr(const Tensor& tensor, Tensor& host_buf) -> const void* {
-    if (tensor.device().type == Device::Type::CPU || cuda_aware_) {
+    // `cuda_aware_` is a process-global flag (from MPIX_CUDA_AWARE_SUPPORT or
+    // TENZOR_MPI_CUDA_AWARE) that says whether the linked MPI implementation's
+    // GPU-direct path understands CUDA device pointers — it says nothing
+    // about what device THIS tensor is actually on. Gating on cuda_aware_
+    // alone (without checking the tensor is actually CUDA) meant a
+    // ROCm/Vulkan/OneAPI/MPS tensor on a CUDA-aware-MPI build would skip
+    // host staging and hand MPI a non-CUDA device pointer, which CUDA-aware
+    // MPI's GPU-direct path (cudaPointerGetAttributes/UCX-CUDA) cannot
+    // understand — a real crash/data-corruption bug, not the "stays false
+    // for other backends" the comment in supports_device() assumed.
+    if (tensor.device().type == Device::Type::CPU ||
+        (tensor.device().type == Device::Type::CUDA && cuda_aware_)) {
         if (tensor.is_contiguous()) {
             return tensor.data_ptr();
         }
@@ -697,7 +721,10 @@ auto MPIBackend::get_send_ptr(const Tensor& tensor, Tensor& host_buf) -> const v
 }
 
 auto MPIBackend::get_recv_ptr(Tensor& tensor, Tensor& host_buf) -> void* {
-    if (tensor.device().type == Device::Type::CPU || cuda_aware_) {
+    // See get_send_ptr for why this must check the tensor's actual device
+    // type, not just the process-global cuda_aware_ flag.
+    if (tensor.device().type == Device::Type::CPU ||
+        (tensor.device().type == Device::Type::CUDA && cuda_aware_)) {
         if (tensor.is_contiguous()) {
             return tensor.data_ptr();
         }

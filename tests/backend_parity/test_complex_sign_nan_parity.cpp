@@ -61,7 +61,7 @@ void run_nan_propagation_check(Device dev) {
 
 TEST_F(ComplexSignNanParity, Complex64SignPropagatesNanAcrossBackends) {
     std::vector<Device> devices = {Device::cpu(), Device::cuda(0), Device::rocm(0),
-                                    Device::vulkan(0), Device::oneapi(0)};
+                                    Device::vulkan(0), Device::oneapi(0), Device::mps(0)};
     int checked = 0;
     for (const auto& dev : devices) {
         if (!tenzor::testing::is_backend_available(dev.type, dev.index)) continue;
@@ -78,7 +78,7 @@ TEST_F(ComplexSignNanParity, Complex64SignPropagatesNanAcrossBackends) {
 
 TEST_F(ComplexSignNanParity, Complex128SignPropagatesNanAcrossBackends) {
     std::vector<Device> devices = {Device::cpu(), Device::cuda(0), Device::rocm(0),
-                                    Device::vulkan(0), Device::oneapi(0)};
+                                    Device::vulkan(0), Device::oneapi(0), Device::mps(0)};
     int checked = 0;
     for (const auto& dev : devices) {
         if (!tenzor::testing::is_backend_available(dev.type, dev.index)) continue;

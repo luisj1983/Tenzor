@@ -1481,7 +1481,8 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_readwrite("dtype", &tenzor::nn::MixedPrecisionConfig::dtype,
                       "Target dtype for mixed precision (Float16 or BFloat16)")
         .def_readwrite("device_type", &tenzor::nn::MixedPrecisionConfig::device_type,
-                      "Device type to apply mixed precision")
+                      "Device type to apply mixed precision; None (default) applies "
+                      "autocast to whatever device the model/tensors are on")
         .def_readwrite("enabled", &tenzor::nn::MixedPrecisionConfig::enabled,
                       "Enable automatic mixed precision")
         .def_readwrite("init_scale", &tenzor::nn::MixedPrecisionConfig::init_scale,
@@ -1492,12 +1493,22 @@ PYBIND11_MODULE(tenzor_core, m) {
                       "Scale backoff factor on overflow")
         .def_readwrite("growth_interval", &tenzor::nn::MixedPrecisionConfig::growth_interval,
                       "Iterations before attempting scale growth")
+        .def_static("fp16", &tenzor::nn::MixedPrecisionConfig::fp16,
+                   "Create default FP16 configuration, device-agnostic "
+                   "(applies to whatever device the model/tensors are on)")
+        .def_static("bfloat16", &tenzor::nn::MixedPrecisionConfig::bfloat16,
+                   "Create default BFloat16 configuration, device-agnostic")
         .def_static("fp16_cuda", &tenzor::nn::MixedPrecisionConfig::fp16_cuda,
-                   "Create default FP16 configuration for CUDA")
+                   "Create FP16 configuration explicitly restricted to CUDA "
+                   "(prefer fp16() unless you specifically want autocast to "
+                   "skip non-CUDA tensors)")
         .def_static("bfloat16_cuda", &tenzor::nn::MixedPrecisionConfig::bfloat16_cuda,
-                   "Create BFloat16 configuration for CUDA")
+                   "Create BFloat16 configuration explicitly restricted to CUDA "
+                   "(prefer bfloat16() unless you specifically want autocast to "
+                   "skip non-CUDA tensors)")
         .def_static("conservative", &tenzor::nn::MixedPrecisionConfig::conservative,
-                   "Create conservative configuration (slower scale growth)");
+                   "Create conservative configuration (slower scale growth), "
+                   "device-agnostic");
 
     // MixedPrecisionTrainer class
     py::class_<tenzor::nn::MixedPrecisionTrainer>(m, "MixedPrecisionTrainer",
@@ -1515,7 +1526,7 @@ PYBIND11_MODULE(tenzor_core, m) {
                 >>> model = tenzor.nn.Linear(10, 5)
                 >>> optimizer = tenzor.optim.Adam(model.parameters(), 0.001)
                 >>> loss_fn = lambda pred, target: (pred - target).pow(2).mean()
-                >>> config = tenzor.MixedPrecisionConfig.fp16_cuda()
+                >>> config = tenzor.MixedPrecisionConfig.fp16()
                 >>> trainer = tenzor.MixedPrecisionTrainer(model, optimizer, loss_fn, config)
                 >>> # Train with mixed precision
                 >>> for inputs, targets in dataloader:
@@ -1528,7 +1539,7 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("model"),
              py::arg("optimizer"),
              py::arg("loss_fn"),
-             py::arg("config") = tenzor::nn::MixedPrecisionConfig::fp16_cuda(),
+             py::arg("config") = tenzor::nn::MixedPrecisionConfig::fp16(),
              "Create mixed precision trainer")
         .def("train_step", &tenzor::nn::MixedPrecisionTrainer::train_step,
              py::arg("input"), py::arg("target"),

@@ -167,12 +167,13 @@ auto DataLoader::collate_samples(const std::vector<std::pair<Tensor, Tensor>>& s
     // require cudaHostAlloc... setting a flag in tensor storage") and then
     // didn't do them. The Storage base class has a virtual `pin()` method
     // (`include/tenzor/core/storage.hpp:88`) that the CPU storage
-    // implements via cudaHostRegister + sets the pinned flag; we just call
-    // it on each batch tensor here.
+    // implements via cudaHostRegister (CUDA) or hipHostRegister (ROCm, via
+    // the isolated rocm_transfer.hip.cpp TU) + sets the pinned flag; we just
+    // call it on each batch tensor here.
     //
     // The pin() call is a no-op on non-CPU storage and on builds without
-    // CUDA, so this path is safe to invoke unconditionally when
-    // `config_.pin_memory == true` (the storage layer guards CUDA-only
+    // CUDA or ROCm, so this path is safe to invoke unconditionally when
+    // `config_.pin_memory == true` (the storage layer guards backend-specific
     // operations internally).
     if (config_.pin_memory) {
         // Ensure host placement + contiguity before pinning (pin() registers

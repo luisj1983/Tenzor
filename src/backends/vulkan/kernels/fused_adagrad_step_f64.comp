@@ -9,11 +9,16 @@ layout(binding = 0) buffer Grad { float64_t grad_data[]; };
 layout(binding = 1) buffer Param { float64_t param_data[]; };
 layout(binding = 2) buffer SumSq { float64_t sum_sq[]; };
 
+// Hyperparameters are `double` push constants, not `float` — this is the F64
+// kernel; a float32 push constant would cap every downstream float64_t
+// computation to float32 precision regardless of in-shader math (see
+// fused_adam_step_f64.comp for the diagnosis).
 layout(push_constant) uniform PushConstants {
     uint numel;
-    float lr;
-    float eps;
-    float weight_decay;
+    uint padding0;
+    double lr;
+    double eps;
+    double weight_decay;
 } params;
 
 void main() {
@@ -36,9 +41,16 @@ void main() {
 
     // Per docs/internals/attention-contract.md (optimizer F64 paths): never
     // downcast for sqrt. Newton-Raphson refines a float-precision initial
-    // guess in F64 — single iteration adds ~24 mantissa bits.
-    float64_t s = sum_sq[gid];
+    // guess in F64 — two iterations to reach full ~52-bit mantissa precision.
+    // Clamp away from exact zero before the reciprocal-sqrt: sum_sq is 0
+    // whenever every gradient seen so far for this element is exactly 0 (a
+    // dead ReLU unit is the common case); 1/sqrt(0) = inf, and the
+    // Newton-Raphson refinement below then computes 0 * inf = NaN, silently
+    // poisoning the parameter. 1e-30 survives the float32 downcast and is
+    // many orders below any real eps, so real (non-zero) values are unaffected.
+    float64_t s = max(sum_sq[gid], float64_t(1e-30));
     float64_t inv_sqrt = float64_t(1.0) / float64_t(sqrt(float(s)));
+    inv_sqrt = inv_sqrt * (float64_t(1.5) - float64_t(0.5) * s * inv_sqrt * inv_sqrt);
     inv_sqrt = inv_sqrt * (float64_t(1.5) - float64_t(0.5) * s * inv_sqrt * inv_sqrt);
     float64_t sqrt_s = s * inv_sqrt;
     float64_t denom = sqrt_s + eps_d;

@@ -70,10 +70,21 @@ auto SGD::step_impl() -> void {
         // binding a reference here dangled past this statement. Bind by value.
         const Tensor grad_tensor = *param.grad();
 
-        // ── CUDA path: fused single-kernel dispatch ──────────────────────────
-        // R.16: fused CUDA kernel only handles Float32/Float64 (half-precision
+        // ── Fused single-kernel dispatch: CUDA/ROCm/Vulkan/OneAPI all share
+        // the same [param, grad, momentum_buffer?] contract with full
+        // dampening/nesterov/first_step support, so they take this path.
+        // MPS's kernel (src/backends/mps/mps_kernel_registry.mm) always reads
+        // a 3rd input unconditionally and has no dampening/nesterov/
+        // first_step support, so it is intentionally excluded here and keeps
+        // using the generic per-op path below (still runs entirely on the
+        // MPS device — this is not a CPU fallback, just the un-fused path).
+        // CPU also keeps the existing per-op path below unchanged.
+        // R.16: fused kernel only handles Float32/Float64 (half-precision
         // params have Float32 state via make_optim_state and need the upcast path).
-        if (param_tensor.device().type == Device::Type::CUDA &&
+        if (param_tensor.device().type != Device::Type::CPU &&
+            param_tensor.device().type != Device::Type::MPS &&
+            param_tensor.device().type == grad_tensor.device().type &&
+            is_op_supported(OpId::FusedSGDStep, param_tensor.device().type) &&
             (param_tensor.dtype() == DType::Float32 || param_tensor.dtype() == DType::Float64)) {
             std::vector<Tensor> inputs = {param_tensor, grad_tensor};
             bool first_step = false;

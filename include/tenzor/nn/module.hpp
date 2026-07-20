@@ -537,6 +537,30 @@ public:
     auto cuda(int device_id = 0) -> void;
 
     /**
+     * @brief Move module to a ROCm (HIP) device.
+     * @param device_id GPU device index (default: 0)
+     */
+    auto rocm(int device_id = 0) -> void;
+
+    /**
+     * @brief Move module to a Vulkan device.
+     * @param device_id GPU device index (default: 0)
+     */
+    auto vulkan(int device_id = 0) -> void;
+
+    /**
+     * @brief Move module to a OneAPI (SYCL) device.
+     * @param device_id GPU device index (default: 0)
+     */
+    auto oneapi(int device_id = 0) -> void;
+
+    /**
+     * @brief Move module to an Apple MPS device.
+     * @param device_id GPU device index (default: 0)
+     */
+    auto mps(int device_id = 0) -> void;
+
+    /**
      * @brief Move module to CPU.
      */
     auto cpu() -> void;

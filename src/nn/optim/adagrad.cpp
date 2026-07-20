@@ -242,16 +242,23 @@ auto Adagrad::step_impl() -> void {
             continue;
         }
 
-        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // Fused single-kernel dispatch for CUDA/ROCm/OneAPI/MPS: fused kernel
+        // avoids GPU→CPU→GPU round-trip. All four share the same [param,
+        // grad, sum_sq] + base-lr/lr_decay/step contract (kernel computes its
+        // own effective lr device-side), unlike Vulkan above which expects
+        // the pre-decayed lr with no lr_decay/step attrs.
         // R.16: skip the fused path for half-precision params.
         if (!needs_upcast &&
-            original_device.type == Device::Type::CUDA &&
-            grad_orig.device().type == Device::Type::CUDA) {
+            grad_orig.device().type == original_device.type &&
+            is_op_supported(OpId::FusedAdagradStep, original_device.type) &&
+            (original_device.type == Device::Type::CUDA ||
+             original_device.type == Device::Type::ROCm ||
+             original_device.type == Device::Type::OneAPI ||
+             original_device.type == Device::Type::MPS)) {
 
-            // CUDA registry expects: [param, grad, sum_sq]
             std::vector<Tensor> inputs = {param->tensor(), grad_orig, sum_[i]};
 
-            // CUDA kernel receives the raw base lr + lr_decay + step and
+            // Kernel receives the raw base lr + lr_decay + step and
             // computes its own effective lr; pass base lr_ for this group,
             // not hp.lr (which already has decay applied).
             const ParamGroup* g = find_group_for_param(i);

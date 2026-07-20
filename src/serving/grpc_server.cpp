@@ -209,7 +209,14 @@ public:
                 response->set_message(e.what());
                 return grpc::Status::OK;
             }
-            repository_.load_model(request->model_name(), mp, Device::cpu());
+            // Mirror the HTTP handler's "device" field (server.cpp:927-933):
+            // default to CPU when unset, otherwise resolve via Device::from_string
+            // so gRPC clients can load onto CUDA/ROCm/Vulkan/OneAPI/MPS too.
+            Device target_device = Device::cpu();
+            if (!request->device().empty()) {
+                target_device = Device::from_string(request->device());
+            }
+            repository_.load_model(request->model_name(), mp, target_device);
             response->set_success(true);
             response->set_message("Model loaded successfully");
             return grpc::Status::OK;

@@ -6,7 +6,7 @@
  */
 
 #include "tenzor/core/tensor.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"

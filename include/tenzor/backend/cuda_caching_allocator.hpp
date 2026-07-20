@@ -1,5 +1,18 @@
 #pragma once
 
+// CUDA-specific caching allocator (CUDA Runtime streams/events baked into the
+// Block/CachingAllocator types below). Despite living in the shared
+// include/tenzor/backend/ directory, this is NOT a generic multi-backend
+// allocator — ROCm, OneAPI, and Vulkan each have their own separate
+// implementations (rocm_caching_allocator.hip.cpp, oneapi_caching_allocator.cpp,
+// vulkan_caching_allocator.hpp/vulkan_vma_allocator.hpp) that do not share
+// this code. Only src/backends/cuda/ includes this header (see the CUDA
+// runtime types below) — a real unification into one cross-backend allocator
+// is a separate, larger effort (would need stream/event as an opaque handle
+// instead of cudaStream_t/cudaEvent_t) and is out of scope here; this header
+// was renamed from caching_allocator.hpp specifically so it no longer reads
+// as the generic one by default.
+
 #include <cstddef>
 #include <map>
 #include <memory>

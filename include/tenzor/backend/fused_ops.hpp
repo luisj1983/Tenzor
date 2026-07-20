@@ -1,5 +1,19 @@
 #pragma once
 
+// CUDA-specific fused-kernel declarations (namespace tenzor::cuda below).
+// Despite living in the shared include/tenzor/backend/ directory, this is
+// NOT a generic cross-backend fused-ops interface — ROCm has its own
+// equivalent fused kernels (fused_layer_norm_hip, fused_attention_hip,
+// fused_adam_step_hip, etc.) declared locally inside
+// src/backends/rocm/rocm_kernel_registry.cpp instead of in a shared
+// `namespace rocm` here, so there is no common interface between the two,
+// only a CUDA-named one that happens to be reachable from generic code
+// (src/ops/fused_ops.cpp, src/ops/fusion_optimizer.cpp). A real shared
+// interface would need each backend's fused kernels declared under its own
+// namespace in a header like this one, or a single backend-parameterized
+// declaration set — out of scope for this comment; flagging so a future
+// change doesn't mistake this for already being cross-backend.
+
 #include "tenzor/core/tensor.hpp"
 #include <tuple>
 #include <utility>

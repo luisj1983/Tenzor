@@ -2,7 +2,7 @@
 
 #include <array>
 #include "tenzor/backend/cudnn_wrapper.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/backend/cuda_config.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"

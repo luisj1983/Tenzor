@@ -2275,29 +2275,39 @@ auto RMSNorm::forward_impl(const Variable& input_orig) -> Variable {
         (is_grad_enabled() && cached_weight_ && cached_weight_->requires_grad());
 
     // ============================================================================
-    // CUDA FAST PATH: Use fused RMSNorm kernel via dispatch (single kernel launch!)
+    // FAST PATH: Use fused RMSNorm kernel via dispatch (single kernel launch!)
     // Use fast path when input doesn't need grad (inference) - even if weights require grad
+    // Applies to any backend with a registered FusedRMSNorm kernel that shares
+    // this [input, weight] -> {output, rrms} contract at Float32 (CUDA/ROCm/
+    // OneAPI/MPS all match it) — previously only CUDA took this path, so
+    // ROCm/OneAPI/MPS silently paid the full autograd/Variable overhead
+    // during pure inference despite having a working fused kernel. Vulkan
+    // has its own dedicated fast path below (broader dtype support).
     // ============================================================================
-    if (!needs_input_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
+    if (!needs_input_grad && input.tensor().dtype() == DType::Float32 &&
+        input.tensor().device().type != Device::Type::CPU &&
+        input.tensor().device().type != Device::Type::Vulkan &&
+        is_op_supported(OpId::FusedRMSNorm, input.tensor().device().type)) {
         const Tensor& x = input.tensor();
+        Device target_device = input.tensor().device();
 
-        // Get weight tensor, ensure on CUDA
-        Tensor weight_cuda = cached_weight_ ? cached_weight_->tensor() : weight_.tensor();
-        if (weight_cuda.device().type != Device::Type::CUDA) {
-            weight_cuda = weight_cuda.to(Device::cuda());
+        // Get weight tensor, ensure on the same device as input
+        Tensor weight_dev = cached_weight_ ? cached_weight_->tensor() : weight_.tensor();
+        if (weight_dev.device().type != target_device.type) {
+            weight_dev = weight_dev.to(target_device);
         }
 
-        // Dispatch to fused CUDA kernel (single kernel launch for max performance)
+        // Dispatch to the fused kernel (single kernel launch for max performance)
         NewOpAttributes attrs;
         attrs.set(AttrKey::Eps, eps_);
 
-        std::vector<Tensor> inputs_vec = {x, weight_cuda};
+        std::vector<Tensor> inputs_vec = {x, weight_dev};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
         // BB.16: inference fast paths still read results[0]; require at
         // least the output tensor (full {output, rrms} contract is only
         // needed by the training path that wires up the backward).
-        check_norm_outputs(results, "RMSNorm CUDA inference", /*min_required=*/1);
-        jit_record_rms_norm(x, weight_cuda, results[0], eps_, normalized_shape_);
+        check_norm_outputs(results, "RMSNorm inference (fused)", /*min_required=*/1);
+        jit_record_rms_norm(x, weight_dev, results[0], eps_, normalized_shape_);
         return Variable(results[0], false);  // results[0] is output, [1] is rrms
     }
 

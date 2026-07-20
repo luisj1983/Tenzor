@@ -14,7 +14,39 @@ if(NOT GTest_FOUND)
     FetchContent_MakeAvailable(googletest)
 endif()
 
-# Include GoogleTest module for gtest_discover_tests
+# Include GoogleTest module for gtest_discover_tests.
+#
+# Work around a bug in the stock CMake 4.4.0 GoogleTest.cmake: its
+# gtest_discover_tests() builds a per-target POST_BUILD discovery script
+# that calls GoogleTestAddTests.cmake's gtest_discover_tests_impl(). That
+# impl hashes TEST_TARGET into its JSON scratch filename specifically so
+# that parallel POST_BUILD discovery jobs sharing a CMAKE_CURRENT_BINARY_DIR
+# (true for every target added from this file) don't collide on one file —
+# but GoogleTest.cmake never actually forwards TEST_TARGET into the script
+# it generates. TEST_TARGET is therefore always empty, the hash is always
+# the same, and under a parallel `ninja` build, concurrent discovery jobs
+# stomp on each other's shared JSON file mid-write, producing intermittent
+# "CMake Error ... Syntax error: value, object or array expected" failures
+# that hit a different, seemingly random target each run.
+#
+# cmake/compat/GoogleTest.cmake is a copy of the stock module with the one
+# missing line (`TEST_TARGET [==[${target}]==]`) added back so POST_BUILD
+# discovery is race-free under parallel builds again. Only shadow the stock
+# module with it if the installed cmake still has the bug — once upstream
+# ships the fix, the shim self-disables.
+find_file(_tenzor_stock_googletest_cmake GoogleTest.cmake PATHS "${CMAKE_ROOT}/Modules" NO_DEFAULT_PATH)
+set(_tenzor_googletest_needs_shim TRUE)
+if(_tenzor_stock_googletest_cmake)
+    file(READ "${_tenzor_stock_googletest_cmake}" _tenzor_stock_googletest_src)
+    if(_tenzor_stock_googletest_src MATCHES "TEST_TARGET")
+        set(_tenzor_googletest_needs_shim FALSE)
+    endif()
+endif()
+if(_tenzor_googletest_needs_shim)
+    message(STATUS "Shimming GoogleTest.cmake to fix missing TEST_TARGET forwarding (parallel POST_BUILD test discovery race)")
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/compat")
+endif()
+unset(_tenzor_stock_googletest_cmake CACHE)
 include(GoogleTest)
 
 # Maximum test execution timeout (25 minutes)

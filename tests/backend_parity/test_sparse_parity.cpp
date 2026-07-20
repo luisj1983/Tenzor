@@ -153,39 +153,33 @@ TEST_P(SparseParity, SparseAddSparseDense) {
 }
 
 // ============================================================================
-// CUDA SparseAdd Tests — verifies on-device kernel matches CPU reference
+// SparseAdd device-kernel parity — verifies the on-device SparseAdd kernel
+// matches the CPU reference on every backend, not just CUDA. Previously this
+// was a TEST_F(SparseAddcudaTest, ...) fixture hardcoded to Device::cuda(),
+// so ROCm/Vulkan/OneAPI's SparseAdd kernels (registered in each backend's
+// kernel_registry.cpp) never got this correctness check at all. Uses the
+// same backend-parameterized SparseParity fixture as the rest of this file
+// (device comes from BackendTest::SetUp(), which already skips/fails per
+// TENZOR_REQUIRE_MULTI_BACKEND / TENZOR_SKIP_BACKENDS), so this is one
+// definition covering all backends instead of a CUDA-only duplicate.
 // ============================================================================
-// These tests intrinsically target the CUDA SparseAdd kernel (they hardcode
-// Device::cuda()), so they live in a non-parameterized TEST_F fixture rather
-// than inside the backend-parameterized SparseParity suite. Putting CUDA-only
-// tests in a parameterized suite with an inline has_cuda() guard causes the
-// test to appear 5× (once per backend parameter) with 4 silent skips — the
-// anti-pattern TESTING.md calls out. One TEST_F + SKIP_IF_NO_CUDA is honest.
 
-class SparseAddcudaTest : public ::testing::Test {
-protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
-};
-
-TEST_F(SparseAddcudaTest, Float32) {
-    SKIP_IF_NO_CUDA;
-
+TEST_P(SparseParity, SparseAddDeviceMatchesCpuFloat32) {
     auto sparse = make_test_csr();
     auto dense = randn({3, 3}, DType::Float32, Device::cpu());
 
     auto cpu_result = sparse::add(sparse, dense);
 
-    auto sparse_gpu = sparse.to(Device::cuda());
-    auto dense_gpu = dense.to(Device::cuda());
-    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+    auto sparse_dev = sparse.to(device);
+    auto dense_dev = dense.to(device);
+    auto dev_result = sparse::add(sparse_dev, dense_dev).to(Device::cpu());
 
-    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, cpu_result))).data<float>()[0];
-    EXPECT_LT(max_err, 1e-5f) << "CUDA SparseAdd Float32 should match CPU";
+    auto max_err = tenzor::max(tenzor::abs(sub(dev_result, cpu_result))).data<float>()[0];
+    EXPECT_LT(max_err, 1e-5f) << device_type_to_backend_name(device.type)
+                              << " SparseAdd Float32 should match CPU";
 }
 
-TEST_F(SparseAddcudaTest, Float64) {
-    SKIP_IF_NO_CUDA;
-
+TEST_P(SparseParity, SparseAddDeviceMatchesCpuFloat64) {
     // Larger matrix to exercise more threads.
     auto identity = eye(32, 32, DType::Float64, Device::cpu());
     auto sparse = SparseTensor::from_dense(identity);
@@ -193,33 +187,31 @@ TEST_F(SparseAddcudaTest, Float64) {
 
     auto cpu_result = sparse::add(sparse, dense);
 
-    auto sparse_gpu = sparse.to(Device::cuda());
-    auto dense_gpu = dense.to(Device::cuda());
-    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+    auto sparse_dev = sparse.to(device);
+    auto dense_dev = dense.to(device);
+    auto dev_result = sparse::add(sparse_dev, dense_dev).to(Device::cpu());
 
-    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, cpu_result))).data<double>()[0];
-    EXPECT_LT(max_err, 1e-12) << "CUDA SparseAdd Float64 should match CPU";
+    auto max_err = tenzor::max(tenzor::abs(sub(dev_result, cpu_result))).data<double>()[0];
+    EXPECT_LT(max_err, 1e-12) << device_type_to_backend_name(device.type)
+                              << " SparseAdd Float64 should match CPU";
 }
 
-TEST_F(SparseAddcudaTest, EmptySparse) {
-    SKIP_IF_NO_CUDA;
-
+TEST_P(SparseParity, SparseAddDeviceEmptySparse) {
     // Empty sparse (all zeros) + dense should return dense unchanged.
     auto zero_matrix = zeros({4, 4}, DType::Float32, Device::cpu());
     auto sparse = SparseTensor::from_dense(zero_matrix);
     auto dense = randn({4, 4}, DType::Float32, Device::cpu());
 
-    auto sparse_gpu = sparse.to(Device::cuda());
-    auto dense_gpu = dense.to(Device::cuda());
-    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+    auto sparse_dev = sparse.to(device);
+    auto dense_dev = dense.to(device);
+    auto dev_result = sparse::add(sparse_dev, dense_dev).to(Device::cpu());
 
-    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, dense))).data<float>()[0];
-    EXPECT_LT(max_err, 1e-6f) << "SparseAdd with empty sparse should return dense unchanged";
+    auto max_err = tenzor::max(tenzor::abs(sub(dev_result, dense))).data<float>()[0];
+    EXPECT_LT(max_err, 1e-6f) << device_type_to_backend_name(device.type)
+                              << " SparseAdd with empty sparse should return dense unchanged";
 }
 
-TEST_F(SparseAddcudaTest, FullRank) {
-    SKIP_IF_NO_CUDA;
-
+TEST_P(SparseParity, SparseAddDeviceFullRank) {
     // Fully dense sparse matrix (every element nonzero) + dense.
     auto full = randn({8, 8}, DType::Float32, Device::cpu());
     auto full_data = full.data<float>();
@@ -231,12 +223,13 @@ TEST_F(SparseAddcudaTest, FullRank) {
 
     auto cpu_result = sparse::add(sparse, dense);
 
-    auto sparse_gpu = sparse.to(Device::cuda());
-    auto dense_gpu = dense.to(Device::cuda());
-    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+    auto sparse_dev = sparse.to(device);
+    auto dense_dev = dense.to(device);
+    auto dev_result = sparse::add(sparse_dev, dense_dev).to(Device::cpu());
 
-    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, cpu_result))).data<float>()[0];
-    EXPECT_LT(max_err, 1e-5f) << "CUDA SparseAdd with full-rank sparse should match CPU";
+    auto max_err = tenzor::max(tenzor::abs(sub(dev_result, cpu_result))).data<float>()[0];
+    EXPECT_LT(max_err, 1e-5f) << device_type_to_backend_name(device.type)
+                              << " SparseAdd with full-rank sparse should match CPU";
 }
 
 TEST_P(SparseParity, FormatConversion_COO_CSR) {

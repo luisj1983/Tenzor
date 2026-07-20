@@ -336,6 +336,7 @@ private:
         void* ptr{nullptr};
         size_t size{0};
         bool in_use{false};
+        bool via_rocm{false};  ///< true if allocated via hipHostMalloc (rocm_transfer::host_malloc)
     };
     std::vector<PinnedBuffer> pinned_buffers_;
     std::mutex pinned_mutex_;
@@ -397,6 +398,15 @@ private:
 
     // Cleanup CUDA resources
     auto cleanup_cuda_resources() -> void;
+
+    // Pre-warm the pinned-buffer pool via hipHostMalloc (ROCm equivalent of
+    // initialize_cuda_resources' pinned-pool section). No-op when ROCm isn't
+    // linked in.
+    auto initialize_rocm_pinned_pool() -> void;
+
+    // Free any pinned buffers allocated by initialize_rocm_pinned_pool()/
+    // get_pinned_buffer()'s ROCm path.
+    auto cleanup_rocm_pinned_pool() -> void;
 
     // Initialize ROCm resources
     auto initialize_rocm_resources() -> void;

@@ -110,7 +110,8 @@ struct GPUInfo {
 
 auto get_gpu_info() -> GPUInfo {
     GPUInfo info;
-    for (auto type : {Device::Type::CUDA, Device::Type::ROCm, Device::Type::OneAPI}) {
+    for (auto type : {Device::Type::CUDA, Device::Type::ROCm, Device::Type::OneAPI,
+                       Device::Type::Vulkan}) {
         Backend* backend = backend_registry().get_backend(type);
         if (backend && backend->is_available() && backend->device_count() > 0) {
             auto dev_info = backend->get_device_info(0);
@@ -125,12 +126,14 @@ auto get_gpu_info() -> GPUInfo {
 }
 
 auto get_device() -> Device {
-    for (auto type : {Device::Type::CUDA, Device::Type::ROCm, Device::Type::OneAPI}) {
+    for (auto type : {Device::Type::CUDA, Device::Type::ROCm, Device::Type::OneAPI,
+                       Device::Type::Vulkan}) {
         Backend* backend = backend_registry().get_backend(type);
         if (backend && backend->is_available()) {
             if (type == Device::Type::CUDA) return Device::cuda(0);
             if (type == Device::Type::ROCm) return Device::rocm(0);
             if (type == Device::Type::OneAPI) return Device::oneapi(0);
+            if (type == Device::Type::Vulkan) return Device::vulkan(0);
         }
     }
     return Device::cpu();

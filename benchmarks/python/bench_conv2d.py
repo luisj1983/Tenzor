@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Dict, Tuple
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -62,13 +62,12 @@ def benchmark_tenzor_conv2d(
             padding = conv_cfg["padding"]
 
             # Create input and conv layer
-            if device == "cuda":
-                x = tz.randn([batch_size, in_ch, H, W]).cuda()
-                conv = tz.nn.Conv2d(in_ch, out_ch, kernel, stride=stride, padding=padding)
-                conv.cuda()
-            else:
+            conv = tz.nn.Conv2d(in_ch, out_ch, kernel, stride=stride, padding=padding)
+            if device == "cpu":
                 x = tz.randn([batch_size, in_ch, H, W])
-                conv = tz.nn.Conv2d(in_ch, out_ch, kernel, stride=stride, padding=padding)
+            else:
+                x = tz.randn([batch_size, in_ch, H, W]).to(device)
+                conv.to(device)
 
             # Tenzor modules expect Variable input
             x_var = tz.Variable(x, requires_grad=False)
@@ -183,8 +182,13 @@ def benchmark_pytorch_conv2d(
     return results
 
 
-def benchmark_resnet_layers(device: str, config: BenchmarkConfig) -> List[BenchmarkResult]:
+def benchmark_resnet_layers(
+    device: str, config: BenchmarkConfig,
+    tenzor_avail: bool = True, pytorch_avail: bool = None,
+) -> List[BenchmarkResult]:
     """Benchmark convolutions matching ResNet-50 architecture."""
+    if pytorch_avail is None:
+        pytorch_avail = device in ("cpu", "cuda")
 
     resnet_layers = [
         # Stage 1
@@ -216,10 +220,11 @@ def benchmark_resnet_layers(device: str, config: BenchmarkConfig) -> List[Benchm
 
         print(f"\n  Layer {i+1}/{len(resnet_layers)}")
 
-        tz_results = benchmark_tenzor_conv2d(configs, sizes, 32, device, config)
-        results.extend(tz_results)
+        if tenzor_avail:
+            tz_results = benchmark_tenzor_conv2d(configs, sizes, 32, device, config)
+            results.extend(tz_results)
 
-        if config.compare_with_pytorch:
+        if config.compare_with_pytorch and pytorch_avail:
             pt_results = benchmark_pytorch_conv2d(configs, sizes, 32, device, config)
             results.extend(pt_results)
 
@@ -240,27 +245,30 @@ def run_conv2d_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResul
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        # Check CUDA availability for both frameworks
-        if device == "cuda":
-            tenzor_cuda = check_tenzor_cuda_available()
-            pytorch_cuda = check_pytorch_cuda_available()
+        # Check availability for both frameworks. PyTorch has no rocm/vulkan/
+        # oneapi device type of its own, so the comparison only ever runs for
+        # device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
 
-            if not tenzor_cuda and not pytorch_cuda:
-                print("CUDA not available for either framework, skipping...")
-                continue
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
 
-            if not tenzor_cuda:
-                print("  [WARNING] Tenzor CUDA not available")
-            if not pytorch_cuda and config.compare_with_pytorch:
-                print("  [WARNING] PyTorch CUDA not available")
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available")
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}")
 
         # Clear GPU memory before starting
-        if device == "cuda":
+        if device != "cpu":
             clear_gpu_memory()
 
         # Standard conv2d benchmarks
         print("\n--- Tenzor Conv2d ---")
-        if device != "cuda" or check_tenzor_cuda_available():
+        if tenzor_avail:
             tz_results = benchmark_tenzor_conv2d(
                 config.conv2d_configs[:3],  # First 3 configs
                 config.image_sizes[:2],      # Smaller sizes
@@ -271,11 +279,11 @@ def run_conv2d_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResul
             all_results.extend(tz_results)
         else:
             tz_results = []
-            print("  [SKIP] Tenzor CUDA not available")
+            print(f"  [SKIP] Tenzor {device} not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Conv2d ---")
-            if device != "cuda" or check_pytorch_cuda_available():
+            if pytorch_avail:
                 pt_results = benchmark_pytorch_conv2d(
                     config.conv2d_configs[:3],
                     config.image_sizes[:2],
@@ -285,10 +293,10 @@ def run_conv2d_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResul
                 )
                 all_results.extend(pt_results)
             else:
-                print("  [SKIP] PyTorch CUDA not available")
+                print(f"  [SKIP] PyTorch {device} not available")
 
         # ResNet layer benchmarks
-        resnet_results = benchmark_resnet_layers(device, config)
+        resnet_results = benchmark_resnet_layers(device, config, tenzor_avail, pytorch_avail)
         all_results.extend(resnet_results)
 
     return all_results

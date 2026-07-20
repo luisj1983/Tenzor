@@ -284,6 +284,22 @@ auto Module::cuda(int device_id) -> void {
     to(Device::cuda(device_id));
 }
 
+auto Module::rocm(int device_id) -> void {
+    to(Device::rocm(device_id));
+}
+
+auto Module::vulkan(int device_id) -> void {
+    to(Device::vulkan(device_id));
+}
+
+auto Module::oneapi(int device_id) -> void {
+    to(Device::oneapi(device_id));
+}
+
+auto Module::mps(int device_id) -> void {
+    to(Device::mps(device_id));
+}
+
 auto Module::cpu() -> void {
     to(Device::cpu());
 }

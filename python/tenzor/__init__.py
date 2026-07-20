@@ -22,7 +22,7 @@ Basic usage:
             return self.fc2(x)
 
     model = MyNet()
-    model.cuda()  # Move to GPU if available
+    model.to("cuda")  # Move to GPU; also "rocm", "vulkan", "oneapi", "mps"
 
 Thread safety:
     The GIL is released during most C++ operations (matmul, conv2d, etc.),

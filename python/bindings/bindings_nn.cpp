@@ -273,6 +273,34 @@ void register_nn(py::module_& m) {
              py::arg("device_id") = 0,
              "Move module to CUDA device",
              py::call_guard<py::gil_scoped_release>())
+        .def("rocm", [](tenzor::nn::Module& self, int device_id) -> tenzor::nn::Module* {
+            self.rocm(device_id);
+            return &self;
+        }, py::return_value_policy::reference,
+             py::arg("device_id") = 0,
+             "Move module to ROCm device",
+             py::call_guard<py::gil_scoped_release>())
+        .def("vulkan", [](tenzor::nn::Module& self, int device_id) -> tenzor::nn::Module* {
+            self.vulkan(device_id);
+            return &self;
+        }, py::return_value_policy::reference,
+             py::arg("device_id") = 0,
+             "Move module to Vulkan device",
+             py::call_guard<py::gil_scoped_release>())
+        .def("oneapi", [](tenzor::nn::Module& self, int device_id) -> tenzor::nn::Module* {
+            self.oneapi(device_id);
+            return &self;
+        }, py::return_value_policy::reference,
+             py::arg("device_id") = 0,
+             "Move module to OneAPI device",
+             py::call_guard<py::gil_scoped_release>())
+        .def("mps", [](tenzor::nn::Module& self, int device_id) -> tenzor::nn::Module* {
+            self.mps(device_id);
+            return &self;
+        }, py::return_value_policy::reference,
+             py::arg("device_id") = 0,
+             "Move module to MPS device",
+             py::call_guard<py::gil_scoped_release>())
         .def("cpu", [](tenzor::nn::Module& self) -> tenzor::nn::Module* {
             self.cpu();
             return &self;

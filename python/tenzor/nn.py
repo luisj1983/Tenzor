@@ -102,7 +102,7 @@ class Module(_CppModule):
                 return x
 
         model = MyModel()
-        model.cuda()  # Move to GPU
+        model.to("cuda")  # Move to GPU; also "rocm", "vulkan", "oneapi", "mps"
         output = model(input_tensor)
     """
 

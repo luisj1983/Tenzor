@@ -6,7 +6,7 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "tenzor/core/tensor.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "../cuda_stream_pool.hpp"
 #include "cuda_common.cuh"
 #include <cub/cub.cuh>

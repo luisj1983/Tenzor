@@ -132,12 +132,16 @@ auto Adadelta::step_impl() -> void {
         const DType state_dt = optim_state_dtype(param_dt);
         const bool needs_upcast = (state_dt != param_dt);
 
-        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // Fused single-kernel dispatch: any backend with a registered
+        // FusedAdadeltaStep kernel (CUDA/ROCm/Vulkan/OneAPI/MPS) avoids the
+        // GPU→CPU→GPU round-trip of the generic fallback below; CPU keeps
+        // the existing per-op path.
         // R.16: skip the fused path for half-precision params — state lives
         // at F32 while the fused kernel expects state at param dtype.
         if (!needs_upcast &&
-            original_device.type == Device::Type::Vulkan &&
-            grad_orig.device().type == Device::Type::Vulkan) {
+            original_device.type != Device::Type::CPU &&
+            original_device.type == grad_orig.device().type &&
+            is_op_supported(OpId::FusedAdadeltaStep, original_device.type)) {
 
             std::vector<Tensor> inputs = {
                 param->tensor(), grad_orig, square_avg_[i], acc_delta_[i]
@@ -145,34 +149,11 @@ auto Adadelta::step_impl() -> void {
 
             // Audit I.14: pass Float64 hyperparams via AttrKey
             // (was static_cast<float>, losing precision in Float64
-            // training).  The Vulkan kernel reads via attrs.get_float
-            // which returns double, so round-trip is double-clean.
+            // training).
             NewOpAttributes attrs;
             attrs.set(AttrKey::Lr, hp.lr);
             attrs.set(AttrKey::Rho, hp.rho);
             attrs.set(AttrKey::Eps, hp.eps);
-            attrs.set(AttrKey::WeightDecay, hp.weight_decay);
-
-            dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
-            continue;
-        }
-
-        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip.
-        // R.16: skip the fused path for half-precision params.
-        if (!needs_upcast &&
-            original_device.type == Device::Type::CUDA &&
-            grad_orig.device().type == Device::Type::CUDA) {
-
-            // CUDA registry expects: [param, grad, square_avg, acc_delta]
-            std::vector<Tensor> inputs = {
-                param->tensor(), grad_orig, square_avg_[i], acc_delta_[i]
-            };
-
-            // Audit I.14: pass Float64 hyperparams via AttrKey.
-            NewOpAttributes attrs;
-            attrs.set(AttrKey::Rho, hp.rho);
-            attrs.set(AttrKey::Eps, hp.eps);
-            attrs.set(AttrKey::Lr, hp.lr);
             attrs.set(AttrKey::WeightDecay, hp.weight_decay);
 
             dispatch(OpId::FusedAdadeltaStep, inputs, attrs);

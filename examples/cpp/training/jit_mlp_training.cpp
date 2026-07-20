@@ -29,6 +29,8 @@ int main(int argc, char* argv[]) {
         if (backend == "cuda") device = Device::cuda();
         else if (backend == "rocm") device = Device::rocm();
         else if (backend == "vulkan") device = Device::vulkan();
+        else if (backend == "oneapi") device = Device::oneapi();
+        else if (backend == "mps") device = Device::mps();
     }
 
     std::cout << "======================================================\n";

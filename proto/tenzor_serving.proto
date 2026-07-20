@@ -65,6 +65,11 @@ message ModelStatusResponse {
 message LoadModelRequest {
   string model_name = 1;
   string model_path = 2;
+  // Target device, e.g. "cpu", "cuda:0", "rocm:0", "vulkan:0", "oneapi:0",
+  // "mps". Defaults to "cpu" when empty — mirrors the HTTP LoadModel
+  // handler's "device" JSON field (server.cpp), which the gRPC handler
+  // previously ignored entirely (always loaded on CPU).
+  string device = 3;
 }
 
 message LoadModelResponse {

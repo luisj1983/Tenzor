@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Tuple
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -38,13 +38,18 @@ def benchmark_tenzor_matmul(
     sync_fn = get_tenzor_sync_fn(device)
 
     for M, K, N in sizes:
-        # Create tensors
-        if device == "cuda":
-            A = tz.randn([M, K]).cuda()
-            B = tz.randn([K, N]).cuda()
-        else:
+        # Create tensors on whichever device was requested (was hardcoded to
+        # only move to GPU for device == "cuda", silently leaving
+        # rocm/vulkan/oneapi tensors on CPU).
+        if device == "cpu":
             A = tz.randn([M, K])
             B = tz.randn([K, N])
+        else:
+            # Tensor.to() / tz.randn(device=...) accept a device name string
+            # directly (pybind11 implicit Device conversion) — no need to
+            # construct a Device object here.
+            A = tz.randn([M, K]).to(device)
+            B = tz.randn([K, N]).to(device)
 
         # Benchmark function - use default args to capture current values
         def matmul_fn(a=A, b=B):
@@ -148,9 +153,8 @@ def benchmark_batched_matmul_tenzor(
     for batch in batch_sizes:
         flops = batch * calculate_matmul_flops(M, N, K)
 
-        tz_device = tz.Device.cuda(0) if device == "cuda" else tz.Device.cpu()
-        A = tz.randn([batch, M, K], device=tz_device)
-        B = tz.randn([batch, K, N], device=tz_device)
+        A = tz.randn([batch, M, K], device=device)
+        B = tz.randn([batch, K, N], device=device)
 
         def bmm_fn(a=A, b=B):
             return tz.bmm(a, b)
@@ -241,41 +245,45 @@ def run_matmul_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResul
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        # Skip CUDA if not available for either framework
-        if device == "cuda":
-            tenzor_cuda = check_tenzor_cuda_available()
-            pytorch_cuda = check_pytorch_cuda_available()
+        # Skip this device if Tenzor doesn't have it available. PyTorch has
+        # no rocm/vulkan/oneapi device type of its own (a ROCm PyTorch build
+        # still uses "cuda" as its device string), so the PyTorch comparison
+        # only ever runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = pytorch_comparable and check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable
 
-            if not tenzor_cuda and not pytorch_cuda:
-                print("CUDA not available for either framework, skipping...")
-                continue
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
 
-            if not tenzor_cuda:
-                print("  [WARNING] Tenzor CUDA not available, will skip Tenzor CUDA benchmarks")
-            if not pytorch_cuda and config.compare_with_pytorch:
-                print("  [WARNING] PyTorch CUDA not available, will skip PyTorch CUDA benchmarks")
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available, will skip Tenzor {device} benchmarks")
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}, will skip PyTorch {device} benchmarks")
 
         # Clear GPU memory before starting
-        if device == "cuda":
+        if device != "cpu":
             clear_gpu_memory()
 
         # Standard matmul
         print("\n--- Tenzor MatMul ---")
-        if device != "cuda" or check_tenzor_cuda_available():
+        tenzor_results = []
+        if tenzor_avail:
             tenzor_results = benchmark_tenzor_matmul(config.matmul_sizes, device, config)
             all_results.extend(tenzor_results)
         else:
-            tenzor_results = []
-            print("  [SKIP] Tenzor CUDA not available")
+            print(f"  [SKIP] Tenzor {device} not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch MatMul ---")
-            if device != "cuda" or check_pytorch_cuda_available():
+            pytorch_results = []
+            if pytorch_avail:
                 pytorch_results = benchmark_pytorch_matmul(config.matmul_sizes, device, config)
                 all_results.extend(pytorch_results)
             else:
-                pytorch_results = []
-                print("  [SKIP] PyTorch CUDA not available")
+                print(f"  [SKIP] PyTorch {device} not available")
 
             # Print comparison (only if both have results)
             if tenzor_results and pytorch_results:
@@ -287,23 +295,23 @@ def run_matmul_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResul
 
         # Batched matmul
         print("\n--- Tenzor Batched MatMul ---")
-        if device != "cuda" or check_tenzor_cuda_available():
+        if tenzor_avail:
             batch_tz = benchmark_batched_matmul_tenzor(
                 config.batch_sizes, (256, 256, 256), device, config
             )
             all_results.extend(batch_tz)
         else:
-            print("  [SKIP] Tenzor CUDA not available")
+            print(f"  [SKIP] Tenzor {device} not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Batched MatMul ---")
-            if device != "cuda" or check_pytorch_cuda_available():
+            if pytorch_avail:
                 batch_pt = benchmark_batched_matmul_pytorch(
                     config.batch_sizes, (256, 256, 256), device, config
                 )
                 all_results.extend(batch_pt)
             else:
-                print("  [SKIP] PyTorch CUDA not available")
+                print(f"  [SKIP] PyTorch {device} not available")
 
     return all_results
 

@@ -11,15 +11,20 @@ layout(binding = 2) buffer SquareAvg { float64_t square_avg[]; };
 layout(binding = 3) buffer MomentumBuf { float64_t momentum_buf[]; };
 layout(binding = 4) buffer GradAvg { float64_t grad_avg[]; };
 
+// Hyperparameters are `double` push constants, not `float` — this is the F64
+// kernel; a float32 push constant would cap every downstream float64_t
+// computation to float32 precision regardless of in-shader math (see
+// fused_adam_step_f64.comp for the diagnosis).
 layout(push_constant) uniform PushConstants {
     uint numel;
-    float lr;
-    float alpha;          // decay rate for square_avg
-    float eps;
-    float weight_decay;
-    float momentum;
     uint centered;        // 0 = not centered, 1 = centered
     uint has_momentum;    // 0 = no momentum buffer, 1 = has momentum
+    uint padding0;
+    double lr;
+    double alpha;          // decay rate for square_avg
+    double eps;
+    double weight_decay;
+    double momentum;
 } params;
 
 void main() {
@@ -48,17 +53,26 @@ void main() {
     // Per attention-contract.md F64 sqrt rule: refine in F64 (audit C10 Vulkan).
     // eps is applied OUTSIDE the sqrt (denom = sqrt(v) + eps), matching
     // PyTorch/eager and the other backends — NOT sqrt(v + eps).
+    // Clamp away from exact zero (and, for the centered branch, away from
+    // negative values a subtractive squared-mean can round to) before the
+    // reciprocal-sqrt: 1/sqrt(0) = inf, and the Newton-Raphson refinement
+    // below then computes 0 * inf = NaN, silently poisoning the parameter —
+    // reproduces on the very first step whenever a gradient is exactly 0
+    // (e.g. a dead ReLU unit). 1e-30 survives the float32 downcast and is
+    // many orders below any real eps, so real (non-zero) values are unaffected.
     if (params.centered != 0) {
         // Centered RMSprop: subtract squared mean gradient
         float64_t ga = alpha_d * grad_avg[gid] + (1.0LF - alpha_d) * g;
         grad_avg[gid] = ga;
-        float64_t s = sq - ga * ga;
+        float64_t s = max(sq - ga * ga, float64_t(1e-30));
         float64_t inv = float64_t(1.0) / float64_t(sqrt(float(s)));
+        inv = inv * (float64_t(1.5) - float64_t(0.5) * s * inv * inv);
         inv = inv * (float64_t(1.5) - float64_t(0.5) * s * inv * inv);
         denom = s * inv + eps_d;
     } else {
-        float64_t s = sq;
+        float64_t s = max(sq, float64_t(1e-30));
         float64_t inv = float64_t(1.0) / float64_t(sqrt(float(s)));
+        inv = inv * (float64_t(1.5) - float64_t(0.5) * s * inv * inv);
         inv = inv * (float64_t(1.5) - float64_t(0.5) * s * inv * inv);
         denom = s * inv + eps_d;
     }

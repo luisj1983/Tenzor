@@ -3159,8 +3159,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             Tensor& param = const_cast<Tensor&>(inputs[0]);
             Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+            // The optimizer pushes grad_avg (index 3) only when centered, then
+            // momentum_buffer. So momentum_buffer is at index 3 when NOT
+            // centered and index 4 when centered (mirrors the CUDA kernel fix
+            // — hard-coding index 4 silently drops the momentum buffer for the
+            // common centered=false, momentum>0 case).
             Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
-            Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+            const size_t mb_idx = centered ? 4u : 3u;
+            Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > mb_idx)
+                ? &const_cast<Tensor&>(inputs[mb_idx]) : nullptr;
 
             oneapi::fused_rmsprop_step_kernel(param, inputs[1], square_avg, grad_avg, momentum_buffer,
                 lr, alpha, eps, weight_decay, momentum, centered, get_q(inputs));

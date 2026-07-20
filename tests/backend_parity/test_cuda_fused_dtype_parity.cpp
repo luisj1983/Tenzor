@@ -29,6 +29,12 @@ protected:
             (void)t; return true;
         } catch (...) { return false; }
     }
+    static bool has_oneapi() {
+        try {
+            auto t = zeros({1}, DType::Float32, Device::oneapi(0));
+            (void)t; return true;
+        } catch (...) { return false; }
+    }
 };
 
 static auto random_f32(std::vector<int64_t> shape) -> Tensor {
@@ -170,6 +176,69 @@ TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_BF16_NativeMatchesRef) {
 
     auto logits_bf16_cuda = logits_f32.to(DType::BFloat16).to(Device::cuda(0));
     std::vector<Tensor> bf16_inputs = {logits_bf16_cuda, targets_cuda};
+    Tensor loss_bf16 = dispatch(OpId::FusedSoftmaxCrossEntropy, bf16_inputs, attrs)[0]
+                           .to(Device::cpu()).to(DType::Float32);
+
+    EXPECT_NEAR(loss_ref.data<float>()[0], loss_bf16.data<float>()[0], 1e-2f);
+}
+
+// ----------------------------------------------------------------------------
+// OneAPI native F16/BF16 FusedSoftmaxCrossEntropy. Unlike FusedRMSNorm (where
+// ROCm/OneAPI both widen-narrow via .to(Float32) — see the file-top comment),
+// OneAPI's fused_softmax_cross_entropy_kernel has a genuine native sycl::half/
+// bfloat16 code path (src/backends/oneapi/kernels/fused_ops.cpp) that reads
+// half/bf16 directly and accumulates in float, exactly like CUDA's. That's a
+// real on-device numeric path a CPU-only host can't stand in for, so it needs
+// its own live check the same way the CUDA tests above do (findings.txt —
+// this file was previously CUDA-only without confirming whether ROCm/OneAPI
+// had a native path to test; verified here that OneAPI does for this op).
+// ROCm's fused_softmax_cross_entropy_hip widen-narrows (calls the F32 kernel
+// then casts back), so there is no native ROCm path to test here.
+// ----------------------------------------------------------------------------
+TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_F16_NativeMatchesRef_OneAPI) {
+    if (!has_oneapi()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "OneAPI not available");
+
+    auto logits_f32 = random_f32({16, 32});
+    auto targets = zeros({16}, DType::Int64, Device::cpu());
+    auto* tp = targets.data<int64_t>();
+    for (int64_t i = 0; i < targets.numel(); ++i) tp[i] = (i * 7) % 32;
+
+    auto logits_f32_dev = logits_f32.to(Device::oneapi(0));
+    auto targets_dev = targets.to(Device::oneapi(0));
+    OpAttributes attrs;
+    attrs.set(AttrKey::Reduction, std::string("mean"));
+    std::vector<Tensor> ref_inputs = {logits_f32_dev, targets_dev};
+    Tensor loss_ref = dispatch(OpId::FusedSoftmaxCrossEntropy, ref_inputs, attrs)[0]
+                          .to(Device::cpu());
+
+    auto logits_f16_dev = logits_f32.to(DType::Float16).to(Device::oneapi(0));
+    std::vector<Tensor> f16_inputs = {logits_f16_dev, targets_dev};
+    Tensor loss_f16 = dispatch(OpId::FusedSoftmaxCrossEntropy, f16_inputs, attrs)[0]
+                          .to(Device::cpu()).to(DType::Float32);
+
+    ASSERT_EQ(loss_ref.dtype(), DType::Float32);
+    ASSERT_EQ(loss_f16.dtype(), DType::Float32);
+    EXPECT_NEAR(loss_ref.data<float>()[0], loss_f16.data<float>()[0], 5e-3f);
+}
+
+TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_BF16_NativeMatchesRef_OneAPI) {
+    if (!has_oneapi()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "OneAPI not available");
+
+    auto logits_f32 = random_f32({16, 32});
+    auto targets = zeros({16}, DType::Int64, Device::cpu());
+    auto* tp = targets.data<int64_t>();
+    for (int64_t i = 0; i < targets.numel(); ++i) tp[i] = (i * 7) % 32;
+
+    auto logits_f32_dev = logits_f32.to(Device::oneapi(0));
+    auto targets_dev = targets.to(Device::oneapi(0));
+    OpAttributes attrs;
+    attrs.set(AttrKey::Reduction, std::string("mean"));
+    std::vector<Tensor> ref_inputs = {logits_f32_dev, targets_dev};
+    Tensor loss_ref = dispatch(OpId::FusedSoftmaxCrossEntropy, ref_inputs, attrs)[0]
+                          .to(Device::cpu());
+
+    auto logits_bf16_dev = logits_f32.to(DType::BFloat16).to(Device::oneapi(0));
+    std::vector<Tensor> bf16_inputs = {logits_bf16_dev, targets_dev};
     Tensor loss_bf16 = dispatch(OpId::FusedSoftmaxCrossEntropy, bf16_inputs, attrs)[0]
                            .to(Device::cpu()).to(DType::Float32);
 

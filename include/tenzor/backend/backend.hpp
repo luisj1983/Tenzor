@@ -400,6 +400,15 @@ public:
      * wraps it in a std::unique_ptr. Returns nullptr when this backend
      * provides no collective implementation (CPU backend, or a CUDA build
      * without NCCL linked).
+     *
+     * Only CUDA (NCCL) and ROCm (RCCL) override this — this is intentional,
+     * not a coverage gap: distributed.cpp's Backend::NCCL path only ever
+     * queries the CUDA/ROCm backends (see distributed.cpp), because there is
+     * no NCCL-equivalent GPU-direct collective library for Vulkan, OneAPI,
+     * or MPS to link here. Multi-device training on those backends uses
+     * Backend::GLOO or Backend::MPI instead, both of which stage through
+     * host memory and work with any Device::Type (see
+     * MPIBackend::supports_device).
      */
     virtual auto create_comm_backend() -> void* { return nullptr; }
 };

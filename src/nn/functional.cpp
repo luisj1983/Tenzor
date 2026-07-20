@@ -1525,10 +1525,18 @@ auto scaled_dot_product_attention(
     // Causal attr but discard it — they don't apply triangular masking. So for
     // is_causal=true on those backends, fall through to the manual BMM path
     // which builds an explicit triu mask. CPU and Vulkan FlashAttention do
-    // honor causal. (#46/#49)
+    // honor causal, and so do OneAPI's (oneapi_kernel_registry.cpp
+    // OpId::FlashAttention reads AND applies AttrKey::Causal) and MPS's
+    // (routed through the CPU kernel via mps_accelerate_multi, which is
+    // itself causal-correct — MPS has no dedicated native FlashAttention
+    // Metal kernel yet, but that's a missing-kernel gap, not a
+    // causal-masking gap: whatever path it takes already masks correctly).
+    // (#46/#49)
     auto dev_t = query.tensor().device().type;
     bool device_supports_causal = (dev_t == Device::Type::CPU ||
-                                   dev_t == Device::Type::Vulkan);
+                                   dev_t == Device::Type::Vulkan ||
+                                   dev_t == Device::Type::OneAPI ||
+                                   dev_t == Device::Type::MPS);
     bool causal_path_ok = !opts.is_causal || device_supports_causal;
 
     // FlashAttention dropout: the CPU kernel has always applied the inverted-

@@ -148,7 +148,7 @@ def main():
     print("\nKey Takeaways:")
     print("1. Always initialize Tenzor with tz.initialize()")
     print("2. Create tensors with zeros(), ones(), randn()")
-    print("3. Manage device placement with Device.cpu() and Device.cuda()")
+    print("3. Manage device placement with Device.cpu(), Device.cuda(), Device.rocm(), etc.")
     print("4. Perform operations: +, -, *, matmul()")
     print("5. Reshape tensors with .reshape()")
     print("6. Support for multiple dtypes: float32, float64, int32, etc.")

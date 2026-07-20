@@ -394,10 +394,18 @@ public:
     /**
      * @brief Enable/disable specific device backend
      *
-     * @param backend "cuda", "rocm", "cpu", or "all"
+     * @param backend "cuda", "rocm", "vulkan", "oneapi", "mps", "cpu", or "all"
      * @param enable Enable or disable
      */
     auto set_backend(const std::string& backend, bool enable) -> void;
+
+    /**
+     * @brief Check whether a backend was enabled via set_backend()
+     *
+     * @param backend "cuda", "rocm", "vulkan", "oneapi", "mps", or "cpu"
+     * @return Current enabled state (true for an unrecognized name)
+     */
+    auto is_backend_enabled(const std::string& backend) const -> bool;
 
     /**
      * @brief Check if pattern is supported
@@ -419,6 +427,9 @@ private:
     bool cuda_enabled_{true};
     bool rocm_enabled_{true};
     bool cpu_enabled_{true};
+    bool vulkan_enabled_{true};
+    bool oneapi_enabled_{true};
+    bool mps_enabled_{true};
 
     std::vector<std::unique_ptr<FusionPattern>> patterns_;
     Statistics stats_;

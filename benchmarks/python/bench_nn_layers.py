@@ -19,7 +19,7 @@ except ImportError:
 from typing import List, Dict
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -47,13 +47,12 @@ def benchmark_linear_layers(device: str, config: BenchmarkConfig) -> List[Benchm
         in_f, out_f, batch = cfg["in_features"], cfg["out_features"], cfg["batch"]
 
         # Tenzor
-        if device == "cuda":
-            x = tz.randn([batch, in_f]).cuda()
-            layer = tz.nn.Linear(in_f, out_f)
-            layer.cuda()
-        else:
+        layer = tz.nn.Linear(in_f, out_f)
+        if device == "cpu":
             x = tz.randn([batch, in_f])
-            layer = tz.nn.Linear(in_f, out_f)
+        else:
+            x = tz.randn([batch, in_f]).to(device)
+            layer.to(device)
 
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
@@ -142,10 +141,10 @@ def benchmark_activation_functions(device: str, config: BenchmarkConfig) -> List
 
     for name, activation in activations_tz.items():
         for batch, features in sizes:
-            if device == "cuda":
-                x = tz.randn([batch, features]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, features])
+            else:
+                x = tz.randn([batch, features]).to(device)
 
             # Tenzor modules expect Variable input
             x_var = tz.Variable(x, requires_grad=False)
@@ -234,15 +233,13 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
     for cfg in bn_configs:
         ch, h, w, batch = cfg["channels"], cfg["h"], cfg["w"], cfg["batch"]
 
-        if device == "cuda":
-            x = tz.randn([batch, ch, h, w]).cuda()
-            bn = tz.nn.BatchNorm2d(ch)
-            bn.eval()  # Set eval mode before CUDA transfer
-            bn.cuda()
-        else:
+        bn = tz.nn.BatchNorm2d(ch)
+        bn.eval()  # Set eval mode before device transfer
+        if device == "cpu":
             x = tz.randn([batch, ch, h, w])
-            bn = tz.nn.BatchNorm2d(ch)
-            bn.eval()
+        else:
+            x = tz.randn([batch, ch, h, w]).to(device)
+            bn.to(device)
 
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
@@ -320,13 +317,12 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
         batch = cfg["batch"]
         seq_len = cfg["seq_len"]
 
-        if device == "cuda":
-            x = tz.randn([batch, seq_len, norm_shape[0]]).cuda()
-            ln = tz.nn.LayerNorm(norm_shape)
-            ln.cuda()
-        else:
+        ln = tz.nn.LayerNorm(norm_shape)
+        if device == "cpu":
             x = tz.randn([batch, seq_len, norm_shape[0]])
-            ln = tz.nn.LayerNorm(norm_shape)
+        else:
+            x = tz.randn([batch, seq_len, norm_shape[0]]).to(device)
+            ln.to(device)
 
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
@@ -375,12 +371,11 @@ def benchmark_pooling_layers(device: str, config: BenchmarkConfig) -> List[Bench
         ch, h, w = cfg["channels"], cfg["h"], cfg["w"]
         kernel, stride, batch = cfg["kernel"], cfg["stride"], cfg["batch"]
 
-        if device == "cuda":
-            x = tz.randn([batch, ch, h, w]).cuda()
-            pool = tz.nn.MaxPool2d(kernel, stride=stride)
-        else:
+        pool = tz.nn.MaxPool2d(kernel, stride=stride)
+        if device == "cpu":
             x = tz.randn([batch, ch, h, w])
-            pool = tz.nn.MaxPool2d(kernel, stride=stride)
+        else:
+            x = tz.randn([batch, ch, h, w]).to(device)
 
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
@@ -420,22 +415,14 @@ def run_nn_layer_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkRes
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        # Check CUDA availability for both frameworks
-        if device == "cuda":
-            tenzor_cuda = check_tenzor_cuda_available()
-            pytorch_cuda = check_pytorch_cuda_available()
-
-            if not tenzor_cuda and not pytorch_cuda:
-                print("CUDA not available for either framework, skipping...")
-                continue
-
-            if not tenzor_cuda:
-                print("  [WARNING] Tenzor CUDA not available")
-            if not pytorch_cuda and config.compare_with_pytorch:
-                print("  [WARNING] PyTorch CUDA not available")
+        # This file is Tenzor-only (no PyTorch comparison), so gate on Tenzor
+        # device availability generically instead of the old CUDA-only check.
+        if not check_tenzor_device_available(device):
+            print(f"Tenzor {device} not available, skipping...")
+            continue
 
         # Clear GPU memory before starting
-        if device == "cuda":
+        if device != "cpu":
             clear_gpu_memory()
 
         all_results.extend(benchmark_linear_layers(device, config))

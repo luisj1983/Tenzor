@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -54,11 +54,11 @@ def benchmark_tenzor_layernorm(
         try:
             ln = tz.nn.LayerNorm([hidden])
 
-            if device == "cuda":
-                ln.cuda()
-                x = tz.randn([batch, seq_len, hidden]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, seq_len, hidden])
+            else:
+                ln.to(device)
+                x = tz.randn([batch, seq_len, hidden]).to(device)
 
             x_var = tz.Variable(x, False)
 
@@ -178,11 +178,11 @@ def benchmark_tenzor_batchnorm(
             else:
                 bn.eval()
 
-            if device == "cuda":
-                bn.cuda()
-                x = tz.randn([batch, channels, h, w]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, channels, h, w])
+            else:
+                bn.to(device)
+                x = tz.randn([batch, channels, h, w]).to(device)
 
             x_var = tz.Variable(x, training)
 
@@ -297,11 +297,11 @@ def benchmark_tenzor_rmsnorm(
         try:
             rms = tz.nn.RMSNorm(hidden)
 
-            if device == "cuda":
-                rms.cuda()
-                x = tz.randn([batch, seq_len, hidden]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, seq_len, hidden])
+            else:
+                rms.to(device)
+                x = tz.randn([batch, seq_len, hidden]).to(device)
 
             x_var = tz.Variable(x, False)
 
@@ -437,21 +437,28 @@ def run_normalization_benchmarks(config: BenchmarkConfig = None) -> List[Benchma
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+        # PyTorch has no rocm/vulkan/oneapi device type of its own, so the
+        # comparison only ever runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
+
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available")
+        run_pytorch = config.compare_with_pytorch and pytorch_avail
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}")
 
         # LayerNorm benchmarks
         print("\n--- Tenzor LayerNorm ---")
-        tenzor_ln = benchmark_tenzor_layernorm(LAYERNORM_CONFIGS, device, config)
+        tenzor_ln = benchmark_tenzor_layernorm(LAYERNORM_CONFIGS, device, config) if tenzor_avail else []
         all_results.extend(tenzor_ln)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch LayerNorm ---")
             pytorch_ln = benchmark_pytorch_layernorm(LAYERNORM_CONFIGS, device, config)
             all_results.extend(pytorch_ln)
@@ -459,10 +466,10 @@ def run_normalization_benchmarks(config: BenchmarkConfig = None) -> List[Benchma
 
         # BatchNorm inference benchmarks
         print("\n--- Tenzor BatchNorm2d (Inference) ---")
-        tenzor_bn_eval = benchmark_tenzor_batchnorm(BATCHNORM_CONFIGS, device, config, training=False)
+        tenzor_bn_eval = benchmark_tenzor_batchnorm(BATCHNORM_CONFIGS, device, config, training=False) if tenzor_avail else []
         all_results.extend(tenzor_bn_eval)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch BatchNorm2d (Inference) ---")
             pytorch_bn_eval = benchmark_pytorch_batchnorm(BATCHNORM_CONFIGS, device, config, training=False)
             all_results.extend(pytorch_bn_eval)
@@ -470,10 +477,10 @@ def run_normalization_benchmarks(config: BenchmarkConfig = None) -> List[Benchma
 
         # BatchNorm training benchmarks
         print("\n--- Tenzor BatchNorm2d (Training) ---")
-        tenzor_bn_train = benchmark_tenzor_batchnorm(BATCHNORM_CONFIGS, device, config, training=True)
+        tenzor_bn_train = benchmark_tenzor_batchnorm(BATCHNORM_CONFIGS, device, config, training=True) if tenzor_avail else []
         all_results.extend(tenzor_bn_train)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch BatchNorm2d (Training) ---")
             pytorch_bn_train = benchmark_pytorch_batchnorm(BATCHNORM_CONFIGS, device, config, training=True)
             all_results.extend(pytorch_bn_train)
@@ -481,10 +488,10 @@ def run_normalization_benchmarks(config: BenchmarkConfig = None) -> List[Benchma
 
         # RMSNorm benchmarks
         print("\n--- Tenzor RMSNorm ---")
-        tenzor_rms = benchmark_tenzor_rmsnorm(LAYERNORM_CONFIGS, device, config)
+        tenzor_rms = benchmark_tenzor_rmsnorm(LAYERNORM_CONFIGS, device, config) if tenzor_avail else []
         all_results.extend(tenzor_rms)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch RMSNorm ---")
             pytorch_rms = benchmark_pytorch_rmsnorm(LAYERNORM_CONFIGS, device, config)
             all_results.extend(pytorch_rms)

@@ -6,7 +6,7 @@
 #include <cublas_v2.h>
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"

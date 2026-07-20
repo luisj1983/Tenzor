@@ -1,6 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include "tenzor/ops/creation.hpp"     // For tenzor::get_global_seed
 #include <optional>

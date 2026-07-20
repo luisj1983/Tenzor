@@ -10,15 +10,17 @@ layout(binding = 1) buffer Param { float64_t param_data[]; };
 layout(binding = 2) buffer SquareAvg { float64_t square_avg[]; };
 layout(binding = 3) buffer AccDelta { float64_t acc_delta[]; };
 
+// Hyperparameters are `double` push constants, not `float` — this is the F64
+// kernel; a float32 push constant would cap every downstream float64_t
+// computation to float32 precision regardless of in-shader math (see
+// fused_adam_step_f64.comp for the diagnosis).
 layout(push_constant) uniform PushConstants {
     uint numel;
-    float lr;
-    float rho;
-    float eps;
-    float weight_decay;
     uint padding0;
-    uint padding1;
-    uint padding2;
+    double lr;
+    double rho;
+    double eps;
+    double weight_decay;
 } params;
 
 void main() {
@@ -43,13 +45,15 @@ void main() {
 
     // Per attention-contract.md F64 sqrt rule: refine a float guess in F64
     // (audit C10 Vulkan). Helper computes sqrt(x) ≈ x * (1/sqrt(float(x)))
-    // refined via one Newton-Raphson iteration in F64.
+    // refined via two Newton-Raphson iterations in F64 (full ~52-bit mantissa).
     float64_t ad_in = acc_delta[gid] + eps_d;
     float64_t inv_sd = float64_t(1.0) / float64_t(sqrt(float(ad_in)));
+    inv_sd = inv_sd * (float64_t(1.5) - float64_t(0.5) * ad_in * inv_sd * inv_sd);
     inv_sd = inv_sd * (float64_t(1.5) - float64_t(0.5) * ad_in * inv_sd * inv_sd);
     float64_t std_delta = ad_in * inv_sd;
     float64_t sg_in = sq + eps_d;
     float64_t inv_sg = float64_t(1.0) / float64_t(sqrt(float(sg_in)));
+    inv_sg = inv_sg * (float64_t(1.5) - float64_t(0.5) * sg_in * inv_sg * inv_sg);
     inv_sg = inv_sg * (float64_t(1.5) - float64_t(0.5) * sg_in * inv_sg * inv_sg);
     float64_t std_grad = sg_in * inv_sg;
     float64_t delta = std_delta / std_grad * g;

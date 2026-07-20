@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/core/pinned_allocator.hpp"
+#include "tenzor/core/rocm_transfer.hpp"
 #include <algorithm>
 #include <functional>
 #include <numeric>
@@ -84,7 +85,8 @@ PinnedMemoryAllocator::PinnedMemoryAllocator(const Config& config)
 
     // Allocate initial pool
     try {
-        void* base_ptr = allocate_cuda_pinned(config_.pool_size);
+        bool via_rocm = false;
+        void* base_ptr = allocate_cuda_pinned(config_.pool_size, via_rocm);
 
         // Create initial free block spanning entire pool
         auto initial_block = std::make_unique<MemoryBlock>(base_ptr, config_.pool_size, true);
@@ -98,6 +100,7 @@ PinnedMemoryAllocator::PinnedMemoryAllocator(const Config& config)
         region.base_ptr = base_ptr;
         region.size = config_.pool_size;
         region.head = initial_block_raw;
+        region.via_rocm = via_rocm;
         pools_.push_back(region);
 
         is_initialized_ = true;
@@ -123,7 +126,7 @@ PinnedMemoryAllocator::~PinnedMemoryAllocator() {
     // Free all pools
     for (auto& pool : pools_) {
         try {
-            free_cuda_pinned(pool.base_ptr, pool.size);
+            free_cuda_pinned(pool.base_ptr, pool.size, pool.via_rocm);
         } catch (...) {
             // Ignore errors during cleanup
         }
@@ -158,7 +161,7 @@ PinnedMemoryAllocator& PinnedMemoryAllocator::operator=(PinnedMemoryAllocator&& 
             block_map_.clear();
             for (auto& pool : pools_) {
                 try {
-                    free_cuda_pinned(pool.base_ptr, pool.size);
+                    free_cuda_pinned(pool.base_ptr, pool.size, pool.via_rocm);
                 } catch (...) {}
             }
         }
@@ -436,7 +439,8 @@ auto PinnedMemoryAllocator::grow_pool(size_t additional_bytes) -> bool {
 
     try {
         // Allocate new pool
-        void* new_ptr = allocate_cuda_pinned(additional_bytes);
+        bool via_rocm = false;
+        void* new_ptr = allocate_cuda_pinned(additional_bytes, via_rocm);
 
         // Create new block
         auto new_block = std::make_unique<MemoryBlock>(new_ptr, additional_bytes, true);
@@ -456,6 +460,7 @@ auto PinnedMemoryAllocator::grow_pool(size_t additional_bytes) -> bool {
         region.base_ptr = new_ptr;
         region.size = additional_bytes;
         region.head = new_block_raw;
+        region.via_rocm = via_rocm;
         pools_.push_back(region);
 
         return true;
@@ -663,14 +668,23 @@ auto PinnedMemoryAllocator::find_block(void* ptr) -> MemoryBlock* {
     return nullptr;
 }
 
-auto PinnedMemoryAllocator::allocate_cuda_pinned(size_t size) -> void* {
+auto PinnedMemoryAllocator::allocate_cuda_pinned(size_t size, bool& out_via_rocm) -> void* {
+    out_via_rocm = false;
 #ifdef TENZOR_USE_CUDA
     void* ptr = nullptr;
     cudaError_t error = cudaHostAlloc(&ptr, size, cudaHostAllocPortable);
     check_cuda_error(error, "cudaHostAlloc");
     return ptr;
 #else
-    // Non-CUDA build: provide REAL page-locked host memory via OS-level
+    // ROCm build: hipHostMalloc gives real DMA-capable pinned memory (like
+    // cudaHostAlloc), so try it before falling back to OS-level mlock (which
+    // merely prevents paging — no DMA acceleration). No-op / returns nullptr
+    // when ROCm isn't linked in.
+    if (void* rocm_ptr = rocm_transfer::host_malloc(size)) {
+        out_via_rocm = true;
+        return rocm_ptr;
+    }
+    // Non-CUDA, non-ROCm build: provide REAL page-locked host memory via OS-level
     // page locking (POSIX mlock / Windows VirtualLock) rather than
     // silently returning a regular std::malloc that pretends to be
     // pinned but isn't (audit item F.9).  Users get the async-transfer
@@ -707,17 +721,23 @@ auto PinnedMemoryAllocator::allocate_cuda_pinned(size_t size) -> void* {
 #endif
 }
 
-auto PinnedMemoryAllocator::free_cuda_pinned(void* ptr, size_t size) -> void {
+auto PinnedMemoryAllocator::free_cuda_pinned(void* ptr, size_t size, bool via_rocm) -> void {
     if (!ptr) {
         return;
     }
 
 #ifdef TENZOR_USE_CUDA
     (void)size;
+    (void)via_rocm;
     cudaError_t error = cudaFreeHost(ptr);
     check_cuda_error(error, "cudaFreeHost");
 #else
-    // Mirror the non-CUDA allocation path: unlock the WHOLE region then free.
+    if (via_rocm) {
+        (void)size;
+        rocm_transfer::host_free(ptr);
+        return;
+    }
+    // Mirror the non-CUDA, non-ROCm allocation path: unlock the WHOLE region then free.
     // allocate_cuda_pinned() locked [ptr, ptr+aligned_size) with
     // mlock/VirtualLock, so we must unlock the same span here. munlock(2) only
     // unlocks the pages in [addr, addr+len); passing len==1 unlocks just the

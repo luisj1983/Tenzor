@@ -231,13 +231,26 @@ auto RMSprop::step_impl() -> void {
             continue;
         }
 
-        // CUDA fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // Fused single-kernel dispatch for CUDA/ROCm/OneAPI (conditional-append
+        // slot contract: [param, grad, square_avg, grad_avg?, momentum_buffer?]),
+        // avoiding the GPU→CPU→GPU round-trip of the generic fallback below.
+        // MPS's fused kernel only implements the vanilla (no centered, no
+        // momentum) 3-input signature, so it only takes this path when neither
+        // feature is requested — otherwise it falls through to the generic
+        // path so centered/momentum are not silently dropped.
         // R.16: skip the fused path for half-precision params (see above).
+        const bool rmsprop_device_has_full_kernel =
+            original_device.type == Device::Type::CUDA ||
+            original_device.type == Device::Type::ROCm ||
+            original_device.type == Device::Type::OneAPI;
+        const bool rmsprop_device_has_vanilla_only_kernel =
+            original_device.type == Device::Type::MPS &&
+            !hp.centered && hp.momentum <= 0.0;
         if (!needs_upcast &&
-            original_device.type == Device::Type::CUDA &&
-            grad_orig.device().type == Device::Type::CUDA) {
+            grad_orig.device().type == original_device.type &&
+            is_op_supported(OpId::FusedRMSPropStep, original_device.type) &&
+            (rmsprop_device_has_full_kernel || rmsprop_device_has_vanilla_only_kernel)) {
 
-            // CUDA registry expects: [param, grad, square_avg, grad_avg?, momentum_buffer?]
             std::vector<Tensor> inputs = {param->tensor(), grad_orig, square_avg_[i]};
             if (hp.centered && i < grad_avg_.size()) {
                 inputs.push_back(grad_avg_[i]);

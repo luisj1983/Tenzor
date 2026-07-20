@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,
-    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_device_available,
     check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
@@ -93,11 +93,11 @@ def benchmark_tenzor_lstm(
             )
             lstm.eval()  # Enable fused kernel optimization for inference
 
-            if device == "cuda":
-                lstm.cuda()
-                x = tz.randn([batch, seq_len, input_size]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, seq_len, input_size])
+            else:
+                lstm.to(device)
+                x = tz.randn([batch, seq_len, input_size]).to(device)
 
             x_var = tz.Variable(x, False)
 
@@ -239,11 +239,11 @@ def benchmark_tenzor_gru(
             )
             gru.eval()  # Enable fused kernel optimization for inference
 
-            if device == "cuda":
-                gru.cuda()
-                x = tz.randn([batch, seq_len, input_size]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, seq_len, input_size])
+            else:
+                gru.to(device)
+                x = tz.randn([batch, seq_len, input_size]).to(device)
 
             x_var = tz.Variable(x, False)
 
@@ -375,11 +375,11 @@ def benchmark_tenzor_lstm_backward(
                 batch_first=True,
             )
 
-            if device == "cuda":
-                lstm.cuda()
-                x = tz.randn([batch, seq_len, input_size]).cuda()
-            else:
+            if device == "cpu":
                 x = tz.randn([batch, seq_len, input_size])
+            else:
+                lstm.to(device)
+                x = tz.randn([batch, seq_len, input_size]).to(device)
 
             x_var = tz.Variable(x, True)
 
@@ -512,30 +512,32 @@ def run_rnn_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult]:
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        # Check CUDA availability for both frameworks
-        if device == "cuda":
-            tenzor_cuda = check_tenzor_cuda_available()
-            pytorch_cuda = check_pytorch_cuda_available()
+        # PyTorch has no rocm/vulkan/oneapi device type of its own, so the
+        # comparison only ever runs for device in ("cpu", "cuda").
+        tenzor_avail = check_tenzor_device_available(device)
+        pytorch_comparable = device in ("cpu", "cuda")
+        pytorch_avail = (check_pytorch_cuda_available() if device == "cuda" else pytorch_comparable) if pytorch_comparable else False
 
-            if not tenzor_cuda and not pytorch_cuda:
-                print("CUDA not available for either framework, skipping...")
-                continue
-
-            if not tenzor_cuda:
-                print("  [WARNING] Tenzor CUDA not available")
-            if not pytorch_cuda and config.compare_with_pytorch:
-                print("  [WARNING] PyTorch CUDA not available")
+        if not tenzor_avail and not (config.compare_with_pytorch and pytorch_avail):
+            print(f"{device} not available for either framework, skipping...")
+            continue
+        if not tenzor_avail:
+            print(f"  [WARNING] Tenzor {device} not available")
+        run_pytorch = config.compare_with_pytorch and pytorch_avail
+        if config.compare_with_pytorch and not pytorch_avail:
+            reason = "not a PyTorch device" if not pytorch_comparable else f"PyTorch {device} not available"
+            print(f"  [WARNING] {reason}")
 
         # Clear GPU memory before starting
-        if device == "cuda":
+        if device != "cpu":
             clear_gpu_memory()
 
         # LSTM Forward
         print("\n--- Tenzor LSTM (Forward) ---")
-        tenzor_lstm = benchmark_tenzor_lstm(LSTM_CONFIGS, device, config)
+        tenzor_lstm = benchmark_tenzor_lstm(LSTM_CONFIGS, device, config) if tenzor_avail else []
         all_results.extend(tenzor_lstm)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch LSTM (Forward) ---")
             pytorch_lstm = benchmark_pytorch_lstm(LSTM_CONFIGS, device, config)
             all_results.extend(pytorch_lstm)
@@ -543,10 +545,10 @@ def run_rnn_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult]:
 
         # GRU Forward
         print("\n--- Tenzor GRU (Forward) ---")
-        tenzor_gru = benchmark_tenzor_gru(GRU_CONFIGS, device, config)
+        tenzor_gru = benchmark_tenzor_gru(GRU_CONFIGS, device, config) if tenzor_avail else []
         all_results.extend(tenzor_gru)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch GRU (Forward) ---")
             pytorch_gru = benchmark_pytorch_gru(GRU_CONFIGS, device, config)
             all_results.extend(pytorch_gru)
@@ -554,10 +556,10 @@ def run_rnn_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult]:
 
         # Bidirectional LSTM
         print("\n--- Tenzor BiLSTM ---")
-        tenzor_bilstm = benchmark_tenzor_lstm(BIDIRECTIONAL_CONFIGS, device, config, bidirectional=True)
+        tenzor_bilstm = benchmark_tenzor_lstm(BIDIRECTIONAL_CONFIGS, device, config, bidirectional=True) if tenzor_avail else []
         all_results.extend(tenzor_bilstm)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch BiLSTM ---")
             pytorch_bilstm = benchmark_pytorch_lstm(BIDIRECTIONAL_CONFIGS, device, config, bidirectional=True)
             all_results.extend(pytorch_bilstm)
@@ -565,10 +567,10 @@ def run_rnn_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult]:
 
         # LSTM Training (with backward)
         print("\n--- Tenzor LSTM (Training) ---")
-        tenzor_lstm_train = benchmark_tenzor_lstm_backward(LSTM_CONFIGS[:3], device, config)
+        tenzor_lstm_train = benchmark_tenzor_lstm_backward(LSTM_CONFIGS[:3], device, config) if tenzor_avail else []
         all_results.extend(tenzor_lstm_train)
 
-        if config.compare_with_pytorch:
+        if run_pytorch:
             print("\n--- PyTorch LSTM (Training) ---")
             pytorch_lstm_train = benchmark_pytorch_lstm_backward(LSTM_CONFIGS[:3], device, config)
             all_results.extend(pytorch_lstm_train)

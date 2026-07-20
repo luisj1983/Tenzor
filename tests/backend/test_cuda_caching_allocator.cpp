@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include <cuda_runtime.h>
 #include <thread>
 #include <vector>

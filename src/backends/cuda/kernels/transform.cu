@@ -3,7 +3,7 @@
 #include <cuda_bf16.h>
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
-#include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/cuda_caching_allocator.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include "cuda_common.cuh"

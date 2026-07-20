@@ -12,6 +12,34 @@ from enum import Enum
 class Device(Enum):
     CPU = "cpu"
     CUDA = "cuda"
+    ROCM = "rocm"
+    VULKAN = "vulkan"
+    ONEAPI = "oneapi"
+
+
+def _default_devices() -> List[str]:
+    """Auto-detect which devices to benchmark by default.
+
+    Previously hardcoded to ["cpu", "cuda"], which meant ROCm/Vulkan/OneAPI
+    were silently excluded from every benchmark run unless the user passed
+    --device explicitly, even on a machine where those backends are the ones
+    actually available (no CUDA GPU at all). Falls back to ["cpu", "cuda"] if
+    tenzor isn't importable yet (e.g. building docs without a built module).
+    """
+    devices = ["cpu"]
+    try:
+        import tenzor as tz
+        tz.initialize()
+        for name in ("cuda", "rocm", "vulkan", "oneapi"):
+            try:
+                if tz.is_backend_available(name):
+                    devices.append(name)
+            except Exception:
+                pass
+    except ImportError:
+        devices.append("cuda")
+    return devices
+
 
 @dataclass
 class BenchmarkConfig:
@@ -21,8 +49,9 @@ class BenchmarkConfig:
     warmup_iterations: int = 5
     benchmark_iterations: int = 100
 
-    # Devices to test
-    devices: List[str] = field(default_factory=lambda: ["cpu", "cuda"])
+    # Devices to test — auto-detected (see _default_devices); override with
+    # --device to restrict to one, or config.devices = [...] directly.
+    devices: List[str] = field(default_factory=_default_devices)
 
     # Matrix sizes for matmul benchmarks
     matmul_sizes: List[tuple] = field(default_factory=lambda: [

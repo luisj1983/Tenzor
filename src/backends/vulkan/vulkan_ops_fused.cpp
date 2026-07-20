@@ -39,10 +39,10 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
         throw std::invalid_argument("FusedSGDStep requires at least 2 inputs (param, grad)");
     }
 
-    float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
-    float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
-    float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
-    float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
+    double lr = attrs.get_float(AttrKey::Lr, 0.01);
+    double momentum = attrs.get_float(AttrKey::Momentum, 0.0);
+    double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+    double dampening = attrs.get_float(AttrKey::Dampening, 0.0);
     bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
 
     int64_t numel = inputs[0].numel();
@@ -56,7 +56,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
                             : "fused_sgd_step";
     auto* pipeline = getPipeline(sgd_shader, device_id);
 
-    bool has_momentum = (inputs.size() > 2 && momentum > 0.0f);
+    bool has_momentum = (inputs.size() > 2 && momentum > 0.0);
 
     // In-place operands: param (and momentum buffer when used) are updated in
     // place and must stay on their own storage — require offset-0 contiguous.
@@ -110,7 +110,10 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
+    // F64 uses a double-precision push-constant layout (see fused_sgd_step_f64.comp):
+    // a float32 push constant would cap every downstream float64_t computation to
+    // float32 precision no matter how the in-shader math is done.
+    struct PushConstantsF32 {
         uint32_t numel;
         float lr;
         float momentum;
@@ -119,16 +122,45 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
         uint32_t nesterov;
         uint32_t has_momentum;
         uint32_t padding;
-    } pc;
+    };
+    struct PushConstantsF64 {
+        uint32_t numel;
+        uint32_t nesterov;
+        uint32_t has_momentum;
+        uint32_t padding;
+        double lr;
+        double momentum;
+        double weight_decay;
+        double dampening;
+    };
 
-    pc.numel = static_cast<uint32_t>(numel);
-    pc.lr = lr;
-    pc.momentum = momentum;
-    pc.weight_decay = weight_decay;
-    pc.dampening = dampening;
-    pc.nesterov = nesterov ? 1u : 0u;
-    pc.has_momentum = has_momentum ? 1u : 0u;
-    pc.padding = 0;
+    const void* pc_ptr = nullptr;
+    size_t pc_size = 0;
+    PushConstantsF32 pc32{};
+    PushConstantsF64 pc64{};
+    if (is_float64) {
+        pc64.numel = static_cast<uint32_t>(numel);
+        pc64.nesterov = nesterov ? 1u : 0u;
+        pc64.has_momentum = has_momentum ? 1u : 0u;
+        pc64.padding = 0;
+        pc64.lr = lr;
+        pc64.momentum = momentum;
+        pc64.weight_decay = weight_decay;
+        pc64.dampening = dampening;
+        pc_ptr = &pc64;
+        pc_size = sizeof(pc64);
+    } else {
+        pc32.numel = static_cast<uint32_t>(numel);
+        pc32.lr = static_cast<float>(lr);
+        pc32.momentum = static_cast<float>(momentum);
+        pc32.weight_decay = static_cast<float>(weight_decay);
+        pc32.dampening = static_cast<float>(dampening);
+        pc32.nesterov = nesterov ? 1u : 0u;
+        pc32.has_momentum = has_momentum ? 1u : 0u;
+        pc32.padding = 0;
+        pc_ptr = &pc32;
+        pc_size = sizeof(pc32);
+    }
 
     // F16 shader processes pairs (1 thread per word), F32 processes 1 element per thread
     int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
@@ -138,7 +170,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &pc);
+                      0, static_cast<uint32_t>(pc_size), pc_ptr);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -166,9 +198,11 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
     bool decoupled = attrs.get_bool(AttrKey::Decoupled, false);
     bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
 
-    // Precompute bias corrections on host
-    float bias_correction1 = static_cast<float>(1.0 - std::pow(beta1, step));
-    float bias_correction2_sqrt = static_cast<float>(std::sqrt(1.0 - std::pow(beta2, step)));
+    // Precompute bias corrections on host in double precision — narrowing to
+    // float here would cap the F64 shader's downstream float64_t math to
+    // float32 precision regardless of in-shader refinement.
+    double bias_correction1 = 1.0 - std::pow(beta1, step);
+    double bias_correction2_sqrt = std::sqrt(1.0 - std::pow(beta2, step));
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
@@ -222,7 +256,10 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
+    // F64 uses a double-precision push-constant layout (see fused_adam_step_f64.comp):
+    // a float32 push constant would cap every downstream float64_t computation to
+    // float32 precision no matter how the in-shader math is done.
+    struct PushConstantsF32 {
         uint32_t numel;
         float lr;
         float beta1;
@@ -235,20 +272,55 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
         uint32_t amsgrad;
         uint32_t padding0;
         uint32_t padding1;
-    } pc;
+    };
+    struct PushConstantsF64 {
+        uint32_t numel;
+        uint32_t decoupled;
+        uint32_t amsgrad;
+        uint32_t padding0;
+        double lr;
+        double beta1;
+        double beta2;
+        double eps;
+        double weight_decay;
+        double bias_correction1;
+        double bias_correction2_sqrt;
+    };
 
-    pc.numel = static_cast<uint32_t>(numel);
-    pc.lr = static_cast<float>(lr);
-    pc.beta1 = static_cast<float>(beta1);
-    pc.beta2 = static_cast<float>(beta2);
-    pc.eps = static_cast<float>(eps);
-    pc.weight_decay = static_cast<float>(weight_decay);
-    pc.bias_correction1 = bias_correction1;
-    pc.bias_correction2_sqrt = bias_correction2_sqrt;
-    pc.decoupled = decoupled ? 1u : 0u;
-    pc.amsgrad = amsgrad ? 1u : 0u;
-    pc.padding0 = 0;
-    pc.padding1 = 0;
+    const void* pc_ptr = nullptr;
+    size_t pc_size = 0;
+    PushConstantsF32 pc32{};
+    PushConstantsF64 pc64{};
+    if (is_float64) {
+        pc64.numel = static_cast<uint32_t>(numel);
+        pc64.decoupled = decoupled ? 1u : 0u;
+        pc64.amsgrad = amsgrad ? 1u : 0u;
+        pc64.padding0 = 0;
+        pc64.lr = lr;
+        pc64.beta1 = beta1;
+        pc64.beta2 = beta2;
+        pc64.eps = eps;
+        pc64.weight_decay = weight_decay;
+        pc64.bias_correction1 = bias_correction1;
+        pc64.bias_correction2_sqrt = bias_correction2_sqrt;
+        pc_ptr = &pc64;
+        pc_size = sizeof(pc64);
+    } else {
+        pc32.numel = static_cast<uint32_t>(numel);
+        pc32.lr = static_cast<float>(lr);
+        pc32.beta1 = static_cast<float>(beta1);
+        pc32.beta2 = static_cast<float>(beta2);
+        pc32.eps = static_cast<float>(eps);
+        pc32.weight_decay = static_cast<float>(weight_decay);
+        pc32.bias_correction1 = static_cast<float>(bias_correction1);
+        pc32.bias_correction2_sqrt = static_cast<float>(bias_correction2_sqrt);
+        pc32.decoupled = decoupled ? 1u : 0u;
+        pc32.amsgrad = amsgrad ? 1u : 0u;
+        pc32.padding0 = 0;
+        pc32.padding1 = 0;
+        pc_ptr = &pc32;
+        pc_size = sizeof(pc32);
+    }
 
     // Half precision packs two elements per uint word; F32/F64 are per-element.
     int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;
@@ -258,7 +330,7 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &pc);
+                      0, static_cast<uint32_t>(pc_size), pc_ptr);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -286,8 +358,8 @@ auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
     bool decoupled = attrs.get_bool(AttrKey::Decoupled, false);
     bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
 
-    float bias_correction1 = static_cast<float>(1.0 - std::pow(beta1, step));
-    float bias_correction2_sqrt = static_cast<float>(std::sqrt(1.0 - std::pow(beta2, step)));
+    double bias_correction1 = 1.0 - std::pow(beta1, step);
+    double bias_correction2_sqrt = std::sqrt(1.0 - std::pow(beta2, step));
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
@@ -333,7 +405,11 @@ auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    struct PushConstants {
+    // F64 uses a double-precision push-constant layout (see
+    // fused_adam_atan2_step_f64.comp): a float32 push constant would cap
+    // every downstream float64_t computation (e.g. lr_d * update) to
+    // float32 precision no matter how the in-shader math is done.
+    struct PushConstantsF32 {
         uint32_t numel;
         float lr;
         float beta1;
@@ -346,20 +422,55 @@ auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
         uint32_t amsgrad;
         uint32_t padding0;
         uint32_t padding1;
-    } pc;
+    };
+    struct PushConstantsF64 {
+        uint32_t numel;
+        uint32_t decoupled;
+        uint32_t amsgrad;
+        uint32_t padding0;
+        double lr;
+        double beta1;
+        double beta2;
+        double eps;
+        double weight_decay;
+        double bias_correction1;
+        double bias_correction2_sqrt;
+    };
 
-    pc.numel = static_cast<uint32_t>(numel);
-    pc.lr = static_cast<float>(lr);
-    pc.beta1 = static_cast<float>(beta1);
-    pc.beta2 = static_cast<float>(beta2);
-    pc.eps = static_cast<float>(eps);
-    pc.weight_decay = static_cast<float>(weight_decay);
-    pc.bias_correction1 = bias_correction1;
-    pc.bias_correction2_sqrt = bias_correction2_sqrt;
-    pc.decoupled = decoupled ? 1u : 0u;
-    pc.amsgrad = amsgrad ? 1u : 0u;
-    pc.padding0 = 0;
-    pc.padding1 = 0;
+    const void* pc_ptr = nullptr;
+    size_t pc_size = 0;
+    PushConstantsF32 pc32{};
+    PushConstantsF64 pc64{};
+    if (is_float64) {
+        pc64.numel = static_cast<uint32_t>(numel);
+        pc64.decoupled = decoupled ? 1u : 0u;
+        pc64.amsgrad = amsgrad ? 1u : 0u;
+        pc64.padding0 = 0;
+        pc64.lr = lr;
+        pc64.beta1 = beta1;
+        pc64.beta2 = beta2;
+        pc64.eps = eps;
+        pc64.weight_decay = weight_decay;
+        pc64.bias_correction1 = bias_correction1;
+        pc64.bias_correction2_sqrt = bias_correction2_sqrt;
+        pc_ptr = &pc64;
+        pc_size = sizeof(pc64);
+    } else {
+        pc32.numel = static_cast<uint32_t>(numel);
+        pc32.lr = static_cast<float>(lr);
+        pc32.beta1 = static_cast<float>(beta1);
+        pc32.beta2 = static_cast<float>(beta2);
+        pc32.eps = static_cast<float>(eps);
+        pc32.weight_decay = static_cast<float>(weight_decay);
+        pc32.bias_correction1 = static_cast<float>(bias_correction1);
+        pc32.bias_correction2_sqrt = static_cast<float>(bias_correction2_sqrt);
+        pc32.decoupled = decoupled ? 1u : 0u;
+        pc32.amsgrad = amsgrad ? 1u : 0u;
+        pc32.padding0 = 0;
+        pc32.padding1 = 0;
+        pc_ptr = &pc32;
+        pc_size = sizeof(pc32);
+    }
 
     int64_t dispatch_count = (is_float16 || is_bfloat16) ? (numel + 1) / 2 : numel;  // BF16 also packs pairs (audit C9)
     uint32_t workgroups = div_wg_checked(dispatch_count, devices_[device_id].workgroupSize, devices_[device_id].maxComputeWorkGroupCount[0], "vk_dispatch");
@@ -368,7 +479,7 @@ auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &pc);
+                      0, static_cast<uint32_t>(pc_size), pc_ptr);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
