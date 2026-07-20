@@ -271,7 +271,17 @@ auto gather_leaf_tensors(
     return out;
 }
 #else
-struct MlirInvokerCache {};
+// Stub used when TENZOR_USE_MLIR_JIT is off. mlir_cache_ is always nullptr in
+// this configuration, so CompiledFunction's `if (mlir_cache_) { ... }` guards
+// make every access unreachable at runtime -- but `.invokers.clear()`/`.size()`
+// still have to type-check, so the stub needs matching no-op members rather
+// than an empty struct.
+struct MlirInvokerCache {
+    struct {
+        auto clear() -> void {}
+        auto size() const -> size_t { return 0; }
+    } invokers;
+};
 #endif
 
 }  // namespace mlir_detail

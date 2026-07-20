@@ -524,8 +524,15 @@ else()
     else()
         # Try system LAPACKE as fallback
         find_package(LAPACK QUIET)
-        include(CheckIncludeFile)
-        check_include_file(lapacke.h HAVE_LAPACKE_H)
+        # check_include_file() (CheckIncludeFile) compiles a .c probe, which
+        # needs the C language enabled via project(LANGUAGES ...) — this
+        # project only enables CXX (+ HIP conditionally), so that call fails
+        # try_compile() outright ("Unknown extension '.c'") instead of just
+        # reporting not-found. Use the CXX-language variant, which probes
+        # with a .cxx file and works with the languages this project actually
+        # enables.
+        include(CheckIncludeFileCXX)
+        check_include_file_cxx(lapacke.h HAVE_LAPACKE_H)
         if(LAPACK_FOUND AND HAVE_LAPACKE_H)
             message(STATUS "MKL not found, using system LAPACKE for linalg operations")
             target_link_libraries(tenzor_core PRIVATE ${LAPACK_LIBRARIES} lapacke)
@@ -685,6 +692,12 @@ if(TENZOR_USE_MLIR_JIT)
     # forbids; using $<TARGET_OBJECTS:...> embeds the .o files without
     # exporting tenzor_jit_mlir as a separate target).
     target_sources(tenzor_core PRIVATE $<TARGET_OBJECTS:tenzor_jit_mlir>)
+    # OpenSSL::Crypto is required by the IREE runtime's dependency chain here,
+    # independent of TENZOR_BUILD_MODEL_HUB (which has its own find_package(OpenSSL)
+    # above) — find it directly rather than relying on that unrelated block
+    # having already run, which left this target undefined whenever ModelHub
+    # was off but MLIR JIT was on.
+    find_package(OpenSSL REQUIRED)
     target_link_libraries(tenzor_core PRIVATE
         iree_compiler_API_SharedImpl
         iree_runtime_runtime
