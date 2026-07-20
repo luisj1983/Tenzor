@@ -584,18 +584,18 @@ for batch in loader:
 Now that you understand the basics, explore these resources:
 
 ### Tutorials
-- [MNIST Classification](../examples/tutorials/mnist_complete.cpp) - Complete training example
-- [Custom Training Loop](../examples/tutorials/custom_training_loop.cpp) - Advanced patterns
+- [MNIST Classification](../examples/cpp/tutorials/mnist_complete.cpp) - Complete training example
+- [Custom Training Loop](../examples/cpp/tutorials/custom_training_loop.cpp) - Advanced patterns
 - [Python Examples](../examples/python/) - Comprehensive Python tutorials
 
 ### Advanced Topics
-- [Model Serialization](../examples/serialization_example.cpp) - Save and load models
-- [Data Loading](../examples/data_pipeline/) - Efficient data pipelines
-- [Distributed Training](../examples/distributed/) - Multi-GPU training
-- [Model Quantization](../examples/quantization/) - Model optimization
+- [Model Serialization](../examples/cpp/serialization_example.cpp) - Save and load models
+- [Data Loading](../examples/cpp/tutorials/mnist_with_dataloader.cpp) - DataLoader and callbacks
+- [Distributed Training](../examples/cpp/zero/) - ZeRO sharding and multi-GPU training
+- [Model Quantization](../examples/cpp/quantization/) - Model optimization
 
 ### API Reference
-- [C++ API Documentation](api/html/index.html) - Full API reference
+- C++ API Documentation - generate locally with `doxygen Doxyfile` from the project root, then open `docs/api/html/index.html` (not pre-built or committed in this repo)
 
 ### Community
 - [GitHub Issues](https://github.com/skreamz/Tenzor/issues) - Report bugs, request features

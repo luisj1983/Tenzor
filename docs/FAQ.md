@@ -55,7 +55,7 @@ Tenzor is released under the MIT License, allowing free use in both commercial a
 - **CPU**: x86_64 with SSE4.2 (AVX2 recommended)
 - **RAM**: 4 GB minimum, 16 GB recommended
 - **Disk**: 500 MB for base install, 2 GB with all backends
-- **Compiler**: GCC 12+, Clang 15+, or MSVC 2022
+- **Compiler**: GCC 13+, Clang 15+, or MSVC 2022
 
 ### How do I install Tenzor?
 
@@ -93,7 +93,7 @@ cmake .. -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=O
 Ensure you're using a compatible compiler:
 
 ```bash
-# Check GCC version (need 12+)
+# Check GCC version (need 13+)
 g++ --version
 
 # Specify compiler explicitly
@@ -372,7 +372,7 @@ np_arr = tz_tensor.numpy()
 
 ### Python version compatibility
 
-Tenzor supports Python 3.8 - 3.13. Check your version:
+Tenzor supports Python 3.9 - 3.13 (matching `requires-python` in `pyproject.toml`). Check your version:
 ```bash
 python --version
 ```
@@ -485,7 +485,7 @@ ctest --output-on-failure
 
 - **GitHub Issues**: [Report bugs](https://github.com/skreamz/Tenzor/issues)
 - **Discussions**: [Ask questions](https://github.com/skreamz/Tenzor/discussions)
-- **Documentation**: [API Reference](api/html/index.html)
+- **Documentation**: API Reference — generate locally with `doxygen Doxyfile` from the project root, then open `docs/api/html/index.html` (not pre-built or committed in this repo)
 
 ---
 
@@ -493,5 +493,5 @@ ctest --output-on-failure
 
 If your question isn't answered here, please:
 1. Search [existing issues](https://github.com/skreamz/Tenzor/issues)
-2. Check the [API documentation](api/html/index.html)
+2. Check the API documentation (generate with `doxygen Doxyfile`; see "Where can I get help?" above)
 3. Open a [new discussion](https://github.com/skreamz/Tenzor/discussions/new)

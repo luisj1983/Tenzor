@@ -71,6 +71,11 @@ Tenzor is designed as a modular, high-performance tensor computation library wit
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+> Diagram simplified to 5 columns; a sixth backend, **MPS** (`backends/mps/`,
+> Apple Silicon GPU via Metal Performance Shaders), also exists but is not yet
+> at parity with the five above — see the Backend Implementations table below
+> and the root README's "Known limitations".
+
 ## Core Components
 
 ### Tensor (`core/tensor.hpp`)
@@ -127,7 +132,7 @@ Represents execution targets:
 ```cpp
 struct Device {
     enum class Type : uint8_t {
-        CPU, CUDA, ROCm, OneAPI, Vulkan
+        CPU, CUDA, ROCm, OneAPI, Vulkan, MPS
     };
     Type type;
     int32_t index;  // Device index for multi-device systems
@@ -186,7 +191,7 @@ public:
 | ROCm | `backends/rocm/` | hipBLAS, MIOpen |
 | OneAPI | `backends/oneapi/` | oneMKL, oneDNN |
 | Vulkan | `backends/vulkan/` | Compute shaders |
-| Metal | `backends/metal/` | Metal Performance Shaders |
+| MPS | `backends/mps/` | Metal Performance Shaders (Apple; partial parity, see README "Known limitations") |
 
 ### Kernel Dispatch Flow
 
@@ -593,4 +598,4 @@ tenzor/
 
 ---
 
-For more details, see the [API Documentation](api/html/index.html) and source code comments.
+For more details, see the API Documentation (generate with `doxygen Doxyfile` from the project root; not pre-built or committed in this repo) and source code comments.

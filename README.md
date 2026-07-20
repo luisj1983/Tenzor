@@ -74,7 +74,7 @@ int main() {
 ### Prerequisites
 
 - CMake 3.25+
-- A C++23 compiler (GCC 12+, Clang 15+, MSVC 19.34+)
+- A C++23 compiler (GCC 13+, Clang 15+, MSVC 19.34+)
 - Optional: CUDA 12.0+, ROCm 5.0+, oneAPI 2023.0+, Vulkan SDK 1.2+
 - Optional: Python 3.9+ (for the bindings)
 
@@ -94,14 +94,15 @@ cmake --build build -j
 
 | Option | Default | Notes |
 |---|---|---|
-| `TENZOR_BUILD_CUDA`       | OFF | Requires CUDA Toolkit |
-| `TENZOR_BUILD_ROCM`       | OFF | Requires ROCm + HIP   |
-| `TENZOR_BUILD_ONEAPI`     | OFF | Requires Intel oneAPI |
-| `TENZOR_BUILD_VULKAN`     | OFF | Requires Vulkan SDK + glslc |
+| `TENZOR_BUILD_CUDA`       | ON  | Requires CUDA Toolkit |
+| `TENZOR_BUILD_ROCM`       | ON  | Requires ROCm + HIP   |
+| `TENZOR_BUILD_ONEAPI`     | ON  | Requires Intel oneAPI |
+| `TENZOR_BUILD_VULKAN`     | ON  | Requires Vulkan SDK + glslc |
+| `TENZOR_BUILD_MPS`        | ON (Apple only) | Apple Metal/MPS backend; option only defined when `APPLE` |
 | `TENZOR_BUILD_PYTHON`     | ON  | Requires Python dev headers |
 | `TENZOR_BUILD_TESTS`      | ON  | GoogleTest (fetched automatically) |
-| `TENZOR_BUILD_BENCHMARKS` | OFF | |
-| `TENZOR_USE_MLIR_JIT`     | OFF | Requires IREE compiler/runtime |
+| `TENZOR_BUILD_BENCHMARKS` | ON  | |
+| `TENZOR_USE_MLIR_JIT`     | autodetected | ON if an IREE distribution is found (`third_party/iree_dist/`, system install, or `$IREE_DIR`), else OFF; always overridable explicitly. See `docs/jit-mlir-setup.md` |
 
 See [INSTALL.md](INSTALL.md) for per-backend setup details.
 

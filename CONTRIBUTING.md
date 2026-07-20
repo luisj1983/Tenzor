@@ -7,9 +7,9 @@ Thank you for your interest in contributing to Tenzor! This document provides gu
 ### Prerequisites
 
 - CMake 3.25 or higher
-- C++23 compatible compiler (GCC 12+, Clang 15+, MSVC 2022+)
+- C++23 compatible compiler (GCC 13+, Clang 15+, MSVC 2022+)
 - CUDA 12.0+ (optional, for GPU support)
-- Python 3.8+ (optional, for bindings)
+- Python 3.9+ (optional, for bindings)
 
 ### Building from Source
 
@@ -53,6 +53,7 @@ tenzor/
 ├── examples/            # Example programs
 ├── python/              # Python bindings
 └── docs/                # Documentation
+```
 
 ## Coding Standards
 
@@ -167,29 +168,39 @@ ctest --output-on-failure
 
 ## Adding New Operations
 
-### 1. Define Interface
+Ops are dispatched by `OpId` (see `include/tenzor/ops/op_id.hpp`), not by
+string-keyed registry lookup — the walkthrough below matches the real dispatch
+path. See also the "Adding a new op: coverage checklist" section further down
+for the full per-PR requirement list.
 
-Add declaration to appropriate header (e.g., `include/tenzor/ops/math.hpp`):
+### 1. Add the OpId
+
+Add an entry to the `OpId` enum in `include/tenzor/ops/op_id.hpp`.
+
+### 2. Define Interface
+
+Add declaration to the appropriate header (e.g., `include/tenzor/ops/math.hpp`):
 
 ```cpp
 auto my_operation(const Tensor& input, float param) -> Tensor;
 ```
 
-### 2. Implement Dispatcher
+### 3. Implement Dispatcher
 
-Add implementation in corresponding source file using OpId-based dispatch:
+Add implementation in the corresponding source file using `OpAttributes` +
+OpId-based dispatch:
 
 ```cpp
 auto my_operation(const Tensor& input, float param) -> Tensor {
     OpAttributes attrs;
-    attrs["param"] = std::to_string(param);
+    attrs.set(AttrKey::Param, param);
     return dispatch<OpId::MyOperation>({input}, attrs)[0];
 }
 ```
 
-### 3. Implement Backend Kernels
+### 4. Implement Backend Kernels
 
-Add CPU implementation in `src/backends/cpu/kernels/`:
+Add a CPU implementation in `src/backends/cpu/kernels/`:
 
 ```cpp
 auto my_operation_cpu(const Tensor& input, float param) -> Tensor {
@@ -197,7 +208,7 @@ auto my_operation_cpu(const Tensor& input, float param) -> Tensor {
 }
 ```
 
-Add CUDA implementation in `src/backends/cuda/kernels/`:
+Add a CUDA implementation in `src/backends/cuda/kernels/`:
 
 ```cuda
 __global__ void my_operation_kernel(const float* input, float* output,
@@ -206,21 +217,35 @@ __global__ void my_operation_kernel(const float* input, float* output,
 }
 ```
 
-### 4. Register Kernels
+Do the same for every other backend the op is expected to support (ROCm,
+OneAPI, Vulkan, MPS) — see `TESTING.md`'s "New op requirements" for when a gap
+is acceptable versus a hard failure.
 
-Register with operation registry:
+### 5. Register Kernels
+
+Register in each backend's kernel registry (e.g.
+`src/backends/cpu/cpu_kernel_registry.cpp`) using the
+`TENZOR_REGISTER_UNARY_KERNEL` / `TENZOR_REGISTER_BINARY_KERNEL` /
+`TENZOR_REGISTER_KERNEL` macros from `include/tenzor/backend/kernel_registry.hpp`:
 
 ```cpp
-operation_registry().register_kernel(
-    "my_operation",
-    Device::Type::CPU,
-    my_operation_cpu
-);
+TENZOR_REGISTER_UNARY_KERNEL(table, MyOperation, cpu::my_operation_cpu);
 ```
 
-### 5. Add Tests
+For kernels that don't fit the unary/binary lambda shape, register directly
+against the `BackendDispatchTable`:
 
-Create comprehensive tests in `tests/unit/test_ops.cpp`:
+```cpp
+table.register_kernel(OpId::MyOperation,
+    [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        return {my_operation_cpu(inputs[0], attrs.get_float(AttrKey::Param))};
+    });
+```
+
+### 6. Add Tests
+
+Create comprehensive tests in `tests/unit/` or `tests/ops/` using
+`MultiBackendDTypeTest` (see `TESTING.md`):
 
 ```cpp
 TEST(OpsTest, MyOperation) {
@@ -232,17 +257,12 @@ TEST(OpsTest, MyOperation) {
 }
 ```
 
-### 6. Add Autograd Support
+### 7. Add Autograd Support
 
-If operation needs gradient support, implement autograd function:
-
-```cpp
-class MyOperationBackward : public Function {
-public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
-};
-```
+If the operation needs gradient support, implement an autograd `Function`
+that dispatches to the backward OpId — see `tests/backend_parity/README.md`'s
+gradient-parity section and `TESTING.md`'s "Autograd invariants" for the
+patterns that must (and must not) be used.
 
 ## Performance Optimization
 
@@ -290,7 +310,7 @@ See `src/backends/cpu/cpu_backend.cpp` for reference implementation.
 ## Documentation
 
 - Keep README.md up to date
-- Update DESIGN.md for architectural changes
+- Update docs/ARCHITECTURE.md for architectural changes
 - Generate API documentation with Doxygen
 
 ```bash

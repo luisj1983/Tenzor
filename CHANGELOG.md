@@ -77,14 +77,22 @@ First public alpha release. The library is feature-complete for the listed scope
 ### Known limitations
 
 - **No public CI proof for GPU backends.** GitHub Actions currently runs CPU smoke tests only.
-- **Vulkan STFT / ISTFT** dispatch to a CPU fallback in this release; the native compute path is built but a forward-pass shape-value bug is open. Tracked in [`audit/README.md`](audit/README.md) Phase 4.3.
+- **Vulkan STFT / ISTFT** dispatch to a CPU fallback in this release; the native compute path is built but a forward-pass shape-value bug is open (tracked internally; not currently published in-repo).
 - **MPS backend** (Apple Metal) is partial and not at parity with the four primary GPU backends.
-- **CPU performance** is below PyTorch on the published benchmark suite (see [`reports/combined_benchmark.md`](reports/combined_benchmark.md)). One Conv2D shape measures 0.07× and is almost certainly a measurement artifact pending re-run.
+- **CPU performance** is below PyTorch on the published benchmark suite (see `benchmarks/baselines/README.md` and `scripts/ci_benchmark.sh` for how to regenerate current numbers). One Conv2D shape measures 0.07× and is almost certainly a measurement artifact pending re-run.
 - **Single maintainer.** Reviews and contributions welcome.
 
 ---
 
 ## [Unreleased]
+
+### Added
+
+- Op count has grown to 702 registered operations across all five backends (up from
+  317 at v0.1.0) — includes sparse ops (SpMM/SpGEMM/Trsv), cuDNN RNN training paths,
+  fused/flash/flex attention variants, and additional distribution sampling ops.
+  Re-verify with `bin/op_coverage_report --json` after configuring the backend set
+  you want to inspect.
 
 ### Fixed
 

@@ -5,8 +5,7 @@ Comprehensive test suite ensuring all Tenzor backends (CPU, CUDA, OneAPI, Vulkan
 ## Quick Start
 
 ```bash
-cd build
-make test_parity_full
+ninja -C build test_parity_full
 ```
 
 ## Test Modules
@@ -27,12 +26,12 @@ make test_parity_full
 
 ### All Tests:
 ```bash
-make test_parity_full
+ninja -C build test_parity_full
 ```
 
 ### Quick Tests (2-3 min):
 ```bash
-make test_parity_quick
+ninja -C build test_parity_quick
 ```
 
 ### Individual Suites:
@@ -50,12 +49,15 @@ ctest -L backend_parity --output-on-failure
 ## Test Groups
 
 ```bash
-make test_parity_quick      # Basic operations only
-make test_parity_full       # All tests
-make test_parity_stress     # Stress tests only
-make test_parity_performance # Performance tests only
-make test_parity_gradients  # Gradient tests only
+ninja -C build test_parity_quick       # Basic operations only
+ninja -C build test_parity_full        # All tests
+ninja -C build test_parity_stress      # Stress tests only
+ninja -C build test_parity_performance # Performance tests only
+ninja -C build test_parity_gradients   # Gradient tests only
 ```
+
+(These are custom CMake targets; `make` also works if you configured with the
+Makefiles generator instead of Ninja.)
 
 ## Supported Backends
 

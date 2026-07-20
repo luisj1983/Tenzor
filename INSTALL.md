@@ -52,7 +52,7 @@ pip install -e .
 
 | Compiler | Minimum Version | Notes |
 |----------|-----------------|-------|
-| GCC | 12.0 | Recommended for Linux |
+| GCC | 13.0 | Recommended for Linux |
 | Clang | 15.0 | Recommended for macOS |
 | MSVC | 2022 (17.0) | Windows only |
 | Intel ICX | 2023.0 | For OneAPI backend |
@@ -176,13 +176,14 @@ cmake --install . --prefix /opt/tenzor
 |--------|-------------|---------|
 | `CMAKE_BUILD_TYPE` | Build type (Debug/Release/RelWithDebInfo) | Release |
 | `CMAKE_INSTALL_PREFIX` | Installation directory | /usr/local |
-| `TENZOR_BUILD_CUDA` | Enable NVIDIA CUDA backend | ON (if found) |
-| `TENZOR_BUILD_ROCM` | Enable AMD ROCm backend | OFF |
-| `TENZOR_BUILD_ONEAPI` | Enable Intel OneAPI backend | OFF |
-| `TENZOR_BUILD_VULKAN` | Enable Vulkan compute backend | OFF |
+| `TENZOR_BUILD_CUDA` | Enable NVIDIA CUDA backend | ON |
+| `TENZOR_BUILD_ROCM` | Enable AMD ROCm backend | ON |
+| `TENZOR_BUILD_ONEAPI` | Enable Intel OneAPI backend | ON |
+| `TENZOR_BUILD_VULKAN` | Enable Vulkan compute backend | ON |
+| `TENZOR_BUILD_MPS` | Enable Apple Metal/MPS backend | ON (macOS only; option not defined elsewhere) |
 | `TENZOR_BUILD_PYTHON` | Build Python bindings | ON |
 | `TENZOR_BUILD_TESTS` | Build test suite | ON |
-| `TENZOR_BUILD_BENCHMARKS` | Build performance benchmarks | OFF |
+| `TENZOR_BUILD_BENCHMARKS` | Build performance benchmarks | ON |
 | `TENZOR_BUILD_EXAMPLES` | Build example programs | ON |
 | `TENZOR_BUILD_DOCS` | Build documentation | OFF |
 | `TENZOR_ENABLE_OPENMP` | Enable OpenMP parallelization | ON |
@@ -435,7 +436,7 @@ Ensure your compiler supports C++23:
 
 ```bash
 # Check GCC version
-g++ --version  # Should be 12.0+
+g++ --version  # Should be 13.0+
 
 # Use specific compiler
 cmake .. -DCMAKE_CXX_COMPILER=g++-13
@@ -476,7 +477,7 @@ cmake .. -DOpenMP_ROOT=$(brew --prefix)/opt/libomp
 
 - **GitHub Issues**: [Report bugs and request features](https://github.com/skreamz/Tenzor/issues)
 - **Discussions**: [Ask questions](https://github.com/skreamz/Tenzor/discussions)
-- **Documentation**: [Full API reference](docs/api/html/index.html)
+- **Documentation**: Full API reference — generate locally with `doxygen Doxyfile` (requires the `doxygen`/`graphviz` packages above), then open `docs/api/html/index.html`. Not pre-built or committed in this repo.
 
 ### Debug Build
 
