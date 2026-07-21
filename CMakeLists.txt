@@ -81,6 +81,19 @@ endif()
 
 project(tenzor VERSION 0.1.0 LANGUAGES ${TENZOR_LANGUAGES})
 
+# tenzor_core is a SHARED library that statically links FetchContent'd
+# dependencies (spdlog when no system package is found, etc.). CMake compiles
+# SHARED library targets' own sources with -fPIC automatically, but that does
+# NOT propagate to a STATIC dependency built without it -- on toolchains that
+# don't default to -fPIC for static libs (stock Ubuntu/Debian GCC, unlike some
+# distros that patch their spec files), linking such a static lib into
+# tenzor_core.so fails at link time with "relocation R_X86_64_TPOFF32 ...
+# can not be used when making a shared object; recompile with -fPIC". Setting
+# this globally before any add_subdirectory()/FetchContent_MakeAvailable()
+# ensures every target configured after this point -- including fetched
+# static deps -- is compiled PIC.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # Use ccache if available for faster rebuilds
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
