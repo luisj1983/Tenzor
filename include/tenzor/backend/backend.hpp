@@ -213,6 +213,25 @@ public:
     virtual auto synchronize(int32_t device_id) -> void = 0;
 
     /**
+     * @brief Release cached/free allocator memory back to the device driver.
+     *
+     * Backends that maintain a caching allocator (CUDA, ROCm, Vulkan, OneAPI,
+     * CPU) override this to empty their free block pools, returning all
+     * currently-free cached memory to the system. Backends without a caching
+     * allocator use the default no-op.
+     *
+     * This is the per-device analogue of `synchronize()`: where `synchronize`
+     * drains in-flight work so freed blocks' completion events signal (making
+     * them *reusable* via the cache), `empty_cache` returns those free blocks
+     * to the driver (reclaiming the memory entirely). Call after
+     * `synchronize()` so pending free-events are signalled and the blocks are
+     * releasable.
+     *
+     * @param device_id Device whose cache to empty (-1 = all devices)
+     */
+    virtual auto empty_cache(int32_t device_id) -> void { (void)device_id; }
+
+    /**
      * @brief Create asynchronous operation stream.
      *
      * @param device_id Device for stream creation

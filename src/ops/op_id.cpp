@@ -642,6 +642,29 @@ auto op_id_to_name(OpId id) noexcept -> std::string_view {
     return "unknown";
 }
 
+auto is_registry_only_op(OpId id) noexcept -> bool {
+    // Ops that exist in the enum/name table only so their autograd backward
+    // / JVP adapters can report a real OpId for rule lookup. They have NO
+    // backend kernel anywhere by design (see each op's comment in op_id.hpp):
+    //   - DeviceTransfer:  Tensor::to(Device) is a raw backend->copy(), no dispatch()
+    //   - ViewAsReal/Complex: pure metadata reinterpretation in src/ops/transform.cpp
+    //   - LinalgSlogdet:   derives (sign, logabsdet) from det()/LAPACK directly
+    //   - LinalgNorm:      string-ord linalg::norm() API; only "fro" has a JVP rule
+    // validate_coverage() skips these exactly like it skips "unknown" enum gaps,
+    // so they are not reported as coverage holes. Keep this list in sync with the
+    // "Registry-only" comments in op_id.hpp.
+    switch (id) {
+        case OpId::DeviceTransfer:
+        case OpId::ViewAsReal:
+        case OpId::ViewAsComplex:
+        case OpId::LinalgSlogdet:
+        case OpId::LinalgNorm:
+            return true;
+        default:
+            return false;
+    }
+}
+
 auto string_to_op_id(std::string_view name) noexcept -> OpId {
     // Build the reverse map once on first call
     static const auto& reverse_map = *[]() {

@@ -874,4 +874,22 @@ inline constexpr bool is_valid_op_id(OpId id) noexcept {
     return static_cast<uint16_t>(id) < static_cast<uint16_t>(OpId::OP_COUNT);
 }
 
+/**
+ * @brief Whether an OpId is "registry-only" — present in the enum/name table
+ * for autograd/JVP-rule bookkeeping but intentionally without any backend
+ * kernel.
+ *
+ * These ops are pure metadata reinterpretation or derive their result from
+ * other ops/LAPACK directly (see each op's comment in the enum above). They
+ * never go through tenzor::dispatch(); their JVP adapters call the op
+ * functions directly. validate_coverage() skips them exactly as it skips
+ * "unknown" enum-gap slots, so a registry-only op is not reported as a
+ * coverage hole. Adding a real op later is still caught: it will have a
+ * name and not be in this set, so it must be registered somewhere.
+ *
+ * @param id Operation identifier to check
+ * @return true if the op is registry-only (no backend kernel by design)
+ */
+auto is_registry_only_op(OpId id) noexcept -> bool;
+
 } // namespace tenzor

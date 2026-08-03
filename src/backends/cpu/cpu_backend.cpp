@@ -197,6 +197,14 @@ public:
         // CPU is always synchronized
     }
 
+    auto empty_cache([[maybe_unused]] int32_t device_id) -> void override {
+        // Return the CPU caching allocator's free pool to the system. CPU
+        // memory is not scarce, but emptying keeps the cache from growing
+        // unboundedly across long-running processes and mirrors the GPU
+        // backends' per-test cleanup (see Backend::empty_cache).
+        cpu::CPUCachingAllocator::instance().release_cached_memory();
+    }
+
     auto create_stream([[maybe_unused]] int32_t device_id) -> StreamHandle override {
         return nullptr;
     }

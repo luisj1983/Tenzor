@@ -1,9 +1,15 @@
+// Include the logging facade (which pulls spdlog -> libstdc++ <format>) BEFORE
+// any HIP header. HIP's host_defines.h does `#define __noinline__ ...`, which
+// would otherwise pollute the `[[__gnu__::__noinline__]]` attribute token in
+// libstdc++16's <format> and break compilation of this host-side TU (compiled
+// with g++, unlike the hipcc kernel TUs). Parsing <format> first, while
+// __noinline__ is still a plain identifier, avoids the collision.
+#include "tenzor/utils/logging.hpp"
 #include "rocm_backend.hpp"
 #include "rocm_stream.hpp"  // rocm::rocm_current_stream()
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/rocm_caching_allocator.hip.hpp"
 #include "tenzor/core/device_guard.hpp"
-#include "tenzor/utils/logging.hpp"
 #include "tenzor/distributed/nccl_backend.hpp"
 #include <hip/hip_runtime.h>
 #include <stdexcept>
@@ -453,6 +459,13 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
 auto ROCmBackend::synchronize(int32_t device_id) -> void {
     check_hip_error(hipSetDevice(device_id), "hipSetDevice in synchronize");
     check_hip_error(hipDeviceSynchronize(), "hipDeviceSynchronize");
+}
+
+auto ROCmBackend::empty_cache(int32_t device_id) -> void {
+    // Return all free cached blocks to the driver. Callers must have already
+    // synchronised the device so pending free-events are signalled and the
+    // cached blocks are releasable (see Backend::empty_cache).
+    backend::rocm::RocmCachingAllocator::get().empty_cache(device_id);
 }
 
 auto ROCmBackend::create_stream(int32_t device_id) -> StreamHandle {

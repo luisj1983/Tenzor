@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"
 #include "../../include/tenzor/models/convnext.hpp"
+#include <tenzor/nn/offload.hpp>
 #include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
@@ -20,8 +21,63 @@ using namespace tenzor::testing;
 
 class ConvNeXtMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
+    // Keeps the OffloadContext alive for the test's lifetime (the context
+    // installs forward/backward hooks on the model; it must outlive the model).
+    std::vector<std::unique_ptr<nn::OffloadContext>> offload_ctxs_;
+
     void SetUp() override {
         MultiBackendDTypeTest::SetUp();
+    }
+
+    /**
+     * @brief Convert model to target dtype/device with memory offloading.
+     *
+     * On GPU, parameters and gradients are offloaded to host memory and
+     * prefetched to the device layer-by-layer; all compute stays on the GPU
+     * (ZeRO-Offload style — NOT a CPU fallback: the kernels run on the device,
+     * only the param/grad storage lives in host memory). This lets models
+     * whose params+grads exceed the 8 GB GPU run there. On CPU it is a plain
+     * convert.
+     */
+    template <typename ModuleT>
+    void convert_model_with_offload(ModuleT& model) {
+        if (device().type == Device::Type::CPU) {
+            convert_model(model);
+            return;
+        }
+        // Move params to the target dtype first (offload stores them in that
+        // dtype on the host).
+        if constexpr (requires { model->to(dtype()); }) {
+            model->to(dtype());
+        } else if constexpr (requires { model.to(dtype()); }) {
+            model.to(dtype());
+        }
+
+        nn::OffloadContext::Config config;
+        config.offload_parameters = true;
+        config.offload_gradients = true;
+        config.prefetch_depth = 2;
+        config.pin_first_layer = true;
+        config.pin_last_layer = true;
+        config.target_device = device();
+        // The model is destroyed at the end of the test, so there is nothing to
+        // restore params/grads to the GPU for. Skipping the restore avoids a
+        // device-capacity OOM (Float64 params+grads > 8 GB) AND avoids stranding
+        // the restored tensors' CachingAllocator blocks on the context's CUDA
+        // streams after the TransferEngine is torn down (which made the cached
+        // blocks permanently un-reusable and OOM'd the next test in the process).
+        config.restore_on_destruction = false;
+
+        std::unique_ptr<nn::OffloadContext> ctx;
+        if constexpr (requires { model.get(); }) {
+            ctx = std::make_unique<nn::OffloadContext>(*model, config);
+        } else if constexpr (requires { *model; }) {
+            ctx = std::make_unique<nn::OffloadContext>(*model, config);
+        } else {
+            ctx = std::make_unique<nn::OffloadContext>(model, config);
+        }
+        ctx->enable();
+        offload_ctxs_.push_back(std::move(ctx));
     }
 
     /**
@@ -420,7 +476,22 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtXLargeForwardShape) {
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtXLargeGradientFlow) {
     auto model = convnext_xlarge(10, false);
-    convert_model(model);
+    // ConvNeXt-XLarge is ~350M params; in Float64 its params+grads (~5.6 GB)
+    // exceed the 8 GB GPU, so checkpointing alone cannot fit it. Combine two
+    // on-device memory strategies — neither is a CPU fallback (all kernels run
+    // on the GPU):
+    //   * Memory offloading (OffloadContext): params/grads live in host memory
+    //     and are prefetched to the GPU layer-by-layer. Only the param/grad
+    //     *storage* is off the device; compute stays on the GPU (ZeRO-Offload).
+    //   * Gradient checkpointing: the stage Sequentials recompute block
+    //     activations in backward instead of retaining them (torch.utils.checkpoint).
+    convert_model_with_offload(model);
+    // Gradient checkpointing is a GPU-memory strategy (recompute activations
+    // in backward instead of retaining them); on CPU there is no VRAM pressure,
+    // so leave it off there to avoid ~2x recomputation on the 350M-param model.
+    if (device().type != Device::Type::CPU) {
+        model->set_gradient_checkpointing(true);
+    }
     model->train();
 
     int64_t img_size = getLargeModelInputSize("xlarge", true);

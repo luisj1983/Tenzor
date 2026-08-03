@@ -87,6 +87,18 @@ auto Device::synchronize() const -> void {
     backend->synchronize(index);
 }
 
+auto Device::empty_cache() const -> void {
+    // Get the backend for this device type
+    auto* backend = backend_registry().get_backend(type);
+    if (!backend) {
+        return;  // CPU or unavailable backend: nothing to empty
+    }
+    // Call the backend's empty_cache method (default no-op for backends without
+    // a caching allocator). Callers should synchronise first so pending
+    // free-events are signalled and cached blocks are releasable.
+    backend->empty_cache(index);
+}
+
 auto get_device_properties(const Device& device) -> DeviceInfo {
     if (device.type == Device::Type::CPU) {
         // CPU doesn't have a traditional "device info" query

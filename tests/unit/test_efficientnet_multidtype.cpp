@@ -39,6 +39,46 @@ protected:
         convert_model(model);
     }
 
+    /**
+     * @brief Real ZeRO-Offload-style param/grad offloading for the large B7
+     * gradient test (params/grads live in host memory, prefetched to the GPU
+     * layer-by-layer; all kernels still run on the device — NOT a CPU fallback).
+     *
+     * Used together with gradient checkpointing for maximum VRAM headroom, per
+     * the offload+checkpointing policy. restore_on_destruction is false because
+     * the model is destroyed at the end of the test (see offload.hpp: restoring
+     * an offloaded-large-model to the device on shutdown OOMs and strands the
+     * restored tensors' CachingAllocator blocks on the context's dying streams).
+     */
+    template <typename ModuleT>
+    void setup_param_offload(ModuleT& model) {
+        if (device().type == Device::Type::CPU) {
+            convert_model(model);  // no VRAM to offload from; plain convert
+            return;
+        }
+        if constexpr (requires { model->to(dtype()); }) {
+            model->to(dtype());
+        } else if constexpr (requires { model.to(dtype()); }) {
+            model.to(dtype());
+        }
+        nn::OffloadContext::Config config;
+        config.offload_parameters = true;
+        config.offload_gradients = true;
+        config.prefetch_depth = 2;
+        config.pin_first_layer = true;
+        config.pin_last_layer = true;
+        config.target_device = device();
+        config.restore_on_destruction = false;
+        if constexpr (requires { model.get(); }) {
+            offload_ctx_ = std::make_unique<nn::OffloadContext>(*model, config);
+        } else if constexpr (requires { *model; }) {
+            offload_ctx_ = std::make_unique<nn::OffloadContext>(*model, config);
+        } else {
+            offload_ctx_ = std::make_unique<nn::OffloadContext>(model, config);
+        }
+        offload_ctx_->enable();
+    }
+
     template <typename ModuleT>
     void enable_offloading_if_needed(ModuleT& model) { (void)model; }
 
@@ -579,6 +619,11 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB6ForwardShape) {
     auto model = efficientnet_b6(1000, false);
     convert_model_with_offload(model);
 
+    // Forward-only shape check at 528x528 in Float64 exceeds the 8 GB GPU at
+    // batch 1 when every activation is saved for backward. no_grad is the
+    // correct inference pattern for a shape check (mirrors torch.no_grad()),
+    // not a workaround.
+    NoGradGuard no_grad;
     Variable input = createInput({1, 3, 528, 528});
     Variable output = model->forward(input);
 
@@ -591,6 +636,10 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB6CustomClasses) {
     auto model = efficientnet_b6(200, false);
     convert_model_with_offload(model);
 
+    // Forward-only shape check (see EfficientNetB6ForwardShape): no_grad avoids
+    // saving every activation for backward, keeping peak memory under the GPU
+    // limit in Float64.
+    NoGradGuard no_grad;
     Variable input = createInput({1, 3, 528, 528});
     Variable output = model->forward(input);
 
@@ -618,7 +667,19 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7ForwardShape) {
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7GradientFlow) {
     auto model = efficientnet_b7(10, false);
-    convert_model_with_offload(model);
+    // Offload + checkpointing combined (both are on-device-memory strategies,
+    // neither is a CPU fallback — all kernels run on the GPU):
+    //   * Memory offloading (OffloadContext): params/grads live in host memory,
+    //     prefetched to the GPU layer-by-layer (ZeRO-Offload).
+    //   * Gradient checkpointing: the stage Sequentials recompute MBConv
+    //     activations in backward instead of retaining them. EfficientNet-B7 at
+    //     600x600 in Float64 retains every activation and exceeds 8 GB VRAM;
+    //     checkpointing bounds activation memory while offload bounds param/grad
+    //     memory, giving headroom across dtypes.
+    setup_param_offload(model);
+    if (device().type != Device::Type::CPU) {
+        model->set_gradient_checkpointing(true);
+    }
     model->train();
 
     int64_t img_size = getInputSize(600);

@@ -132,6 +132,21 @@ __device__ __forceinline__ __half float2half_sat(float x) {
     return __float2half(x);
 }
 
+/**
+ * @brief Saturating float-to-bfloat16 conversion.
+ * BFloat16 shares Float32's 8-bit exponent (max ~3.39e38), so overflow is
+ * rare, but clamp for parity with float2half_sat so every float->narrow
+ * store shares the same saturating overflow semantics. NaN and Inf preserved.
+ */
+__device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x) {
+    if (::isnan(x) || ::isinf(x)) {
+        return __float2bfloat16(x);
+    }
+    constexpr float kBf16Max = 3.38953856e38f;
+    x = fminf(fmaxf(x, -kBf16Max), kBf16Max);
+    return __float2bfloat16(x);
+}
+
 // ============================================================================
 // Warp and Block Reduction Primitives
 // ============================================================================

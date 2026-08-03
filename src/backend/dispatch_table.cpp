@@ -46,6 +46,12 @@ auto DispatchTableRegistry::validate_coverage(bool strict) -> bool {
         // the enum, not operations that need kernels.
         const auto name = op_id_to_name(op);
         if (name == "unknown") continue;
+        // Skip registry-only ops: they exist in the enum/name table only so
+        // autograd backward / JVP adapters can report a real OpId for rule
+        // lookup. They have no backend kernel anywhere by design (pure
+        // metadata reinterpretation, or derived from other ops/LAPACK
+        // directly) and never go through dispatch(). See is_registry_only_op.
+        if (is_registry_only_op(op)) continue;
 
         bool covered = false;
         for (const auto& table : tables_) {

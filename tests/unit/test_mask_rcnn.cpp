@@ -26,6 +26,13 @@ TEST_P(MaskRCNNTest, MaskRCNNResNet50ForwardShape) {
     Variable images(randn({2, 3, 800, 800}, DType::Float32, device), true);
 
     model->eval();
+    // Forward-only inference: the test asserts the output-shape contract only,
+    // never calling backward(). With the input's requires_grad=true, forward_test
+    // builds an autograd graph and saves every activation; Mask R-CNN + FPN on
+    // 800x800 exceeds the 8 GB GPU. NoGradGuard is the correct inference idiom
+    // (mirrors torch.no_grad()) — it disables grad tracking only, so the
+    // boxes/labels/scores/masks shape contract is still fully exercised.
+    NoGradGuard no_grad;
     auto [boxes, labels, scores, masks] = model->forward_test(images);
 
     // forward_test applies score-thresholding + per-class NMS, so the detection

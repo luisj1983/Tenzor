@@ -2894,9 +2894,33 @@ void bind_compression(py::module& m) {
     // =============================================================================
 
     m.def("empty_cache", []() {
-        // Release CPU cache
+        // Release the CPU caching allocator's free pool...
         tenzor::cpu::CPUCachingAllocator::instance().release_cached_memory();
-        // Note: Could also release GPU caches here if desired
+        // ...and every available accelerator's. The CPU-only call below left
+        // GPU caches untouched, so freed GPU tensors stayed cached indefinitely
+        // (the caching allocator holds them for reuse rather than returning them
+        // to the driver), steadily consuming VRAM until the next large
+        // allocation OOM'd. Synchronise each device first so pending free
+        // events are signalled and the cached blocks are releasable. Backends
+        // without a caching allocator (or unavailable ones) are a no-op via
+        // Device::empty_cache().
+        for (auto type : {tenzor::Device::Type::CUDA,
+                          tenzor::Device::Type::ROCm,
+                          tenzor::Device::Type::Vulkan,
+                          tenzor::Device::Type::OneAPI,
+                          tenzor::Device::Type::MPS}) {
+            auto* backend = tenzor::backend_registry().get_backend(type);
+            if (!backend || !backend->is_available()) continue;
+            for (int32_t i = 0; i < backend->device_count(); ++i) {
+                try {
+                    tenzor::Device d{type, i};
+                    d.synchronize();
+                    d.empty_cache();
+                } catch (const std::exception&) {
+                    // Best-effort: a failing device must not abort the loop.
+                }
+            }
+        }
     }, "Release all cached memory back to the system");
 
     m.def("memory_stats", [](const std::string& device) -> py::dict {

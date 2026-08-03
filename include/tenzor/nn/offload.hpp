@@ -103,6 +103,19 @@ public:
         bool pin_first_layer{true};            ///< Keep first layer on GPU
         bool pin_last_layer{true};             ///< Keep last layer on GPU
         bool enable_statistics{true};          ///< Track offload statistics
+        /// Whether ~OffloadContext() tries to move offloaded params/grads back to
+        /// their original (accelerator) device. The restore exists so a model that
+        /// *outlives* its OffloadContext is left in a usable on-device state. When
+        /// the model is destroyed together with the context (the common test/eval
+        /// pattern), the restore is pointless — and for models that were offloaded
+        /// *because* they exceed device capacity it always OOMs anyway. Worse, the
+        /// restored tensors are freed only when the model destructs, which is
+        /// *after* the context's TransferEngine (and its CUDA streams) are torn down,
+        /// stranding the freed CachingAllocator blocks' completion events on dead
+        /// streams. Those blocks become permanently un-reusable and un-evictable, so
+        /// the next test in the same process OOMs on a device full of stuck cache.
+        /// Set false when the model is destroyed with the context.
+        bool restore_on_destruction{true};
         size_t cpu_memory_limit{16ULL * 1024 * 1024 * 1024};  ///< CPU memory limit (16 GB)
         size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};   ///< GPU memory limit (8 GB)
         Device target_device{Device::cuda(0)}; ///< Target device for computation (for CPU-start models)
@@ -472,6 +485,22 @@ private:
      * training loop). Caller must hold tensor_map_mutex_.
      */
     auto drain_all_pending() -> void;
+
+    /**
+     * @brief Block-finalize every pending GPU->CPU offload, freeing its GPU
+     *        storage. Prefetch (CPU->GPU) transfers are left in flight.
+     *
+     * drain_all_pending() commits both directions, so it can *consume* GPU
+     * memory by committing pending prefetches — wrong when the goal is to make
+     * room. This helper finalizes only pending offloads (pending_is_offload ==
+     * true): each one block-waits on its DMA, then rebinds *tensor_ptr to the
+     * host copy, dropping the last reference to the GPU storage. Used as
+     * backpressure when a layer's parameter load fails with an allocation error:
+     * the failure means prior layers' async offloads have not yet freed their
+     * GPU memory, so block-free them and retry. Caller must hold
+     * tensor_map_mutex_.
+     */
+    auto drain_pending_offloads() -> void;
 
     /**
      * @brief Walk tensor_map_ and finalize every pending offload whose handle is

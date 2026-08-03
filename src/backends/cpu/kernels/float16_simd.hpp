@@ -51,9 +51,35 @@ inline __m256 cvt_f16_to_f32_avx2(const uint16_t* fp16) {
 }
 
 /**
- * @brief Convert 8 Float32 values to 8 Float16 values (AVX2)
+ * @brief Saturate a vector of Float32 values to the finite Float16 range
+ *        [-65504, 65504] (AVX2).
+ *
+ * The F16C conversion intrinsic `_mm256_cvtps_ph` produces signed *infinity*
+ * on overflow (strict IEEE-754). Deep-network Float16 gradients routinely
+ * exceed the half range (e.g. ResNet-101's input gradient reaches ~1.4e5),
+ * and a mid-chain inf later becomes nan via inf - inf, severing the gradient
+ * signal on CPU/CUDA. ROCm/OneAPI half conversions instead saturate to ±65504.
+ * Clamping here makes CPU match those backends (cross-backend parity) and
+ * keeps the gradient finite. NaN is preserved: the ordered comparison is
+ * false for NaN, so NaN passes through unchanged (genuine NaNs stay visible).
+ */
+inline __m256 saturate_f16_range_avx2(__m256 x) {
+    const __m256 vmax = _mm256_set1_ps(65504.0f);
+    const __m256 signmask = _mm256_set1_ps(-0.0f);
+    __m256 absx = _mm256_andnot_ps(signmask, x);
+    // over = |x| > 65504  (ordered: false for NaN -> NaN preserved)
+    __m256 over = _mm256_cmp_ps(absx, vmax, _CMP_GT_OQ);
+    // sat = copysign(65504, x): 65504 with x's sign bit
+    __m256 sat = _mm256_or_ps(vmax, _mm256_and_ps(signmask, x));
+    return _mm256_blendv_ps(x, sat, over);
+}
+
+/**
+ * @brief Convert 8 Float32 values to 8 Float16 values (AVX2), saturating
+ *        out-of-range values to ±65504 instead of producing infinity.
  */
 inline void cvt_f32_to_f16_avx2(__m256 fp32, uint16_t* fp16) {
+    fp32 = saturate_f16_range_avx2(fp32);
     __m128i fp16_vec = _mm256_cvtps_ph(fp32, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     _mm_storeu_si128(reinterpret_cast<__m128i*>(fp16), fp16_vec);
 }
@@ -69,11 +95,47 @@ inline __m512 cvt_f16_to_f32_avx512(const uint16_t* fp16) {
 }
 
 /**
- * @brief Convert 16 Float32 values to 16 Float16 values (AVX-512)
+ * @brief Saturate a vector of Float32 values to the finite Float16 range
+ *        [-65504, 65504] (AVX-512). See saturate_f16_range_avx2 for rationale.
+ *        NaN is preserved (ordered comparison is false for NaN).
+ */
+inline __m512 saturate_f16_range_avx512(__m512 x) {
+    const __m512 vmax = _mm512_set1_ps(65504.0f);
+    const __m512 signmask = _mm512_set1_ps(-0.0f);
+    __m512 absx = _mm512_andnot_ps(signmask, x);
+    __mmask16 over = _mm512_cmp_ps_mask(absx, vmax, _CMP_GT_OQ);
+    __m512 sat = _mm512_or_ps(vmax, _mm512_and_ps(signmask, x));
+    return _mm512_mask_blend_ps(over, x, sat);
+}
+
+/**
+ * @brief Convert 16 Float32 values to 16 Float16 values (AVX-512), saturating
+ *        out-of-range values to ±65504 instead of producing infinity.
  */
 inline void cvt_f32_to_f16_avx512(__m512 fp32, uint16_t* fp16) {
+    fp32 = saturate_f16_range_avx512(fp32);
     __m256i fp16_vec = _mm512_cvtps_ph(fp32, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(fp16), fp16_vec);
+}
+
+/**
+ * @brief Saturate a single Float32 to the finite Float16 range (NaN-preserving).
+ *
+ * Used by the scalar remainder loops and the non-SIMD fallback so every
+ * float->half conversion path shares the same saturating overflow semantics.
+ */
+inline float sat_f16_value(float x) {
+    // Comparisons with NaN are false, so NaN passes through unchanged.
+    if (x > 65504.0f) return 65504.0f;
+    if (x < -65504.0f) return -65504.0f;
+    return x;
+}
+
+/**
+ * @brief Convert one Float32 to a Float16 bit pattern, saturating overflow.
+ */
+inline uint16_t cvt_f32_to_f16_sat(float x) {
+    return _cvtss_sh(sat_f16_value(x), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 }
 
 #endif // TENZOR_F16_AVX512
@@ -103,7 +165,7 @@ inline void add_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (size_t j = 0; j < n; ++j) {
         float fa = _cvtsh_ss(a[j]);
         float fb = _cvtsh_ss(b[j]);
-        out[j] = _cvtss_sh(fa + fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[j] = cvt_f32_to_f16_sat(fa + fb);
     }
 #elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
@@ -117,14 +179,14 @@ inline void add_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa + fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa + fb);
     }
 #else
     // Scalar F16C (no AVX2/AVX512)
     for (size_t i = 0; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa + fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa + fb);
     }
 #endif
 
@@ -158,7 +220,7 @@ inline void sub_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (size_t j = 0; j < n; ++j) {
         float fa = _cvtsh_ss(a[j]);
         float fb = _cvtsh_ss(b[j]);
-        out[j] = _cvtss_sh(fa - fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[j] = cvt_f32_to_f16_sat(fa - fb);
     }
 #elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
@@ -171,14 +233,14 @@ inline void sub_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa - fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa - fb);
     }
 #else
     // Scalar F16C (no AVX2/AVX512)
     for (size_t i = 0; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa - fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa - fb);
     }
 #endif
 
@@ -211,7 +273,7 @@ inline void mul_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (size_t j = 0; j < n; ++j) {
         float fa = _cvtsh_ss(a[j]);
         float fb = _cvtsh_ss(b[j]);
-        out[j] = _cvtss_sh(fa * fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[j] = cvt_f32_to_f16_sat(fa * fb);
     }
 #elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
@@ -224,14 +286,14 @@ inline void mul_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa * fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa * fb);
     }
 #else
     // Scalar F16C (no AVX2/AVX512)
     for (size_t i = 0; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa * fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa * fb);
     }
 #endif
 
@@ -264,7 +326,7 @@ inline void div_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (size_t j = 0; j < n; ++j) {
         float fa = _cvtsh_ss(a[j]);
         float fb = _cvtsh_ss(b[j]);
-        out[j] = _cvtss_sh(fa / fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[j] = cvt_f32_to_f16_sat(fa / fb);
     }
 #elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
@@ -277,14 +339,14 @@ inline void div_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
     for (; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa / fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa / fb);
     }
 #else
     // Scalar F16C (no AVX2/AVX512)
     for (size_t i = 0; i < n; ++i) {
         float fa = _cvtsh_ss(a[i]);
         float fb = _cvtsh_ss(b[i]);
-        out[i] = _cvtss_sh(fa / fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        out[i] = cvt_f32_to_f16_sat(fa / fb);
     }
 #endif
 

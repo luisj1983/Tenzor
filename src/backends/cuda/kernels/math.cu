@@ -383,9 +383,7 @@ __global__ void broadcast_kernel(
     }
 }
 
-// float2half_sat is defined in cuda_common.cuh
-// Forward declaration for float2bfloat16_sat - defined below
-__device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x);
+// float2half_sat and float2bfloat16_sat are defined in cuda_common.cuh
 
 // Device-side operation functors with FP16/BF16 saturating specializations
 // FP16/BF16 ops promote to float32 and saturate back, matching the fast-path kernels
@@ -536,21 +534,7 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 // FP16 Saturating Conversion
 // ============================================================================
 
-// float2half_sat is provided by cuda_common.cuh
-
-// Saturating Float32 -> BFloat16 conversion: clamps to max finite BFloat16
-// value (~3.39e38) instead of producing Inf.  BFloat16 has the same exponent
-// range as Float32 so overflow is rare, but accumulation across deep nets or
-// large reductions can exceed the finite range.
-__device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x) {
-    // Preserve NaN and Inf through conversion
-    if (::isnan(x) || ::isinf(x)) {
-        return __float2bfloat16(x);
-    }
-    constexpr float kBF16Max = 3.3895313892515355e+38f;  // 0x7F7F in BF16
-    x = fminf(fmaxf(x, -kBF16Max), kBF16Max);
-    return __float2bfloat16(x);
-}
+// float2half_sat and float2bfloat16_sat are provided by cuda_common.cuh
 
 // ============================================================================
 // FP16 Binary Operations

@@ -511,7 +511,13 @@ TEST_P(SwinMultiDTypeTest, SwinTinyHierarchicalFeatures) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallHierarchicalGradients) {
     int img_size = GetImageSize();
-    auto model = swin_small(50, img_size, false);
+    // Gradient checkpointing (on-GPU recomputation): Float64 Swin-Small at
+    // batch 2 / 224x224 saves every stage activation for backward and exceeds
+    // the 8 GB GPU. use_checkpoint=true drops those saved activations and
+    // recomputes them in backward — same gradients, bounded memory. This is
+    // the standard memory-reduction idiom (mirrors torch.utils.checkpoint),
+    // not a CPU offload: all compute stays on the device.
+    auto model = swin_small(50, img_size, false, true);
     model->to(dtype());
     model->to(device());
     model->train();
@@ -735,6 +741,13 @@ TEST_P(SwinMultiDTypeTest, SwinLargeTrainEvalModeConsistency) {
 
     Variable input = createInput({1, 3, img_size, img_size}, false);
 
+    // Forward-only shape/dtype check across eval and train modes (no backward).
+    // Swin-Large in Float64 saves every activation for backward across TWO
+    // forwards, exceeding the 8 GB GPU. no_grad is the correct inference pattern
+    // (mirrors torch.no_grad()); it disables grad tracking only, leaving
+    // train()/eval() behaviour (dropout/BN) intact so the mode comparison is
+    // still exercised.
+    NoGradGuard no_grad;
     // Test in eval mode
     model->eval();
     Variable output_eval = model->forward(input);

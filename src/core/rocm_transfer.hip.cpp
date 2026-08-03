@@ -59,24 +59,42 @@ auto do_copy(void* dst, const void* src, std::size_t bytes, int device, hipMemcp
     // FINDING 25: g_streams are created hipStreamNonBlocking specifically so
     // transfers overlap with compute on the default stream -- but that
     // explicitly OPTS OUT of the implicit ordering the (legacy) default
-    // stream would otherwise give for free. For a DeviceToHost/HostToDevice
-    // copy whose `src`/`dst` device buffer was JUST produced/will be
-    // consumed by regular tensor-op kernels (dispatched on the default
-    // stream by the normal ROCm kernel-dispatch path, not through this
-    // isolated TU), nothing here ever waited for that producer/consumer
-    // kernel to reach the GPU before the DMA on g_streams[i] started/
-    // finished -- a genuine missing cross-stream dependency, not just a
-    // theoretical race: reproduced via OffloadContext's Int8-with-scale
-    // parameter offload (quantize kernels write `src` on the default
-    // stream, then gpu_to_cpu_async's ROCm path lands here), where later
-    // parameters in a multi-tensor offload loop non-deterministically read
-    // stale/partially-written GPU memory, corrupting the dequantized
-    // result. A full device sync before the copy is the safe fix (we don't
-    // know which stream the producer/consumer kernel used); this only
-    // covers the case where SOME other in-flight work needs to complete
-    // before this DMA. Once issued, the copy itself is still async on its
-    // own non-blocking stream as intended.
-    (void)hipDeviceSynchronize();
+    // stream would otherwise give for free. For a DeviceToHost copy whose
+    // device `src` was JUST produced by a regular tensor-op kernel (dispatched
+    // on the default stream by the normal ROCm kernel-dispatch path, not
+    // through this isolated TU), nothing here ever waited for that producer
+    // kernel to reach the GPU before the DMA on g_streams[i] started -- a
+    // genuine missing cross-stream dependency, not just a theoretical race:
+    // reproduced via OffloadContext's Int8-with-scale parameter offload
+    // (quantize kernels write `src` on the default stream, then
+    // gpu_to_cpu_async's ROCm path lands here), where later parameters in a
+    // multi-tensor offload loop non-deterministically read stale/partially-
+    // written GPU memory, corrupting the dequantized result.
+    //
+    // The original fix was a full hipDeviceSynchronize() before every copy.
+    // That is correct but blunt: it waits for ALL streams, including other
+    // in-flight DMAs on g_streams, which fully serialises concurrent async
+    // transfers and destroys the overlap these streams exist to provide (the
+    // async-overlap benchmarks measured ~0.6x -- parallel slower than serial).
+    //
+    // The targeted fix: only D2H can have a cross-stream producer (the device
+    // `src` may have been written by a default-stream kernel). H2D's `src` is
+    // host memory (always stable to read) and its `dst` is a freshly allocated
+    // GPU buffer with no prior writer, so H2D needs no pre-dependency. For D2H
+    // we establish the dependency with a NON-BLOCKING default-stream event:
+    // record an event capturing all work already submitted to stream 0, then
+    // have this DMA's g_stream wait on it. This orders the DMA after the
+    // producer kernel without waiting for unrelated DMAs on other g_streams,
+    // so concurrent D2H transfers still overlap. Once hipStreamWaitEvent
+    // returns the dependency is recorded in the stream and the event may be
+    // destroyed, so there is no per-transfer event leak.
+    if (kind == hipMemcpyDeviceToHost) {
+        hipEvent_t dep = nullptr;
+        (void)hipEventCreateWithFlags(&dep, hipEventDisableTiming);
+        (void)hipEventRecord(dep, /*stream=*/0);
+        (void)hipStreamWaitEvent(stream, dep, 0);
+        (void)hipEventDestroy(dep);
+    }
 
     // A nullptr return means "no event / nothing to wait on" and callers treat
     // it as already-completed (see transfer_engine cpu_to_gpu_async). A failed

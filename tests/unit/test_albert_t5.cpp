@@ -403,6 +403,14 @@ TEST_P(ALBERTandT5Test, T5DecoderCombinesPaddingMaskWithCausal_G12) {
     Tensor mask_half = mask_half_cpu.to(device);
     Tensor enc_mask = enc_mask_cpu.to(device);
 
+    // Forward-only inference: the test compares two decoder outputs and never
+    // calls backward(), so disable grad tracking. Building an autograd graph
+    // here is unnecessary and, on GPU backends, triggers a buffer-reuse hazard
+    // where the second forward overwrites the first forward's still-live output
+    // storage (the caching allocator recycles a buffer that a saved-tensor
+    // alias still references). NoGradGuard matches the ViT/Swin ForwardShape
+    // tests and torch.no_grad() for inference.
+    NoGradGuard no_grad;
     auto out_full = model->forward(input_ids, decoder_input_ids, enc_mask, mask_full);
     auto out_half = model->forward(input_ids, decoder_input_ids, enc_mask, mask_half);
 

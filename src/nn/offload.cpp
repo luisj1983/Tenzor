@@ -12,7 +12,9 @@
 #include "tenzor/utils/log.hpp"         // TENZOR_LOG_WARN (D.1)
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <iostream>
 
 namespace tenzor {
@@ -148,6 +150,11 @@ OffloadContext::~OffloadContext() {
             // Drain pending handles first.
             drain_all_pending();
 
+            // Restore is_offloaded tensors to original_device unless the caller
+            // opted out (Config::restore_on_destruction == false), typically
+            // because the model is destroyed together with this context. See
+            // the field's doc-comment for why the restore is harmful in that case.
+            if (config_.restore_on_destruction) {
             // Restore is_offloaded tensors to original_device. On alloc failure,
             // leave *tensor_ptr pointing at info.cpu_copy -- the IntrusiveRefCount
             // on Storage keeps the data alive (no UAF), but the device will be
@@ -174,6 +181,7 @@ OffloadContext::~OffloadContext() {
                                     info.original_device.to_string(), e.what());
                 }
             }
+            }  // end restore_on_destruction
         } catch (const std::exception& e) {
             TENZOR_LOG_WARN("OffloadContext: error draining pending transfers on "
                             "shutdown: {}", e.what());
@@ -606,6 +614,20 @@ auto OffloadContext::drain_all_pending() -> void {
     }
 }
 
+auto OffloadContext::drain_pending_offloads() -> void {
+    // Caller must hold tensor_map_mutex_. Backpressure path: block-finalize
+    // pending GPU->CPU offloads only (NOT prefetches, which would consume GPU
+    // memory). Each finalized offload rebinds *tensor_ptr to its host copy,
+    // releasing the GPU storage. This is what makes room when a layer's
+    // parameter load hit an allocation failure because prior layers' async
+    // offloads had not yet completed and freed their GPU memory.
+    for (auto& [tensor_ptr, info] : tensor_map_) {
+        if (info.pending_handle.is_valid() && info.pending_is_offload) {
+            finalize_pending(info, tensor_ptr);
+        }
+    }
+}
+
 auto OffloadContext::offload_single_tensor(Tensor* tensor_ptr,
                                            OffloadPriority priority) -> bool {
     // Public wrapper around the private offload_tensor() so
@@ -946,11 +968,40 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
             finalize_pending(it->second, tensor_ptr);
         }
 
+        // Helper: load a CPU tensor to a GPU device, retrying once after
+        // block-finalizing any pending GPU->CPU offloads. The retry is the
+        // backpressure path: a failure here means prior layers' async offloads
+        // have not yet completed and freed their GPU storage, so the device is
+        // full of stale soon-to-be-offloaded params. Block-freeing those
+        // pending offloads makes room; if the retry still fails the tensor
+        // stays on its CPU copy and the caller logs. The mutex is already held
+        // by load_tensor_to_gpu, so drain_pending_offloads() is legal here.
+        auto load_cpu_to_gpu = [&](const Tensor& src, const Device& dev)
+            -> std::optional<Tensor> {
+            try {
+                return transfer_engine_->cpu_to_gpu(src, dev);
+            } catch (const std::exception&) {
+                // Backpressure: the allocation failed because prior layers'
+                // async GPU->CPU offloads have not yet freed their GPU storage.
+                // Block-finalize those pending offloads to release the storage,
+                // then retry once. If it still fails the tensor stays on its
+                // CPU copy and the caller leaves it on the host.
+                drain_pending_offloads();
+                try {
+                    return transfer_engine_->cpu_to_gpu(src, dev);
+                } catch (const std::exception& e) {
+                    TENZOR_LOG_WARN("OffloadContext::load_to_gpu: failed to load CPU tensor "
+                                    "to GPU: {}", e.what());
+                    return std::nullopt;
+                }
+            }
+        };
+
         // Case 1: Tensor was offloaded from GPU - restore it
         if (it != tensor_map_.end() && it->second.is_offloaded) {
-            try {
-                Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(
-                    it->second.cpu_copy, it->second.original_device);
+            auto gpu_opt = load_cpu_to_gpu(it->second.cpu_copy, it->second.original_device);
+            if (gpu_opt) {
+                Tensor gpu_tensor = std::move(*gpu_opt);
                 // Phase C (C3): cast back to original dtype on GPU after DMA when
                 // the cpu_copy was quantized.
                 // Audit G3: Int8WithScale dequant — widen + multiply by scale.
@@ -964,31 +1015,23 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
                 *tensor_ptr = gpu_tensor;
                 it->second.is_offloaded = false;
                 stats_.current_cpu_memory.fetch_sub(it->second.size_bytes, std::memory_order_relaxed);
-            } catch (const std::exception& e) {
-                // Audit I.4: route to unified logger.
-                TENZOR_LOG_WARN("OffloadContext::load_to_gpu: failed to load offloaded "
-                                "tensor to GPU: {}", e.what());
             }
         }
         // Case 2: Tensor on CPU and not in map - CPU-start model, load to target device
         else if (tensor_ptr->device().type == Device::Type::CPU) {
-            try {
-                // Initialize tensor info if not already tracked
-                if (it == tensor_map_.end()) {
-                    initialize_tensor_info(tensor_ptr, layer, owner);
-                    it = tensor_map_.find(tensor_ptr);
-                }
-                // Store CPU copy and load to GPU
-                if (it != tensor_map_.end()) {
-                    it->second.cpu_copy = *tensor_ptr;  // Store original CPU tensor
-                    Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(*tensor_ptr, config_.target_device);
-                    *tensor_ptr = gpu_tensor;
+            // Initialize tensor info if not already tracked
+            if (it == tensor_map_.end()) {
+                initialize_tensor_info(tensor_ptr, layer, owner);
+                it = tensor_map_.find(tensor_ptr);
+            }
+            // Store CPU copy and load to GPU
+            if (it != tensor_map_.end()) {
+                it->second.cpu_copy = *tensor_ptr;  // Store original CPU tensor
+                auto gpu_opt = load_cpu_to_gpu(*tensor_ptr, config_.target_device);
+                if (gpu_opt) {
+                    *tensor_ptr = std::move(*gpu_opt);
                     it->second.is_offloaded = false;  // Currently on GPU
                 }
-            } catch (const std::exception& e) {
-                // Audit I.4: route to unified logger.
-                TENZOR_LOG_WARN("OffloadContext::load_to_gpu: failed to load CPU tensor "
-                                "to GPU: {}", e.what());
             }
         }
     };

@@ -1308,12 +1308,29 @@ auto QuantStub::forward_impl(const Variable& input) -> Variable {
     const float scale = qparams_.scale.numel() > 0
         ? qparams_.scale.cpu().data<float>()[0]
         : 1.0f;
-    // zero_point is always DType::Int32 (quantize.cpp / fake_quantize.cpp).
-    // Reading it as int64_t throws DTypeException on the dtype mismatch, so the
-    // QAT-through-QuantStub forward would deterministically throw. Read int32_t.
-    const float zero_point = qparams_.zero_point.numel() > 0
-        ? static_cast<float>(qparams_.zero_point.cpu().data<int32_t>()[0])
-        : 0.0f;
+    // zero_point's dtype is NOT fixed by the API: QuantizationParams accepts
+    // any integer dtype the caller supplies (the S20 QAT tests use Int64, the
+    // FakeQuantize per-channel tests use Int32, quantize.cpp uses Int32).
+    // Reading it with a hardcoded data<int32_t>() throws DTypeException when
+    // the caller supplied Int64 (or any other int width), deterministically
+    // breaking QAT-through-QuantStub for those callers. Read the scalar
+    // according to its ACTUAL dtype instead.
+    const float zero_point = [&] () -> float {
+        if (qparams_.zero_point.numel() == 0) return 0.0f;
+        const Tensor zp_cpu = qparams_.zero_point.cpu();
+        switch (zp_cpu.dtype()) {
+            case DType::Int32:    return static_cast<float>(zp_cpu.data<int32_t>()[0]);
+            case DType::Int64:    return static_cast<float>(zp_cpu.data<int64_t>()[0]);
+            case DType::Int16:    return static_cast<float>(zp_cpu.data<int16_t>()[0]);
+            case DType::Int8:     return static_cast<float>(zp_cpu.data<int8_t>()[0]);
+            case DType::UInt8:    return static_cast<float>(zp_cpu.data<uint8_t>()[0]);
+            case DType::Float32:  return zp_cpu.data<float>()[0];
+            default:
+                throw std::runtime_error(
+                    "QuantStub::forward_impl: unsupported zero_point dtype " +
+                    std::to_string(static_cast<int>(zp_cpu.dtype())));
+        }
+    }();
     float qmin = -128.0f, qmax = 127.0f;
     switch (qparams_.dtype) {
         case QuantDType::INT8:   qmin = -128.0f; qmax = 127.0f;  break;

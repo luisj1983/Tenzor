@@ -38,8 +38,19 @@ Float16::Float16(float f) {
     int32_t e = exp - 127 + 15;
 
     if (e >= 0x1F) {
-        // Overflow -> signed infinity.
-        bits = static_cast<uint16_t>(sign | 0x7C00);
+        // Overflow -> saturate to the largest representable half value
+        // (sign | 0x7BFF == ±65504), NOT signed infinity.
+        //
+        // Deep-network Float16 gradients routinely exceed the half range
+        // (e.g. ResNet-101's input gradient reaches ~1.4e5). Producing inf on
+        // overflow (the strict IEEE-754 round-to-nearest result) causes a
+        // mid-chain inf - inf = nan that severs the gradient signal on CPU/CUDA,
+        // diverging from ROCm/OneAPI whose half conversions saturate to ±65504.
+        // Saturating matches those backends (cross-backend parity) and keeps the
+        // gradient signal finite. The autograd engine's leaf .grad downcast is
+        // the only float->half conversion in the steady path; saturating here
+        // is the single point that fixes the whole backward chain.
+        bits = static_cast<uint16_t>(sign | 0x7BFF);
         return;
     }
 
@@ -67,9 +78,16 @@ Float16::Float16(float f) {
     uint16_t h = static_cast<uint16_t>(
         sign | (static_cast<uint32_t>(e) << 10) | half_mant);
     if (remainder > 0x1000 || (remainder == 0x1000 && (half_mant & 1))) {
-        // Increment propagates a mantissa carry into the exponent; if the
-        // exponent was 0x1E this correctly overflows to 0x7C00 (infinity).
+        // Increment propagates a mantissa carry into the exponent. If the
+        // exponent was 0x1E the carry would reach 0x7C00 (infinity); saturate
+        // to the largest finite half (0x7BFF) instead — see the overflow note
+        // above for why saturation (not inf) matches ROCm/OneAPI and keeps deep
+        // Float16 backward gradients finite.
         h++;
+        // 0x7BFF + 1 == 0x7C00 (inf); clamp back to max-finite.
+        if ((h & 0x7C00) == 0x7C00 && (h & 0x03FF) == 0) {
+            h = static_cast<uint16_t>(sign | 0x7BFF);
+        }
     }
     bits = h;
 }

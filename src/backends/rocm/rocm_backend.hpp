@@ -165,6 +165,7 @@ public:
 
     // Synchronization
     auto synchronize(int32_t device_id) -> void override;
+    auto empty_cache(int32_t device_id) -> void override;
 
     // Stream management
     auto create_stream(int32_t device_id) -> StreamHandle override;

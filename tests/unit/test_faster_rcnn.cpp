@@ -26,6 +26,15 @@ TEST_P(FasterRCNNTest, FasterRCNNResNet50ForwardShape) {
 
     // forward() returns a dummy Variable, use forward_inference() instead
     model->eval();
+    // Forward-only inference: the test asserts the detection count only, never
+    // calling backward(). With the input's requires_grad=true, forward_inference
+    // builds an autograd graph and saves every activation; on an 8 GB GPU the
+    // 800x800 ResNet50 feature maps exhaust memory, and the resulting
+    // allocation failure surfaces as a sticky CUDA error on the next cuBLAS
+    // call (cublasCreate returns CUBLAS_STATUS_INVALID_VALUE). NoGradGuard is
+    // the correct inference idiom (mirrors torch.no_grad()) — it disables grad
+    // tracking only, so the detections.size() assertion is still exercised.
+    NoGradGuard no_grad;
     auto detections = model->forward_inference(images);
 
     // Should return detections for each image
@@ -112,6 +121,16 @@ TEST_P(FasterRCNNTest, ForwardImplPacks7Columns_G9) {
     // Two-image batch: (B=2, 3, 800, 800).
     Variable images(randn({2, 3, 800, 800}, DType::Float32, device), false);
 
+    // Forward-only inference: the test asserts the output rank/column contract
+    // only, never calling backward(). Even with the input's requires_grad
+    // false, the model parameters require grad, so forward() builds an
+    // autograd graph and saves every activation; on an 8 GB GPU the 800x800
+    // ResNet50 feature maps exhaust memory, surfacing as a sticky CUDA error
+    // on the next cuBLAS call (cublasCreate returns CUBLAS_STATUS_INVALID_VALUE).
+    // NoGradGuard is the correct inference idiom (mirrors torch.no_grad()) — it
+    // disables grad tracking only, so the (N, 7) shape contract is still
+    // exercised.
+    NoGradGuard no_grad;
     Variable output = model->forward(images);
     const auto& shape = output.tensor().shape();
     ASSERT_EQ(shape.size(), 2u) << "Expected (N, 7) — got rank " << shape.size();

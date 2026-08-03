@@ -51,18 +51,22 @@ auto FusedLinearReLUBackward::backward(std::vector<Tensor> grad_outputs) -> std:
     auto relu_mask = gt(relu_output_, zero_tensor);
     auto masked_grad = mul(grad_output, relu_mask.to(grad_output.dtype()));
 
-    // grad_input = masked_grad @ W^T (for the input gradient).
-    // The fused node replaces MatMul(out = x @ W) -> ReLU. For out = a @ b the
-    // input gradient is grad_a = grad_out @ b^T (cf. MatMulBackward, which
-    // transposes b on its last two axes). The previous code omitted the
-    // transpose: for x[B,in] @ W[in,out] that is a shape mismatch (out vs in)
-    // and for a square W it silently produced a wrong gradient.
-    auto weight_t = weight.transpose(weight.ndim() - 2, weight.ndim() - 1);
-    auto grad_input = matmul(masked_grad, weight_t);
+    // grad_input = masked_grad @ W (for the input gradient).
+    // The fused node replaces MatMul(out = x @ W^T) -> ReLU, where the weight
+    // W is stored in the PyTorch nn.Linear convention W=[OUT,IN] (see
+    // fused_linear_relu() in src/ops/fused_ops.cpp: out_features=W.shape()[0],
+    // and the forward is out = x @ W^T). For out = x @ W^T the input gradient
+    // is grad_x = grad_out @ (W^T)^T = grad_out @ W. The previous code
+    // transposed W (computing grad_out @ W^T), which is a shape mismatch for
+    // non-square W and a silently-wrong gradient for square W.
+    auto grad_input = matmul(masked_grad, weight);
 
-    // grad_weight = input^T @ masked_grad (for the weight gradient)
-    auto input_t = input.transpose(input.ndim() - 2, input.ndim() - 1);
-    auto grad_weight = matmul(input_t, masked_grad);
+    // grad_weight = masked_grad^T @ x (for the weight gradient).
+    // For out = x @ W^T, grad_{W^T} = x^T @ grad_out, so
+    // grad_W = (x^T @ grad_out)^T = grad_out^T @ x = [OUT,B]@[B,IN] = [OUT,IN],
+    // matching W's shape.
+    auto masked_grad_t = masked_grad.transpose(masked_grad.ndim() - 2, masked_grad.ndim() - 1);
+    auto grad_weight = matmul(masked_grad_t, input);
 
     std::vector<Tensor> result;
     result.push_back(std::move(grad_input));
@@ -108,18 +112,19 @@ auto FusedLinearReLUBackward::backward_with_variables(std::vector<Variable> grad
     // masked_grad has grad_fn through grad_out (mask is a constant Variable).
     Variable masked_grad = grad_out * mask_var;
 
-    // grad_input = masked_grad @ W^T. For out = x @ W the input gradient is
-    // grad_x = grad_out @ W^T; transpose W on its last two axes (mirrors
-    // MatMulBackward). Done at the Variable level so the grad_fn chain is
-    // preserved for higher-order (create_graph=true).
-    int64_t Wnd = static_cast<int64_t>(W_var.shape().size());
-    Variable W_t = transpose(W_var, Wnd - 2, Wnd - 1);
-    Variable grad_input = matmul(masked_grad, W_t);
+    // grad_input = masked_grad @ W. The forward is out = x @ W^T with W stored
+    // in the nn.Linear convention W=[OUT,IN] (see fused_linear_relu() in
+    // src/ops/fused_ops.cpp), so grad_x = grad_out @ (W^T)^T = grad_out @ W.
+    // Done at the Variable level so the grad_fn chain is preserved for
+    // higher-order (create_graph=true). (The prior code transposed W here,
+    // which mismatched shapes for non-square W and was silently wrong for
+    // square W.)
+    Variable grad_input = matmul(masked_grad, W_var);
 
-    // grad_weight = x^T @ masked_grad
-    int64_t xnd = static_cast<int64_t>(x_var.shape().size());
-    Variable x_t = transpose(x_var, xnd - 2, xnd - 1);
-    Variable grad_weight = matmul(x_t, masked_grad);
+    // grad_weight = masked_grad^T @ x = [OUT,B]@[B,IN] = [OUT,IN], matching W.
+    int64_t mnd = static_cast<int64_t>(masked_grad.shape().size());
+    Variable masked_grad_t = transpose(masked_grad, mnd - 2, mnd - 1);
+    Variable grad_weight = matmul(masked_grad_t, x_var);
 
     return {grad_input, grad_weight};
 }

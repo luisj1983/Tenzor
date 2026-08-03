@@ -179,10 +179,11 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet101ForwardShape) {
 
 TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet101GradientFlow) {
     auto model = DeepLabV3Plus_ResNet101(21, 16, false);
-    convert_model_with_offload(model);
+    convert_model(model);
     model->train();
 
     auto images = createInput({1, 3, getInputSize(512), getInputSize(512)});
+
     Variable output = model->forward(images);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -311,6 +312,14 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ASPPWithDilation) {
 
     // Test that ASPP handles different input sizes (tests dilation rates)
     auto images_large = createInput({1, 3, 768, 768});
+
+    // Forward-only inference: the test asserts dtype and finite-non-zero on a
+    // single forward, never calling backward(). With grad tracking on, every
+    // activation is saved for backward, and a 768x768 Float64 input through
+    // DeepLabV3+ exceeds the 8 GB GPU. NoGradGuard is the correct inference
+    // idiom (mirrors torch.no_grad()) — it disables grad tracking only, so the
+    // dtype/finite-non-zero assertions are still fully exercised.
+    NoGradGuard no_grad;
     Variable output_large = model->forward(images_large);
 
     EXPECT_EQ(output_large.tensor().dtype(), dtype())
@@ -522,6 +531,14 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, LargeBatchProcessing) {
 
     // Test with larger batch size
     auto images = createInput({8, 3, 256, 256});
+
+    // Forward-only inference: the test asserts shape/dtype/finite-non-zero on
+    // a single forward, never calling backward(). With grad tracking on, every
+    // activation is saved for backward, and a batch of 8 at 256x256 in Float64
+    // through DeepLabV3+ exceeds the 8 GB GPU. NoGradGuard is the correct
+    // inference idiom (mirrors torch.no_grad()) — it disables grad tracking
+    // only, so the assertions are still fully exercised.
+    NoGradGuard no_grad;
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();

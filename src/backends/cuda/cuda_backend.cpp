@@ -619,6 +619,16 @@ public:
         cuda::cuda_drain_index_errors();
     }
 
+    auto empty_cache(int32_t device_id) -> void override {
+        // Return all free cached blocks to the driver. Callers must have
+        // already synchronised the device so pending free-events are signalled
+        // and the cached blocks are releasable (see Backend::empty_cache). When
+        // the caching allocator is disabled (TENZOR_DISABLE_CACHING_ALLOCATOR)
+        // there is no cache to empty.
+        if (!use_caching_allocator_) return;
+        backend::CachingAllocator::get().empty_cache(device_id);
+    }
+
     auto create_stream(int32_t device_id) -> StreamHandle override {
         auto stream = cuda::CUDAStreamPool::instance().acquire(device_id);
         return static_cast<StreamHandle>(stream);

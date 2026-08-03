@@ -215,7 +215,23 @@ TEST_P(GradCheckComprehensiveMultiDTypeTest, Mish) {
 
 TEST_P(GradCheckComprehensiveMultiDTypeTest, LeakyRelu) {
     if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
-    auto x = make_centered_var({4, 6});
+    // leaky_relu has a non-differentiable kink at x==0; central-difference
+    // gradcheck is mathematically invalid for any sample within eps of it.
+    // Use a deterministic input bounded away from zero (|x| >= 0.15, identical
+    // on every backend/dtype) that still exercises both the positive (slope 1)
+    // and negative (slope alpha) branches. The previous make_centered_var
+    // (randn*0.3) could draw a value within eps of the kink and fail despite a
+    // correct kernel (observed failing on cuda0_Float32 with x[0]=6.6e-5).
+    // Mirrors the kink-avoiding input in test_gradcheck_comprehensive.cpp.
+    std::vector<float> vals(24);
+    for (int i = 0; i < 24; ++i) {
+        float mag = 0.15f + 0.07f * static_cast<float>(i % 5);
+        vals[i] = ((i % 2 == 0) ? 1.0f : -1.0f) * mag;
+    }
+    auto x_t = from_data(vals.data(), {4, 6}, Device::cpu());
+    if (dtype() != DType::Float32) x_t = x_t.to(dtype());
+    x_t = x_t.to(device());
+    auto x = Variable(std::move(x_t), true);
     auto f = [](const Variable& v) { return leaky_relu(v, 0.01f); };
     EXPECT_TRUE(gradcheck(f, x, gc_eps(), gc_atol(), gc_rtol()));
 }

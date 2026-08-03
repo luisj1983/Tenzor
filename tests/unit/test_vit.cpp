@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/nn/offload.hpp>
+#include <optional>
 #include "../../include/tenzor/models/vit.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
@@ -299,6 +301,13 @@ TEST_P(ViTTest, ViTHugePatch14ForwardShape) {
     auto model = ViT_Huge_Patch14(1000, false, 224);
     model->to(device);
 
+    // Forward-only shape check: run under no_grad so the autograd engine does
+    // not retain all 32 encoder layers' activations for a backward that never
+    // happens. ViT-Huge/14 is ~632M params (~2.5GB FP32); retaining the full
+    // graph on top of the weights OOMs an 8GB laptop GPU even at batch 1.
+    // no_grad is the correct inference pattern for a shape check (mirrors
+    // torch.no_grad()), not a workaround.
+    NoGradGuard no_grad;
     Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
@@ -309,16 +318,52 @@ TEST_P(ViTTest, ViTHugePatch14ForwardShape) {
 
 TEST_P(ViTTest, ViTHugePatch14GradientFlow) {
     auto model = ViT_Huge_Patch14(10, false, 224);
-    model->to(device);
     model->train();
     // ViT-Huge/14 (~632M params) forward+backward in Float32 exceeds an 8GB
-    // GPU when every layer's activations are retained. Enable activation
-    // (gradient) checkpointing so the 32 encoder layers recompute their
-    // activations during backward instead of storing them — peak memory drops
-    // by ~O(num_layers) and the full model fits. Gradients are identical
-    // (checkpoint captures/replays RNG for dropout), so the grad-flow check
-    // still validates the real model.
+    // GPU when every layer's activations are retained. Two memory techniques
+    // make the full model fit:
+    //   - Gradient checkpointing (set_gradient_checkpointing): each encoder
+    //     layer recomputes its activations during backward instead of storing
+    //     them, dropping activation memory from O(num_layers) to O(1).
+    //     Gradients are identical (checkpoint captures/replays RNG), so the
+    //     grad-flow check still validates the real model.
+    //   - ZeRO-Phase-2 offload (cuda only): on the 8GB CUDA device the 632M
+    //     Float32 params + grads alone (~5GB) plus one checkpointed layer's
+    //     working set still OOMs under checkpointing alone. OffloadContext
+    //     keeps params and grads on the CPU host and stages each layer onto
+    //     the GPU just-in-time (prefetch_depth=2), so peak GPU memory is one
+    //     layer's working set. Compute stays on the GPU — this is the
+    //     library's documented ZeRO-Phase-2 path (nn/offload.hpp), not a CPU
+    //     compute fallback. CPU/ROCm/OneAPI/Vulkan have enough device memory
+    //     for the full model under checkpointing alone, so they take the
+    //     plain model->to(device) path.
     model->set_gradient_checkpointing(true);
+
+    std::optional<nn::OffloadContext> offload_ctx;
+    if (device.type == Device::Type::CUDA) {
+        nn::OffloadContext::Config config;
+        config.offload_parameters = true;
+        config.offload_gradients = true;
+        config.prefetch_depth = 2;
+        config.pin_first_layer = true;
+        config.pin_last_layer = true;
+        config.target_device = device;
+        // The model is destroyed together with this OffloadContext at end of
+        // test, so the default restore-at-shutdown is pointless — and for a
+        // model offloaded precisely because it exceeds device capacity it
+        // OOMs anyway (see warnings above). Worse, the restored GPU tensors
+        // are freed only when the model destructs, which is *after* the
+        // context's TransferEngine (and its CUDA streams) are torn down,
+        // stranding the freed CachingAllocator blocks' completion events on
+        // dead streams. Those blocks become permanently un-reusable and
+        // un-evictable, so the next test in this process (e.g.
+        // ViTHugePatch16ForwardShape) OOMs on a device full of stuck cache.
+        config.restore_on_destruction = false;
+        offload_ctx.emplace(*model, config);
+        offload_ctx->enable();
+    } else {
+        model->to(device);
+    }
 
     Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);

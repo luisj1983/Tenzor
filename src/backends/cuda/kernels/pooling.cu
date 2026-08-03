@@ -10,6 +10,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "cuda_launch_utils.cuh"
+#include "cuda_common.cuh"
 #include "../cuda_error.hpp"
 #include <array>
 #include <stdexcept>
@@ -30,8 +31,8 @@ __device__ inline float dev_load(const __nv_bfloat16* p, int64_t i) { return __b
 
 __device__ inline void dev_store(float* p, int64_t i, float v) { p[i] = v; }
 __device__ inline void dev_store(double* p, int64_t i, float v) { p[i] = static_cast<double>(v); }
-__device__ inline void dev_store(__half* p, int64_t i, float v) { p[i] = __float2half(v); }
-__device__ inline void dev_store(__nv_bfloat16* p, int64_t i, float v) { p[i] = __float2bfloat16(v); }
+__device__ inline void dev_store(__half* p, int64_t i, float v) { p[i] = float2half_sat(v); }
+__device__ inline void dev_store(__nv_bfloat16* p, int64_t i, float v) { p[i] = float2bfloat16_sat(v); }
 
 // audit-2026-05-03 — pool_compute_t<T> = double when T is double, else float.
 // Pooling kernels that need Float64 precision (e.g. for autograd gradcheck)
@@ -50,8 +51,8 @@ __device__ inline float  dev_load_compute(const __nv_bfloat16* p, int64_t i) { r
 
 __device__ inline void dev_store_compute(float* p, int64_t i, float v)  { p[i] = v; }
 __device__ inline void dev_store_compute(double* p, int64_t i, double v) { p[i] = v; }
-__device__ inline void dev_store_compute(__half* p, int64_t i, float v) { p[i] = __float2half(v); }
-__device__ inline void dev_store_compute(__nv_bfloat16* p, int64_t i, float v) { p[i] = __float2bfloat16(v); }
+__device__ inline void dev_store_compute(__half* p, int64_t i, float v) { p[i] = float2half_sat(v); }
+__device__ inline void dev_store_compute(__nv_bfloat16* p, int64_t i, float v) { p[i] = float2bfloat16_sat(v); }
 
 // ============================================================================
 // Launch config helpers

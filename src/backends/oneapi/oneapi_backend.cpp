@@ -606,6 +606,14 @@ public:
         check_async_errors();
     }
 
+    auto empty_cache(int32_t device_id) -> void override {
+        // Return all free cached blocks to the driver. Callers must have
+        // already synchronised the device so pending free-events are signalled
+        // and the cached blocks are releasable (see Backend::empty_cache).
+        (void)device_id;
+        backend::OneAPICachingAllocator::get().release_all();
+    }
+
     auto create_stream(int32_t device_id) -> StreamHandle override {
         validate_device_id(device_id);
 

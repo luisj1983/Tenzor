@@ -241,7 +241,24 @@ __global__ void nms_build_sort_keys_kernel(const float* scores, uint64_t* keys,
 // (which trigger ICE on gfx1150).
 static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices,
                                         int64_t num_boxes, hipStream_t stream) {
-    if (num_boxes <= 1) return;
+    if (num_boxes <= 0) return;
+    if (num_boxes == 1) {
+        // Single box: the descending argsort is trivially [0], but the caller
+        // (nms_greedy_suppression_kernel) still reads d_indices[0] and copies it
+        // verbatim into keep_indices. The bitonic path below needs padded_n>=2
+        // (for num_boxes==1 padded_n stays 1 and the sort loops never execute),
+        // and the radix path needs >=2 elements, so neither initialises
+        // d_indices — an early return here would leave the just-hipMalloc'd
+        // buffer as garbage, and keep_indices[0] would be a random value. That
+        // garbage index then reaches index_select on the 1-row filtered_boxes in
+        // batched_nms and throws "index N out of range for dimension of size 1".
+        // Write the identity index explicitly.
+        int64_t iota_blocks = (1 + 255) / 256;
+        hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, stream,
+                           d_indices, /*n=*/1, /*padded_n=*/1);
+        NMS_HIP_CHECK(hipGetLastError());
+        return;
+    }
 
     if (num_boxes <= 1024) {
         // Bitonic sort: O(n * log^2(n)) comparisons, all on GPU

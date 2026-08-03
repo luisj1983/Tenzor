@@ -267,6 +267,44 @@ protected:
         }
     }
 
+    // -------------------------------------------------------------------------
+    // TearDown: drain the accelerator between tests.
+    // -------------------------------------------------------------------------
+    // gtest runs tests back-to-back with no device barrier between them. A test
+    // that freed GPU tensors (e.g. a gradient-flow test whose model destructs at
+    // end-of-test) leaves those frees recorded as *pending* completion events
+    // on the async compute stream — the CachingAllocator cannot evict or reuse
+    // such cached blocks until the events signal (the memory may still be read
+    // by an in-flight kernel, so refusing to evict is correct). The next test
+    // then OOMs on a device full of un-evictable cached memory even though the
+    // allocator *could* reclaim it once the stream drains. Synchronising here
+    // drains the stream, signals every pending free-event, and makes the entire
+    // cached pool evictable/reusable for the following test — the clean-device
+    // starting condition the suite assumes. CPU has no async stream, so it is
+    // skipped. This fixes cross-test OOMs where a large model test passes in
+    // isolation but fails when run after a gradient-flow test (e.g.
+    // ViTHugePatch14ForwardShape after ViTLargePatch16GradientFlow).
+    void TearDown() override {
+        if (device.type != Device::Type::CPU) {
+            try {
+                device.synchronize();
+                // Drain the backend caching allocator's free pool back to the
+                // driver so the next test starts on a clean device. The
+                // allocator caches freed tensors for reuse rather than returning
+                // them to the driver; across many tests this cache grows until
+                // a later large-allocation test (e.g. ViTHugePatch14ForwardShape
+                // after ViTLargePatch16GradientFlow) finds the device full of
+                // cached-but-unreclaimed memory and OOMs. Synchronise first so
+                // pending free-events signal and the cached blocks are releasable.
+                device.empty_cache();
+            } catch (...) {
+                // A device sync/cache-empty failure during teardown must not
+                // mask the test's own result or abort the process for later
+                // tests.
+            }
+        }
+    }
+
     // Helper to check if a backend is available
     static bool isBackendAvailable(Device::Type backend_type, int32_t index = 0) {
         try {

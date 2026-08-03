@@ -186,6 +186,17 @@ struct Device {
      *       instead of using backend-specific calls like cudaDeviceSynchronize().
      */
     auto synchronize() const -> void;
+
+    /**
+     * @brief Release cached/free allocator memory back to the device driver.
+     *
+     * Empties the backend caching allocator's free-block pool for this device,
+     * returning all currently-free cached memory to the system. Call
+     * @ref synchronize() first so pending free-events are signalled and the
+     * cached blocks are releasable. CPU and backends without a caching
+     * allocator are a no-op.
+     */
+    auto empty_cache() const -> void;
 };
 
 // Forward declaration — full definition in backend/backend.hpp

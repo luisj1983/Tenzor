@@ -180,7 +180,24 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
             Tensor zp_cpu = (qparams_->zero_point.device() == Device::cpu())
                 ? qparams_->zero_point : qparams_->zero_point.to(Device::cpu());
             float scale = scale_cpu.data<float>()[0];
-            float zero_point = static_cast<float>(zp_cpu.data<int32_t>()[0]);
+            // zero_point's dtype is not fixed by the API (callers may supply
+            // Int64, Int32, or other int widths); read the scalar according to
+            // its actual dtype instead of assuming Int32 (which throws
+            // DTypeException for an Int64 zero_point).
+            float zero_point = [&] () -> float {
+                switch (zp_cpu.dtype()) {
+                    case DType::Int32:    return static_cast<float>(zp_cpu.data<int32_t>()[0]);
+                    case DType::Int64:    return static_cast<float>(zp_cpu.data<int64_t>()[0]);
+                    case DType::Int16:    return static_cast<float>(zp_cpu.data<int16_t>()[0]);
+                    case DType::Int8:     return static_cast<float>(zp_cpu.data<int8_t>()[0]);
+                    case DType::UInt8:    return static_cast<float>(zp_cpu.data<uint8_t>()[0]);
+                    case DType::Float32:  return zp_cpu.data<float>()[0];
+                    default:
+                        throw std::runtime_error(
+                            "FakeQuantize::forward_impl: unsupported zero_point dtype " +
+                            std::to_string(static_cast<int>(zp_cpu.dtype())));
+                }
+            }();
             return fake_quantize_with_grad(input, scale, zero_point, quant_min, quant_max);
         }
 

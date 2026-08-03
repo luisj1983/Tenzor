@@ -52,14 +52,33 @@ public:
             throw std::invalid_argument("Cannot normalize scalar tensor");
         }
 
-        // Channels-first (C,H,W) convention, consistent with the other
-        // transforms in this header (RandomErasing, RandomRotation, ...). The
-        // channel axis is the dimension that holds the C channels: index 0 for
-        // a [C,H,W] tensor and index 1 for a batched [N,C,H,W] tensor.
+        // Locate the channel axis. The conventional channels-first layout
+        // places C at axis 0 for [C,H,W] and axis 1 for [N,C,H,W]; prefer that
+        // axis when it matches num_channels (preserves the behaviour the other
+        // transforms in this header rely on). When the conventional axis does
+        // NOT match, fall back to scanning for a UNIQUE dimension equal to
+        // num_channels so channels-last layouts ([H,W,C] and [N,H,W,C]) are
+        // also normalised correctly instead of being rejected. If no axis
+        // matches -- or several do -- the layout is genuinely ambiguous and we
+        // refuse rather than silently pick the wrong one. For num_channels==1
+        // the params are scalar-broadcast, so any axis is fine and we keep the
+        // conventional position.
         size_t num_channels = mean_.size();
-        size_t channel_axis = (shape.size() >= 4) ? 1 : 0;
-        if (static_cast<size_t>(shape[channel_axis]) != num_channels && num_channels > 1) {
-            throw std::invalid_argument("Input channels must match normalization parameters");
+        size_t conventional_axis = (shape.size() >= 4) ? 1 : 0;
+        size_t channel_axis = conventional_axis;
+        if (num_channels > 1 &&
+            static_cast<size_t>(shape[conventional_axis]) != num_channels) {
+            size_t matches = 0;
+            for (size_t a = 0; a < shape.size(); ++a) {
+                if (static_cast<size_t>(shape[a]) == num_channels) {
+                    channel_axis = a;
+                    ++matches;
+                }
+            }
+            if (matches != 1) {
+                throw std::invalid_argument(
+                    "Input channels must match normalization parameters");
+            }
         }
 
         // Validate no zero std

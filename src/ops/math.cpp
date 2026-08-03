@@ -174,7 +174,8 @@ auto add(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
     Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Add>(inputs)[0];
+    Tensor res = dispatch<OpId::Add>(inputs)[0];
+    return res;
 }
 
 auto sub(const Tensor& a, const Tensor& b) -> Tensor {

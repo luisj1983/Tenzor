@@ -74,6 +74,7 @@ public:
     auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override;
 
     auto synchronize(int32_t device_id) -> void override;
+    auto empty_cache(int32_t device_id) -> void override;
     auto create_stream(int32_t device_id) -> StreamHandle override;
     auto destroy_stream(StreamHandle stream) -> void override;
     auto synchronize_stream(StreamHandle stream) -> void override;

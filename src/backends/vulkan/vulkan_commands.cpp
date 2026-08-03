@@ -4,6 +4,7 @@
  */
 
 #include "vulkan_helpers.hpp"
+#include "tenzor/backend/vulkan_caching_allocator.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -304,6 +305,13 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     if (ctx.descriptorPool) {
         ctx.descriptorPool->reset();
     }
+}
+
+auto VulkanBackend::empty_cache(int32_t device_id) -> void {
+    // Return all free cached blocks to the driver. Callers must have already
+    // synchronised the device so pending free-events are signalled and the
+    // cached blocks are releasable (see Backend::empty_cache).
+    backend::VulkanCachingAllocator::get().empty_cache(device_id);
 }
 
 auto VulkanBackend::is_device_lost(int32_t device_id) const -> bool {
