@@ -116,6 +116,7 @@ issues.txt
 currentfailures.txt
 profile_attention.py
 findings.txt
+skipped_tests.txt
 
 # Per-backend out-of-source build directories
 /build-*/

@@ -163,9 +163,9 @@ TEST_P(DistributionsMultiDTypeTest, ExponentialSampleNonneg) {
 }
 
 TEST_P(DistributionsMultiDTypeTest, GammaSamplePositive) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Gamma sampler is Float32/Float64 only";
-    }
+    // fill_gamma_cpu (distribution.hpp) widens Float16/BFloat16 to Float32
+    // for the sampler and narrows the result back, so this runs on every
+    // dtype the fixture parameterizes.
     auto concentration = tenzor::full({4}, 2.0f, dtype(), device());
     auto rate = tenzor::full({4}, 1.0f, dtype(), device());
     Gamma dist(concentration, rate);
@@ -178,9 +178,8 @@ TEST_P(DistributionsMultiDTypeTest, GammaSamplePositive) {
 }
 
 TEST_P(DistributionsMultiDTypeTest, BetaSampleInZeroOne) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Beta sampler (uses Gamma) is Float32/Float64 only";
-    }
+    // Beta::sample() draws through fill_gamma_cpu, which already widens
+    // Float16/BFloat16 to Float32 internally (see GammaSamplePositive above).
     auto a = tenzor::full({4}, 2.0f, dtype(), device());
     auto b = tenzor::full({4}, 3.0f, dtype(), device());
     Beta dist(a, b);
@@ -232,9 +231,8 @@ TEST_P(DistributionsMultiDTypeTest, HalfNormalSampleNonneg) {
 }
 
 TEST_P(DistributionsMultiDTypeTest, Chi2SampleNonneg) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Chi2 (uses Gamma) is Float32/Float64 only";
-    }
+    // Chi2::sample() draws through fill_gamma_cpu, which already widens
+    // Float16/BFloat16 to Float32 internally (see GammaSamplePositive above).
     auto df = tenzor::full({4}, 3.0f, dtype(), device());
     Chi2 dist(df);
     auto s = dist.sample();

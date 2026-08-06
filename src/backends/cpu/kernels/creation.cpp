@@ -1066,8 +1066,40 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate) -> Ten
             std::gamma_distribution<double> dist(alpha, 1.0 / beta);
             out[i] = dist(gen);
         }
+    } else if (concentration.dtype() == DType::Float16) {
+        // Widen to Float32, sample, narrow back — mirrors unary_math_kernel's
+        // Float16 path in math.cpp (std::gamma_distribution has no half-
+        // precision specialization, and half-precision RNG state would just
+        // lose entropy for no benefit).
+        const Float16* a_data = concentration.data<Float16>();
+        const Float16* b_data = rate.data<Float16>();
+        Float16* out = result.data<Float16>();
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            std::mt19937_64 gen(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL));
+            float a_f = static_cast<float>(a_data[i]);
+            float b_f = static_cast<float>(b_data[i]);
+            float alpha = a_f > 0.0f ? a_f : std::numeric_limits<float>::min();
+            float beta  = b_f > 0.0f ? b_f : std::numeric_limits<float>::min();
+            std::gamma_distribution<float> dist(alpha, 1.0f / beta);
+            out[i] = Float16(dist(gen));
+        }
+    } else if (concentration.dtype() == DType::BFloat16) {
+        const BFloat16* a_data = concentration.data<BFloat16>();
+        const BFloat16* b_data = rate.data<BFloat16>();
+        BFloat16* out = result.data<BFloat16>();
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
+        for (int64_t i = 0; i < n; ++i) {
+            std::mt19937_64 gen(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL));
+            float a_f = static_cast<float>(a_data[i]);
+            float b_f = static_cast<float>(b_data[i]);
+            float alpha = a_f > 0.0f ? a_f : std::numeric_limits<float>::min();
+            float beta  = b_f > 0.0f ? b_f : std::numeric_limits<float>::min();
+            std::gamma_distribution<float> dist(alpha, 1.0f / beta);
+            out[i] = BFloat16(dist(gen));
+        }
     } else {
-        throw std::runtime_error("gamma_sample: unsupported dtype (Float32/Float64 only)");
+        throw std::runtime_error("gamma_sample: unsupported dtype (Float32/Float64/Float16/BFloat16 only)");
     }
     return result;
 }

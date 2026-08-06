@@ -44,6 +44,13 @@ KNOWN_REASONS = {
     "KernelNotImplemented",
     "RequiresMultiGPU",
     "KnownBug",
+    "MissingPerfBaseline",
+    "NotApplicable",
+    # Heuristic-only labels below (no matching C++ SkipReason enum value —
+    # these classify *bare* GTEST_SKIP() call sites by message text, distinct
+    # from the explicitly-tagged SKIP_WITH_REASON enum in
+    # multi_backend_dtype_fixture.hpp).
+    "ResourceConstraint",
 }
 
 # Match GTEST_SKIP() / GTEST_SKIP_(..) with optional << "message" sequences
@@ -74,8 +81,13 @@ MSG_HEURISTICS = [
     # multi-backend parity test that can't run on single-backend hosts.
     (re.compile(r"backends\.size\s*\(\s*\)\s*<\s*2", re.I), "RequiresMultiGPU"),
     # "if (!has_cuda()) GTEST_SKIP()" and similar device probes without a
-    # human-readable message in the skip argument.
-    (re.compile(r"!\s*has_(?:cuda|rocm|vulkan|oneapi|mps)\s*\(", re.I),
+    # human-readable message in the skip argument. Matches both function-call
+    # syntax (has_cuda()) and a local bool variable of the same name
+    # (bool has_cuda = ...; if (!has_cuda) ...) — the latter evaded this
+    # heuristic when it required a literal trailing '(', which was the #1
+    # cause of the UNTAGGED bucket (test_quantized_linear_int4.cpp,
+    # test_fft.cpp both probe availability into a local bool).
+    (re.compile(r"!\s*has_(?:cuda|rocm|vulkan|oneapi|mps)\b", re.I),
      "BackendUnavailable"),
     (re.compile(r"!is_(?:cuda|rocm|vulkan|oneapi|mps)_available|"
                 r"device(?:_count)?\s*\(\s*\)\s*==\s*0",
@@ -95,13 +107,19 @@ MSG_HEURISTICS = [
                 r"only\s+one\s+successful\s+backend",
                 re.I), "RequiresMultiGPU"),
     # "reshape returned the same Tensor object" / impl()-pointer aliasing
-    # degenerate paths — tag as KnownBug since these guard against an
-    # undefined/impl-dependent condition.
+    # degenerate paths — implementation-defined, not a bug (as of the
+    # 2026-08 skip audit these call sites are now explicitly tagged
+    # SKIP_WITH_REASON(SkipReason::NotApplicable, ...), so this heuristic
+    # only fires for any future untagged occurrences of the same pattern).
     (re.compile(r"impl\(\)\.get\(\)\s*==|same\s+Tensor\s+object",
-                re.I), "KnownBug"),
-    # "Not enough memory for ..." — allocator / physical-memory constraints.
+                re.I), "NotApplicable"),
+    # "Not enough memory for ..." — allocator / physical-memory resource
+    # constraints (host doesn't have enough free VRAM/RAM right now), not a
+    # missing kernel. Was previously mis-tagged KernelNotImplemented, which
+    # made test_cuda_caching_allocator.cpp / test_rocm_caching_allocator.cpp
+    # look like feature gaps instead of environment-capacity skips.
     (re.compile(r"[Nn]ot\s+enough\s+memory|insufficient\s+memory|out\s+of\s+memory",
-                re.I), "KernelNotImplemented"),
+                re.I), "ResourceConstraint"),
     # "Need at least N GPUs" — stricter than generic RequiresMultiGPU test.
     (re.compile(r"[Nn]eed\s+at\s+least\s+\d+\s+GPUs?",
                 re.I), "RequiresMultiGPU"),

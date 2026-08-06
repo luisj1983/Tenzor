@@ -75,33 +75,25 @@ protected:
         // failure under TENZOR_REQUIRE_MULTI_BACKEND=1 instead of a quiet skip.
         HONOR_BACKEND_ENV_VARS(param.backend_name);
 
+        // HONOR_BACKEND_ENV_VARS above already returned (skipped or FAILed)
+        // if this backend is unavailable, so the per-branch availability
+        // re-checks that used to live here were dead code — deleted rather
+        // than duplicating what the macro already guarantees.
         if (param.backend_name == "cpu") {
             device = Device::cpu();
             // Explicitly initialize the library for CPU tests
             tenzor::initialize();
         }
         else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
             device = Device::cuda(0);
         }
         else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
             device = Device::vulkan(0);
         }
         else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
             device = Device::oneapi(0);
         }
         else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
             device = Device::rocm(0);
         }
 

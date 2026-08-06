@@ -41,8 +41,12 @@ TEST_P(AliasDetectionMultiDTypeTest, ReshapeViewAliasesBase) {
     Tensor a = zeros({4, 4}, dtype(), device());
     Tensor v = a.reshape({16});
     if (a.impl().get() == v.impl().get()) {
-        GTEST_SKIP() << "reshape returned the same Tensor object; "
-                        "aliasing is not applicable to this case.";
+        // Implementation-defined: reshape() is allowed to return the same
+        // Tensor object when it's a no-op view. Not a bug — the aliasing
+        // scenario this test targets just didn't arise this time.
+        SKIP_WITH_REASON(SkipReason::NotApplicable,
+                         "reshape returned the same Tensor object; "
+                         "aliasing is not applicable to this case.");
     }
     EXPECT_TRUE(may_alias(a, v));
     EXPECT_TRUE(may_alias(v, a));

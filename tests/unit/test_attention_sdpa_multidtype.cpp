@@ -144,12 +144,14 @@ TEST_P(SDPAMultiDTypeTest, CrossAttention_Forward) {
 // ============================================================================
 
 TEST_P(SDPAMultiDTypeTest, Backward_ProducesFiniteInputGrad) {
-    // CPU supports the Float64 attention backward natively (the
-    // flash_attention_backward_typed<double> path), so it must run there; only
-    // GPU backends that lack an FP64 attention backward are skipped.
-    if (dtype() == DType::Float64 && device_.type != Device::Type::CPU) {
+    // CPU, CUDA, ROCm, and OneAPI all have a native Float64 FlashAttention
+    // forward/backward (Audit A.11 in each backend's kernel_registry). Only
+    // Vulkan's FlashAttention kernel explicitly rejects Float64 (see
+    // vulkan_kernel_registry.cpp), so narrow the skip to Vulkan specifically
+    // instead of every non-CPU backend.
+    if (dtype() == DType::Float64 && device_.type == Device::Type::Vulkan) {
         SKIP_WITH_REASON(SkipReason::DtypeUnsupportedOnBackend,
-                         "Float64 attention backward is not supported on this backend");
+                         "Float64 attention backward is not supported on Vulkan");
     }
 
     const int64_t batch = 2, seq = 8, embed = 32, heads = 4;

@@ -79,6 +79,11 @@ enum class SkipReason {
     RequiresMultiGPU,             // multi-device distributed coverage
     KnownBug,                     // track with issue #; do not paper over
     MissingPerfBaseline,          // host has no committed perf-baseline entry
+    NotApplicable,                // scenario the test targets did not arise
+                                   // (e.g. an aliasing test where the op
+                                   // returned the same Tensor object rather
+                                   // than a distinct view) — implementation-
+                                   // defined, not a bug and not a gap.
 };
 
 inline const char* skip_reason_string(SkipReason r) {
@@ -93,6 +98,7 @@ inline const char* skip_reason_string(SkipReason r) {
         case SkipReason::RequiresMultiGPU:           return "RequiresMultiGPU";
         case SkipReason::KnownBug:                   return "KnownBug";
         case SkipReason::MissingPerfBaseline:        return "MissingPerfBaseline";
+        case SkipReason::NotApplicable:              return "NotApplicable";
     }
     return "Unknown";
 }

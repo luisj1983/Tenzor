@@ -348,13 +348,13 @@ TEST_P(NestedAutogradTest, NestedLayerNorm3DMatchesRegularLayerNorm) {
     auto offsets = make_int64_tensor({0, 3, 6});
     const double eps = 1e-5;
 
+    // F013 (>2D completion): nested_layer_norm must accept >2D values —
+    // that's exactly what this test verifies, so a regression here must fail
+    // the test, not silently skip it. (Previously a bare catch(...) around
+    // this call would report SKIPPED instead of FAILED if the feature
+    // regressed, defeating the test's purpose.)
     tenzor::Variable v1(vals, true), w1(w, true), b1(b, true);
-    tenzor::Variable out1;
-    try {
-        out1 = tenzor::autograd::nested_layer_norm(v1, offsets, w1, b1, eps);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "nested_layer_norm forward does not accept >2D values: " << e.what();
-    }
+    tenzor::Variable out1 = tenzor::autograd::nested_layer_norm(v1, offsets, w1, b1, eps);
     out1.backward(seed);
 
     tenzor::Variable v2(vals, true), w2(w, true), b2(b, true);

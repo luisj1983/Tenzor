@@ -48,11 +48,6 @@ TEST_P(TransformerLayerMultiDTypeTest, TransformerEncoder_ForwardShape) {
 }
 
 TEST_P(TransformerLayerMultiDTypeTest, TransformerEncoder_BackwardGradPopulated) {
-    // Float16 transformer encoder backward is flaky/zero-grad on multiple
-    // backends; needs cross-attention path Float16 work — followup #17.
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 transformer encoder backward — followup #17";
-    }
     auto layer = std::make_shared<nn::TransformerEncoderLayer>(
         16, 4, 32, /*dropout=*/0.0, "relu");
     nn::TransformerEncoder encoder(layer, 2);
@@ -82,13 +77,6 @@ TEST_P(TransformerLayerMultiDTypeTest, TransformerFull_ForwardShape) {
 }
 
 TEST_P(TransformerLayerMultiDTypeTest, TransformerFull_BackwardGradPopulated) {
-    // Phase 2.2-followup #17: full transformer (with decoder + cross
-    // attention) Float16 backward returns zero grads on every backend
-    // even after SDPA/RMSNorm dtype fixes. Cross-attention path has its
-    // own Float16 issue.
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 transformer (with decoder) backward zero grads — followup #17";
-    }
     nn::Transformer model(16, 4, 1, 1, 32, /*dropout=*/0.0, "relu");
     convert_model(model);
     Variable src = createInput({3, 2, 16}, true);

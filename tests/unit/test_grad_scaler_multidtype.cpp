@@ -78,11 +78,6 @@ TEST_P(GradScalerMultiDTypeTest, CustomConstructor) {
 
 // Test 3: Loss scaling
 TEST_P(GradScalerMultiDTypeTest, LossScaling) {
-    // Skip Float16 - GradScaler works with Float32/64 gradients
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(1000.0f);
 
     auto loss_tensor = CreateScalar<float>(0.5f);
@@ -96,10 +91,6 @@ TEST_P(GradScalerMultiDTypeTest, LossScaling) {
 
 // Test 4: Gradient unscaling
 TEST_P(GradScalerMultiDTypeTest, GradientUnscaling) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(100.0f);
 
     auto param_tensor = ones({2, 3}, dtype(), device());
@@ -124,10 +115,6 @@ TEST_P(GradScalerMultiDTypeTest, GradientUnscaling) {
 
 // Test 5: Inf detection
 TEST_P(GradScalerMultiDTypeTest, InfDetection) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler;
 
     auto param_tensor = ones({2, 2}, dtype(), device());
@@ -138,6 +125,10 @@ TEST_P(GradScalerMultiDTypeTest, InfDetection) {
     if (dtype() == DType::Float64) {
         double* grad_data = grad_cpu.data<double>();
         grad_data[1] = std::numeric_limits<double>::infinity();
+    } else if (dtype() == DType::Float16) {
+        // Float16 storage is 2 bytes; data<float>() would misinterpret it.
+        Float16* grad_data = grad_cpu.data<Float16>();
+        grad_data[1] = Float16(std::numeric_limits<float>::infinity());
     } else {
         float* grad_data = grad_cpu.data<float>();
         grad_data[1] = std::numeric_limits<float>::infinity();
@@ -156,10 +147,6 @@ TEST_P(GradScalerMultiDTypeTest, InfDetection) {
 
 // Test 6: NaN detection
 TEST_P(GradScalerMultiDTypeTest, NanDetection) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler;
 
     auto param_tensor = ones({2, 2}, dtype(), device());
@@ -170,6 +157,10 @@ TEST_P(GradScalerMultiDTypeTest, NanDetection) {
     if (dtype() == DType::Float64) {
         double* grad_data = grad_cpu.data<double>();
         grad_data[2] = std::numeric_limits<double>::quiet_NaN();
+    } else if (dtype() == DType::Float16) {
+        // Float16 storage is 2 bytes; data<float>() would misinterpret it.
+        Float16* grad_data = grad_cpu.data<Float16>();
+        grad_data[2] = Float16(std::numeric_limits<float>::quiet_NaN());
     } else {
         float* grad_data = grad_cpu.data<float>();
         grad_data[2] = std::numeric_limits<float>::quiet_NaN();
@@ -188,10 +179,6 @@ TEST_P(GradScalerMultiDTypeTest, NanDetection) {
 
 // Test 7: Scale backoff on overflow
 TEST_P(GradScalerMultiDTypeTest, ScaleBackoff) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(1000.0f, 2.0f, 0.5f, 10);
     float initial_scale = scaler.get_scale();
 
@@ -221,10 +208,6 @@ TEST_P(GradScalerMultiDTypeTest, ScaleBackoff) {
 
 // Test 8: Scale growth after successful iterations
 TEST_P(GradScalerMultiDTypeTest, ScaleGrowth) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(1000.0f, 2.0f, 0.5f, 3);
 
     auto param_tensor = ones({2, 2}, dtype(), device());
@@ -251,10 +234,6 @@ TEST_P(GradScalerMultiDTypeTest, ScaleGrowth) {
 
 // Test 9: SGD optimizer integration
 TEST_P(GradScalerMultiDTypeTest, SGDIntegration) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(100.0f);
 
     auto param_tensor = CreateTensor<float>({3, 3}, 1.0f);
@@ -282,10 +261,6 @@ TEST_P(GradScalerMultiDTypeTest, SGDIntegration) {
 
 // Test 10: Adam optimizer integration
 TEST_P(GradScalerMultiDTypeTest, AdamIntegration) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(100.0f);
 
     auto param_tensor = CreateTensor<float>({2, 2}, 1.0f);
@@ -311,10 +286,6 @@ TEST_P(GradScalerMultiDTypeTest, AdamIntegration) {
 
 // Test 11: Multiple parameters
 TEST_P(GradScalerMultiDTypeTest, MultipleParameters) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(100.0f);
 
     auto param1_tensor = ones({2, 2}, dtype(), device());
@@ -351,10 +322,6 @@ TEST_P(GradScalerMultiDTypeTest, MultipleParameters) {
 
 // Test 12: Underflow prevention
 TEST_P(GradScalerMultiDTypeTest, UnderflowPrevention) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     float scale = 65536.0f;
     GradScaler scaler(scale);
 
@@ -385,10 +352,6 @@ TEST_P(GradScalerMultiDTypeTest, UnderflowPrevention) {
 
 // Test 13: Training loop simulation
 TEST_P(GradScalerMultiDTypeTest, TrainingLoopSimulation) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(1024.0f, 2.0f, 0.5f, 5);
 
     auto param_tensor = ones({10, 10}, dtype(), device());
@@ -429,18 +392,21 @@ TEST_P(GradScalerMultiDTypeTest, TrainingLoopSimulation) {
 
 // Test 14: Numeric range differences
 TEST_P(GradScalerMultiDTypeTest, NumericRangeDifferences) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler(1024.0f);
 
     auto param_tensor = ones({3, 3}, dtype(), device());
     auto param = Variable(param_tensor, true);
 
-    // Large but not infinite value - use float max for both dtypes since
-    // CreateTensor casts to float before creating the tensor
-    float large_value = std::numeric_limits<float>::max() / 2048.0f;
+    // Large but not infinite value, scaled to each dtype's own finite range.
+    // Float16's max finite magnitude is ~65504, so the float32-max-derived
+    // constant used for Float32/Float64 silently overflows to infinity when
+    // narrowed to Float16 — that's a genuine (and correct) inf, not a bug, so
+    // GradScaler correctly rejects the step; use a Float16-representable
+    // "large" value instead so this test exercises the same "big but finite"
+    // scenario across every dtype.
+    float large_value = (dtype() == DType::Float16)
+        ? 60000.0f
+        : std::numeric_limits<float>::max() / 2048.0f;
     auto grad_tensor = CreateTensor<float>({3, 3}, large_value);
     param.set_grad(grad_tensor);
 
@@ -456,10 +422,6 @@ TEST_P(GradScalerMultiDTypeTest, NumericRangeDifferences) {
 
 // Test 15: State persistence
 TEST_P(GradScalerMultiDTypeTest, StateDictConsistency) {
-    if (dtype() == DType::Float16) {
-        SKIP_WITH_REASON(::tenzor::testing::SkipReason::DtypeUnsupportedOnBackend, "GradScaler typically uses Float32/Float64 for gradients");
-    }
-
     GradScaler scaler1(2048.0f, 3.0f, 0.25f, 500);
 
     // Modify state using the current dtype
@@ -499,7 +461,7 @@ INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(GradScalerMultiDTypeTest);
  * COVERAGE SUMMARY:
  *
  * Test Cases: 15
- * DTypes Tested: Float32, Float64, Float16 (Float16 skipped)
+ * DTypes Tested: Float32, Float64, Float16
  * Backends Tested: CPU, CUDA, OneAPI
  * Total Scenarios: 15 tests × 3 dtypes × 3 backends = 135 test scenarios
  *

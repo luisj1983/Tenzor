@@ -609,10 +609,6 @@ TEST_P(GradCheckMissingTest, LinalgNormFro) {
     // either throwing or producing an invalid tensor (the detailed comparator
     // never gets data to compare). Not a precision issue — something deeper
     // in the GPU NormBackward_Linalg dispatch path. CPU works correctly.
-    if (device.type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KnownBug,
-            "linalg_norm(fro) GPU backward crashes (J10)");
-    }
     auto x_t = randn({4, 5}, DType::Float64, Device::cpu());
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable {
@@ -674,14 +670,7 @@ TEST_P(GradCheckMissingTest, Cholesky) {
 // ============================================================================
 
 TEST_P(GradCheckMissingTest, FunctionalGroupNormGradcheck) {
-    // II.21: tagged so count_skips.py classifies the GPU gap; backward
-    // wiring lives in src/nn/layers/normalization.cpp and works on CPU.
-    // GPU GroupNormBackward divergence is tracked under J5.
-    if (device.type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KnownBug,
-            "F::group_norm GPU backward tracked under J5");
-    }
-    // GroupNormBackward CPU path internally downcasts to Float32 (see
+    // GroupNormBackward's CPU path internally downcasts to Float32 (see
     // src/nn/layers/normalization.cpp:1420-1424 and the kernel branching
     // in cpu/kernels/nn_kernels.cpp:2232+). Even with a Float64 Variable,
     // the analytical gradient has Float32 precision, so we run the input/
@@ -689,9 +678,9 @@ TEST_P(GradCheckMissingTest, FunctionalGroupNormGradcheck) {
     // of this test is to verify the *wiring* (that grad_fn is attached and
     // backward runs); kernel-precision is tracked separately.
     auto x_t = randn({2, 4, 4, 4}, DType::Float32, Device::cpu());
-    Variable x(x_t, /*requires_grad=*/true);
-    Variable w(tenzor::ones({4}, DType::Float32, Device::cpu()), true);
-    Variable b(tenzor::zeros({4}, DType::Float32, Device::cpu()), true);
+    Variable x(x_t.to(device), /*requires_grad=*/true);
+    Variable w(tenzor::ones({4}, DType::Float32, device), true);
+    Variable b(tenzor::zeros({4}, DType::Float32, device), true);
     auto f_input = [&](const Variable& v) -> Variable {
         auto y = tenzor::nn::functional::group_norm(v, /*num_groups=*/2,
                                                      w, b, /*eps=*/1e-5);
@@ -717,16 +706,12 @@ TEST_P(GradCheckMissingTest, FunctionalGroupNormGradcheck) {
 }
 
 TEST_P(GradCheckMissingTest, FunctionalInstanceNormGradcheck) {
-    if (device.type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KnownBug,
-            "F::instance_norm GPU backward tracked under J5");
-    }
     // Same Float32-only kernel-internal precision constraint as
     // FunctionalGroupNormGradcheck above — see comment there.
     auto x_t = randn({2, 4, 4, 4}, DType::Float32, Device::cpu());
-    Variable x(x_t, /*requires_grad=*/true);
-    Variable w(tenzor::ones({4}, DType::Float32, Device::cpu()), true);
-    Variable b(tenzor::zeros({4}, DType::Float32, Device::cpu()), true);
+    Variable x(x_t.to(device), /*requires_grad=*/true);
+    Variable w(tenzor::ones({4}, DType::Float32, device), true);
+    Variable b(tenzor::zeros({4}, DType::Float32, device), true);
     auto f_input = [&](const Variable& v) -> Variable {
         auto y = tenzor::nn::functional::instance_norm(
             v, /*running_mean=*/std::nullopt, /*running_var=*/std::nullopt,
@@ -979,16 +964,12 @@ TEST_P(GradCheckMissingTest, VectorNormGradcheck) {
 }
 
 TEST_P(GradCheckMissingTest, MatrixNormGradcheck) {
-    if (device.type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KnownBug,
-            "matrix_norm (Frobenius) GPU backward crashes — same J10 path");
-    }
     // matrix_norm with ord=2 (operator 2-norm) goes through SVD and the
     // backward is delicate near degenerate singular values. Frobenius norm
     // (sum of squares, sqrt) is smooth and a much better fit for
     // gradcheck. linalg_norm(.,"fro") is the dedicated path.
     auto a_t = randn({4, 5}, DType::Float64, Device::cpu());
-    Variable a(a_t, /*requires_grad=*/true);
+    Variable a(a_t.to(device), /*requires_grad=*/true);
     auto f = [&](const Variable& v) -> Variable {
         return ::tenzor::linalg_norm(v, /*ord=*/"fro");
     };
