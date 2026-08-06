@@ -275,7 +275,8 @@ INSTANTIATE_TEST_SUITE_P(
     DTypeEdgeCaseEnhancedTest,
     ::testing::Combine(
         STANDARD_BACKENDS,
-        ::testing::Values(DType::Float32, DType::Float64, DType::Int32, DType::Int64)
+        ::testing::Values(DType::Float32, DType::Float64, DType::Int32, DType::Int64,
+                           DType::Bool)
     ),
     BackendDTypeParamName);
 
