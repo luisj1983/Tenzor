@@ -13,6 +13,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/attr_macros.hpp"
 #include "cuda_stream.hpp"  // cuda::cuda_current_stream()
+#include "tenzor/backend/cuda_config.hpp"  // tenzor::cuda::force_custom_kernels()
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/linalg.hpp"
@@ -1175,6 +1176,93 @@ Tensor cuda_compose_nanvar(const Tensor& x_in, int64_t dim, bool keepdim,
 
     return narrow ? var.to(x_in.dtype()) : var;
 }
+
+// --- Custom (non-vendor) CUDA kernel paths, shared by the ---------------
+// force_custom_kernels() runtime bypass and the no-cuDNN/no-cuBLAS builds.
+// These are file-scope functions (not local lambdas) because the dispatch
+// table stores each registered kernel as a plain KernelFn function pointer —
+// a capturing lambda cannot convert to one. The registered lambdas therefore
+// stay captureless and call these by name.
+
+// Custom conv2d needs symmetric stride/padding/dilation (the scalar CUDA
+// kernel can't express per-axis values). Read the attrs and either return the
+// shared (s, p, d, groups) tuple or throw — so force-custom on asymmetric
+// conv fails loudly instead of silently collapsing.
+auto conv2d_iso_or_throw(const OpAttributes& attrs, const char* op_name)
+    -> std::tuple<int64_t, int64_t, int64_t, int64_t> {
+    TENZOR_READ_CONV2D_ATTRS();
+    if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
+        throw std::invalid_argument(
+            std::string(op_name) + " (CUDA non-cuDNN): backend kernel only supports symmetric "
+            "stride/padding/dilation; got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
+            ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
+            ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]) +
+            ". Build with cuDNN for asymmetric support.");
+    }
+    return std::make_tuple(stride[0], padding[0], dilation[0], groups);
+}
+
+// Custom BatchNorm2d fused training (composed from batchnorm2d_* kernels).
+// Preserves the Bessel-corrected running-var estimate verbatim — see the
+// inline comments; diverging from this regresses the BN parity tests.
+auto bn_fused_training_custom(std::span<const Tensor> inputs, const OpAttributes& attrs)
+    -> std::vector<Tensor> {
+    // inputs: [input, running_mean, running_var, gamma, beta]
+    float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+    float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
+    auto stream = get_cuda_stream(attrs);
+
+    // Compute batch mean and variance
+    Tensor batch_mean = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
+    Tensor batch_var = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
+    cuda::batchnorm2d_mean_var(inputs[0], batch_mean, batch_var, stream);
+
+    // Forward with affine transform
+    Tensor output = cuda::batchnorm2d_forward_affine(inputs[0], batch_mean, batch_var, inputs[3], inputs[4], epsilon, stream);
+
+    // Update running stats. The RUNNING variance uses the UNBIASED
+    // (Bessel-corrected) estimate — var * count/(count-1) — to match cuDNN's
+    // batchnorm training and the nn-layer CPU path; the normalization above
+    // deliberately uses the biased var. Without this, the non-cuDNN fused
+    // path's running_var was systematically ~(count-1)/count too small and
+    // diverged from cuDNN/PyTorch at inference.
+    Tensor running_mean = inputs[1];
+    Tensor running_var = inputs[2];
+    int64_t bn_count = inputs[0].shape()[0] * inputs[0].shape()[2] * inputs[0].shape()[3];
+    Tensor running_batch_var = batch_var;
+    if (bn_count >= 2) {
+        running_batch_var = tenzor::mul(
+            batch_var, static_cast<double>(bn_count) / static_cast<double>(bn_count - 1));
+    }
+    cuda::batchnorm2d_update_running_stats(running_mean, running_var, batch_mean, running_batch_var, momentum, stream);
+
+    // F068: the 5th output must be invstd = 1/sqrt(var + eps), matching the
+    // cuDNN path's contract (cudnn_batchnorm2d_forward_training's
+    // saved_inv_var) and what BatchNorm2dBackward's non-cuDNN branch
+    // actually assumes (`variance = reciprocal(square(inputs[4])) - eps`).
+    // batchnorm2d_forward_affine already computes exactly this quantity
+    // internally (rsqrtf(variance + epsilon)) per output element; we
+    // recompute the same formula once per channel here via existing
+    // tensor ops so backward gets invstd instead of raw variance.
+    Tensor saved_inv_var = tenzor::rsqrt(tenzor::add(batch_var, static_cast<double>(epsilon)));
+    return std::vector<Tensor>{output, running_mean, running_var, batch_mean, saved_inv_var};
+}
+
+// Custom CUDA kernel BatchNorm2d backward.
+auto bn_backward_custom(std::span<const Tensor> inputs, const OpAttributes& attrs)
+    -> std::vector<Tensor> {
+    // Dispatch contract: {grad_output, input, weight, mean, invstd} (matches
+    // the cuDNN path). The custom kernel takes (grad_output, input, mean,
+    // variance, gamma); reconstruct variance from invstd = 1/sqrt(var+eps)
+    // and map gamma = weight. (Previously read as (mean, variance, gamma).)
+    float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+    Tensor variance = tenzor::reciprocal(tenzor::square(inputs[4])) - static_cast<double>(epsilon);
+    auto [grad_input, grad_gamma, grad_beta] = cuda::batchnorm2d_backward(
+        inputs[0], inputs[1], inputs[3], variance, inputs[2],
+        epsilon, get_cuda_stream(attrs)
+    );
+    return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
+}
 } // namespace
 
 /**
@@ -1820,6 +1908,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #ifdef TENZOR_HAS_CUDNN
     // Fused BatchNorm training: computes mean/var, normalizes, and updates running stats in one call
     table.register_kernel(OpId::BatchNorm2dFusedTraining, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        if (tenzor::cuda::force_custom_kernels()) {
+            return bn_fused_training_custom(inputs, attrs);
+        }
         // inputs: [input, running_mean, running_var, gamma, beta]
         float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
@@ -1834,6 +1925,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     // cuDNN BatchNorm2d backward - significantly faster than separate tensor ops
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        if (tenzor::cuda::force_custom_kernels()) {
+            return bn_backward_custom(inputs, attrs);
+        }
         // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]
         float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [grad_input, grad_gamma, grad_beta] = cuda::cudnn_batchnorm2d_backward(
@@ -1843,63 +1937,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
     });
 #else
-    // Fallback: compose batchnorm2d operations when cuDNN is unavailable
-    table.register_kernel(OpId::BatchNorm2dFusedTraining, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [input, running_mean, running_var, gamma, beta]
-        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
-        auto stream = get_cuda_stream(attrs);
-
-        // Compute batch mean and variance
-        Tensor batch_mean = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
-        Tensor batch_var = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
-        cuda::batchnorm2d_mean_var(inputs[0], batch_mean, batch_var, stream);
-
-        // Forward with affine transform
-        Tensor output = cuda::batchnorm2d_forward_affine(inputs[0], batch_mean, batch_var, inputs[3], inputs[4], epsilon, stream);
-
-        // Update running stats. The RUNNING variance uses the UNBIASED
-        // (Bessel-corrected) estimate — var * count/(count-1) — to match cuDNN's
-        // batchnorm training and the nn-layer CPU path; the normalization above
-        // deliberately uses the biased var. Without this, the non-cuDNN fused
-        // path's running_var was systematically ~(count-1)/count too small and
-        // diverged from cuDNN/PyTorch at inference.
-        Tensor running_mean = inputs[1];
-        Tensor running_var = inputs[2];
-        int64_t bn_count = inputs[0].shape()[0] * inputs[0].shape()[2] * inputs[0].shape()[3];
-        Tensor running_batch_var = batch_var;
-        if (bn_count >= 2) {
-            running_batch_var = tenzor::mul(
-                batch_var, static_cast<double>(bn_count) / static_cast<double>(bn_count - 1));
-        }
-        cuda::batchnorm2d_update_running_stats(running_mean, running_var, batch_mean, running_batch_var, momentum, stream);
-
-        // F068: the 5th output must be invstd = 1/sqrt(var + eps), matching the
-        // cuDNN path's contract (cudnn_batchnorm2d_forward_training's
-        // saved_inv_var) and what BatchNorm2dBackward's non-cuDNN branch
-        // actually assumes (`variance = reciprocal(square(inputs[4])) - eps`).
-        // batchnorm2d_forward_affine already computes exactly this quantity
-        // internally (rsqrtf(variance + epsilon)) per output element; we
-        // recompute the same formula once per channel here via existing
-        // tensor ops so backward gets invstd instead of raw variance.
-        Tensor saved_inv_var = tenzor::rsqrt(tenzor::add(batch_var, static_cast<double>(epsilon)));
-        return std::vector<Tensor>{output, running_mean, running_var, batch_mean, saved_inv_var};
-    });
-
-    // Custom CUDA kernel backward - fallback when cuDNN is not available.
-    table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Dispatch contract: {grad_output, input, weight, mean, invstd} (matches
-        // the cuDNN path). The custom kernel takes (grad_output, input, mean,
-        // variance, gamma); reconstruct variance from invstd = 1/sqrt(var+eps)
-        // and map gamma = weight. (Previously read as (mean, variance, gamma).)
-        float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        Tensor variance = tenzor::reciprocal(tenzor::square(inputs[4])) - static_cast<double>(epsilon);
-        auto [grad_input, grad_gamma, grad_beta] = cuda::batchnorm2d_backward(
-            inputs[0], inputs[1], inputs[3], variance, inputs[2],
-            epsilon, get_cuda_stream(attrs)
-        );
-        return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
-    });
+    // No cuDNN at build time: register the custom composed paths directly.
+    table.register_kernel(OpId::BatchNorm2dFusedTraining, bn_fused_training_custom);
+    table.register_kernel(OpId::BatchNorm2dBackward, bn_backward_custom);
 #endif
 
     // =========================================================================
@@ -2939,6 +2979,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // inputs: [input, weight] or [input, weight, bias]
         // F.11: per-axis stride/padding/dilation via attr_macros helpers.
         // cuDNN supports asymmetric values natively via cudnnSetConvolution2dDescriptor.
+        if (tenzor::cuda::force_custom_kernels()) {
+            auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dForward");
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, s, p, d, g, get_cuda_stream(attrs));
+        }
         TENZOR_READ_CONV2D_ATTRS();
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias,
@@ -2947,6 +2992,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                                            get_cuda_stream(attrs));
     });
     table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        if (tenzor::cuda::force_custom_kernels()) {
+            auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardInput");
+            auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                inputs[0], inputs[1], inputs[2], s, p, d, g, true, false, false, get_cuda_stream(attrs));
+            return {grad_input};
+        }
         TENZOR_READ_CONV2D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
             inputs[0], inputs[1], inputs[2],
@@ -2955,6 +3006,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {grad_input};
     });
     table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        if (tenzor::cuda::force_custom_kernels()) {
+            auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardWeight");
+            auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                inputs[0], inputs[1], inputs[2], s, p, d, g, false, true, false, get_cuda_stream(attrs));
+            return {grad_weight};
+        }
         TENZOR_READ_CONV2D_ATTRS();
         auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
             inputs[0], inputs[1], inputs[2],
@@ -2963,7 +3020,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {grad_weight};
     });
     // Conv2dBackwardBias: inputs = {grad_output}
-    // Bias gradient = sum of grad_output over batch and spatial dims (N,H,W)
+    // Bias gradient = sum of grad_output over batch and spatial dims (N,H,W).
+    // Pure-tensor reduction (no cuDNN involvement) — not subject to the
+    // force_custom_kernels bypass.
     table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
         const Tensor& grad_output = inputs[0]; // (N, C, H, W)
         // Sum over dim 3 (W), then 2 (H), then 0 (N) to get (C,)
@@ -2973,39 +3032,25 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {grad_bias};
     });
 #else
-    // F.11: per-axis read with scalar fallback; non-cuDNN scalar kernel
-    // requires symmetric stride/padding/dilation — fail loudly rather than
-    // silently collapse asymmetric input.
-    auto conv2d_iso_or_throw = [](const OpAttributes& attrs, const char* op_name) {
-        TENZOR_READ_CONV2D_ATTRS();
-        if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
-            throw std::invalid_argument(
-                std::string(op_name) + " (CUDA non-cuDNN): backend kernel only supports symmetric "
-                "stride/padding/dilation; got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]) +
-                ". Build with cuDNN for asymmetric support.");
-        }
-        return std::make_tuple(stride[0], padding[0], dilation[0], groups);
-    };
-    table.register_single_output_kernel(OpId::Conv2dForward, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    // No cuDNN at build time: custom scalar kernels only (symmetric conv).
+    table.register_single_output_kernel(OpId::Conv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dForward");
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias, s, p, d, g, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Conv2dBackwardInput, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    table.register_kernel(OpId::Conv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardInput");
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
             inputs[0], inputs[1], inputs[2], s, p, d, g, true, false, false, get_cuda_stream(attrs));
         return {grad_input};
     });
-    table.register_kernel(OpId::Conv2dBackwardWeight, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    table.register_kernel(OpId::Conv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardWeight");
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
             inputs[0], inputs[1], inputs[2], s, p, d, g, false, true, false, get_cuda_stream(attrs));
         return {grad_weight};
     });
-    table.register_kernel(OpId::Conv2dBackwardBias, [conv2d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    table.register_kernel(OpId::Conv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
         auto [s, p, d, g] = conv2d_iso_or_throw(attrs, "Conv2dBackwardBias");
         auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
             inputs[0], inputs[1], inputs[2], s, p, d, g, false, false, true, get_cuda_stream(attrs));

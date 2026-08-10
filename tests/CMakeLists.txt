@@ -443,6 +443,11 @@ endif()
 add_subdirectory(nested)
 add_subdirectory(sparse)
 
+# Manual perf harness (vendor vs custom CUDA kernels). GPU-only, not in ctest.
+if(TENZOR_BUILD_CUDA)
+    add_subdirectory(performance)
+endif()
+
 # ============================================================================
 # Combined unit test executable
 # ============================================================================

@@ -1439,7 +1439,8 @@ void matmul_f32(
 
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices
-    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
+    if (!tenzor::cuda::force_custom_kernels() &&
+        (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD)) {
         matmul_cublas_f32(A, B, C, M, N, K, stream);
         return;
     }
@@ -1482,7 +1483,8 @@ void matmul_f64(
 
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices
-    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
+    if (!tenzor::cuda::force_custom_kernels() &&
+        (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD)) {
         matmul_cublas_f64(A, B, C, M, N, K, stream);
         return;
     }
@@ -1583,7 +1585,8 @@ void matmul_f16(
 
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
-    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
+    if (!tenzor::cuda::force_custom_kernels() &&
+        (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD)) {
         matmul_cublas_f16(A, B, C, M, N, K, stream);
         return;
     }
@@ -1694,7 +1697,8 @@ void matmul_bf16(
 
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (BF16 benefits from Tensor Core acceleration)
-    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
+    if (!tenzor::cuda::force_custom_kernels() &&
+        (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD)) {
         matmul_cublas_bf16(A, B, C, M, N, K, stream);
         return;
     }
@@ -1726,12 +1730,16 @@ void batched_matmul_f32(
     int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
-    // Always use cuBLAS for batched matmul - cublasSgemmStridedBatched is
-    // highly optimized and amortizes kernel launch overhead across the batch
-    batched_matmul_cublas_f32(A, B, C, batch_size, M, N, K,
-                               stride_a, stride_b, stride_c, stream);
-#else
-    // Fallback to custom batched kernel when cuBLAS is not available
+    if (!tenzor::cuda::force_custom_kernels()) {
+        // cuBLAS cublasSgemmStridedBatched is highly optimized and amortizes
+        // kernel launch overhead across the batch.
+        batched_matmul_cublas_f32(A, B, C, batch_size, M, N, K,
+                                   stride_a, stride_b, stride_c, stream);
+        return;
+    }
+#endif
+    // Custom batched kernel — used when cuBLAS is unavailable, or when
+    // force_custom_kernels() bypasses the vendor library.
     // Select architecture-appropriate tile sizes
     int dev = 0; cudaGetDevice(&dev);
     auto tc = get_tile_config(dev);
@@ -1769,7 +1777,6 @@ void batched_matmul_f32(
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-#endif
 }
 
 void batched_matmul_f64(
@@ -1782,12 +1789,16 @@ void batched_matmul_f64(
     int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
-    // Always use cuBLAS for batched matmul - cublasDgemmStridedBatched is
-    // highly optimized and amortizes kernel launch overhead across the batch
-    batched_matmul_cublas_f64(A, B, C, batch_size, M, N, K,
-                               stride_a, stride_b, stride_c, stream);
-#else
-    // Fallback to custom batched kernel when cuBLAS is not available
+    if (!tenzor::cuda::force_custom_kernels()) {
+        // cuBLAS cublasDgemmStridedBatched is highly optimized and amortizes
+        // kernel launch overhead across the batch.
+        batched_matmul_cublas_f64(A, B, C, batch_size, M, N, K,
+                                   stride_a, stride_b, stride_c, stream);
+        return;
+    }
+#endif
+    // Custom batched kernel — used when cuBLAS is unavailable, or when
+    // force_custom_kernels() bypasses the vendor library.
     // Select architecture-appropriate tile sizes
     int dev = 0; cudaGetDevice(&dev);
     auto tc = get_tile_config(dev);
@@ -1825,7 +1836,6 @@ void batched_matmul_f64(
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-#endif
 }
 
 /**
@@ -1846,7 +1856,8 @@ void batched_matmul_f16(
 
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
-    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
+    if (!tenzor::cuda::force_custom_kernels() &&
+        (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD)) {
         batched_matmul_cublas_f16(A, B, C, batch_size, M, N, K,
                                    stride_a, stride_b, stride_c, stream);
         return;
@@ -1980,11 +1991,15 @@ void batched_matmul_bf16(
     int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
-    // Always use cuBLAS for batched matmul - BF16 benefits from Tensor Core acceleration
-    batched_matmul_cublas_bf16(A, B, C, batch_size, M, N, K,
-                                stride_a, stride_b, stride_c, stream);
-#else
-    // Fallback to custom batched kernel when cuBLAS is not available.
+    if (!tenzor::cuda::force_custom_kernels()) {
+        // cuBLAS BF16 batched matmul benefits from Tensor Core acceleration.
+        batched_matmul_cublas_bf16(A, B, C, batch_size, M, N, K,
+                                    stride_a, stride_b, stride_c, stream);
+        return;
+    }
+#endif
+    // Custom batched kernel — used when cuBLAS is unavailable, or when
+    // force_custom_kernels() bypasses the vendor library.
     // gridDim.z is capped at 65535; chunk the batch and offset base pointers.
     dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
     constexpr int64_t kMaxGridZ = 65535;
@@ -2003,7 +2018,6 @@ void batched_matmul_bf16(
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-#endif
 }
 
 // ============================================================================

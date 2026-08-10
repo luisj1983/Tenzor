@@ -14,6 +14,7 @@ message(STATUS "CUDA Backend: Found CUDA ${CUDAToolkit_VERSION}")
 set(CUDA_BACKEND_SOURCES
     cuda_backend.cpp
     cuda_kernel_registry.cpp
+    cuda_config.cpp
     ../../backend/cuda_caching_allocator.cpp
     kernels/math.cu
     kernels/matmul.cu

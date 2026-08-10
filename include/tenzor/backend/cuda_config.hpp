@@ -5,9 +5,41 @@
  * Provides process-global toggles for CUDA-specific numerical behavior:
  * - TF32 Tensor Core usage for Float32 matmul
  * - FP16 overflow warnings
+ * - Force custom (non-vendor) kernels for matmul/conv/batchnorm
  */
 
 #pragma once
+
+namespace tenzor::cuda {
+
+/**
+ * @brief Check whether the CUDA backend is forced to use custom (non-vendor)
+ *        kernels instead of cuBLAS / cuDNN.
+ *
+ * DEFAULT: DISABLED — matmul dispatches to cuBLAS for any size at or above
+ * CUBLAS_THRESHOLD, and Conv2d / BatchNorm dispatch to cuDNN when built with
+ * cuDNN. Enabling this (via TENZOR_FORCE_CUSTOM_KERNELS=1 or
+ * set_force_custom_kernels(true)) bypasses those vendor paths and runs the
+ * custom tiled matmul / im2col+cuBLAS conv / composed batchnorm kernels that
+ * already live alongside them. Intended for performance A/B comparison and
+ * correctness isolation of the custom kernels against the vendor libraries.
+ *
+ * Process-global (not thread-local): a cuBLAS/cuDNN call dispatched from the
+ * runtime can execute on a worker thread distinct from the one that called
+ * set_force_custom_kernels() / set the env var, so the flag is stored in a
+ * process-wide atomic and honored on every thread (same rationale as
+ * matmul::allow_tf32).
+ */
+auto force_custom_kernels() -> bool;
+
+/**
+ * @brief Set whether the CUDA backend is forced to use custom kernels.
+ * @param value true to bypass cuBLAS/cuDNN for custom kernels, false for the
+ *        default vendor-library dispatch
+ */
+auto set_force_custom_kernels(bool value) -> void;
+
+} // namespace tenzor::cuda
 
 namespace tenzor::cuda::matmul {
 
