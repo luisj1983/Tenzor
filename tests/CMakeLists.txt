@@ -922,6 +922,11 @@ add_executable(test_quantization_conversion test_quantization_conversion.cpp)
 target_link_libraries(test_quantization_conversion PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_quantization_conversion DISCOVERY_TIMEOUT 60)
 
+# Multi-dtype / multi-backend companion for quantization conversion.
+add_executable(test_quantization_conversion_multidtype test_quantization_conversion_multidtype.cpp)
+target_link_libraries(test_quantization_conversion_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_quantization_conversion_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
 # Mask R-CNN loss tests
 add_executable(test_mask_rcnn_losses test_mask_rcnn_losses.cpp)
 target_link_libraries(test_mask_rcnn_losses PRIVATE tenzor_core GTest::gtest_main)

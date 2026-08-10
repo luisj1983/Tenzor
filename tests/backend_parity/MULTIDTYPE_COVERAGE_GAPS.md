@@ -76,6 +76,24 @@ subset (forward-only on CPU) or covers behaviour that is dtype-agnostic.
   DtypeUnsupportedOnBackend; the pure-construction tests are dtype-orthogonal
   and run on every combo. Verified CPU (51 passed / 18 skipped / 0 failed
   across 3 dtypes) and cuda F16 (KL passes, Percentile skips).
+- `tests/test_quantization_conversion.cpp` — closed. New companion
+  `tests/test_quantization_conversion_multidtype.cpp` inherits
+  `MultiBackendDTypeTest`, re-runs all 16 quantization-conversion tests
+  (convert_to_quantized / convert_from_quantized / prepare_qat for Linear
+  & Conv2d, Linear & Conv2d round-trip error, sequential & ResNet-style
+  model quantization, QAT workflow, multiple qconfigs, dynamic / static
+  quantization, null handling, batch processing, high-accuracy config)
+  across {Float32, Float64, Float16} × 5 backends, with the source
+  Linear/Conv2d moved to the test dtype+device via convert_model before
+  conversion. No dtype skips: every stage of the conversion path upcasts
+  non-Float32 tensors to Float32 internally (weight observer, quantize_tensor,
+  quantized forward input/bias, convert_from_quantized dequant), so an F16/F64
+  source weight is upcast before INT8 quantization on every backend and the
+  recovered weight is always Float32. Numerical comparisons are dtype-safe
+  (round-trip uses the plain file's max_abs_error helper; QuantizationError
+  casts both outputs to Float32 before the MAE). Verified CPU (48 passed /
+  0 skipped / 0 failed across 3 dtypes) and cuda F16 (Linear round-trip,
+  Conv2d round-trip, quantization error all pass).
 
 ## High-value candidates missing a companion
 
@@ -87,7 +105,6 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/test_quantization_conversion.cpp` | TODO: add `test_quantization_conversion_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/integration/test_training_loops.cpp` | TODO: add `test_training_loops_multidtype.cpp` using `MultiBackendDTypeTest`. |
 
 <!--
@@ -155,7 +172,6 @@ tests/autograd/test_inference_mode_guard.cpp # audit-7 FF.31: justified — file
 tests/test_minimal_training.cpp              # audit-6 CC.21 + audit-7 FF.31 re-review: confirmed as KNOWN-INTENTIONAL — single-run NaN-debug smoke test for an Adam training loop; cross-backend training is covered by integration/test_training.cpp and the backend_parity/ training-loop tests. No action needed.
 tests/ops/test_new_ops.cpp                   # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NewOpsTest : public MultiBackendDTypeTest). Already parametrised over 5 backends × 3 dtypes.
 tests/integration/test_nn.cpp                # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NNTest : public BackendTest). Integration coverage parametrised over backends; per-layer numeric parity comes from tests/nn/layers/*_multidtype.cpp companions.
-tests/test_quantization_conversion.cpp
 tests/integration/test_training.cpp          # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (TrainingTest : public BackendTest). Integration coverage parametrised over backends; per-op numeric parity comes from backend_parity/ tests.
 tests/integration/test_training_loops.cpp
 
