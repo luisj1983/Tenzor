@@ -15,18 +15,18 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
-// Macro (not a method) so that GTEST_SKIP's internal `return`
-// statement returns from the TEST_P body rather than from a helper
-// method — otherwise the test continues and fails on the first op
-// that doesn't support Float16.
-// TODO: BatchNorm supports FP32-accumulation-with-FP16-storage on CUDA/ROCm
-// and we should split this skip into a tolerance-loosening branch once the
-// dispatch tests are hooked up to per-dtype tolerance. See plan Phase 2a.
-#define skipIfHalf() \
+// Macro (not a method) so any future GTEST_SKIP returns from the TEST_P body
+// rather than from a helper method. BatchNorm runs FP32-accumulation-with-
+// FP16-storage on CUDA/ROCm and true half on the other backends; the fixture's
+// setTolerances() (called from SetUp) already widens atol/rtol to 1e-2 for
+// Float16/BFloat16. Instead of skipping the half cases, we run them at the
+// dtype-aware tolerance — re-asserting it here keeps these numerical checks
+// half-correct even if the fixture default ever tightens.
+#define loosenForHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            SKIP_WITH_REASON(::tenzor::testing::SkipReason::NumericalDivergence, \
-                             "BatchNorm dispatch test uses FP32 tolerance — narrow in Phase 2"); \
+            rtol_ = 1e-2f; \
+            atol_ = 1e-2f; \
         } \
     } while (0)
 
@@ -51,7 +51,7 @@ TEST_P(BatchNormDispatchMultiDTypeTest, TrainingForwardShape) {
 }
 
 TEST_P(BatchNormDispatchMultiDTypeTest, TrainingUpdatesRunningStats) {
-    skipIfHalf();
+    loosenForHalf();
     nn::BatchNorm2d bn(4, 1e-5, 0.1, true, true);
     convert_model(bn);
     bn.train();
@@ -138,7 +138,7 @@ TEST_P(BatchNormDispatchMultiDTypeTest, AffineParameterGradients) {
 // ============================================================================
 
 TEST_P(BatchNormDispatchMultiDTypeTest, NormalizesToZeroMeanUnitVariance) {
-    skipIfHalf();
+    loosenForHalf();
     // In training mode, the per-channel output should have approximately zero
     // mean and unit variance across the (N, H, W) dimensions, scaled by gamma=1
     // and shifted by beta=0 (the default initialization).
@@ -171,7 +171,7 @@ TEST_P(BatchNormDispatchMultiDTypeTest, NormalizesToZeroMeanUnitVariance) {
 }
 
 TEST_P(BatchNormDispatchMultiDTypeTest, EvalModeUsesRunningStats) {
-    skipIfHalf();
+    loosenForHalf();
     // In eval mode with affine=false, output = (input - running_mean) / sqrt(running_var + eps).
     // After construction, running_mean=0 and running_var=1, so output should equal input.
     nn::BatchNorm2d bn(4, 1e-5, 0.1, /*affine=*/false, /*track_running_stats=*/true);
