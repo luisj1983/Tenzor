@@ -21,6 +21,12 @@ subset (forward-only on CPU) or covers behaviour that is dtype-agnostic.
   RReLU, CTCLoss, MultiLabelMarginLoss, Embedding) across {Float32, Float64,
   Float16} × 5 backends, asserting the stub still passes through (no throw,
   finite grad) in non-Float32 dtypes. Verified CPU + CUDA (30/30 each).
+- `tests/test_linear_reshape_integration.cpp` — closed. New companion
+  `tests/test_linear_reshape_integration_multidtype.cpp` inherits
+  `MultiBackendDTypeTest`, re-runs the Linear-fed-by-reshape/permute-chain
+  integration surface (LinearWithReshapeInput, LinearWithPermuteInput,
+  MultipleReshapeOps) across {Float32, Float64, Float16} × 5 backends with
+  EXPECT_GRAD_FLOWS backward coverage. Verified CPU + CUDA (9/9 each).
 - `tests/nn/quantization/test_awq_quantizer.cpp` — closed audit-10 OO.19. New
   companion `tests/nn/quantization/test_awq_quantizer_multidtype.cpp`
   inherits `MultiBackendDTypeTest`, sweeps {Float16, BFloat16, Float32} ×
@@ -43,7 +49,6 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/test_linear_reshape_integration.cpp` | TODO: add `test_linear_reshape_integration_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/test_mask_rcnn_losses.cpp` | TODO: add `test_mask_rcnn_losses_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/nn/quantization/test_observers_extended.cpp` | TODO: add `test_observers_extended_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/test_quantization_conversion.cpp` | TODO: add `test_quantization_conversion_multidtype.cpp` using `MultiBackendDTypeTest`. |
@@ -112,7 +117,6 @@ tests/integration/test_cross_backend.cpp     # audit-9 LL.16: confirmed cross-ba
 tests/test_grad_accumulation.cpp             # audit-6 CC.21: justified as out of scope for audit-6 — already runs as multi-backend (TEST_P + BackendTest fixture). Tests GradientAccumulator state-machine (step count, flush, reset) which is dtype-orthogonal; numeric correctness comes from the wrapped optimizer's parity tests.
 tests/autograd/test_higher_order_contract.cpp # audit-6 CC.21: justified as out of scope for audit-6 — engine-level contract test for HigherOrderGradMode stub backwards (Error throws, Warn logs); CPU-only by design per file doc-comment, no backend or dtype variance.
 tests/autograd/test_inference_mode_guard.cpp # audit-7 FF.31: justified — file header already documents "CPU-only infrastructure tests verifying RAII guard semantics, nesting behaviour, and effect on Variable grad_fn attachment". The InferenceModeGuard / NoGradGuard contract is dtype-orthogonal and the guard mechanism lives in autograd/variable.cpp, not in any backend kernel.
-tests/test_linear_reshape_integration.cpp
 tests/test_mask_rcnn_losses.cpp              # audit-7 FF.31: justified — Mask R-CNN loss correctness is per-component (BCE, smooth-L1, mask CE); the underlying ops have their own multi-backend / multi-dtype companions. The test pins Device::cpu() in SetUp and verifies loss-decomposition shapes/values, not numeric parity across backends.
 tests/test_minimal_training.cpp              # audit-6 CC.21 + audit-7 FF.31 re-review: confirmed as KNOWN-INTENTIONAL — single-run NaN-debug smoke test for an Adam training loop; cross-backend training is covered by integration/test_training.cpp and the backend_parity/ training-loop tests. No action needed.
 tests/ops/test_new_ops.cpp                   # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NewOpsTest : public MultiBackendDTypeTest). Already parametrised over 5 backends × 3 dtypes.

@@ -805,6 +805,11 @@ add_executable(test_linear_reshape_integration test_linear_reshape_integration.c
 target_link_libraries(test_linear_reshape_integration PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_linear_reshape_integration DISCOVERY_TIMEOUT 60)
 
+# Multi-dtype / multi-backend companion to test_linear_reshape_integration.cpp.
+add_executable(test_linear_reshape_integration_multidtype test_linear_reshape_integration_multidtype.cpp)
+target_link_libraries(test_linear_reshape_integration_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linear_reshape_integration_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
 # Creation operations tests
 add_executable(test_creation_ops test_creation_ops.cpp)
 target_link_libraries(test_creation_ops PRIVATE tenzor_core GTest::gtest_main)
