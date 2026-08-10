@@ -65,6 +65,14 @@ add_executable(test_higher_order_stubs_regression test_higher_order_stubs_regres
 target_link_libraries(test_higher_order_stubs_regression PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_higher_order_stubs_regression LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# Multi-dtype / multi-backend companion to test_higher_order_stubs_regression.cpp.
+# Re-runs the stub-passthrough surface across {Float32, Float64, Float16} x
+# {cpu, cuda, vulkan, oneapi, rocm, mps} to surface backends that only register
+# a Float32 kernel for a given op as an explicit categorized skip.
+add_executable(test_higher_order_stubs_regression_multidtype test_higher_order_stubs_regression_multidtype.cpp)
+target_link_libraries(test_higher_order_stubs_regression_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_higher_order_stubs_regression_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
 # Higher order gradients
 add_executable(test_higher_order_gradients test_higher_order_gradients.cpp)
 target_link_libraries(test_higher_order_gradients PRIVATE tenzor_core GTest::gtest_main)
