@@ -529,6 +529,14 @@ add_executable(test_observers_extended quantization/test_observers_extended.cpp)
 target_link_libraries(test_observers_extended PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_observers_extended LABELS "nn" DISCOVERY_TIMEOUT 60)
 
+# Multi-dtype / multi-backend companion for the extended observers.
+add_executable(test_observers_extended_multidtype
+    quantization/test_observers_extended_multidtype.cpp)
+target_link_libraries(test_observers_extended_multidtype
+    PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_observers_extended_multidtype LABELS "nn"
+    DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
 # ============================================================================
 # Phase 4.4: Multi-backend conversions for NN tests
 # ============================================================================

@@ -61,6 +61,21 @@ subset (forward-only on CPU) or covers behaviour that is dtype-agnostic.
   scalars read back via a dtype-safe helper (cast to Float32 before
   `.item<float>()`). Verified F32 CPU, F64 CPU, F16 cuda skip, and
   GradientFlow cuda F32.
+- `tests/nn/quantization/test_observers_extended.cpp` — closed. New companion
+  `tests/nn/quantization/test_observers_extended_multidtype.cpp` inherits
+  `MultiBackendDTypeTest`, re-runs all 23 extended-observer tests
+  (KLDivergence, Percentile, MSE, per-channel MinMax: construction,
+  observe-does-not-crash, qparam validity, multi-observe, reset,
+  tighter-percentile) across {Float32, Float64, Float16} × 5 backends with
+  the observed input created in the test dtype on the test device. Dtype
+  coverage is split by what each observer supports: KL & MinMax upcast in
+  observe() so they run the full {F32,F64,F16} sweep (new coverage = the
+  device-side `.to(Float32)` cast kernel for F16/F64 inputs); Percentile &
+  MSE are test-only Float32 observers (no upcast — `.data<float>()` on a
+  non-F32 tensor) so their observe-based tests skip non-F32 with
+  DtypeUnsupportedOnBackend; the pure-construction tests are dtype-orthogonal
+  and run on every combo. Verified CPU (51 passed / 18 skipped / 0 failed
+  across 3 dtypes) and cuda F16 (KL passes, Percentile skips).
 
 ## High-value candidates missing a companion
 
@@ -72,7 +87,6 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/nn/quantization/test_observers_extended.cpp` | TODO: add `test_observers_extended_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/test_quantization_conversion.cpp` | TODO: add `test_quantization_conversion_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/integration/test_training_loops.cpp` | TODO: add `test_training_loops_multidtype.cpp` using `MultiBackendDTypeTest`. |
 
@@ -141,7 +155,6 @@ tests/autograd/test_inference_mode_guard.cpp # audit-7 FF.31: justified — file
 tests/test_minimal_training.cpp              # audit-6 CC.21 + audit-7 FF.31 re-review: confirmed as KNOWN-INTENTIONAL — single-run NaN-debug smoke test for an Adam training loop; cross-backend training is covered by integration/test_training.cpp and the backend_parity/ training-loop tests. No action needed.
 tests/ops/test_new_ops.cpp                   # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NewOpsTest : public MultiBackendDTypeTest). Already parametrised over 5 backends × 3 dtypes.
 tests/integration/test_nn.cpp                # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NNTest : public BackendTest). Integration coverage parametrised over backends; per-layer numeric parity comes from tests/nn/layers/*_multidtype.cpp companions.
-tests/nn/quantization/test_observers_extended.cpp
 tests/test_quantization_conversion.cpp
 tests/integration/test_training.cpp          # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (TrainingTest : public BackendTest). Integration coverage parametrised over backends; per-op numeric parity comes from backend_parity/ tests.
 tests/integration/test_training_loops.cpp
