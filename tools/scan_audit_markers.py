@@ -60,11 +60,15 @@ EXCLUDED_DIRS = {
 SOURCE_SUFFIXES = {".cpp", ".hpp", ".cu", ".hip", ".comp", ".py"}
 
 # Files whose basename matches any entry here are skipped regardless of the
-# directory they live in. The scanner itself defines the marker literals it
-# searches for, so scanning it would always produce false positives on a clean
-# tree. Keep this set tiny and only add genuinely self-referential tools.
+# directory they live in. These are genuinely self-referential tools: they
+# mention TODO/FIXME/HACK as *data* (a regex to match, a skip-reason category
+# to count, or the marker literals they themselves search for) rather than as
+# action markers, so scanning them would always produce false positives on a
+# clean tree. Keep this set tiny and only add genuinely self-referential tools.
 EXCLUDED_FILENAMES = {
-    "scan_audit_markers.py",
+    "scan_audit_markers.py",   # defines the marker literals it searches for
+    "audit_tolerances.py",     # JUSTIFY_RX matches FIXME|TODO as justification text
+    "count_skips.py",          # counts and reports "TODO:" skip-reason messages
 }
 
 # CC.15: only flag TODO/FIXME/HACK when they appear inside a comment on the

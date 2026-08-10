@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Comprehensive test for all neural network layer and activation bindings.
-Tests Phase 1, Task 3 requirements from NEW_TODO.md.
+Tests Phase 1, Task 3 requirements (Python bindings completeness).
 
 This test verifies that all requested layers and activations from the requirements
 are properly bound and can be instantiated with correct parameters.
@@ -240,7 +240,7 @@ def print_summary():
     print("\n" + "="*60)
     print("REQUIREMENTS VERIFICATION SUMMARY")
     print("="*60)
-    print("\nPhase 1, Task 3 Requirements from NEW_TODO.md:\n")
+    print("\nPhase 1, Task 3 Requirements (Python bindings completeness):\n")
 
     print("LAYERS TO ADD (12 total):")
     layers = [
@@ -303,7 +303,7 @@ def main():
     """Run all tests."""
     print("="*60)
     print("Python Bindings Completeness Test")
-    print("Phase 1, Task 3 from NEW_TODO.md")
+    print("Phase 1, Task 3 (Python bindings completeness)")
     print("="*60)
 
     try:

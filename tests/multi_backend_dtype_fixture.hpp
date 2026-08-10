@@ -75,7 +75,7 @@ enum class SkipReason {
     DtypeUnsupportedOnBackend,    // kernel explicitly doesn't register dtype
     ComplexFP16Unrepresentable,   // no Float16 complex type
     GradcheckFDPrecision,         // finite-difference noise dominates at FP16
-    KernelNotImplemented,         // feature is genuinely TODO
+    KernelNotImplemented,         // feature is not yet implemented
     RequiresMultiGPU,             // multi-device distributed coverage
     KnownBug,                     // track with issue #; do not paper over
     MissingPerfBaseline,          // host has no committed perf-baseline entry

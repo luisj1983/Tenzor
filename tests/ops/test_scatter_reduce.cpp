@@ -46,7 +46,7 @@ protected:
 //     index was being read.
 //   - Vulkan empty-index path: returned an uninitialised tensor instead
 //     of cloning self, producing zero output.
-//   - Vulkan !include_self init: was a no-op TODO; now writes per-mode
+//   - Vulkan !include_self init: was a no-op; now writes per-mode
 //     identity to every touched output position before scatter.
 // All four are now real fixes; the test pattern stands as regression
 // coverage.

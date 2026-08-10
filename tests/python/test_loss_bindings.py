@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test Python bindings for loss functions and Sequential container.
-Tests all loss functions according to NEW_TODO.md Phase 1, Task 4.
+Tests all loss functions (Phase 1, Task 4).
 """
 
 import sys

@@ -2,21 +2,4 @@
 # Each line is `<repo-relative path>:<lineno>` matching the
 # scanner's output. Pre-existing entries are ignored; new
 # markers FAIL the lint. Drive this list down over time.
-examples/cpp/custom_op_example.cpp:10
-python/bindings/bindings_core.cpp:1350
-scripts/count_skips.py:152
-tests/multi_backend_dtype_fixture.hpp:73
-tests/ops/test_batchnorm_dispatch_multidtype.cpp:22
-tests/ops/test_scatter_reduce.cpp:49
-tests/performance/bench_cublas_cudnn.cpp:104
-tests/performance/bench_cublas_cudnn.cpp:133
-tests/performance/bench_cublas_cudnn.cpp:158
-tests/performance/bench_cublas_cudnn.cpp:182
-tests/performance/bench_cublas_cudnn.cpp:188
-tests/performance/bench_cublas_cudnn.cpp:236
-tests/performance/bench_cublas_cudnn.cpp:242
-tests/performance/bench_cublas_cudnn.cpp:268
-tests/performance/bench_cublas_cudnn.cpp:274
-tests/performance/bench_cublas_cudnn.cpp:296
-tests/performance/bench_cublas_cudnn.cpp:302
-tools/audit_tolerances.py:49
+
