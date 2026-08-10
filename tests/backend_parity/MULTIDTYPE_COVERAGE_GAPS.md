@@ -94,6 +94,26 @@ subset (forward-only on CPU) or covers behaviour that is dtype-agnostic.
   casts both outputs to Float32 before the MAE). Verified CPU (48 passed /
   0 skipped / 0 failed across 3 dtypes) and cuda F16 (Linear round-trip,
   Conv2d round-trip, quantization error all pass).
+- `tests/integration/test_training_loops.cpp` — closed. New companion
+  `tests/integration/test_training_loops_multidtype.cpp` inherits
+  `MultiBackendDTypeTest`, re-runs all 15 SimpleCNN training-workflow tests
+  (basic convergence, Step/Cosine/Exponential LR scheduling, gradient
+  clipping, gradient accumulation, Adam/AdamW/SGD optimizer comparison,
+  validation + early-stopping loops, multi-loss training, checkpointing,
+  full train/val workflow) across {Float32, Float64, Float16} × 5 backends,
+  with the SimpleCNN dtype-converted via `convert_model` and the synthetic
+  MNIST input cast to the test dtype on the test device. Dtype coverage is
+  gated by what the training path sustains: Float32 runs on every backend;
+  Float64 runs on CPU only (fc1 ≈ 6.4M params × multi-epoch F64 training is
+  too memory/compute heavy for GPU, so F64-on-non-CPU skips with
+  NumericalDivergence); Float16/BFloat16 skip categorically
+  (NumericalDivergence — BatchNorm2d training convergence not validated in
+  half precision across backends). Numerical readbacks are dtype-safe
+  (calculate_accuracy and the gradient-clipping norm cast to CPU Float32
+  before `.data<float>()`, so an F64 tensor is not type-punned as float).
+  Verified CPU F32 (LR-scheduling) + CPU F64 (VaryingBatchSizes, proving
+  F64 BN/conv/linear fwd+bwd works on CPU) + cuda F32 (BasicMNISTTraining
+  convergence) + cuda F16/F64 skip guards fire.
 
 ## High-value candidates missing a companion
 
@@ -105,7 +125,7 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/integration/test_training_loops.cpp` | TODO: add `test_training_loops_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| _(none remaining — all high-value candidates now have a companion or are documented in the KNOWN-INTENTIONAL block below)_ | |
 
 <!--
 audit-11 RR.21: removed `test_ciou_loss.cpp`, `test_contiguous_fix.cpp`,
@@ -173,7 +193,6 @@ tests/test_minimal_training.cpp              # audit-6 CC.21 + audit-7 FF.31 re-
 tests/ops/test_new_ops.cpp                   # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NewOpsTest : public MultiBackendDTypeTest). Already parametrised over 5 backends × 3 dtypes.
 tests/integration/test_nn.cpp                # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NNTest : public BackendTest). Integration coverage parametrised over backends; per-layer numeric parity comes from tests/nn/layers/*_multidtype.cpp companions.
 tests/integration/test_training.cpp          # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (TrainingTest : public BackendTest). Integration coverage parametrised over backends; per-op numeric parity comes from backend_parity/ tests.
-tests/integration/test_training_loops.cpp
 
 # Grandfathered pre-existing gaps as of audit-3 baseline (2026-05-22). These
 # are either infrastructure / backend-specific / regression-guard files

@@ -208,6 +208,10 @@ add_executable(test_optimization_multidtype test_optimization_multidtype.cpp)
 target_link_libraries(test_optimization_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_optimization_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration" BACKENDS multi)
 
+add_executable(test_training_loops_multidtype test_training_loops_multidtype.cpp)
+target_link_libraries(test_training_loops_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_training_loops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration" BACKENDS multi)
+
 # Note: Existing integration tests
 # - test_nn.cpp
 # - test_training.cpp
