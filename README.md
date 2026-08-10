@@ -154,7 +154,6 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full diagram and dispat
 ## Roadmap
 
 - Public GPU CI on self-hosted runners.
-- Resolve the Vulkan STFT/ISTFT regression and re-enable the native pipeline.
 - Re-run benchmarks with proper warmup/median-of-N and publish GPU numbers.
 - Distributed training improvements.
 - Pretrained weight hub for the reference models.

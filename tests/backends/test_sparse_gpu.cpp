@@ -144,6 +144,31 @@ TEST_P(SparseGPUTest, ToDenseRoundtrip) {
     expect_tensors_close(dense_gpu, dense_rt);
 }
 
+// Integer-valued sparse roundtrip (Dense -> Sparse -> Dense). The Vulkan
+// sparse extract/scatter shaders are float-only; this confirms int values
+// survive the roundtrip on every backend instead of throwing.
+TEST_P(SparseGPUTest, ToDenseRoundtrip_Int32) {
+    // 4x4 int32 matrix: [1 0 2 0 / 0 3 0 0 / 0 0 4 0 / 5 0 0 6]
+    auto dense_cpu = Tensor({4, 4}, DType::Int32, Device::cpu());
+    auto* d = dense_cpu.data<int32_t>();
+    for (int i = 0; i < 16; ++i) d[i] = 0;
+    d[0] = 1; d[2] = 2; d[5] = 3; d[10] = 4; d[12] = 5; d[15] = 6;
+    auto dense_gpu = dense_cpu.to(device_);
+
+    auto sparse_gpu = SparseTensor::from_dense(dense_gpu);  // DenseToSparse
+    auto dense_rt = sparse_gpu.to_dense();                  // SparseToDense
+
+    EXPECT_EQ(dense_rt.dtype(), DType::Int32);
+    auto a = dense_gpu.to(Device::cpu()).contiguous();
+    auto b = dense_rt.to(Device::cpu()).contiguous();
+    ASSERT_EQ(a.numel(), b.numel());
+    auto* ap = a.data<int32_t>();
+    auto* bp = b.data<int32_t>();
+    for (int64_t i = 0; i < a.numel(); ++i) {
+        EXPECT_EQ(ap[i], bp[i]) << "int32 roundtrip mismatch at " << i;
+    }
+}
+
 // ============================================================================
 // SparseAdd: Sparse + Dense
 // ============================================================================
