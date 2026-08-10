@@ -98,6 +98,13 @@ add_executable(test_strict_linalg_grad test_strict_linalg_grad.cpp)
 target_link_libraries(test_strict_linalg_grad PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_strict_linalg_grad LABELS "autograd" DISCOVERY_TIMEOUT 60)
 
+# Multi-dtype / multi-backend companion to test_strict_linalg_grad.cpp.
+# Float16/BFloat16 skip categorically (no linalg factorization kernel); the
+# real coverage is Float32 + Float64 exercising the closed-form LDL adjoint.
+add_executable(test_strict_linalg_grad_multidtype test_strict_linalg_grad_multidtype.cpp)
+target_link_libraries(test_strict_linalg_grad_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_strict_linalg_grad_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
 # Hardshrink / Threshold implementations (P2.6b)
 add_executable(test_hardshrink_threshold test_hardshrink_threshold.cpp)
 target_link_libraries(test_hardshrink_threshold PRIVATE tenzor_core GTest::gtest_main)

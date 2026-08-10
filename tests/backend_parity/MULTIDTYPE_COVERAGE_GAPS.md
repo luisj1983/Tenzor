@@ -27,6 +27,15 @@ subset (forward-only on CPU) or covers behaviour that is dtype-agnostic.
   integration surface (LinearWithReshapeInput, LinearWithPermuteInput,
   MultipleReshapeOps) across {Float32, Float64, Float16} × 5 backends with
   EXPECT_GRAD_FLOWS backward coverage. Verified CPU + CUDA (9/9 each).
+- `tests/autograd/test_strict_linalg_grad.cpp` — closed. New companion
+  `tests/autograd/test_strict_linalg_grad_multidtype.cpp` inherits
+  `MultiBackendDTypeTest`, re-runs the LDL-factor backward contract
+  (meaningful gradient, STRICT_LINALG_GRAD no-op, pivoting throws
+  NonDifferentiable) across {Float32, Float64, Float16} × 5 backends.
+  Float16/BFloat16 skip categorically (DtypeUnsupportedOnBackend — no
+  backend registers a Float16 linalg factorization kernel); the real
+  coverage is Float32 + Float64 exercising the closed-form LDL adjoint on
+  GPU backends. Verified CPU + CUDA (8 passed + 4 F16 skipped each).
 - `tests/nn/quantization/test_awq_quantizer.cpp` — closed audit-10 OO.19. New
   companion `tests/nn/quantization/test_awq_quantizer_multidtype.cpp`
   inherits `MultiBackendDTypeTest`, sweeps {Float16, BFloat16, Float32} ×
@@ -52,7 +61,6 @@ backend-agnostic infrastructure or already parity-parameterized.
 | `tests/test_mask_rcnn_losses.cpp` | TODO: add `test_mask_rcnn_losses_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/nn/quantization/test_observers_extended.cpp` | TODO: add `test_observers_extended_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/test_quantization_conversion.cpp` | TODO: add `test_quantization_conversion_multidtype.cpp` using `MultiBackendDTypeTest`. |
-| `tests/autograd/test_strict_linalg_grad.cpp` | TODO: add `test_strict_linalg_grad_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/integration/test_training_loops.cpp` | TODO: add `test_training_loops_multidtype.cpp` using `MultiBackendDTypeTest`. |
 
 <!--
@@ -123,7 +131,6 @@ tests/ops/test_new_ops.cpp                   # audit-9 LL.16: confirmed cross-ba
 tests/integration/test_nn.cpp                # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NNTest : public BackendTest). Integration coverage parametrised over backends; per-layer numeric parity comes from tests/nn/layers/*_multidtype.cpp companions.
 tests/nn/quantization/test_observers_extended.cpp
 tests/test_quantization_conversion.cpp
-tests/autograd/test_strict_linalg_grad.cpp
 tests/integration/test_training.cpp          # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (TrainingTest : public BackendTest). Integration coverage parametrised over backends; per-op numeric parity comes from backend_parity/ tests.
 tests/integration/test_training_loops.cpp
 
