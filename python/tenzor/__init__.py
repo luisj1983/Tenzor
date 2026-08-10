@@ -118,6 +118,34 @@ def from_numpy(array, requires_grad: bool = False):
     return t
 
 
+# Audit B1 (follow-up): module-level ``to_torch`` / ``from_torch`` convenience.
+# The C++ interop lives on the ``tenzor.torch_interop`` submodule as
+# ``tensor_to_torch`` / ``tensor_from_torch``. These top-level aliases mirror
+# ``from_numpy`` (Audit E.10): the documented surface is the short name, and
+# delegating to the submodule keeps a single implementation. When the module
+# was built without torch support, ``torch_interop`` is the unavailable proxy
+# whose attribute access raises a clear ImportError, so the error path is
+# preserved.
+def to_torch(tensor, requires_grad: bool = False):
+    """Convert a Tenzor ``Tensor`` to a PyTorch tensor.
+
+    Delegates to ``tenzor.torch_interop.tensor_to_torch``: zero-copy when the
+    dtype, contiguity and device allow it, otherwise materialises a copy.
+    ``requires_grad`` requests a PyTorch tensor that tracks gradients.
+    """
+    return torch_interop.tensor_to_torch(tensor, requires_grad)
+
+
+def from_torch(torch_tensor, device=None):
+    """Convert a PyTorch tensor to a Tenzor ``Tensor``.
+
+    Delegates to ``tenzor.torch_interop.tensor_from_torch``: zero-copy when
+    possible, otherwise copies. ``device`` places the result on a specific
+    Tenzor device; when ``None`` the PyTorch tensor's own device is honoured.
+    """
+    return torch_interop.tensor_from_torch(torch_tensor, device)
+
+
 # ---------------------------------------------------------------------------
 # Reproducible seeding across the C++ RNG *and* the Python-side RNGs.
 #
@@ -248,40 +276,50 @@ if _os.path.exists(_func_transforms_path):
 from .tenzor_core import linalg
 _sys.modules['tenzor.linalg'] = linalg
 
-# PyTorch interop submodule (optional). The C++ ``tenzor_core.torch_interop``
-# submodule is only registered when the extension was compiled with
-# ``TENZOR_BUILD_TORCH_INTEROP=ON`` (which defines ``TENZOR_HAS_TORCH`` and
-# links libtorch). The shipped ``tenzor/torch_interop.pyi`` promises this API
-# unconditionally, so when the module was built WITHOUT torch support we expose
-# a proxy that raises a clear, actionable ``ImportError`` on any access — far
-# better than the bare ``AttributeError`` a missing attribute would otherwise
-# produce.
+# PyTorch interop submodule (optional + lazy). The libtorch-backed bindings
+# live in a separate plugin shared library (tenzor_torch_interop.<abi>.so)
+# that tenzor_core dlopens on FIRST use -- NOT at import. This keeps libtorch
+# (and its libmpi/libfabric transitive dependencies) out of tenzor_core.so's
+# DT_NEEDED, so `import tenzor` succeeds even when libtorch cannot be loaded
+# (e.g. oneAPI's setvars.sh shadows the system libfabric with one that lacks
+# FABRIC_1.9, which breaks libtorch's libmpi). Only an actual call into
+# tenzor.torch_interop / to_torch / from_torch then attempts the dlopen and
+# surfaces a clear ImportError if libtorch is unavailable. The shipped
+# ``tenzor/torch_interop.pyi`` promises this API unconditionally; the lazy
+# proxy below makes that promise resolve to a clear runtime error instead of a
+# bare AttributeError when torch support is absent or libtorch won't load.
 from . import tenzor_core as _tenzor_core_mod
-if hasattr(_tenzor_core_mod, "torch_interop"):
-    torch_interop = _tenzor_core_mod.torch_interop
-    _sys.modules['tenzor.torch_interop'] = torch_interop
-else:
-    class _TorchInteropUnavailable:
-        """Placeholder for tenzor.torch_interop when built without libtorch.
 
-        Any attribute access raises ImportError naming the rebuild flag, so the
-        torch_interop.pyi promise resolves to a clear runtime error instead of
-        an AttributeError.
-        """
 
-        _MESSAGE = (
-            "Tenzor was built without PyTorch interop; rebuild with "
-            "TENZOR_BUILD_TORCH_INTEROP=ON "
-            "(e.g. CMAKE_ARGS=\"-DTENZOR_BUILD_TORCH_INTEROP=ON\" pip install .) "
-            "to enable tenzor.torch_interop."
-        )
+class _TorchInteropLazy:
+    """Lazy proxy for ``tenzor.torch_interop``.
 
-        def __getattr__(self, name):
-            if name.startswith("__") and name.endswith("__"):
-                raise AttributeError(name)
-            raise ImportError(self._MESSAGE)
+    The first attribute access dlopens the libtorch plugin (via
+    ``tenzor_core._load_torch_interop``), caches the real submodule as the
+    ``tenzor.torch_interop`` global, and forwards the attribute. If tenzor was
+    built without torch support (no ``_load_torch_interop`` on tenzor_core) or
+    libtorch cannot be loaded at runtime, a clear ImportError is raised.
+    """
 
-    torch_interop = _TorchInteropUnavailable()
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        global torch_interop
+        if not hasattr(_tenzor_core_mod, "_load_torch_interop"):
+            raise ImportError(
+                "Tenzor was built without PyTorch interop; rebuild with "
+                "TENZOR_BUILD_TORCH_INTEROP=ON "
+                "(e.g. CMAKE_ARGS=\"-DTENZOR_BUILD_TORCH_INTEROP=ON\" pip install .) "
+                "to enable tenzor.torch_interop."
+            )
+        real = _tenzor_core_mod._load_torch_interop()
+        torch_interop = real
+        _sys.modules['tenzor.torch_interop'] = real
+        return getattr(real, name)
+
+
+torch_interop = _TorchInteropLazy()
+_sys.modules['tenzor.torch_interop'] = torch_interop
 
 # Audit-8 II.12: expose ``tenzor.exceptions`` as a typed-namespace alias to
 # the C++ exception classes registered on ``tenzor_core``. This gives users a

@@ -138,8 +138,30 @@ TEST_P(TransformerContainerMultiDTypeTest, TransformerDecoder_BackwardGradFlow) 
     auto tgt = Variable(createRandn({kBatch, kSeqLen, kDModel}), true);
     auto memory = Variable(createRandn({kBatch, kSeqLen, kDModel}), true);
     auto out = dec.forward(tgt, memory, Tensor{}, Tensor{}, Tensor{}, Tensor{});
-    // Scale loss for Float16 — see TransformerEncoder_BackwardGradFlow.
-    auto loss = tenzor::sum(out);
+    // Use a non-linear loss (sum-of-squares) instead of plain sum().
+    //
+    // The decoder is post-LN (default), so its final op is LayerNorm (norm3)
+    // with affine weight initialised to 1.0 along the normalised dim. With
+    // grad_output = constant (which `sum(out)` produces), the LayerNorm
+    // backward yields *exactly zero* input gradient by construction:
+    //
+    //   ∂L/∂z_i = (γ/σ) * Σ_j [δ_ji - 1/N - x̂_i·x̂_j/N]
+    //           = (1/σ) * (1 - 1 - x̂_i·0) = 0       (with γ=1, Σx̂=0)
+    //
+    // That zero grad propagates through every upstream op (residual3 → norm2
+    // → residual2 → norm1 → …), so *both* tgt and memory end up with zero
+    // grad — which EXPECT_GRAD_FLOWS misreads as a severed grad_fn. CPU/ROCm/
+    // OneAPI used to pass only because their Float32 accumulation leaves
+    // residual numerical noise that rounds away from zero; the cleaner
+    // Float16 paths on cpu/vulkan/rocm land on the true zero and trip. See
+    // TransformerEncoder_BackwardGradFlow for the same diagnosis. Squaring
+    // the output makes grad_output non-uniform (= 2*out), breaking the
+    // constant-grad symmetry so a real, non-zero grad reaches tgt and memory
+    // on every backend regardless of accumulation accuracy.
+    //
+    // Float16 still scales the loss to keep gradients above the
+    // representable range (~5.96e-8) through 3 layers.
+    auto loss = tenzor::sum(out * out);
     if (dtype() == DType::Float16) loss = loss * 1024.0f;
     loss.backward();
     EXPECT_GRAD_FLOWS(tgt);

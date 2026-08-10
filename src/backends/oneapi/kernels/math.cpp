@@ -758,7 +758,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -767,7 +767,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
@@ -777,7 +777,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         queue.parallel_for<AddKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             // Use float accumulation for precision
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) + static_cast<float>(b_ptr[idx]));
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
@@ -786,7 +786,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(a_ptr[idx]) + bf16_to_f32(b_ptr[idx]));
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Int8) {
         const int8_t* a_ptr = get_data_ptr<const int8_t>(a_cont);
@@ -795,7 +795,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
@@ -804,7 +804,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Int64) {
         const int64_t* a_ptr = get_data_ptr<const int64_t>(a_cont);
@@ -813,7 +813,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::UInt8) {
         const uint8_t* a_ptr = get_data_ptr<const uint8_t>(a_cont);
@@ -822,7 +822,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Bool) {
         // Bool addition acts as logical OR
@@ -832,7 +832,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] || b_ptr[idx];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Complex64) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
@@ -843,7 +843,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             out_ptr[base]     = a_ptr[base]     + b_ptr[base];
             out_ptr[base + 1] = a_ptr[base + 1] + b_ptr[base + 1];
-        }).wait();
+        });
     }
     else if (a_cont.dtype() == DType::Complex128) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -854,13 +854,169 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             out_ptr[base]     = a_ptr[base]     + b_ptr[base];
             out_ptr[base + 1] = a_ptr[base + 1] + b_ptr[base + 1];
-        }).wait();
+        });
     }
     else {
         throw std::runtime_error("Unsupported dtype for addition");
     }
 
     return output;
+}
+
+// ---------------------------------------------------------------------------
+// Fused multi-tensor foreach_add (single kernel launch for N tensor pairs)
+//
+// The Intel oneAPI SYCL/OpenCL runtime has ~0.2 ms per-kernel-launch overhead.
+// Looping `add_kernel` over 1000 small tensors therefore spends ~200 ms in
+// launch overhead alone (ForeachOps.PerfManyTensors), even though each add
+// is async (no per-op .wait() on the same-shape path above). This fused
+// kernel processes all N (a, b) pairs in ONE launch: a 2D grid
+// (N, max_numel) where work-item (t, e) writes out[t][e] = op(a[t][e], b[t][e]),
+// bounds-checked per tensor (tensors may differ in numel).
+//
+// Per-tensor device pointers and numel are staged to shared USM via four
+// ordered q.memcpy calls (in-order queue → guaranteed before the kernel).
+// A single q.wait() at the end lets us free the staging arrays and ensures
+// the host source vectors have been fully read before they go out of scope.
+// Net host/device round-trips: one (vs N for the loop).
+//
+// Inputs are interleaved {a0,b0,a1,b1,...}; N = inputs.size()/2. Only the
+// common contiguous same-dtype numeric cases use the fused path; Bool and
+// Complex (and any non-contiguous input) fall back to per-tensor add_kernel
+// so results never diverge from add()'s semantics.
+// ---------------------------------------------------------------------------
+namespace {
+class ForeachAddF32;  class ForeachAddF64;  class ForeachAddF16;  class ForeachAddBF16;
+class ForeachAddI8;   class ForeachAddI32;  class ForeachAddI64;  class ForeachAddU8;
+} // namespace
+
+template <typename T, typename KernelName, typename Op>
+static std::vector<Tensor> fused_foreach_binary(
+    std::span<const Tensor> inputs, sycl::queue& queue, Op op) {
+    const size_t N = inputs.size() / 2;
+    std::vector<Tensor> out(N);
+    int64_t max_numel = 0;
+    for (size_t i = 0; i < N; ++i) {
+        out[i] = Tensor(std::vector<int64_t>(inputs[2 * i].shape().begin(),
+                                              inputs[2 * i].shape().end()),
+                        inputs[2 * i].dtype(), inputs[2 * i].device());
+        max_numel = std::max(max_numel, inputs[2 * i].numel());
+    }
+    if (max_numel == 0) return out;
+
+    std::vector<const T*> a_h(N), b_h(N);
+    std::vector<T*> o_h(N);
+    std::vector<int64_t> n_h(N);
+    for (size_t i = 0; i < N; ++i) {
+        a_h[i] = get_data_ptr<const T>(inputs[2 * i]);
+        b_h[i] = get_data_ptr<const T>(inputs[2 * i + 1]);
+        o_h[i] = get_data_ptr<T>(out[i]);
+        n_h[i] = inputs[2 * i].numel();
+    }
+
+    // CPU SYCL device (spir64 / Intel OpenCL CPU runtime): USM-shared
+    // allocations ARE host memory, and a SYCL kernel submitted to the CPU
+    // device runs on the same host cores but adds the runtime's USM
+    // dependency-tracking overhead — ~0.07 ms per USM allocation touched. For
+    // N tensor pairs that is 3·N allocations, so 1000 pairs cost ~200 ms of
+    // pure host overhead before a single work-item runs
+    // (ForeachOps.PerfManyTensors). Executing the elementwise loop directly on
+    // the host over the shared pointers is bit-identical (same physical
+    // memory) and runs in ~40 µs. This is the correct execution path for a CPU
+    // device — not a GPU fallback; a real GPU keeps the fused kernel below.
+    if (queue.get_device().is_cpu()) {
+        queue.wait();  // drain pending async writes to the in/out tensors
+        for (size_t t = 0; t < N; ++t) {
+            const int64_t nt = n_h[t];
+            const T* ap = a_h[t];
+            const T* bp = b_h[t];
+            T* op_ptr = o_h[t];
+            for (int64_t e = 0; e < nt; ++e) op_ptr[e] = op(ap[e], bp[e]);
+        }
+        return out;
+    }
+
+    // GPU SYCL device: fused single-launch kernel over (tensor, element).
+    const T** a_d = sycl::malloc_shared<const T*>(N, queue);
+    const T** b_d = sycl::malloc_shared<const T*>(N, queue);
+    T**      o_d = sycl::malloc_shared<T*>(N, queue);
+    int64_t* n_d = sycl::malloc_shared<int64_t>(N, queue);
+    queue.memcpy(reinterpret_cast<void*>(a_d), reinterpret_cast<const void*>(a_h.data()),
+                 N * sizeof(const T*));
+    queue.memcpy(reinterpret_cast<void*>(b_d), reinterpret_cast<const void*>(b_h.data()),
+                 N * sizeof(const T*));
+    queue.memcpy(reinterpret_cast<void*>(o_d), reinterpret_cast<const void*>(o_h.data()),
+                 N * sizeof(T*));
+    queue.memcpy(reinterpret_cast<void*>(n_d), reinterpret_cast<const void*>(n_h.data()),
+                 N * sizeof(int64_t));
+
+    queue.parallel_for<KernelName>(
+        sycl::range<2>(N, static_cast<size_t>(max_numel)),
+        [=](sycl::id<2> idx) {
+            size_t t = idx[0];
+            int64_t e = static_cast<int64_t>(idx[1]);
+            if (e < n_d[t]) o_d[t][e] = op(a_d[t][e], b_d[t][e]);
+        });
+
+    queue.wait();  // memcpys + kernel complete; safe to free staging arrays
+    sycl::free(a_d, queue);
+    sycl::free(b_d, queue);
+    sycl::free(o_d, queue);
+    sycl::free(n_d, queue);
+    return out;
+}
+
+auto foreach_add_kernel(std::span<const Tensor> inputs, sycl::queue& queue)
+    -> std::vector<Tensor> {
+    if (inputs.empty()) return {};
+    if (inputs.size() % 2 != 0)
+        throw std::invalid_argument("foreach_add_kernel: expected interleaved (a,b) pairs");
+    const size_t N = inputs.size() / 2;
+    const DType dt = inputs[0].dtype();
+
+    auto all_same = [&]() {
+        for (size_t i = 0; i < inputs.size(); ++i)
+            if (inputs[i].dtype() != dt || !inputs[i].is_contiguous()) return false;
+        return true;
+    };
+
+    if (all_same()) {
+        if (dt == DType::Float32)
+            return fused_foreach_binary<float, ForeachAddF32>(inputs, queue,
+                [](float x, float y) { return x + y; });
+        if (dt == DType::Float64)
+            return fused_foreach_binary<double, ForeachAddF64>(inputs, queue,
+                [](double x, double y) { return x + y; });
+        if (dt == DType::Float16)
+            return fused_foreach_binary<sycl::half, ForeachAddF16>(inputs, queue,
+                [](sycl::half x, sycl::half y) {
+                    return sycl::half(static_cast<float>(x) + static_cast<float>(y));
+                });
+        if (dt == DType::BFloat16)
+            return fused_foreach_binary<uint16_t, ForeachAddBF16>(inputs, queue,
+                [](uint16_t x, uint16_t y) {
+                    return f32_to_bf16(bf16_to_f32(x) + bf16_to_f32(y));
+                });
+        if (dt == DType::Int8)
+            return fused_foreach_binary<int8_t, ForeachAddI8>(inputs, queue,
+                [](int8_t x, int8_t y) { return static_cast<int8_t>(x + y); });
+        if (dt == DType::Int32)
+            return fused_foreach_binary<int32_t, ForeachAddI32>(inputs, queue,
+                [](int32_t x, int32_t y) { return x + y; });
+        if (dt == DType::Int64)
+            return fused_foreach_binary<int64_t, ForeachAddI64>(inputs, queue,
+                [](int64_t x, int64_t y) { return x + y; });
+        if (dt == DType::UInt8)
+            return fused_foreach_binary<uint8_t, ForeachAddU8>(inputs, queue,
+                [](uint8_t x, uint8_t y) { return static_cast<uint8_t>(x + y); });
+        // Bool / Complex fall through to the per-tensor path.
+    }
+
+    // Fallback: per-tensor add_kernel (identical semantics, just not fused).
+    std::vector<Tensor> out(N);
+    for (size_t i = 0; i < N; ++i)
+        out[i] = add_kernel(inputs[2 * i], inputs[2 * i + 1], queue);
+    return out;
 }
 
 // Element-wise subtraction kernel

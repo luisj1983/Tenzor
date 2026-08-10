@@ -633,7 +633,13 @@ TEST_P(AutogradAdditionalTest, SoftmaxBackwardCorrectGradients) {
 }
 
 TEST_P(AutogradAdditionalTest, LogSoftmaxBackwardCorrectGradients) {
-    auto x = Variable(ones({2, 3}, DType::Float32, device), true);
+    // A uniform (ones) input is degenerate: log_softmax of a constant row is
+    // constant, so sum(y).backward() seeds a uniform gradient and the
+    // log_softmax backward (grad_in = grad_out - softmax*sum(grad_out))
+    // cancels to exactly 0. Use a random input so softmax is non-uniform and
+    // the input gradient genuinely flows. (Same class as the BatchNorm3d /
+    // GradNNParity BatchNorm2dBackward degeneracy.)
+    auto x = Variable(randn({2, 3}, DType::Float32, device), true);
     auto y = log_softmax(x, 1);
 
     auto loss = sum(y);

@@ -63,6 +63,22 @@ class ProcessGroup:
     def barrier(self) -> None: ...
 
 
+class ProcessGroupBase:
+    """Base process-group abstraction exposed by the C++ distributed binding.
+
+    The full-featured ``ProcessGroup`` adds gather/scatter/reduce_scatter on
+    top; this base surfaces the core collective + rank/size surface shared by
+    all group implementations (bindings_distributed.cpp).
+    """
+    @property
+    def rank(self) -> int: ...
+    @property
+    def world_size(self) -> int: ...
+    def broadcast(self, tensor: Tensor, src_rank: int = 0) -> None: ...
+    def all_reduce(self, tensor: Tensor, op: ReduceOp = ...) -> None: ...
+    def barrier(self) -> None: ...
+
+
 def init_process_group(
     backend: str = "nccl",
     rank: int = -1,

@@ -49,6 +49,7 @@ namespace oneapi {
 
     // ---- Math operations (kernels/math.cpp) ----
     auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto foreach_add_kernel(std::span<const Tensor> inputs, sycl::queue& queue) -> std::vector<Tensor>;
     auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
     auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
     auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
@@ -736,7 +737,7 @@ namespace oneapi {
     auto fused_sgd_step_kernel(
         Tensor& param, const Tensor& grad, Tensor* momentum_buffer,
         float lr, float momentum, float weight_decay, float dampening,
-        bool nesterov, sycl::queue& queue) -> void;
+        bool nesterov, bool first_step, sycl::queue& queue) -> void;
     auto fused_rmsprop_step_kernel(
         Tensor& param, const Tensor& grad, Tensor& square_avg,
         Tensor* grad_avg, Tensor* momentum_buffer,
@@ -1149,6 +1150,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                     [&](const Tensor& a, const Tensor& b) { return oneapi::add_kernel(a, b, get_q(inputs)); })};
             }
             return {oneapi::add_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // Fused multi-tensor add: one kernel launch for all N (a,b) pairs.
+    // inputs = {a0,b0,a1,b1,...}; N = inputs.size()/2. The host foreach_add()
+    // (src/ops/foreach.cpp) dispatches this when is_op_supported(ForeachAdd)
+    // is true (oneapi registers it); other backends fall back to the per-tensor
+    // add() loop. See kernels/math.cpp foreach_add_kernel for why the fused
+    // launch is needed (oneapi's ~0.2 ms/launch overhead × 1000 = ~200 ms).
+    table.register_kernel(OpId::ForeachAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return oneapi::foreach_add_kernel(inputs, get_q(inputs));
         });
 
     table.register_kernel(OpId::Sub,
@@ -3110,6 +3122,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
             float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
             bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
+            bool first_step = attrs.get_bool(AttrKey::FirstStep, false);
 
             Tensor& param = const_cast<Tensor&>(inputs[0]);
             Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0f)
@@ -3117,7 +3130,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             oneapi::fused_sgd_step_kernel(
                 param, inputs[1], momentum_buffer,
-                lr, momentum, weight_decay, dampening, nesterov,
+                lr, momentum, weight_decay, dampening, nesterov, first_step,
                 get_q(inputs));
             return std::vector<Tensor>{param};
         });

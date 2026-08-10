@@ -36,6 +36,26 @@ static auto numerical_jvp(std::function<Tensor(const Tensor&)> fn,
     return tenzor::mul(tenzor::sub(f_plus, f_minus), 0.5 / eps);
 }
 
+// High-precision variant: compute the finite-difference reference in float64
+// on the CPU and return float32 for check_jvp. The analytical JVP under test
+// runs in the input's (float32) dtype; a float32 central-difference reference
+// accrues ~machine_eps/eps ≈ 1e-3 of roundoff at the default eps=1e-4 — right
+// at the 1e-3 check tolerance — so a correct kernel can fail purely from
+// vendor-specific exp/sum rounding (e.g. rocm LogSoftmax). float64 drops that
+// roundoff to ~1e-11, isolating the analytical kernel's own accuracy. Only
+// usable when `fn` depends solely on its (now float64-CPU) input — NOT for
+// tests whose lambda captures device tensors (e.g. Linear captures w_p/b_p),
+// which would raise a cross-device error.
+static auto numerical_jvp_f64(std::function<Tensor(const Tensor&)> fn,
+                              const Tensor& primal, const Tensor& tangent,
+                              double eps = 1e-4) -> Tensor {
+    auto p64 = primal.cpu().to(DType::Float64);
+    auto t64 = tangent.cpu().to(DType::Float64);
+    auto f_plus = fn(tenzor::add(p64, tenzor::mul(t64, eps)));
+    auto f_minus = fn(tenzor::sub(p64, tenzor::mul(t64, eps)));
+    return tenzor::mul(tenzor::sub(f_plus, f_minus), 0.5 / eps).to(DType::Float32);
+}
+
 // Helper: check JVP against numerical
 static void check_jvp(const Tensor& analytical, const Tensor& numerical,
                        const char* name, float tol = 1e-3f) {
@@ -198,7 +218,7 @@ TEST_P(JVPExpanded, LogSoftmax) {
     auto result = jvp_log_softmax(DualTensor(p, t), /*dim=*/1);
     EXPECT_EQ(result.tangent().shape()[0], 2);
     EXPECT_EQ(result.tangent().shape()[1], 4);
-    auto expected = numerical_jvp([](const Tensor& x) {
+    auto expected = numerical_jvp_f64([](const Tensor& x) {
         auto m = tenzor::max(x, 1, true);
         auto e = tenzor::exp(tenzor::sub(x, m));
         auto se = tenzor::sum(e, 1, true);

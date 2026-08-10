@@ -37,7 +37,7 @@ def test_uint_dtypes_round_trip_torch_to_tenzor(torch_dtype, tz_dtype_name):
     # Should not throw "Unsupported PyTorch ScalarType for Tenzor".
     z = tz.from_torch(t)
     assert z.dtype == getattr(tz.dtype, tz_dtype_name)
-    assert z.numel() == 8
+    assert z.numel == 8  # tenzor exposes numel as a property, not a method
 
 
 @pytest.mark.skipif(not HAS_WIDE_UINT, reason="PyTorch < 2.3 lacks wide unsigned dtypes")

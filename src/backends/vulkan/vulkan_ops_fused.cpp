@@ -44,6 +44,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
     double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
     double dampening = attrs.get_float(AttrKey::Dampening, 0.0);
     bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
+    bool first_step = attrs.get_bool(AttrKey::FirstStep, false);
 
     int64_t numel = inputs[0].numel();
     int32_t device_id = inputs[0].device().index;
@@ -121,13 +122,13 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
         float dampening;
         uint32_t nesterov;
         uint32_t has_momentum;
-        uint32_t padding;
+        uint32_t first_step;
     };
     struct PushConstantsF64 {
         uint32_t numel;
         uint32_t nesterov;
         uint32_t has_momentum;
-        uint32_t padding;
+        uint32_t first_step;
         double lr;
         double momentum;
         double weight_decay;
@@ -142,7 +143,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
         pc64.numel = static_cast<uint32_t>(numel);
         pc64.nesterov = nesterov ? 1u : 0u;
         pc64.has_momentum = has_momentum ? 1u : 0u;
-        pc64.padding = 0;
+        pc64.first_step = first_step ? 1u : 0u;
         pc64.lr = lr;
         pc64.momentum = momentum;
         pc64.weight_decay = weight_decay;
@@ -157,7 +158,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
         pc32.dampening = static_cast<float>(dampening);
         pc32.nesterov = nesterov ? 1u : 0u;
         pc32.has_momentum = has_momentum ? 1u : 0u;
-        pc32.padding = 0;
+        pc32.first_step = first_step ? 1u : 0u;
         pc_ptr = &pc32;
         pc_size = sizeof(pc32);
     }

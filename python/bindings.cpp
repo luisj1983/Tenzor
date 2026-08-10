@@ -9,6 +9,11 @@
 #include <iostream>
 #include <sstream>
 #include <tenzor/tenzor.hpp>
+#ifdef TENZOR_HAS_TORCH
+#include <dlfcn.h>      // dlopen/dlsym/dladdr for the lazy torch-interop plugin loader
+#include <filesystem>   // derive plugin path from tenzor_core.so's location
+#include <string>
+#endif
 #include <tenzor/autograd/graph_optimizer.hpp>
 #include <tenzor/onnx/graph_module.hpp>
 #include <tenzor/core/device_guard.hpp>
@@ -154,6 +159,102 @@ static void configure_openmp_threads() {
 
 namespace py = pybind11;
 
+#ifdef TENZOR_HAS_TORCH
+// Lazy PyTorch-interop plugin loader. libtorch (and its libmpi/libfabric
+// transitive dependencies) are kept OUT of tenzor_core.so's DT_NEEDED by
+// building the interop into a separate plugin shared library
+// (tenzor_torch_interop.<abi>.so, sitting next to tenzor_core.so) which we
+// dlopen here on first use. This keeps `import tenzor` working even when
+// libtorch cannot be loaded -- e.g. oneAPI's setvars.sh puts its libfabric
+// (only FABRIC_1.6) ahead of the system one (FABRIC_1.9) on LD_LIBRARY_PATH,
+// which breaks libtorch's libmpi; only tenzor.torch_interop / to_torch /
+// from_torch then surface the failure as a clear ImportError.
+//
+// The plugin exports `tenzor_load_torch_interop(PyObject*)`, which creates the
+// `torch_interop` submodule on the passed-in parent (this module) and
+// registers the interop bindings. We locate the plugin by deriving its path
+// from tenzor_core.so's own location (via dladdr), swapping the module stem
+// "tenzor_core" -> "tenzor_torch_interop" while preserving the CPython ABI
+// suffix, so it works in any build/install layout.
+// Pre-load the SYSTEM libfabric (exports FABRIC_1.0..1.9) before dlopen'ing
+// the plugin. oneAPI's setvars.sh puts its own libfabric (only FABRIC_1.6)
+// first on LD_LIBRARY_PATH, which would otherwise win when libtorch's libmpi
+// resolves its libfabric.so.1 dependency and fail with "version FABRIC_1.9 not
+// found". Loading the system copy with RTLD_GLOBAL makes soname
+// libfabric.so.1 already-resident, so the dynamic linker reuses it instead of
+// searching LD_LIBRARY_PATH. The system copy is a strict superset (1.0..1.9),
+// so it also satisfies anything that needed 1.6. Verified safe: the oneAPI
+// backend links neither libfabric nor libmpi, and nothing maps libfabric
+// before torch-interop use, so this is the first libfabric load. If some other
+// libfabric.so.1 is already resident we leave it (cannot override a resident
+// soname) and the plugin dlopen surfaces a clear ImportError.
+static void tenzor_preload_system_libfabric() {
+    if (dlopen("libfabric.so.1", RTLD_NOLOAD)) return;  // already resident
+    for (const char* p : {"/usr/lib/libfabric.so.1", "/lib/libfabric.so.1",
+                          "/usr/lib64/libfabric.so.1",
+                          "/lib/x86_64-linux-gnu/libfabric.so.1"}) {
+        if (dlopen(p, RTLD_NOW | RTLD_GLOBAL)) return;
+    }
+    // None found -> the plugin dlopen below surfaces a clear ImportError.
+}
+
+static py::object tenzor_load_torch_interop_plugin(PyObject* parent) {
+    Dl_info info{};
+    if (!dladdr(reinterpret_cast<void*>(&tenzor_load_torch_interop_plugin), &info) ||
+        !info.dli_fname) {
+        PyErr_SetString(PyExc_ImportError,
+            "tenzor.torch_interop: cannot locate tenzor_core module path");
+        throw py::error_already_set();
+    }
+    std::string core_fname = std::filesystem::path(info.dli_fname).filename().string();
+    const std::string stem = "tenzor_core";
+    auto pos = core_fname.find(stem);
+    if (pos == std::string::npos) {
+        PyErr_SetString(PyExc_ImportError,
+            "tenzor.torch_interop: unexpected tenzor_core module filename");
+        throw py::error_already_set();
+    }
+    std::string plug_fname = core_fname.substr(0, pos) +
+        "tenzor_torch_interop" + core_fname.substr(pos + stem.size());
+    auto plug_path = std::filesystem::path(info.dli_fname).parent_path() / plug_fname;
+
+    // Ensure the system libfabric (FABRIC_1.9) is resident before loading the
+    // plugin, so oneAPI's old libfabric on LD_LIBRARY_PATH can't shadow it.
+    tenzor_preload_system_libfabric();
+
+    void* handle = dlopen(plug_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        const char* err = dlerror();
+        std::string msg = "Failed to load PyTorch interop plugin (" +
+            plug_path.string() + "). " + (err ? err : "unknown error") +
+            " -- importing tenzor does not require libtorch, but "
+            "tenzor.torch_interop / to_torch / from_torch do; if libtorch's "
+            "libmpi fails with a libfabric FABRIC_1.9 version error, strip "
+            "oneAPI's libfabric path from LD_LIBRARY_PATH.";
+        PyErr_SetString(PyExc_ImportError, msg.c_str());
+        throw py::error_already_set();
+    }
+    using reg_fn = int (*)(PyObject*);
+    auto reg = reinterpret_cast<reg_fn>(dlsym(handle, "tenzor_load_torch_interop"));
+    if (!reg) {
+        const char* err = dlerror();
+        dlclose(handle);
+        std::string msg = std::string("PyTorch interop plugin missing entry "
+            "symbol tenzor_load_torch_interop: ") + (err ? err : "unknown");
+        PyErr_SetString(PyExc_ImportError, msg.c_str());
+        throw py::error_already_set();
+    }
+    if (reg(parent) != 0) {
+        // The plugin set a Python exception during registration; propagate it.
+        throw py::error_already_set();
+    }
+    // Keep the plugin loaded for the process lifetime -- its registered
+    // bindings reference libtorch symbols. The handle is intentionally never
+    // closed. The submodule is now an attribute of the parent module.
+    return py::reinterpret_borrow<py::module_>(py::handle(parent)).attr("torch_interop");
+}
+#endif
+
 // Forward declaration for compression bindings
 void bind_compression(py::module& m);
 
@@ -164,6 +265,19 @@ void bind_compression(py::module& m);
 
 PYBIND11_MODULE(tenzor_core, m) {
     m.doc() = "Tenzor: High-performance tensor library";
+#ifdef TENZOR_HAS_TORCH
+    // Pre-load the SYSTEM libfabric (FABRIC_1.9) now, at `import tenzor`, so a
+    // later `import torch` (torch's own _load_global_deps loads libmpi ->
+    // libfabric) and the lazily-dlopen'd torch-interop plugin both resolve
+    // libfabric.so.1 to the system copy instead of oneAPI's old libfabric
+    // (FABRIC_1.6) that setvars.sh puts first on LD_LIBRARY_PATH. Once the
+    // soname is resident (RTLD_GLOBAL) the dynamic linker reuses it and skips
+    // the LD_LIBRARY_PATH search. Gated on torch interop being built; the
+    // oneAPI backend links neither libfabric nor libmpi, and the system copy
+    // is a strict version superset (1.0..1.9), so this is safe. This removes
+    // the need to manually strip oneAPI's libfabric path from LD_LIBRARY_PATH.
+    tenzor_preload_system_libfabric();
+#endif
 
     // ========================================================================
     // Custom Exception Hierarchy
@@ -205,11 +319,38 @@ PYBIND11_MODULE(tenzor_core, m) {
         m, "AutogradError", py_tenzor_error.ptr());
     py::register_exception<tenzor::BackendException>(
         m, "BackendError", py_tenzor_error.ptr());
-    // Map to Python's builtin MemoryError (like the IndexError/ValueError/...
-    // parity exceptions below) so `except MemoryError:` catches an OOM, instead
-    // of basing it on TenzorError (which only `except RuntimeError:` would catch).
-    py::register_exception<tenzor::MemoryException>(
-        m, "MemoryError", PyExc_MemoryError);
+    // MemoryError must satisfy two contracts at once:
+    //   (1) the unified hierarchy -- every typed tz error subclasses
+    //       TenzorError (see tests/python/test_error_classes.py), AND
+    //   (2) Python-idiomatic OOM handling -- `except MemoryError:` catches
+    //       an allocation failure.
+    // pybind11's register_exception takes a single base, so registering
+    // MemoryException on PyExc_MemoryError satisfies (2) but breaks (1)
+    // (tz.MemoryError is not a TenzorError subclass), while basing it on
+    // TenzorError alone would break (2). Build the type with BOTH bases via
+    // type() -- TenzorError and the builtin MemoryError share Exception as
+    // their solid base, so CPython accepts the multiple inheritance (verified)
+    // -- and register the MemoryException -> MemoryError translator by hand.
+    {
+        static py::object py_memory_error;  // referenced by the translator below
+        py::object type_obj =
+            py::reinterpret_borrow<py::object>(reinterpret_cast<PyObject*>(&PyType_Type));
+        py::tuple bases = py::make_tuple(
+            py::reinterpret_borrow<py::object>(py_tenzor_error.ptr()),
+            py::reinterpret_borrow<py::object>(PyExc_MemoryError));
+        py::dict ns;
+        ns["__module__"] = m.attr("__name__");
+        ns["__doc__"] = "Raised when a tensor allocation cannot be satisfied.";
+        py_memory_error = type_obj("MemoryError", bases, ns);
+        m.attr("MemoryError") = py_memory_error;
+        py::register_exception_translator([](std::exception_ptr p) {
+            try {
+                if (p) std::rethrow_exception(p);
+            } catch (const tenzor::MemoryException& e) {
+                PyErr_SetString(py_memory_error.ptr(), e.what());
+            }
+        });
+    }
     // 5th-audit B'7: register every TenzorException-derived class that ships
     // in the public API. Pre-fix `TensorBoardException` was missing and would
     // surface only through the catch-all translator below, losing its
@@ -750,43 +891,26 @@ PYBIND11_MODULE(tenzor_core, m) {
         py::arg("strict") = true,
         "Download and load pretrained weights into model");
 
-    // PyTorch interoperability (optional - requires torch headers)
+    // PyTorch interoperability (optional, lazy-loaded). The libtorch-backed
+    // bindings live in a separate plugin .so (see tenzor_load_torch_interop
+    // above) that we dlopen on first use, so `import tenzor` does not pull
+    // libtorch. Python reaches it through the lazy tenzor.torch_interop proxy
+    // (python/tenzor/__init__.py), which calls this function on first
+    // attribute access (to_torch / from_torch / tenzor.torch_interop.*).
     #ifdef TENZOR_HAS_TORCH
-    auto torch_mod = m.def_submodule("torch_interop", "PyTorch tensor interoperability");
-
-    torch_mod.def("can_zero_copy_to_torch", &tenzor::torch_interop::can_zero_copy_to_torch,
-                  "Check if zero-copy conversion to PyTorch is possible");
-    torch_mod.def("tensor_to_torch", &tenzor::torch_interop::tensor_to_torch,
-                  py::arg("tensor"), py::arg("requires_grad") = false,
-                  "Convert Tenzor tensor to PyTorch tensor");
-    torch_mod.def("tensor_from_torch", &tenzor::torch_interop::tensor_from_torch,
-                  py::arg("torch_tensor"), py::arg("device") = py::none(),
-                  "Convert PyTorch tensor to Tenzor tensor");
-    torch_mod.def("can_zero_copy_from_torch", &tenzor::torch_interop::can_zero_copy_from_torch,
-                  py::arg("torch_tensor"),
-                  "Check if zero-copy conversion from PyTorch is possible");
-    torch_mod.def("variable_to_torch", &tenzor::torch_interop::variable_to_torch,
-                  py::arg("variable"),
-                  "Convert Tenzor Variable to PyTorch Variable with autograd");
-    torch_mod.def("variable_from_torch", &tenzor::torch_interop::variable_from_torch,
-                  py::arg("torch_variable"),
-                  "Convert PyTorch Variable to Tenzor Variable");
-    torch_mod.def("dtype_to_torch", &tenzor::torch_interop::dtype_to_torch,
-                  py::arg("dtype"),
-                  "Map Tenzor DType to PyTorch ScalarType (as int)");
-    torch_mod.def("dtype_from_torch", &tenzor::torch_interop::dtype_from_torch,
-                  py::arg("torch_dtype"),
-                  "Map PyTorch ScalarType (as int) to Tenzor DType");
-    torch_mod.def("device_to_torch_string", &tenzor::torch_interop::device_to_torch_string,
-                  py::arg("device"),
-                  "Map Tenzor Device to PyTorch device string");
-    torch_mod.def("device_from_torch_string", &tenzor::torch_interop::device_from_torch_string,
-                  py::arg("device_str"),
-                  "Map PyTorch device string to Tenzor Device");
-    torch_mod.def("sync_gradients", &tenzor::torch_interop::sync_gradients,
-                  py::arg("tenzor_var"), py::arg("torch_var"),
-                  py::arg("tenzor_to_torch") = true,
-                  "Synchronize gradient storage between Tenzor and PyTorch");
+    m.def("_load_torch_interop", [m]() -> py::object {
+        // Idempotent: the plugin registers the `torch_interop` submodule as an
+        // attribute of THIS module on first load, so the cache lives in the
+        // module's __dict__ (Python-managed lifetime) -- NOT in a C++ static
+        // py::object. A static py::object's destructor would run at C++ static
+        // shutdown, AFTER Py_Finalize has torn down the interpreter, and its
+        // Py_DECREF would segfault (exit 139). Letting Python own the cached
+        // reference avoids that entirely.
+        py::module_ self(m);
+        if (!py::hasattr(self, "torch_interop"))
+            tenzor_load_torch_interop_plugin(m.ptr());  // dlopen + register the attr
+        return self.attr("torch_interop");
+    }, "Lazily dlopen the PyTorch interop plugin and return its submodule");
     #endif
 
     // =============================================================================

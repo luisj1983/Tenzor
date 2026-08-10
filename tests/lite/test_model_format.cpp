@@ -164,6 +164,11 @@ TEST(ModelFormatTest, RoundTripGraphWithWeights) {
     opts.weights[2] = b;
     opts.input_ids  = {0};
     opts.output_ids = {5};
+    // Declare input 0's (x) shape/dtype so the saved TVAL table records it and
+    // the loaded runtime validates the caller's forward() input against it.
+    // Without this the input spec's shape stays empty (rank 0) and forward()
+    // rejects the {2,1} input with "input 0 rank mismatch (got 2, expected 0)".
+    opts.input_specs[0] = {tenzor::DType::Float32, {2, 1}};
     opts.metadata["framework_version"] = "tenzor-lite-phase2";
 
     auto path = temp_path("roundtrip_graph_weights");

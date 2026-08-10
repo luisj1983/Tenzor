@@ -55,10 +55,23 @@ TEST_P(Float16Test, LargeValues) {
     Float16 f16_large(65504.0f);  // Max Float16 value
     EXPECT_NEAR(static_cast<float>(f16_large), 65504.0f, 1.0f);
 
-    // Test overflow
+    // Overflow saturates to the largest finite half (±65504), NOT signed
+    // infinity. This is the project's half-conversion contract (see
+    // Float16::Float16 in src/core/dtype.cpp): ROCm/OneAPI hardware saturates,
+    // and producing inf on CPU/CUDA would diverge from those backends and
+    // sever deep-network gradients where mid-chain inf - inf = nan. The test
+    // previously asserted the strict IEEE-754 round-to-nearest result (inf),
+    // which contradicts that contract and failed identically on every backend.
     Float16 f16_overflow(100000.0f);
     float result = static_cast<float>(f16_overflow);
-    EXPECT_TRUE(std::isinf(result));
+    EXPECT_FALSE(std::isinf(result)) << "overflow must saturate, not produce inf";
+    EXPECT_FALSE(std::isnan(result)) << "overflow must not produce nan";
+    EXPECT_NEAR(result, 65504.0f, 1.0f);
+
+    Float16 f16_neg_overflow(-100000.0f);
+    float neg_result = static_cast<float>(f16_neg_overflow);
+    EXPECT_FALSE(std::isinf(neg_result)) << "negative overflow must saturate";
+    EXPECT_NEAR(neg_result, -65504.0f, 1.0f);
 }
 
 TEST_P(Float16Test, SpecialValues) {

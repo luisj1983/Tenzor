@@ -2044,6 +2044,7 @@ auto fused_sgd_step_kernel(
     float weight_decay,
     float dampening,
     bool nesterov,
+    bool first_step,
     sycl::queue& queue
 ) -> void {
     const int64_t numel = param.numel();
@@ -2067,7 +2068,16 @@ auto fused_sgd_step_kernel(
 
             if (has_momentum_buffer && mom_ptr) {
                 float v = mom_ptr[idx];
-                v = momentum * v + (1.0f - dampening) * g;
+                // PyTorch SGD: on the very first momentum step the buffer is
+                // initialised to the (weight-decayed) gradient with NO dampening;
+                // dampening is only applied on subsequent steps. Applying
+                // (1 - dampening) on step 1 must match the CPU reference /
+                // torch.optim.SGD (and the CUDA/ROCm fused kernels).
+                if (first_step) {
+                    v = g;
+                } else {
+                    v = momentum * v + (1.0f - dampening) * g;
+                }
                 mom_ptr[idx] = v;
 
                 if (nesterov) {
@@ -2099,7 +2109,13 @@ auto fused_sgd_step_kernel(
 
             if (has_momentum_buffer && mom_ptr) {
                 double v = mom_ptr[idx];
-                v = d_momentum * v + (1.0 - d_dampening) * g;
+                // PyTorch SGD: first momentum step initialises buf = g with NO
+                // dampening (see the Float32 path / CPU reference).
+                if (first_step) {
+                    v = g;
+                } else {
+                    v = d_momentum * v + (1.0 - d_dampening) * g;
+                }
                 mom_ptr[idx] = v;
 
                 if (nesterov) {

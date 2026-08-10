@@ -23,11 +23,17 @@ TEST(AuthTest, DisabledAllowsAll) {
     EXPECT_TRUE(validate_token(config, "Bearer garbage"));
 }
 
-TEST(AuthTest, EnabledButEmptyKeysAllowsAll) {
+TEST(AuthTest, EnabledButEmptyKeysDeniesAll) {
     AuthConfig config;
     config.enabled = true;
     config.api_keys = {};
-    EXPECT_TRUE(validate_token(config, "any_token"));
+    // Secure fail-closed default (auth.hpp): an enabled-but-keyless server is an
+    // operator misconfiguration, so validate_token DENIES every request rather
+    // than silently accepting traffic. Auth is only bypassed when explicitly
+    // disabled (config.enabled = false, see DisabledAllowsAll).
+    EXPECT_FALSE(validate_token(config, "any_token"));
+    EXPECT_FALSE(validate_token(config, ""));
+    EXPECT_FALSE(validate_token(config, "Bearer whatever"));
 }
 
 TEST(AuthTest, ValidBearerToken) {

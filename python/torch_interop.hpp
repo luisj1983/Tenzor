@@ -11,14 +11,17 @@
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/core/dtype.hpp>
 #include <tenzor/core/device.hpp>
+#include <tenzor/autograd/variable.hpp>  // tenzor::Variable (variable_* / sync_gradients)
 
-// Forward declare PyTorch types to avoid requiring torch headers
-namespace torch {
-    class Tensor;
-    namespace autograd {
-        class Variable;
-    }
-}
+// Modern libtorch (>=2.x) defines torch::Tensor and torch::autograd::Variable
+// as type aliases (using-declarations over at::Tensor), not forward-declarable
+// classes. Forward-declaring `class Variable` here conflicts with torch's own
+// `using Variable = at::Tensor` (a hard "conflicting declaration" error that
+// also corrupts downstream template/std lookup), so this header must include
+// the real torch headers instead. It is only ever included by translation
+// units built with TENZOR_HAS_TORCH (torch_interop.cpp and the guarded block
+// in bindings.cpp), so the libtorch dependency is unconditional here.
+#include <torch/torch.h>
 
 namespace tenzor {
 namespace torch_interop {

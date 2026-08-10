@@ -185,6 +185,46 @@ auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) 
     Tensor a = (x1.dtype() == compute) ? x1.contiguous() : dispatchCast(x1.contiguous(), compute);
     Tensor b = (x2.dtype() == compute) ? x2.contiguous() : dispatchCast(x2.contiguous(), compute);
 
+    // General N-D path with batch broadcasting (matches CPU cdist, mirrors the
+    // CUDA path in src/backends/cuda/kernels/advanced.cu): the last two dims are
+    // the matrix (P/R, M); all leading dims are the batch, which broadcasts when
+    // one side is 1. Normalize to a matching-batch 3D problem, recurse into the
+    // 3D path, then reshape the result back. (Previously this backend threw for
+    // ndim>3 and required an exactly-matching 3D batch, diverging from CPU/CUDA
+    // — AllBackends/CDistTest.ND4DMatchesCPU and BatchOneBroadcastMatchesCPU.)
+    {
+        const int64_t an = a.ndim(), bn = b.ndim();
+        if (an < 2 || bn < 2) throw std::runtime_error("cdist: inputs must have >= 2 dims");
+        const bool nd_general = an > 3 || bn > 3 || an != bn ||
+            (an == 3 && bn == 3 && a.shape()[0] != b.shape()[0]);
+        if (nd_general) {
+            std::vector<int64_t> batchA(a.shape().begin(), a.shape().end() - 2);
+            std::vector<int64_t> batchB(b.shape().begin(), b.shape().end() - 2);
+            const size_t bl = std::max(batchA.size(), batchB.size());
+            std::vector<int64_t> batch(bl);
+            for (size_t i = 0; i < bl; ++i) {
+                int64_t da = i < batchA.size() ? batchA[batchA.size() - 1 - i] : 1;
+                int64_t db = i < batchB.size() ? batchB[batchB.size() - 1 - i] : 1;
+                if (da != db && da != 1 && db != 1)
+                    throw std::runtime_error("cdist: batch dimensions are not broadcastable");
+                batch[bl - 1 - i] = (da == 1) ? db : da;
+            }
+            const int64_t P = a.shape()[an - 2], M = a.shape()[an - 1];
+            const int64_t R = b.shape()[bn - 2];
+            std::vector<int64_t> aT = batch; aT.push_back(P); aT.push_back(M);
+            std::vector<int64_t> bT = batch; bT.push_back(R); bT.push_back(M);
+            Tensor aE = ::tenzor::expand(a, aT).contiguous();
+            Tensor bE = ::tenzor::expand(b, bT).contiguous();
+            int64_t Bp = 1; for (int64_t d : batch) Bp *= d;
+            Tensor a3 = ::tenzor::reshape(aE, {Bp, P, M});
+            Tensor b3 = ::tenzor::reshape(bE, {Bp, R, M});
+            Tensor r3 = dispatchCDist(a3, b3, p);
+            std::vector<int64_t> rShape = batch; rShape.push_back(P); rShape.push_back(R);
+            Tensor r = ::tenzor::reshape(r3, rShape);
+            return (orig_dtype == compute) ? r : dispatchCast(r, orig_dtype);
+        }
+    }
+
     int64_t B, P, M, R;
     if (a.ndim() == 2 && b.ndim() == 2) {
         B = 1; P = a.shape()[0]; M = a.shape()[1]; R = b.shape()[0];
@@ -733,6 +773,23 @@ auto VulkanBackend::dispatchMultinomial(const Tensor& probs, int64_t num_samples
 
     bool was_1d = (input.ndim() == 1);
     if (was_1d) input = tenzor::reshape(input, {1, input.numel()});
+
+    // Every row must have a positive probability sum (matches CPU/CUDA, which
+    // throw "sum of probabilities must be > 0"). Without this, all-zero rows
+    // produce arbitrary/garbage indices on Vulkan (a degenerate CDF for the
+    // with-replacement path, -inf Gumbel keys for without-replacement) while
+    // CPU errors. Previously this backend emitted garbage silently.
+    {
+        int64_t batch_size_v = input.shape()[0];
+        Tensor row_sums = dispatchReduction("sum", input, /*dim=*/1, /*keepdim=*/false);
+        Tensor row_sums_host = row_sums.to(Device::cpu()).contiguous();
+        const float* sums = row_sums_host.data<float>();
+        for (int64_t b = 0; b < batch_size_v; ++b) {
+            if (!(sums[b] > 0.0f)) {
+                throw std::runtime_error("multinomial: sum of probabilities must be > 0");
+            }
+        }
+    }
 
     // Without-replacement sampling via the Gumbel-max trick:
     //     key[i] = log(p[i]) + G,  G ~ Gumbel(0,1) via -log(-log(U))

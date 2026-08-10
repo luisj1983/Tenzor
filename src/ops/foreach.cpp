@@ -13,6 +13,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/op_id.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -70,8 +72,27 @@ static inline bool foreach_use_omp(int64_t n, const std::vector<Tensor>& lst) {
 auto foreach_add(const std::vector<Tensor>& a, const std::vector<Tensor>& b)
     -> std::vector<Tensor> {
     check_same_size("foreach_add", a, b);
-    std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
+
+    // Fused fast path: if the active backend registers a fused foreach_add
+    // kernel (oneapi does — see OpId::ForeachAdd / oneapi foreach_add_kernel),
+    // dispatch all N (a,b) pairs as a single kernel launch. The oneAPI SYCL/
+    // OpenCL runtime has ~0.2 ms per-launch overhead, so looping add() over
+    // 1000 small tensors spends ~200 ms in launch overhead alone
+    // (ForeachOps.PerfManyTensors); one fused launch drops it to a few ms.
+    // Backends without a fused kernel (cpu/cuda/rocm/vulkan) are already fast
+    // via async per-tensor dispatch, so they keep the loop below.
+    if (!a.empty() && is_op_supported(OpId::ForeachAdd, a[0].device().type)) {
+        std::vector<Tensor> inputs;
+        inputs.reserve(static_cast<size_t>(n) * 2);
+        for (int64_t i = 0; i < n; ++i) {
+            inputs.push_back(a[i]);
+            inputs.push_back(b[i]);
+        }
+        return dispatch(OpId::ForeachAdd, std::span<const Tensor>(inputs.data(), inputs.size()));
+    }
+
+    std::vector<Tensor> out(a.size());
     #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::add(a[i], b[i]);

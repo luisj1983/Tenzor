@@ -40,6 +40,16 @@ void main() {
             sum += abs(in_data[i * params.D + d] - in_data[j * params.D + d]);
         }
         out_data[idx] = sum;
+    } else if (isinf(params.p)) {
+        // p = inf: Chebyshev distance = max_d |x_i,d - x_j,d|. The generic
+        // pow() path computes pow(diff, inf) -> inf, then pow(inf, 0) -> 1,
+        // returning all-ones instead of the max — matches CPU/CUDA's isinf
+        // branch. (PdistChebyshevInfinity expects [4, 2, 6].)
+        for (uint d = 0; d < params.D; ++d) {
+            float a = abs(in_data[i * params.D + d] - in_data[j * params.D + d]);
+            if (a > sum) sum = a;
+        }
+        out_data[idx] = sum;
     } else {
         for (uint d = 0; d < params.D; ++d) {
             sum += pow(abs(in_data[i * params.D + d] - in_data[j * params.D + d]), params.p);

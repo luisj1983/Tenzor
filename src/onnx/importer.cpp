@@ -31,6 +31,7 @@
 #include "../../include/tenzor/ops/indexing.hpp"
 #include "../../include/tenzor/ops/vision.hpp"
 #include "../../include/tenzor/ops/linalg.hpp"   // custom-domain linalg re-import
+#include "../../include/tenzor/autograd/ops.hpp"  // Variable-level unsqueeze/squeeze/slice
 #include <array>
 #include <cstring>
 #include <limits>
@@ -51,6 +52,35 @@ namespace onnx {
 // proto_to_ir_tensor (in the anonymous namespace) to size sub-32-bit
 // int32_data initializers.
 auto onnx_to_dtype(ONNXDataType onnx_dtype) -> DType;
+
+// ---------------------------------------------------------------------------
+// LambdaModule: a leaf nn::Module that runs a captured single-input
+// functional op.
+//
+// The ONNX importer builds an nn::Sequential of *modules* -- but decomposed
+// forwards (e.g. ConvTranspose1d, which is unsqueeze -> ConvTranspose2d ->
+// squeeze -> narrow/slice) trace as a chain of *functional* ops (Unsqueeze /
+// Squeeze / Slice) wrapped around a single module. Those functional ops are
+// eagerly executed during import for shape propagation but were then dropped
+// from the executable Sequential, so the round-tripped model lost the
+// reshape/slice steps and the bare ConvTranspose2d rejected the
+// original-rank input (ConvTranspose2d expects 4D; ConvTranspose1d feeds 3D).
+// LambdaModule wraps such a functional op as an executable Module so it joins
+// the Sequential chain. Constant (initializer-input) functional ops stay
+// constant-folded and are NOT wrapped (see make_functional_module).
+// ---------------------------------------------------------------------------
+class LambdaModule : public nn::Module {
+public:
+    explicit LambdaModule(std::function<Variable(const Variable&)> fn,
+                           std::string repr)
+        : fn_(std::move(fn)), repr_(std::move(repr)) {}
+    auto forward_impl(const Variable& input) -> Variable override { return fn_(input); }
+    auto extra_repr() const -> std::string override { return repr_; }
+
+private:
+    std::function<Variable(const Variable&)> fn_;
+    std::string repr_;
+};
 
 // ============================================================================
 // Protobuf → Internal IR conversion
@@ -779,6 +809,16 @@ auto ONNXImporter::convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<
 
         try {
             auto module = convert_node(node);
+            // Functional ops (Unsqueeze/Squeeze/Slice) return nullopt from
+            // convert_node (they eagerly register their output for shape
+            // propagation). When such an op sits on the runtime activation
+            // path, wrap it as an executable LambdaModule so it joins the
+            // Sequential instead of being dropped -- otherwise decomposed
+            // forwards (e.g. ConvTranspose1d) lose their reshape/slice steps
+            // and the round-tripped model rejects the original-rank input.
+            if (!module.has_value()) {
+                module = make_functional_module(node);
+            }
             if (module.has_value()) {
                 model->add_module(module.value());
                 context_.register_module(node.name, module.value());
@@ -851,6 +891,130 @@ auto ONNXImporter::load_initializers(const ONNXGraphData& graph) -> void {
         std::vector<int64_t> shape_vec(tensor.shape().begin(), tensor.shape().end());
         log("  Loaded: " + name + " " + shape_to_string(shape_vec));
     }
+}
+
+auto ONNXImporter::make_functional_module(const ONNXImportNode& node)
+    -> std::optional<std::shared_ptr<nn::Module>> {
+    // Only single-input shape ops that live on the runtime activation path are
+    // wrapped as executable Modules here. A functional op whose data input is a
+    // constant initializer is constant-folded by its eager converter (the
+    // registered output value is reused downstream) and must NOT join the
+    // Sequential -- adding it would feed it the runtime activation instead of
+    // the constant it actually consumed (e.g. the weight-unsqueeze in the
+    // ConvTranspose1d decomposition operates on the initializer weight).
+    if (node.op_type != "Unsqueeze" && node.op_type != "Squeeze" &&
+        node.op_type != "Slice") {
+        return std::nullopt;
+    }
+    if (node.inputs.empty()) {
+        return std::nullopt;
+    }
+    if (initializers_ptr_ && initializers_ptr_->count(node.inputs[0])) {
+        return std::nullopt;  // constant input: stays constant-folded
+    }
+
+    if (node.op_type == "Unsqueeze") {
+        std::vector<int64_t> axes;
+        if (node.inputs.size() > 1) {
+            auto axes_tensor = get_input(node.inputs[1]).to(DType::Int64);
+            const int64_t* d = axes_tensor.data<int64_t>();
+            axes.assign(d, d + axes_tensor.numel());
+        } else {
+            auto a = node.get_attr("axes");
+            if (a.has_value() && a->ints.has_value()) axes = a->ints.value();
+        }
+        std::sort(axes.begin(), axes.end());  // insert dims in ascending order
+        auto fn = [axes](const Variable& x) -> Variable {
+            Variable r = x;
+            for (int64_t a : axes) r = ::tenzor::unsqueeze(r, a);
+            return r;
+        };
+        std::string repr = "Unsqueeze(axes=[" + std::to_string(axes.size()) + "])";
+        return std::make_shared<LambdaModule>(std::move(fn), std::move(repr));
+    }
+
+    if (node.op_type == "Squeeze") {
+        std::vector<int64_t> axes;
+        if (node.inputs.size() > 1) {
+            auto axes_tensor = get_input(node.inputs[1]).to(DType::Int64);
+            const int64_t* d = axes_tensor.data<int64_t>();
+            axes.assign(d, d + axes_tensor.numel());
+        } else {
+            auto a = node.get_attr("axes");
+            if (a.has_value() && a->ints.has_value()) axes = a->ints.value();
+        }
+        if (axes.empty()) {
+            // Squeeze all size-1 dims (resolved at runtime against the actual
+            // input shape, since the import-time placeholder may use a
+            // placeholder batch of 1).
+            auto fn = [](const Variable& x) -> Variable {
+                Variable r = x;
+                auto shape = r.shape();
+                for (int64_t d = static_cast<int64_t>(shape.size()) - 1; d >= 0; --d) {
+                    if (shape[d] == 1) r = ::tenzor::squeeze(r, d);
+                }
+                return r;
+            };
+            return std::make_shared<LambdaModule>(std::move(fn), "Squeeze()");
+        }
+        std::sort(axes.begin(), axes.end(), std::greater<>());  // remove in desc order
+        auto fn = [axes](const Variable& x) -> Variable {
+            Variable r = x;
+            for (int64_t a : axes) r = ::tenzor::squeeze(r, a);
+            return r;
+        };
+        std::string repr = "Squeeze(axes=[" + std::to_string(axes.size()) + "])";
+        return std::make_shared<LambdaModule>(std::move(fn), std::move(repr));
+    }
+
+    // Slice: capture the resolved per-axis (axis, start, end, step) from the
+    // int64 control tensors. Negative start/end and axis are left for
+    // ::tenzor::slice to normalise at runtime against the real input shape
+    // (matching Tensor::slice semantics used by the eager converter).
+    auto starts_t = get_host_input(node.inputs[1]).to(DType::Int64);
+    auto ends_t = get_host_input(node.inputs[2]).to(DType::Int64);
+    const int64_t* starts = starts_t.data<int64_t>();
+    const int64_t* ends = ends_t.data<int64_t>();
+    int64_t n = starts_t.numel();
+
+    std::vector<int64_t> axes_vec;
+    if (node.inputs.size() > 3) {
+        auto axes_t = get_host_input(node.inputs[3]).to(DType::Int64);
+        const int64_t* d = axes_t.data<int64_t>();
+        axes_vec.assign(d, d + axes_t.numel());
+    } else {
+        for (int64_t i = 0; i < n; ++i) axes_vec.push_back(i);
+    }
+    std::vector<int64_t> steps_vec;
+    if (node.inputs.size() > 4) {
+        auto steps_t = get_host_input(node.inputs[4]).to(DType::Int64);
+        const int64_t* d = steps_t.data<int64_t>();
+        steps_vec.assign(d, d + steps_t.numel());
+    } else {
+        steps_vec.assign(n, 1);
+    }
+
+    struct SliceAxis { int64_t axis, start, end, step; };
+    std::vector<SliceAxis> slices;
+    slices.reserve(n);
+    for (int64_t i = 0; i < n; ++i) {
+        slices.push_back({axes_vec[i], starts[i], ends[i], steps_vec[i]});
+    }
+    // Apply in reverse axis order so earlier-axis indices stay valid as later
+    // dims are sliced (matches convert_slice, which slices forward but each
+    // slice is independent of the others' axis index; reverse is safe too
+    // since each slice only changes a size, not a dim's position).
+    std::sort(slices.begin(), slices.end(),
+              [](const SliceAxis& a, const SliceAxis& b) { return a.axis > b.axis; });
+    auto fn = [slices](const Variable& x) -> Variable {
+        Variable r = x;
+        for (const auto& s : slices) {
+            r = ::tenzor::slice(r, s.axis, s.start, s.end, s.step);
+        }
+        return r;
+    };
+    std::string repr = "Slice(axes=[" + std::to_string(n) + "])";
+    return std::make_shared<LambdaModule>(std::move(fn), std::move(repr));
 }
 
 auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std::shared_ptr<nn::Module>> {

@@ -593,23 +593,29 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseDepthwiseConsistency) {
     // where it amplifies to ~3e-6. Use the same relaxed Float64 tolerance for
     // both library-backed GPU backends.
     float consistency_tol = atol();
-    if ((device().type == Device::Type::CUDA ||
+    if ((device().type == Device::Type::CPU ||
+         device().type == Device::Type::CUDA ||
          device().type == Device::Type::OneAPI ||
          device().type == Device::Type::Vulkan ||
          device().type == Device::Type::ROCm) &&
         (dtype() == DType::Float64 || dtype() == DType::Float32)) {
-        // Library-level run-to-run jitter in deep networks. cuDNN/oneDNN pick
-        // convolution algorithms heuristically and use atomic reductions, so
-        // two forward passes of the same model are not bit-identical — the
-        // ~1-ulp GEMM jitter amplifies through ConvNeXt-Base's 27-block stage 3.
-        // Float32's default 1e-5 atol sits right at that amplified jitter
-        // (~1e-5 observed), so it needs the same relaxed bound already used for
-        // Float64. (Float16's 1e-2 atol is already loose enough.)
-        // Vulkan's tiled matmul/conv use the same atomic-reduction reductions
-        // and the caching allocator changes buffer alignment between the two
-        // passes, so it exhibits the identical ~4e-6 (Float64) jitter — measured
-        // 4.35e-6, well within 5e-5. (Not a skip: the 5e-5 bound still catches
-        // any real >5e-5 nondeterminism.)
+        // Library-level run-to-run jitter in deep networks. The library-backed
+        // GEMM/conv kernels (MKL/oneDNN on CPU, cuDNN/oneDNN on GPU) dispatch by
+        // buffer alignment and use atomic/parallel reductions, so two forward
+        // passes of the same model are not bit-identical: the caching allocator
+        // hands the second pass differently-aligned buffers, the library picks
+        // a different (deterministic) code path, and the ~1-ulp GEMM jitter
+        // amplifies through ConvNeXt-Base's 27-block stage 3. This is inherent
+        // library behaviour, not a Tenzor kernel bug. Measured run-to-run
+        // differences: CPU Float32 ~1.4e-5, CPU Float64 ~8.6e-6, Vulkan Float64
+        // ~4.4e-6 — all the same jitter class. Float32's default 1e-5 atol sits
+        // right at that amplified jitter (~1e-5 observed), so it needs the same
+        // relaxed bound already used for Float64; the CPU path is no different
+        // (it was wrongly assumed bit-deterministic — same MKL/oneDNN dispatch
+        // applies). (Float16's 1e-2 atol is already loose enough.) Verified
+        // single-threaded (OMP_NUM_THREADS=1): the difference is bit-identical
+        // across runs, ruling out thread-scheduling/uninitialised-memory bugs.
+        // (Not a skip: the 5e-5 bound still catches any real >5e-5 nondeterminism.)
         consistency_tol = 5e-5f;
     }
 

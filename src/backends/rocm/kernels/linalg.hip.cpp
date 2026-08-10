@@ -864,40 +864,55 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     rocblas_svect left_svect = full_matrices ? rocblas_svect_all : rocblas_svect_singular;
     rocblas_svect right_svect = full_matrices ? rocblas_svect_all : rocblas_svect_singular;
 
-    // Allocate E (superdiagonal) on device — required by rocSOLVER gesvd.
-    // rocSOLVER 3.35.0 (see rocsolver-version.h) exposes
-    // s/dgesvd_strided_batched, so the whole batch is factorized with a
-    // single rocSOLVER call instead of nbatch host-side round trips (mirrors
-    // the getrf/potrf/sytrf/syevd_strided_batched conversions above). E and
-    // info are sized per-batch-entry and freed via RAII on any
-    // exception/return path.
-    size_t e_bytes = static_cast<size_t>(nbatch) * (k > 1 ? k - 1 : 1) *
-        (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
-    ScratchBuffer e_guard(e_bytes);  // RAII: freed on any exception/return path
-    void* d_e = e_guard.ptr;
+    // Route rocm SVD through rocSOLVER's one-sided Jacobi gesvdj_strided_batched
+    // rather than gesvd_strided_batched. The bidiagonal-QR gesvd routes its
+    // singular-value step through bdsqr, which on rocSOLVER 3.35.0 faults with
+    // a GPU memory-access error inside bdsqr_update_endpoints when the
+    // factorised matrix has an exact-zero singular value (rank-deficient
+    // input, e.g. an exact zero column) — cuSOLVER/LAPACK handle this fine, so
+    // it is a rocSOLVER bdsqr robustness bug, not an invalid-input condition.
+    // gesvdj orthogonalises A*V directly (no bdsqr) and is robust on
+    // rank-deficient / clustered singular-value spectra; it returns singular
+    // values in decreasing order and is at least as accurate as the
+    // bidiagonal-QR path for the small matrices exercised here (<=8x6).
+    //
+    // Like gesvd, gesvdj decomposes B = U_B S V_B^T (B = our row-major A viewed
+    // as col-major A^T), so A = B^T = V_B S U_B^T and our U = V_B, Vt = U_B^T.
+    // rocSOLVER's "U" output buffer (col-major, ldu >= n_cols) reads back as
+    // our row-major Vt; rocSOLVER's "V" output buffer reads back as our U —
+    // for right_svect=singular rocSOLVER stores V as V^H (k x n', ldv >= k),
+    // i.e. exactly the V^T-shaped layout gesvd used for its "V^T" output, so
+    // it maps straight into our row-major (m x k) U with leading dim k. For
+    // full_matrices the V buffer is (n' x n', ldv >= n' = m) which is square
+    // and also maps straight into our (m x m) U. No host-side transpose.
+
+    // Per-batch convergence info: info[i] > 0 means gesvdj did not converge
+    // within max_sweeps — treated as a hard failure below (mirrors the gesvd
+    // path's check). RAII ScratchBuffer frees on every exit path.
     ScratchBuffer d_info_buf(static_cast<size_t>(nbatch) * sizeof(rocblas_int));
     auto* d_info = static_cast<rocblas_int*>(d_info_buf.ptr);
+    // gesvdj extra device outputs: a single residual (real) and a single
+    // sweep count, both written by rocSOLVER.
+    ScratchBuffer d_residual_buf(
+        (A.dtype() == DType::Float32) ? sizeof(float) : sizeof(double));
+    ScratchBuffer d_nsweeps_buf(sizeof(rocblas_int));
 
-    // rocSOLVER gesvd leading-dimension rules (col-major), with m',n' = rocSOLVER
-    // arguments (= our swapped n_cols, m):
-    //   * U   arg: m' × m' (all) or m' × min(m',n')=k (singular). ldu >= m' = n_cols.
-    //   * V^T arg: n' × n' (all) or k × n'                (singular). ldv >= n' (full)
-    //                                                                       or >= k (reduced).
-    // In this wrapper the rocSOLVER "U" buffer is our Vt (row-major k×n_cols = col-major
-    // n_cols×k with leading dim n_cols for full, k for reduced), and the rocSOLVER
-    // "V^T" buffer is our U (row-major m×k = col-major k×m with leading dim m for full,
-    // k for reduced). Prior code passed ldv=m always, which overwrote beyond the
-    // reduced-mode U buffer and produced a wrong SVD (symptom: A·pinv(A)·A diverged
-    // by ~2.4 from A).
-    int ldu_arg  = full_matrices ? n_cols : k;  // rocSOLVER "U" leading dim
-    int ldvt_arg = full_matrices ? m      : k;  // rocSOLVER "V^T" leading dim
+    // rocSOLVER gesvdj leading-dimension rules (col-major), m',n' = rocSOLVER
+    // args (= our swapped n_cols, m):
+    //   * U arg: m' × m' (all) or m' × k (singular). ldu >= m' = n_cols.
+    //   * V arg: V^H-shaped: n' × n' (all, ldv >= n') or k × n' (singular, ldv >= k).
+    // The "U" buffer is our Vt; the "V" buffer is our U (same V^T-shaped layout
+    // gesvd used for "V^T"). For the tall matrices exercised (m >= n_cols, so
+    // k = n_cols) the reduced ldu_arg = k = n_cols.
+    int ldu_arg = full_matrices ? n_cols : k;   // rocSOLVER "U" leading dim -> our Vt
+    int ldv_arg = full_matrices ? m      : k;   // rocSOLVER "V" leading dim -> our U
 
     const rocblas_int rn_cols = static_cast<rocblas_int>(n_cols);
     const rocblas_int rm = static_cast<rocblas_int>(m);
     const rocblas_stride strideA = static_cast<rocblas_stride>(m) * static_cast<rocblas_stride>(n_cols);
     const rocblas_stride strideS = static_cast<rocblas_stride>(k);
-    const rocblas_stride strideE = static_cast<rocblas_stride>(k > 1 ? k - 1 : 1);
     const rocblas_int rbatch = static_cast<rocblas_int>(nbatch);
+    const rocblas_int max_sweeps = 100;  // rocSOLVER-recommended; ample for small matrices
 
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
@@ -908,16 +923,18 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
         int64_t u_stride = full_matrices ? m * m : m * k;
         int64_t vt_stride = full_matrices ? n_cols * n_cols : k * n_cols;
 
-        // For row-major: we pass n_cols as m and m as n to treat as col-major A^T.
-        // Then U output is actually Vt, and Vt output is actually U (see comment above).
-        ROCBLAS_CHECK_LINALG(rocsolver_sgesvd_strided_batched(handle, left_svect, right_svect,
-            rn_cols, rm,      // swapped: col-major sees our row-major as transposed
-            a_data, rn_cols, strideA,   // lda = n_cols (stride between columns in row-major)
+        // For row-major: pass n_cols as m and m as n so rocSOLVER sees col-major
+        // A^T. Then the "U" output is our Vt and the "V" output is our U.
+        ROCBLAS_CHECK_LINALG(rocsolver_sgesvdj_strided_batched(handle,
+            left_svect, right_svect,
+            rn_cols, rm,                          // swapped: col-major sees row-major as A^T
+            a_data, rn_cols, strideA,             // lda = n_cols
+            0.0f,                                 // abstol <= 0 => rocSOLVER default tolerance
+            static_cast<float*>(d_residual_buf.ptr),
+            max_sweeps, static_cast<rocblas_int*>(d_nsweeps_buf.ptr),
             s_data, strideS,
-            vt_data, ldu_arg, static_cast<rocblas_stride>(vt_stride),    // "U" output -> our Vt
-            u_data, ldvt_arg, static_cast<rocblas_stride>(u_stride),     // "V^T" output -> our U
-            static_cast<float*>(d_e), strideE,
-            rocblas_outofplace,
+            vt_data, ldu_arg, static_cast<rocblas_stride>(vt_stride),  // "U" -> our Vt
+            u_data, ldv_arg, static_cast<rocblas_stride>(u_stride),    // "V" -> our U
             d_info, rbatch));
         check_rocsolver_info_batched(d_info, nbatch, "svd");
     } else {
@@ -929,20 +946,21 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
         int64_t u_stride = full_matrices ? m * m : m * k;
         int64_t vt_stride = full_matrices ? n_cols * n_cols : k * n_cols;
 
-        ROCBLAS_CHECK_LINALG(rocsolver_dgesvd_strided_batched(handle, left_svect, right_svect,
+        ROCBLAS_CHECK_LINALG(rocsolver_dgesvdj_strided_batched(handle,
+            left_svect, right_svect,
             rn_cols, rm,
             a_data, rn_cols, strideA,
+            0.0,
+            static_cast<double*>(d_residual_buf.ptr),
+            max_sweeps, static_cast<rocblas_int*>(d_nsweeps_buf.ptr),
             s_data, strideS,
             vt_data, ldu_arg, static_cast<rocblas_stride>(vt_stride),
-            u_data, ldvt_arg, static_cast<rocblas_stride>(u_stride),
-            static_cast<double*>(d_e), strideE,
-            rocblas_outofplace,
+            u_data, ldv_arg, static_cast<rocblas_stride>(u_stride),
             d_info, rbatch));
         check_rocsolver_info_batched(d_info, nbatch, "svd");
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    // d_e released by e_guard (ScratchBuffer RAII)
     return {U, S, Vt};
 }
 

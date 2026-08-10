@@ -302,12 +302,17 @@ void train_gpt(Device device) {
             Variable input_var(inputs, true);
             auto logits = model->forward(input_var);
 
-            // Reshape for cross entropy: [batch * seq, vocab]
-            auto logits_flat = logits.tensor().reshape({actual_batch * seq_len, vocab_size});
+            // Reshape for cross entropy: [batch * seq, vocab]. Use the
+            // Variable-level reshape (tenzor::reshape) so the grad_fn chain
+            // back to the model parameters is preserved. logits.tensor()-
+            // reshape(...) then re-wrapping in a fresh Variable(..., true)
+            // severs the graph -- the re-wrap is a leaf with no upstream
+            // grad_fn, so loss.backward() populates only that leaf's grad and
+            // the model parameters receive ZERO grads (the model never learns).
+            auto logits_flat = reshape(logits, {actual_batch * seq_len, vocab_size});
             auto targets_flat = targets.reshape({actual_batch * seq_len});
 
-            Variable logits_var(logits_flat, true);
-            auto loss = criterion(logits_var, targets_flat);
+            auto loss = criterion(logits_flat, targets_flat);
 
             loss.backward();
             optimizer.step();

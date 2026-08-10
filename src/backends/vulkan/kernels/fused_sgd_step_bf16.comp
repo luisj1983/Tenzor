@@ -16,7 +16,7 @@ layout(push_constant) uniform PushConstants {
     float dampening;
     uint nesterov;
     uint has_momentum;
-    uint padding;
+    uint first_step;      // 1 = initialise buf = g with NO dampening (PyTorch SGD)
 } params;
 
 // Helper to read bfloat16 from packed buffer
@@ -46,7 +46,13 @@ void main() {
         }
 
         if (params.has_momentum != 0 && params.momentum > 0.0) {
-            float buf = params.momentum * momentum_buf[elem0] + (1.0 - params.dampening) * g;
+            // PyTorch SGD: first momentum step initialises buf = g with NO dampening.
+            float buf;
+            if (params.first_step != 0) {
+                buf = g;
+            } else {
+                buf = params.momentum * momentum_buf[elem0] + (1.0 - params.dampening) * g;
+            }
             momentum_buf[elem0] = buf;
             if (params.nesterov != 0) {
                 g = g + params.momentum * buf;
@@ -68,7 +74,13 @@ void main() {
         }
 
         if (params.has_momentum != 0 && params.momentum > 0.0) {
-            float buf = params.momentum * momentum_buf[elem1] + (1.0 - params.dampening) * g;
+            // PyTorch SGD: first momentum step initialises buf = g with NO dampening.
+            float buf;
+            if (params.first_step != 0) {
+                buf = g;
+            } else {
+                buf = params.momentum * momentum_buf[elem1] + (1.0 - params.dampening) * g;
+            }
             momentum_buf[elem1] = buf;
             if (params.nesterov != 0) {
                 g = g + params.momentum * buf;

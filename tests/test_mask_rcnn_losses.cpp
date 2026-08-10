@@ -376,14 +376,21 @@ TEST_P(MaskRCNNLossTest, GradientFlow) {
     auto model = mask_rcnn_resnet50_fpn(80, false);
     model->train();
 
-    Tensor images_t({1, 3, 800, 800}, DType::Float32, Device::cpu());
+    // 512x512, not the 800x800 used by the forward-shape test: this is a
+    // TRAINING test (forward_train + backward + grad-flow through every head),
+    // and 800x800 training exceeds the 8 GB cuda backend (cudnn conv footprint +
+    // saved activations + grads) -- the vulkan/oneapi backends fit 800x800 but
+    // cuda does not. The test's contract is grad-flow regression guarding,
+    // which holds at any size yielding positive ROIs, so size it to fit all
+    // backends on the normal (non-checkpointed) training path.
+    Tensor images_t({1, 3, 512, 512}, DType::Float32, Device::cpu());
     images_t.fill_(0.5f);
     Variable images(images_t.to(device), true);
 
     Tensor gt_boxes_cpu({1, 2, 4}, DType::Float32, Device::cpu());
     auto* boxes_data = gt_boxes_cpu.data<float>();
-    boxes_data[0] = 100.0f; boxes_data[1] = 100.0f; boxes_data[2] = 300.0f; boxes_data[3] = 300.0f;
-    boxes_data[4] = 400.0f; boxes_data[5] = 400.0f; boxes_data[6] = 600.0f; boxes_data[7] = 600.0f;
+    boxes_data[0] = 64.0f; boxes_data[1] = 64.0f; boxes_data[2] = 192.0f; boxes_data[3] = 192.0f;
+    boxes_data[4] = 256.0f; boxes_data[5] = 256.0f; boxes_data[6] = 384.0f; boxes_data[7] = 384.0f;
     Tensor gt_boxes = gt_boxes_cpu.to(device);
 
     Tensor gt_labels_cpu({1, 2}, DType::Int64, Device::cpu());
@@ -394,18 +401,18 @@ TEST_P(MaskRCNNLossTest, GradientFlow) {
     // Non-trivial mask regions so the mask-branch loss is meaningfully non-zero
     // whenever positive ROIs are sampled — required for the mask-head gradient
     // assertion below to be a genuine regression guard rather than a no-op.
-    Tensor gt_masks_cpu({1, 2, 800, 800}, DType::Float32, Device::cpu());
+    Tensor gt_masks_cpu({1, 2, 512, 512}, DType::Float32, Device::cpu());
     {
         auto* masks_data = gt_masks_cpu.data<float>();
         std::fill(masks_data, masks_data + gt_masks_cpu.numel(), 0.0f);
-        for (int64_t h = 100; h < 300; ++h) {
-            for (int64_t w = 100; w < 300; ++w) {
-                masks_data[0 * 800 * 800 + h * 800 + w] = 1.0f;  // object 0
+        for (int64_t h = 64; h < 192; ++h) {
+            for (int64_t w = 64; w < 192; ++w) {
+                masks_data[0 * 512 * 512 + h * 512 + w] = 1.0f;  // object 0
             }
         }
-        for (int64_t h = 400; h < 600; ++h) {
-            for (int64_t w = 400; w < 600; ++w) {
-                masks_data[1 * 800 * 800 + h * 800 + w] = 1.0f;  // object 1
+        for (int64_t h = 256; h < 384; ++h) {
+            for (int64_t w = 256; w < 384; ++w) {
+                masks_data[1 * 512 * 512 + h * 512 + w] = 1.0f;  // object 1
             }
         }
     }

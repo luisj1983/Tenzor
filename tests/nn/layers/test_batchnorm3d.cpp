@@ -125,9 +125,18 @@ TEST_P(BatchNorm3dTest, BackwardPassGradientFlow) {
     auto input = Variable(randn({4, 4, 2, 4, 4}, DType::Float32, device), true);
     auto output = bn.forward(input);
 
-    auto out_shape = output.shape();
-    std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    output.backward(ones(shape_vec, DType::Float32, device));
+    // A uniform seed gradient (ones, equivalently sum(out).backward()) is
+    // degenerate for BatchNorm in train mode: with affine=true and
+    // weight=ones/bias=zeros the output is zero-mean, so the true input
+    // gradient is identically 0 (the backward projects out the constant
+    // component) and the weight gradient collapses too — a broken backward
+    // kernel would pass identically to a correct one. Use a non-degenerate
+    // scalar loss, sum(out*out + out); its seed gradient 2*out+1 is not in
+    // span{1, x_hat} (the eps in invstd leaves a residual), so input, weight
+    // and bias gradients all flow. Mirrors the note in
+    // test_grad_nn_parity.cpp::BatchNorm2dBackward.
+    auto loss = tenzor::sum(output * output + output);
+    loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
 

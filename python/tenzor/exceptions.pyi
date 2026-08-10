@@ -54,7 +54,7 @@ class TensorBoardError(TenzorError):
 class IndexError(_builtins.IndexError):
     """Raised on out-of-range indexing of a tensor or sequence."""
 
-class MemoryError(_builtins.MemoryError):
+class MemoryError(TenzorError, _builtins.MemoryError):
     """Raised when a tensor allocation cannot be satisfied."""
 
 class NotImplementedError(_builtins.NotImplementedError):

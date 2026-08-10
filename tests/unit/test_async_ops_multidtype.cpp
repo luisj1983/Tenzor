@@ -210,6 +210,14 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncOperationsNonBlocking) {
     auto a = createRandn({512, 512});
     auto b = createRandn({512, 512});
 
+    // Warm up the per-device stream pool: the first async op on a device lazily
+    // creates its streams (hipStreamCreate x STREAMS_PER_DEVICE on rocm, etc.),
+    // a one-time init whose cost (notably ~13ms on the rocm/HIP runtime) is
+    // unrelated to per-op submission latency. Drive it before timing so the
+    // measurement reflects the steady-state "submission is non-blocking"
+    // contract the test is actually asserting, not first-use pool creation.
+    async_matmul(a, b).wait();
+
     auto start = std::chrono::high_resolution_clock::now();
     auto future = async_matmul(a, b);
     auto after_submit = std::chrono::high_resolution_clock::now();

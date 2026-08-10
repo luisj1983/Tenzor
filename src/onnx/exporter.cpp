@@ -3557,6 +3557,30 @@ auto ONNXExporter::convert_jit_node_to_onnx(
             onnx_node.set_attr("transB", static_cast<int64_t>(1));
             break;
         }
+        case jit::OpType::Slice: {
+            // JIT Slice (single-axis) stores start/end/dim as scalar int attrs.
+            // ONNX Slice (opset >= 10) takes starts/ends/axes as int64 INPUT
+            // initializers, NOT attributes. The data input was already added
+            // above; emit the three control tensors so the round-trip is
+            // importable by convert_slice (which requires >= 3 inputs and
+            // rejects the legacy attribute form -- without this the exporter
+            // emitted a 1-input Slice node that the importer cannot load).
+            int64_t dim   = node->get_int_attr("dim");
+            int64_t start = node->get_int_attr("start");
+            int64_t end   = node->get_int_attr("end");
+            auto make_i64 = [&](const char* suffix, int64_t v) -> std::string {
+                std::string name =
+                    graph_.get_unique_name(node_name + std::string("_") + suffix);
+                Tensor t({1}, DType::Int64, Device::cpu());
+                *t.data<int64_t>() = v;
+                add_initializer_tensor(t, name);
+                return name;
+            };
+            onnx_node.add_input(make_i64("starts", start));
+            onnx_node.add_input(make_i64("ends", end));
+            onnx_node.add_input(make_i64("axes", dim));
+            break;
+        }
         case jit::OpType::Conv2d: {
             // Map JIT conv attributes to ONNX Conv attributes
             auto kernel = node->get_vec_attr("kernel_size");

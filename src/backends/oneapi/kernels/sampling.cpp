@@ -9,6 +9,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
+#include "tenzor/ops/transform.hpp"  // tenzor::expand / reshape for N-D cdist
 #include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <chrono>
@@ -23,6 +24,9 @@ namespace oneapi {
 // Forward declaration: topk implementation lives in reduction.cpp.
 auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
                  bool sorted, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+
+// Forward declaration: sum implementation lives in reduction.cpp.
+auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
 
 namespace {
 
@@ -104,6 +108,24 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                                  "num_categories without replacement");
     }
 
+    // Every row must have a positive probability sum (matches CPU/CUDA, which
+    // throw "sum of probabilities must be > 0"). Without this, all-zero rows
+    // produce arbitrary/garbage indices on OneAPI (a degenerate CDF for the
+    // with-replacement path, +inf keys for without-replacement) while CPU
+    // errors. Previously this backend silently coerced a non-positive per-row
+    // total to 1.0 and emitted garbage — a workaround, not a fix.
+    {
+        Tensor row_sums = sum_kernel(input, /*dim=*/1, /*keepdim=*/false, queue);
+        std::vector<float> sums(static_cast<size_t>(batch_size));
+        queue.memcpy(sums.data(), get_data_ptr<const float>(row_sums),
+                     batch_size * sizeof(float)).wait();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            if (!(sums[b] > 0.0f)) {
+                throw std::runtime_error("multinomial: sum of probabilities must be > 0");
+            }
+        }
+    }
+
     // Without replacement: Efraimidis-Spirakis weighted reservoir sampling
     // (Gumbel-top-k). For each (b, i) we compute key[b, i] = -log(U) / w
     // and select the `num_samples` smallest keys per row. Equivalent in
@@ -170,7 +192,7 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
         // Read total (single scalar D2H sync — necessary metadata)
         float total = 0.0f;
         queue.memcpy(&total, cdf_ptr + nc - 1, sizeof(float)).wait();
-        if (total <= 0.0f) total = 1.0f;
+        // total > 0 is guaranteed by the up-front row-sum validation above.
 
         // Sample via binary search
         uint64_t batch_seed = seed + b * 1000003;
@@ -579,6 +601,46 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
     auto b = x2.contiguous();
     if (a.dtype() != compute_dtype) a = a.to(compute_dtype);
     if (b.dtype() != compute_dtype) b = b.to(compute_dtype);
+
+    // General N-D path with batch broadcasting (matches CPU cdist, mirrors the
+    // CUDA path in src/backends/cuda/kernels/advanced.cu): the last two dims are
+    // the matrix (P/R, M); all leading dims are the batch, which broadcasts when
+    // one side is 1. Normalize to a matching-batch 3D problem, recurse into the
+    // 3D path, then reshape the result back. (Previously this backend threw for
+    // ndim>3 and required an exactly-matching 3D batch, diverging from CPU/CUDA
+    // — AllBackends/CDistTest.ND4DMatchesCPU and BatchOneBroadcastMatchesCPU.)
+    {
+        const int64_t an = a.ndim(), bn = b.ndim();
+        if (an < 2 || bn < 2) throw std::runtime_error("cdist: inputs must have >= 2 dims");
+        const bool nd_general = an > 3 || bn > 3 || an != bn ||
+            (an == 3 && bn == 3 && a.shape()[0] != b.shape()[0]);
+        if (nd_general) {
+            std::vector<int64_t> batchA(a.shape().begin(), a.shape().end() - 2);
+            std::vector<int64_t> batchB(b.shape().begin(), b.shape().end() - 2);
+            const size_t bl = std::max(batchA.size(), batchB.size());
+            std::vector<int64_t> batch(bl);
+            for (size_t i = 0; i < bl; ++i) {
+                int64_t da = i < batchA.size() ? batchA[batchA.size() - 1 - i] : 1;
+                int64_t db = i < batchB.size() ? batchB[batchB.size() - 1 - i] : 1;
+                if (da != db && da != 1 && db != 1)
+                    throw std::runtime_error("cdist: batch dimensions are not broadcastable");
+                batch[bl - 1 - i] = (da == 1) ? db : da;
+            }
+            const int64_t P = a.shape()[an - 2], M = a.shape()[an - 1];
+            const int64_t R = b.shape()[bn - 2];
+            std::vector<int64_t> aT = batch; aT.push_back(P); aT.push_back(M);
+            std::vector<int64_t> bT = batch; bT.push_back(R); bT.push_back(M);
+            Tensor aE = ::tenzor::expand(a, aT).contiguous();
+            Tensor bE = ::tenzor::expand(b, bT).contiguous();
+            int64_t Bp = 1; for (int64_t d : batch) Bp *= d;
+            Tensor a3 = ::tenzor::reshape(aE, {Bp, P, M});
+            Tensor b3 = ::tenzor::reshape(bE, {Bp, R, M});
+            Tensor r3 = cdist_kernel(a3, b3, p, queue);
+            std::vector<int64_t> rShape = batch; rShape.push_back(P); rShape.push_back(R);
+            Tensor r = ::tenzor::reshape(r3, rShape);
+            return (orig_dtype == compute_dtype) ? r : r.to(orig_dtype);
+        }
+    }
 
     // Accept 2D (P, M) or 3D (B, P, M); 2D treated as B=1
     int64_t B, P, M, R;
@@ -1364,6 +1426,16 @@ auto pdist_kernel(const Tensor& input, double p, sycl::queue& queue) -> Tensor {
             } else if (p_f == T(1)) {
                 for (int64_t d = 0; d < D; d++) {
                     sum += sycl::fabs(data[i * D + d] - data[j * D + d]);
+                }
+                out_ptr[idx] = sum;
+            } else if (sycl::isinf(p_f)) {
+                // p = inf: Chebyshev distance = max_d |x_i,d - x_j,d|. The generic
+                // pow() path computes pow(diff, inf) -> inf, then pow(inf, 0) -> 1,
+                // returning all-ones instead of the max — matches CPU/CUDA's isinf
+                // branch. (PdistChebyshevInfinity expects [4, 2, 6].)
+                for (int64_t d = 0; d < D; d++) {
+                    T a = sycl::fabs(data[i * D + d] - data[j * D + d]);
+                    if (a > sum) sum = a;
                 }
                 out_ptr[idx] = sum;
             } else {

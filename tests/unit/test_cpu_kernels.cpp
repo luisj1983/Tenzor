@@ -385,6 +385,11 @@ TEST(CPUKernelsTest, DivFloat64_Basic) {
 }
 
 TEST(CPUKernelsTest, DivInt32_Basic) {
+    // div() is true division (PyTorch `/` semantics): integer inputs are
+    // promoted to the default float dtype so div(Int32{20}, Int32{5}) yields
+    // 4.0 as Float32, not a truncated Int32 quotient (see div() in
+    // src/ops/math.cpp -- "div(Int32{3}, Int32{2}) must be 1.5, not 1").
+    // The result is therefore read as float, matching that contract.
     auto a = ones({2, 3}, DType::Int32);
     auto b = ones({2, 3}, DType::Int32);
 
@@ -396,10 +401,11 @@ TEST(CPUKernelsTest, DivInt32_Basic) {
     }
 
     auto c = div(a, b);
-    auto c_data = c.data<int32_t>();
+    ASSERT_EQ(c.dtype(), DType::Float32) << "true division must promote Int32 to Float32";
+    auto c_data = c.data<float>();
 
     for (int i = 0; i < 6; i++) {
-        EXPECT_EQ(c_data[i], 4) << "Mismatch at index " << i;
+        EXPECT_FLOAT_EQ(c_data[i], 4.0f) << "Mismatch at index " << i;
     }
 }
 

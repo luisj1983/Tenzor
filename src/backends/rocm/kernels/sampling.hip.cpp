@@ -9,6 +9,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"  // tenzor::get_global_seed (manual_seed reproducibility)
+#include "tenzor/ops/transform.hpp"  // tenzor::expand / reshape for N-D cdist
 #include "../hip_buffer.hpp"  // HipBuffer (RAII device scratch)
 #include <hip/hip_runtime.h>
 #include <hipcub/hipcub.hpp>
@@ -24,6 +25,9 @@ namespace rocm {
 // Forward declaration: defined in sort.hip.cpp.
 auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
                  bool sorted, hipStream_t stream) -> std::pair<Tensor, Tensor>;
+
+// Forward declaration: defined in reduction.hip.cpp.
+auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
 
 #ifndef HIP_CHECK
 #define HIP_CHECK(call) do { \
@@ -484,6 +488,25 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
             std::to_string(num_categories) + ") when replacement=false");
     }
 
+    // Every row must have a positive probability sum (matches CPU/CUDA, which
+    // throw "sum of probabilities must be > 0"). Without this, all-zero rows
+    // produce arbitrary/garbage indices on ROCm (a degenerate CDF for the
+    // with-replacement path, +inf Gumbel keys for without-replacement) while
+    // CPU errors. Previously this backend silently coerced a non-positive
+    // per-row total to 1.0 and emitted garbage — a workaround, not a fix.
+    {
+        Tensor row_sums = sum_kernel(input, /*dim=*/1, /*keepdim=*/false, stream);
+        std::vector<float> sums(static_cast<size_t>(batch_size));
+        HIP_CHECK(hipMemcpyAsync(sums.data(), row_sums.data<float>(),
+            batch_size * sizeof(float), hipMemcpyDeviceToHost, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        for (int64_t b = 0; b < batch_size; ++b) {
+            if (!(sums[b] > 0.0f)) {
+                throw std::runtime_error("multinomial: sum of probabilities must be > 0");
+            }
+        }
+    }
+
     uint64_t seed = ::tenzor::get_global_seed();  // reproducible under manual_seed(); see Generator
 
     if (!replacement) {
@@ -540,7 +563,7 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
         HIP_CHECK(hipMemcpyAsync(&total, cdf_ptr + num_categories - 1, sizeof(float),
                                   hipMemcpyDeviceToHost, stream));
         HIP_CHECK(hipStreamSynchronize(stream));
-        if (total <= 0.0f) total = 1.0f;
+        // total > 0 is guaranteed by the up-front row-sum validation above.
 
         int threads = 256;
         int blocks = static_cast<int>((num_samples + threads - 1) / threads);
@@ -788,6 +811,46 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
     auto b = x2.contiguous();
     if (a.dtype() != compute_dtype) a = a.to(compute_dtype);
     if (b.dtype() != compute_dtype) b = b.to(compute_dtype);
+
+    // General N-D path with batch broadcasting (matches CPU cdist, mirrors the
+    // CUDA path in src/backends/cuda/kernels/advanced.cu): the last two dims are
+    // the matrix (P/R, M); all leading dims are the batch, which broadcasts when
+    // one side is 1. Normalize to a matching-batch 3D problem, recurse into the
+    // 3D path, then reshape the result back. (Previously this backend threw for
+    // ndim>3 and required an exactly-matching 3D batch, diverging from CPU/CUDA
+    // — AllBackends/CDistTest.ND4DMatchesCPU and BatchOneBroadcastMatchesCPU.)
+    {
+        const int64_t an = a.ndim(), bn = b.ndim();
+        if (an < 2 || bn < 2) throw std::runtime_error("cdist: inputs must have >= 2 dims");
+        const bool nd_general = an > 3 || bn > 3 || an != bn ||
+            (an == 3 && bn == 3 && a.shape()[0] != b.shape()[0]);
+        if (nd_general) {
+            std::vector<int64_t> batchA(a.shape().begin(), a.shape().end() - 2);
+            std::vector<int64_t> batchB(b.shape().begin(), b.shape().end() - 2);
+            const size_t bl = std::max(batchA.size(), batchB.size());
+            std::vector<int64_t> batch(bl);
+            for (size_t i = 0; i < bl; ++i) {
+                int64_t da = i < batchA.size() ? batchA[batchA.size() - 1 - i] : 1;
+                int64_t db = i < batchB.size() ? batchB[batchB.size() - 1 - i] : 1;
+                if (da != db && da != 1 && db != 1)
+                    throw std::runtime_error("cdist: batch dimensions are not broadcastable");
+                batch[bl - 1 - i] = (da == 1) ? db : da;
+            }
+            const int64_t P = a.shape()[an - 2], M = a.shape()[an - 1];
+            const int64_t R = b.shape()[bn - 2];
+            std::vector<int64_t> aT = batch; aT.push_back(P); aT.push_back(M);
+            std::vector<int64_t> bT = batch; bT.push_back(R); bT.push_back(M);
+            Tensor aE = ::tenzor::expand(a, aT).contiguous();
+            Tensor bE = ::tenzor::expand(b, bT).contiguous();
+            int64_t Bp = 1; for (int64_t d : batch) Bp *= d;
+            Tensor a3 = ::tenzor::reshape(aE, {Bp, P, M});
+            Tensor b3 = ::tenzor::reshape(bE, {Bp, R, M});
+            Tensor r3 = cdist_kernel(a3, b3, p, stream);
+            std::vector<int64_t> rShape = batch; rShape.push_back(P); rShape.push_back(R);
+            Tensor r = ::tenzor::reshape(r3, rShape);
+            return (orig_dtype == compute_dtype) ? r : r.to(orig_dtype);
+        }
+    }
 
     // Accept 2D (P, M) or 3D (B, P, M); 2D treated as B=1
     int64_t B, P, M, R;
@@ -1141,6 +1204,16 @@ __global__ void pdist_kernel_impl(
     } else if (p == T(1)) {
         for (int64_t d = 0; d < D; d++) {
             sum += fabs(data[i * D + d] - data[j * D + d]);
+        }
+        output[idx] = sum;
+    } else if (isinf(p)) {
+        // p = inf: Chebyshev distance = max_d |x_i,d - x_j,d|. The generic
+        // pow() path computes pow(diff, inf) -> inf, then pow(inf, 0) -> 1,
+        // returning all-ones instead of the max — matches CPU/CUDA's isinf
+        // branch. (PdistChebyshevInfinity expects [4, 2, 6].)
+        for (int64_t d = 0; d < D; d++) {
+            T a = fabs(data[i * D + d] - data[j * D + d]);
+            if (a > sum) sum = a;
         }
         output[idx] = sum;
     } else {

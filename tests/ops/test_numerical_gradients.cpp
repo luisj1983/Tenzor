@@ -26,6 +26,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include <cmath>
+#include <algorithm>  // std::clamp
 
 using namespace tenzor;
 
@@ -42,11 +43,17 @@ protected:
     /// Create a small random CPU tensor as Variable
     auto make_var(std::vector<int64_t> shape, float low = -1.0f, float high = 1.0f) -> Variable {
         auto t = tenzor::randn(shape, DType::Float32, Device::cpu());
-        // Scale to [low, high] range
+        // Affinely map the standard-normal samples toward [low, high]. randn
+        // has unbounded support, so the affine map alone can still produce
+        // values OUTSIDE [low, high] -- including negatives, which are out of
+        // domain for log()/sqrt() and would nondeterministically NaN the
+        // gradcheck (a domain-violation failure, not an op bug). Clamp to the
+        // requested bounds so domain-restricted ops always see valid inputs.
         auto range = high - low;
         auto data = t.data<float>();
         for (int64_t i = 0; i < t.numel(); ++i) {
             data[i] = data[i] * range * 0.5f + (low + high) * 0.5f;
+            data[i] = std::clamp(data[i], low, high);
         }
         return Variable(t, true);
     }

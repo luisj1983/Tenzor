@@ -16,7 +16,7 @@ layout(push_constant) uniform PushConstants {
     float dampening;
     uint nesterov;        // 0=off, 1=on
     uint has_momentum;    // 0=no momentum buffer, 1=has momentum
-    uint padding;
+    uint first_step;      // 1 = initialise buf = g with NO dampening (PyTorch SGD)
 } params;
 
 void main() {
@@ -31,8 +31,17 @@ void main() {
     }
 
     if (params.has_momentum != 0 && params.momentum > 0.0) {
-        // buf = momentum * buf + (1 - dampening) * g
-        float buf = params.momentum * momentum_buf[gid] + (1.0 - params.dampening) * g;
+        // PyTorch SGD: on the very first momentum step the buffer is
+        // initialised to the (weight-decayed) gradient with NO dampening;
+        // dampening is only applied on subsequent steps. Applying
+        // (1 - dampening) on step 1 must match the CPU reference / torch.optim.SGD
+        // (and the CUDA/ROCm/OneAPI fused kernels).
+        float buf;
+        if (params.first_step != 0) {
+            buf = g;
+        } else {
+            buf = params.momentum * momentum_buf[gid] + (1.0 - params.dampening) * g;
+        }
         momentum_buf[gid] = buf;
 
         if (params.nesterov != 0) {

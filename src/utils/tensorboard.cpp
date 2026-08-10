@@ -234,16 +234,18 @@ SummaryWriter::~SummaryWriter() {
 }
 
 auto SummaryWriter::add_scalar(std::string_view tag, float value, int64_t step) -> void {
-    // Check is_open UNDER the lock: close() flushes and clears is_open while
-    // holding the mutex, so a pre-lock check could pass and then write to a
-    // closed stream after close() returns.
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    // Re-check under the lock: the early is_open fast-path above is racy with a
-    // concurrent close() that resets the stream/impl state.
-    if (!impl_->is_open) return;
+    // Early closed-writer check: throw before any work so a caller that uses
+    // the writer after close() gets the exception (matches add_histogram /
+    // add_image, which throw on the same condition). This unlocked check is
+    // racy with a concurrent close(); the locked re-check below handles that
+    // race by silently no-op-ing instead of writing to a closed stream.
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open check above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
 
     auto data = serialize_scalar(value);
     write_event(tag, data, step, /*is_scalar=*/true);
@@ -423,16 +425,18 @@ auto build_graph_def(const std::shared_ptr<Function>& root) -> GraphDefResult {
 
 auto SummaryWriter::add_graph(std::string_view model_name,
                              const Variable& output) -> void {
-    // Check is_open UNDER the lock: close() flushes and clears is_open while
-    // holding the mutex, so a pre-lock check could pass and then write to a
-    // closed stream after close() returns.
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    // Re-check under the lock: the early is_open fast-path above is racy with a
-    // concurrent close() that resets the stream/impl state.
-    if (!impl_->is_open) return;
+    // Early closed-writer check: throw before any work so a caller that uses
+    // the writer after close() gets the exception (matches add_histogram /
+    // add_image, which throw on the same condition). This unlocked check is
+    // racy with a concurrent close(); the locked re-check below handles that
+    // race by silently no-op-ing instead of writing to a closed stream.
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    // Re-check under the lock: the early is_open check above is racy with a
+    // concurrent close() that resets the stream/impl state.
+    if (!impl_->is_open) return;
 
     // Walk the autograd graph rooted at `output.grad_fn()` and build a real
     // GraphDef protobuf message.

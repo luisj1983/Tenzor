@@ -612,6 +612,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     // CTC Loss
     names[static_cast<size_t>(OpId::CTCLossForward)] = "ctc_loss_forward";
 
+    // Fused multi-tensor (foreach)
+    names[static_cast<size_t>(OpId::ForeachAdd)] = "foreach_add";
+
     return names;
 }();
 
@@ -626,7 +629,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 490;
+inline constexpr size_t EXPECTED_NAMED_OPS = 491;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

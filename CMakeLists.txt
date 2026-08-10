@@ -654,11 +654,47 @@ if(TENZOR_BUILD_PYTHON)
         # `torch_interop` submodule on TENZOR_HAS_TORCH.
         if(TENZOR_BUILD_TORCH_INTEROP)
             find_package(Torch REQUIRED)
-            target_sources(tenzor_python PRIVATE python/torch_interop.cpp)
-            target_link_libraries(tenzor_python PRIVATE "${TORCH_LIBRARIES}")
-            target_include_directories(tenzor_python PRIVATE ${TORCH_INCLUDE_DIRS})
+            # Lazy-load design: the libtorch-backed interop is compiled into a
+            # SEPARATE plugin shared library (tenzor_torch_interop) that
+            # tenzor_core dlopens on first tenzor.torch_interop use. tenzor_core
+            # itself does NOT link libtorch, so `import tenzor` does not pull
+            # libtorch (and its libmpi/libfabric transitive deps) -- keeping
+            # non-torch python imports working even when libtorch cannot load
+            # (e.g. oneAPI's libfabric shadowing the system one). The TENZOR_HAS_TORCH
+            # define on tenzor_python only compiles the dlopen-based lazy loader
+            # in bindings.cpp (no torch headers, no libtorch link).
             target_compile_definitions(tenzor_python PRIVATE TENZOR_HAS_TORCH)
-            message(STATUS "  PyTorch interop:      ON (libtorch found)")
+            # THPVariable_Wrap/Unpack (used by the plugin's pybind boundary
+            # lambdas to convert at::Tensor <-> py::object) live in
+            # libtorch_python, which Torch_LIBRARIES omits because it is a
+            # Python-extension library. Locate it for the plugin link below.
+            find_library(TORCH_PYTHON_LIB torch_python)
+            if(NOT TORCH_PYTHON_LIB)
+                message(FATAL_ERROR
+                    "TENZOR_BUILD_TORCH_INTEROP=ON requires libtorch_python "
+                    "(provides THPVariable_Wrap/Unpack) but it was not found")
+            endif()
+
+            # The lazy interop plugin. Built beside tenzor_core.so (same
+            # LIBRARY_OUTPUT_DIRECTORY) so the loader can derive its path from
+            # tenzor_core.so's location via dladdr.
+            pybind11_add_module(tenzor_torch_interop python/torch_interop.cpp)
+            target_link_libraries(tenzor_torch_interop
+                PRIVATE tenzor_core "${TORCH_LIBRARIES}" ${TORCH_PYTHON_LIB})
+            target_include_directories(tenzor_torch_interop
+                PRIVATE ${TORCH_INCLUDE_DIRS})
+            if(TARGET tenzor_backend_cuda)
+                # torch_interop.cpp calls the CUDA runtime API directly for
+                # CUDA<->torch copies; tenzor_backend_cuda propagates the CUDA
+                # include dirs + cudart link.
+                target_link_libraries(tenzor_torch_interop PRIVATE tenzor_backend_cuda)
+            endif()
+            set_target_properties(tenzor_torch_interop PROPERTIES
+                OUTPUT_NAME "tenzor_torch_interop"
+                LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/python/tenzor")
+            # Build the plugin whenever tenzor_python is built.
+            add_dependencies(tenzor_python tenzor_torch_interop)
+            message(STATUS "  PyTorch interop:      ON (libtorch found, lazy plugin)")
         endif()
 
         if(TENZOR_USE_MLIR_JIT)

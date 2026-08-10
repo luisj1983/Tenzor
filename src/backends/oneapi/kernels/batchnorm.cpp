@@ -238,153 +238,12 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
 auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
                           const Tensor& invstd, const Tensor& gamma, float epsilon, sycl::queue& queue)
                           -> std::tuple<Tensor, Tensor, Tensor> {
-    // oneDNN BatchNorm backward descriptors are f32-only; delegate non-f32 to SYCL
-    if (input.dtype() != DType::Float32) {
-        return batchnorm2d_backward_sycl(grad_output, input, mean, invstd, gamma, epsilon, queue);
-    }
-
-    // Reconstruct variance from invstd device-side. oneDNN requires
-    // DNNL_ARG_VARIANCE, but we never want to round-trip through the host:
-    // one SYCL kernel over C elements is far cheaper than 4 host dispatches.
-    Tensor variance(std::vector<int64_t>(invstd.shape().begin(), invstd.shape().end()),
-                    invstd.dtype(), invstd.device());
-    {
-        const float* invstd_ptr = get_data_ptr<const float>(invstd);
-        float*       var_ptr    = get_data_ptr<float>(variance);
-        const float  eps_v      = epsilon;
-        int64_t      C_loc      = invstd.numel();
-        queue.parallel_for(sycl::range<1>(C_loc), [=](sycl::id<1> i) {
-            float iv = invstd_ptr[i];
-            var_ptr[i] = 1.0f / (iv * iv) - eps_v;
-        }).wait();
-    }
-
-    using namespace dnnl;
-
-    auto shape = input.shape();
-    if (shape.size() != 4) {
-        throw std::invalid_argument("BatchNorm2d requires 4D input (N, C, H, W)");
-    }
-
-    const int64_t N = shape[0];
-    const int64_t C = shape[1];
-    const int64_t H = shape[2];
-    const int64_t W = shape[3];
-
-    Tensor grad_input(std::vector<int64_t>{N, C, H, W}, input.dtype(), input.device());
-    Tensor grad_gamma({C}, input.dtype(), input.device());
-    Tensor grad_beta({C}, input.dtype(), input.device());
-
-    // Create oneDNN engine and stream
-    auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
-    auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
-
-    // Memory descriptors
-    memory::dims src_dims = {N, C, H, W};
-    memory::dims scale_shift_dims = {C};
-
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
-    auto diff_dst_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
-    auto diff_src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
-    auto scale_shift_md = memory::desc(scale_shift_dims, memory::data_type::f32, memory::format_tag::x);
-
-    // Forward descriptor (needed for backward)
-    // oneDNN v3: forward hint pd (src + dst; use_scale|use_shift replaces use_scale_shift).
-    auto bn_fwd_pd = batch_normalization_forward::primitive_desc(
-        dnnl_engine, prop_kind::forward_training,
-        src_md, src_md, epsilon,
-        normalization_flags::use_scale | normalization_flags::use_shift);
-
-    // Backward primitive_desc (v3): diff_src, diff_dst, src, eps, flags, fwd hint.
-    auto bn_bwd_pd = batch_normalization_backward::primitive_desc(
-        dnnl_engine, prop_kind::backward,
-        diff_src_md, diff_dst_md, src_md, epsilon,
-        normalization_flags::use_scale | normalization_flags::use_shift,
-        bn_fwd_pd);
-
-    // Wrap tensors
-    auto src_mem = sycl_interop::make_memory(bn_bwd_pd.src_desc(), dnnl_engine,
-                                              sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(input.data_ptr()));
-
-    auto diff_dst_mem = sycl_interop::make_memory(bn_bwd_pd.diff_dst_desc(), dnnl_engine,
-                                                   sycl_interop::memory_kind::usm,
-                                                   const_cast<void*>(grad_output.data_ptr()));
-
-    auto diff_src_mem = sycl_interop::make_memory(bn_bwd_pd.diff_src_desc(), dnnl_engine,
-                                                   sycl_interop::memory_kind::usm,
-                                                   const_cast<void*>(grad_input.data_ptr()));
-
-    auto mean_mem = sycl_interop::make_memory(scale_shift_md, dnnl_engine,
-                                               sycl_interop::memory_kind::usm,
-                                               const_cast<void*>(mean.data_ptr()));
-
-    auto var_mem = sycl_interop::make_memory(scale_shift_md, dnnl_engine,
-                                              sycl_interop::memory_kind::usm,
-                                              const_cast<void*>(variance.data_ptr()));
-
-    // Scale-shift for forward (always f32 for oneDNN)
-    Tensor scale_shift({2, C}, DType::Float32, input.device());
-    float* ss_ptr = get_data_ptr<float>(scale_shift);
-    const float* gamma_ptr = get_data_ptr<const float>(gamma);
-
-    queue.parallel_for<BatchNormScaleShiftBwdKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> i) {
-        ss_ptr[i] = gamma_ptr[i];
-        ss_ptr[C + i] = 0.0f;  // Beta not used in backward
-    });
-
-    // oneDNN v3: separate scale and shift buffers (views into the packed {2,C}
-    // scale_shift tensor — scale at [0,C), shift at [C,2C)).
-    auto scale_mem = sycl_interop::make_memory(
-        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
-        static_cast<void*>(ss_ptr));
-    auto shift_mem = sycl_interop::make_memory(
-        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
-        static_cast<void*>(ss_ptr + C));
-
-    // Diff scale-shift for gradients (always f32 for oneDNN). v3: separate
-    // diff_scale and diff_shift buffers (views into the packed {2,C} tensor).
-    Tensor diff_scale_shift({2, C}, DType::Float32, input.device());
-    float* diff_ss_base = get_data_ptr<float>(diff_scale_shift);
-    auto diff_scale_mem = sycl_interop::make_memory(
-        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
-        static_cast<void*>(diff_ss_base));
-    auto diff_shift_mem = sycl_interop::make_memory(
-        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
-        static_cast<void*>(diff_ss_base + C));
-
-    // Execute backward
-    auto bn_bwd_prim = batch_normalization_backward(bn_bwd_pd);
-    bn_bwd_prim.execute(dnnl_stream, {
-        {DNNL_ARG_SRC, src_mem},
-        {DNNL_ARG_MEAN, mean_mem},
-        {DNNL_ARG_VARIANCE, var_mem},
-        {DNNL_ARG_DIFF_DST, diff_dst_mem},
-        {DNNL_ARG_SCALE, scale_mem},
-        {DNNL_ARG_DIFF_SRC, diff_src_mem},
-        {DNNL_ARG_DIFF_SCALE, diff_scale_mem},
-        {DNNL_ARG_DIFF_SHIFT, diff_shift_mem}
-    });
-
-    dnnl_stream.wait();
-
-    // Extract grad_gamma and grad_beta
-    float* diff_ss_ptr = get_data_ptr<float>(diff_scale_shift);
-    float* grad_gamma_ptr = get_data_ptr<float>(grad_gamma);
-    float* grad_beta_ptr = get_data_ptr<float>(grad_beta);
-
-    queue.parallel_for<BatchNormExtractGradKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> i) {
-        grad_gamma_ptr[i] = diff_ss_ptr[i];
-        grad_beta_ptr[i] = diff_ss_ptr[C + i];
-    });
-
-    // The extract kernel reads diff_scale_shift (a function-local USM tensor) and
-    // writes the USM-shared grad_gamma/grad_beta. Drain the queue before returning
-    // so the kernel finishes before diff_scale_shift/scale_shift are destroyed
-    // (use-after-free) and before the host reads stale gradients.
-    queue.wait_and_throw();
-
-    return {grad_input, grad_gamma, grad_beta};
+    // The oneDNN batch_normalization_backward primitive silently writes zero to
+    // diff_src (grad_input) when executed via SYCL interop on a non-Intel CPU
+    // SYCL device (confirmed via host readback; SeveranceSweep.BatchNorm2dGradFlows
+    // /oneapi). Route every dtype through the pure-SYCL kernels instead — they
+    // are bit-identical to the prior f64/f16/bf16 paths and don't depend on oneDNN.
+    return batchnorm2d_backward_sycl(grad_output, input, mean, invstd, gamma, epsilon, queue);
 }
 
 // ============================================================================
@@ -528,7 +387,48 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
     Tensor grad_gamma({C}, input.dtype(), input.device());
     Tensor grad_beta({C}, input.dtype(), input.device());
 
-    if (input.dtype() == DType::Float64) {
+    if (input.dtype() == DType::Float32) {
+        // Pure-SYCL f32 backward. The oneDNN batch_normalization_backward
+        // primitive, executed via SYCL interop on a non-Intel CPU SYCL device,
+        // silently writes zero to diff_src (grad_input) — confirmed via
+        // host-side readback (SeveranceSweep.BatchNorm2dGradFlows/oneapi). The
+        // self-contained SYCL kernels below are bit-identical to the f64 path
+        // and don't depend on oneDNN, so they replace the oneDNN f32 path.
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* mean_ptr = get_data_ptr<const float>(mean);
+        const float* invstd_ptr = get_data_ptr<const float>(invstd);
+        const float* gamma_ptr = get_data_ptr<const float>(gamma);
+        float* grad_in_ptr = get_data_ptr<float>(grad_input);
+        float* grad_gamma_ptr = get_data_ptr<float>(grad_gamma);
+        float* grad_beta_ptr = get_data_ptr<float>(grad_beta);
+
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum_go = 0.0f, sum_go_norm = 0.0f;
+            const float m = mean_ptr[c], std_inv = invstd_ptr[c];
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t hw = 0; hw < spatial; ++hw) {
+                    const int64_t idx = ((n * C + c) * spatial) + hw;
+                    sum_go += grad_out_ptr[idx];
+                    sum_go_norm += grad_out_ptr[idx] * (in_ptr[idx] - m) * std_inv;
+                }
+            grad_gamma_ptr[c] = sum_go_norm;
+            grad_beta_ptr[c] = sum_go;
+        }).wait();
+
+        // The input gradient kernel reads grad_gamma and grad_beta written above
+        queue.wait_and_throw();
+
+        const float scale = 1.0f / static_cast<float>(N * spatial);
+        queue.parallel_for<BatchNorm2dBackwardInputKernelFloat32>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const float std_inv = invstd_ptr[c];
+            const int64_t i = ((n * C + c) * spatial) + hw;
+            const float x_norm = (in_ptr[i] - mean_ptr[c]) * std_inv;
+            grad_in_ptr[i] = gamma_ptr[c] * std_inv * (grad_out_ptr[i] -
+                grad_beta_ptr[c] * scale - x_norm * grad_gamma_ptr[c] * scale);
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
         const double* in_ptr = get_data_ptr<const double>(input);
         const double* mean_ptr = get_data_ptr<const double>(mean);

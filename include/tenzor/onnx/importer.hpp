@@ -116,6 +116,13 @@ private:
     auto load_initializers(const ONNXGraphData& graph) -> void;
     auto convert_node(const ONNXImportNode& node) -> std::optional<std::shared_ptr<nn::Module>>;
 
+    // Wrap a single-input functional op (Unsqueeze/Squeeze/Slice) that lives on
+    // the runtime activation path as an executable nn::Module so it joins the
+    // Sequential chain instead of being dropped after eager shape propagation.
+    // Returns nullopt for ops whose data input is a constant initializer (those
+    // stay constant-folded) or for op types this does not handle.
+    auto make_functional_module(const ONNXImportNode& node) -> std::optional<std::shared_ptr<nn::Module>>;
+
     // Tensor operations
     auto convert_add(const ONNXImportNode& node) -> void;
     auto convert_sub(const ONNXImportNode& node) -> void;

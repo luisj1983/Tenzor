@@ -1657,11 +1657,37 @@ auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor
         return result.to(bias_table.dtype());
     }
 
+    // Canonical contract (matches the CUDA and ROCm kernels, and the model's
+    // own index_select path in src/nn/layers/vision.cpp:220-239):
+    //   bias_table   : [table_entries, num_heads]  (table entries in dim 0)
+    //   rel_pos_index: [num_positions, num_positions], int64; each value is a
+    //                  row index into bias_table (dim 0), range
+    //                  [0, table_entries)
+    //   output       : [num_positions, num_positions, num_heads]
+    //   out[i, j, h] = bias_table[rel_pos_index[i, j], h]
+    // The previous CPU kernel transposed this (treated bias_table as
+    // [num_heads, table_size] and emitted [num_heads, seq, seq]), which
+    // bounds-checked indices against num_heads instead of table_entries and
+    // produced a different output order from every other backend -- a cross-
+    // backend parity bug. Aligned to the CUDA/ROCm layout here.
+    if (bias_table.shape().size() != 2) {
+        throw std::invalid_argument(
+            "gather_relative_position_bias: bias_table must be 2-D "
+            "[table_entries, num_heads]");
+    }
+    int64_t table_entries = bias_table.shape()[0];
+    int64_t table_heads = bias_table.shape()[1];
+    if (table_heads != num_heads) {
+        throw std::invalid_argument(
+            "gather_relative_position_bias: bias_table dim 1 (" +
+            std::to_string(table_heads) + ") does not match NumHeads attr (" +
+            std::to_string(num_heads) + ")");
+    }
+
     auto idx_shape = rel_pos_index.shape();
-    // The kernel indexes idx_data[pos] for pos in [0, seq_len*seq_len) and reads
-    // seq_len from idx_shape[0]. That is only valid when rel_pos_index is exactly
-    // a square [seq_len, seq_len] table; any other rank/shape would silently
-    // misread (or read out of bounds when numel < seq_len^2). Assert the contract.
+    // rel_pos_index must be a square [num_positions, num_positions] table; any
+    // other rank/shape would silently misread (or read out of bounds when
+    // numel < num_positions^2). Assert the contract.
     if (idx_shape.size() != 2 || idx_shape[0] != idx_shape[1]) {
         std::string got = "[";
         for (size_t d = 0; d < idx_shape.size(); ++d) {
@@ -1671,48 +1697,57 @@ auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor
         got += "]";
         throw std::invalid_argument(
             "gather_relative_position_bias: rel_pos_index must be a square 2-D "
-            "[seq_len, seq_len] tensor, got " + got);
+            "[num_positions, num_positions] tensor, got " + got);
     }
-    int64_t seq_len = idx_shape[0];
-    // Output: [num_heads, seq_len, seq_len]
-    Tensor output({num_heads, seq_len, seq_len}, bias_table.dtype(), bias_table.device());
+    if (idx_shape[0] != num_positions) {
+        throw std::invalid_argument(
+            "gather_relative_position_bias: rel_pos_index dim 0 (" +
+            std::to_string(idx_shape[0]) +
+            ") does not match NumPositions attr (" +
+            std::to_string(num_positions) + ")");
+    }
 
     // rel_pos_index is commonly Int32 (and may be a non-contiguous view). Read
     // it via a contiguous Int64 tensor so both dtypes are handled correctly and
-    // the flat idx_data[pos] indexing below matches logical order. Keep the
-    // owning tensor alive for the duration of the kernel.
+    // the flat idx_data[i * num_positions + j] indexing below matches logical
+    // order. Keep the owning tensor alive for the duration of the kernel.
     Tensor idx_src = rel_pos_index.is_contiguous() ? rel_pos_index
                                                     : rel_pos_index.contiguous();
     Tensor idx_i64 = (idx_src.dtype() == DType::Int64) ? idx_src
                                                        : idx_src.to(DType::Int64);
     const int64_t* idx_data = idx_i64.data<int64_t>();
-    int64_t table_stride = bias_table.shape()[1]; // second dim of bias table
 
     // Bounds-check every relative-position index up front (sequentially, so we
     // can throw cleanly rather than from inside the OpenMP region below). Each
-    // idx is used as an unchecked offset into bias_table; an out-of-range or
+    // idx is used as a row offset into bias_table (dim 0); an out-of-range or
     // negative value (e.g. from an untrusted checkpoint or mismatched shapes)
     // would otherwise be an OOB read / information-disclosure vector.
     int64_t num_index = rel_pos_index.numel();
     for (int64_t pos = 0; pos < num_index; ++pos) {
         int64_t idx = idx_data[pos];
-        if (idx < 0 || idx >= table_stride) {
+        if (idx < 0 || idx >= table_entries) {
             throw std::out_of_range(
                 "gather_relative_position_bias: rel_pos_index value " + std::to_string(idx) +
-                " out of range [0, " + std::to_string(table_stride) + ")");
+                " out of range [0, " + std::to_string(table_entries) + ")");
         }
     }
+
+    // Output: [num_positions, num_positions, num_heads]
+    Tensor output({num_positions, num_positions, num_heads}, bias_table.dtype(), bias_table.device());
 
     TENZOR_DISPATCH_FLOATING_TYPES(bias_table.dtype(), "gather_rel_pos_bias", [&]() {
         const scalar_t* table_data = bias_table.data<scalar_t>();
         scalar_t* out_data = output.data<scalar_t>();
-        int64_t total = num_heads * seq_len * seq_len;
+        int64_t total = num_positions * num_positions * num_heads;
         _Pragma("omp parallel for if(total > 10000)")
-        for (int64_t i = 0; i < total; i++) {
-            int64_t h = i / (seq_len * seq_len);
-            int64_t pos = i % (seq_len * seq_len);
-            int64_t idx = idx_data[pos];
-            out_data[i] = table_data[h * table_stride + idx];
+        for (int64_t n = 0; n < total; n++) {
+            // Layout matches the CUDA gather_2d_kernel: the flat output index n
+            // decomposes as (i, j, h) with h minor, j middle, i major.
+            int64_t h = n % num_heads;
+            int64_t j = (n / num_heads) % num_positions;
+            int64_t i = n / (num_heads * num_positions);
+            int64_t table_idx = idx_data[i * num_positions + j];
+            out_data[n] = table_data[table_idx * num_heads + h];
         }
     });
     return output;

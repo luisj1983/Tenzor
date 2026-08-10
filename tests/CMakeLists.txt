@@ -474,9 +474,18 @@ target_include_directories(tenzor_unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/src/backends/cpu/kernels
     ${PROJECT_SOURCE_DIR}/include
 )
+# GPU backends are loaded via dlopen by tenzor::initialize() at runtime, NOT
+# linked as direct NEEDED dependencies. Linking them directly loads each GPU
+# runtime (CUDA/HIP/SYCL/Vulkan) at process startup via .init_array, before
+# main(); co-initialising CUDA and ROCm at static-init time corrupts rocclr's
+# thread/stack pool so the first hipLaunchKernel aborts with EINVAL
+# ("pthread_create() failed", os_posix.cpp:475) — every AllBackends/*/rocm
+# case in this binary then "Subprocess aborted". The lazy-dlopen path
+# initialize() already uses is the intended design; add_dependencies keeps the
+# build-order edge without a link-time NEEDED entry.
 foreach(backend cuda rocm oneapi vulkan)
     if(TARGET tenzor_backend_${backend})
-        target_link_libraries(tenzor_unit_tests PRIVATE tenzor_backend_${backend})
+        add_dependencies(tenzor_unit_tests tenzor_backend_${backend})
     endif()
 endforeach()
 
@@ -516,9 +525,12 @@ target_link_libraries(tenzor_backend_param_tests PRIVATE
 target_include_directories(tenzor_backend_param_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include
 )
+# GPU backends load via dlopen (tenzor::initialize()), not as direct NEEDED
+# deps — see the matching comment above tenzor_unit_tests for why direct
+# linking aborts every AllBackends/*/rocm case at process startup.
 foreach(backend cuda rocm oneapi vulkan)
     if(TARGET tenzor_backend_${backend})
-        target_link_libraries(tenzor_backend_param_tests PRIVATE tenzor_backend_${backend})
+        add_dependencies(tenzor_backend_param_tests tenzor_backend_${backend})
     endif()
 endforeach()
 tenzor_discover_tests(tenzor_backend_param_tests DISCOVERY_TIMEOUT 120 BACKENDS multi LABELS "unit")

@@ -625,11 +625,40 @@ if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     endif()
     find_package(hip QUIET CONFIG PATHS ${_ROCM_ROOT})
     if(hip_FOUND)
+        # HIPRTC include dir for runtime-generated kernels that pull in
+        # <hip/hip_fp16.h> / <hip/hip_bf16.h> (Float16/BFloat16 fusions).
+        #
+        # Do NOT hardcode ${_ROCM_ROOT}/include: the HIP runtime headers move
+        # between ROCm layouts (ROCm 6.x puts them under <root>/core/include;
+        # older layouts used <root>/include, and on some installs the latter
+        # does not exist at all). Derive the dir from the same hip::host
+        # imported target find_package(hip) set up -- it carries exactly the
+        # dir the host compiler uses to find <hip/hip_runtime_api.h>, which is
+        # the same dir that holds <hip/hip_fp16.h>. Fall back to the discovered
+        # core/include then include if the target property is unavailable.
+        get_target_property(_HIP_HOST_INCS hip::host INTERFACE_INCLUDE_DIRECTORIES)
+        set(_HIPRTC_INCLUDE_DIR "")
+        foreach(_d ${_HIP_HOST_INCS})
+            # Imported-target include props are plain paths on ROCm, but strip
+            # any $<...> generator-expression wrapper defensively.
+            string(REGEX REPLACE "\\$<[^:>]+:([^>]*)>" "\\1" _d "${_d}")
+            string(REGEX REPLACE "\\$<.*>" "" _d "${_d}")
+            if(EXISTS "${_d}")
+                set(_HIPRTC_INCLUDE_DIR "${_d}")
+                break()
+            endif()
+        endforeach()
+        if(NOT _HIPRTC_INCLUDE_DIR)
+            foreach(_d "${_ROCM_ROOT}/core/include" "${_ROCM_ROOT}/include")
+                if(EXISTS "${_d}")
+                    set(_HIPRTC_INCLUDE_DIR "${_d}")
+                    break()
+                endif()
+            endforeach()
+        endif()
         target_compile_definitions(tenzor_core PRIVATE
             TENZOR_HAS_ROCM
-            # HIPRTC include dir for runtime-generated kernels that pull in
-            # <hip/hip_fp16.h> / <hip/hip_bf16.h> (Float16/BFloat16 fusions).
-            TENZOR_HIPRTC_INCLUDE="${_ROCM_ROOT}/include"
+            TENZOR_HIPRTC_INCLUDE="${_HIPRTC_INCLUDE_DIR}"
         )
         # NOTE (FINDING 60, resolved): ddp.cpp/fsdp.cpp/zero_optimizer.cpp used
         # to guard their dedicated comm-stream/event overlap code on

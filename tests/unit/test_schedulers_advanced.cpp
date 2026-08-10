@@ -47,13 +47,19 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_BasicMinMode) {
     EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.1);
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 0);
 
-    // No improvement for patience epochs
-    scheduler.step(0.91);  // No improvement
+    // No improvement within the patience window. ReduceLROnPlateau matches
+    // PyTorch: LR is reduced only when num_bad_epochs STRICTLY EXCEEDS
+    // patience (patience=2 -> the 3rd consecutive bad epoch triggers the
+    // reduction; the 2nd bad epoch is still within the patience window).
+    scheduler.step(0.91);  // No improvement, bad_epochs=1
     EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.1);
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 1);
 
-    // Trigger LR reduction when bad_epochs reaches patience
-    scheduler.step(0.92);  // No improvement, bad_epochs=2, triggers reduction (patience=2)
+    scheduler.step(0.92);  // No improvement, bad_epochs=2 (still <= patience)
+    EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.1);
+    EXPECT_EQ(scheduler.get_num_bad_epochs(), 2);
+
+    scheduler.step(0.93);  // bad_epochs=3 > patience=2, triggers reduction
     EXPECT_NEAR(scheduler.get_last_lr(), 0.01, 1e-9);  // Reduced by factor 0.1
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 0);  // Reset counter
 }
@@ -70,12 +76,17 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_MaxMode) {
     scheduler.step(0.8);  // Improvement
     EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.01);
 
-    // No improvement for patience epochs
-    scheduler.step(0.79);  // No improvement
+    // No improvement within the patience window. PyTorch ReduceLROnPlateau
+    // reduces only when num_bad_epochs STRICTLY EXCEEDS patience (patience=3
+    // -> the 4th consecutive non-improving epoch triggers the reduction).
+    scheduler.step(0.79);  // No improvement, bad_epochs=1
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 1);
-    scheduler.step(0.78);  // No improvement
+    scheduler.step(0.78);  // No improvement, bad_epochs=2
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 2);
-    scheduler.step(0.77);  // No improvement, triggers reduction (patience=3)
+    scheduler.step(0.77);  // No improvement, bad_epochs=3 (still <= patience)
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.01, 1e-9);  // Not reduced yet
+    EXPECT_EQ(scheduler.get_num_bad_epochs(), 3);
+    scheduler.step(0.76);  // bad_epochs=4 > patience=3, triggers reduction
     EXPECT_NEAR(scheduler.get_last_lr(), 0.005, 1e-9);
     EXPECT_EQ(scheduler.get_num_bad_epochs(), 0);  // Reset after reduction
 }
@@ -87,11 +98,13 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Cooldown) {
 
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2, 1e-4, "rel", 2);  // cooldown=2
 
-    // Trigger reduction
+    // Trigger reduction: patience=2 means the 3rd consecutive bad epoch
+    // reduces LR (PyTorch strict-exceed semantics: num_bad > patience).
     scheduler.step(1.0);
     scheduler.step(1.0);
-    scheduler.step(1.0);  // patience exceeded, reduce LR
-    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-9);
+    scheduler.step(1.0);
+    scheduler.step(1.0);  // bad_epochs=3 > patience=2, reduce LR
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-9);  // 1.0 * 0.1
     EXPECT_TRUE(scheduler.in_cooldown());
 
     // During cooldown, bad epochs shouldn't accumulate
@@ -466,8 +479,10 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Training_Simulation) {
     auto optimizer = SGD(params, 0.1);
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.5, 3);
 
-    // Simulate training with validation loss
-    std::vector<double> val_losses = {1.0, 0.9, 0.85, 0.84, 0.84, 0.84, 0.84, 0.83};
+    // Simulate training with validation loss. With patience=3 and PyTorch's
+    // strict-exceed semantics, the LR reduces on the 4th consecutive
+    // non-improving epoch (index 7 here; epochs 4-7 hold the loss flat).
+    std::vector<double> val_losses = {1.0, 0.9, 0.85, 0.84, 0.84, 0.84, 0.84, 0.84};
 
     double last_lr = 0.1;
     for (size_t epoch = 0; epoch < val_losses.size(); epoch++) {
@@ -475,10 +490,10 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Training_Simulation) {
         optimizer.step();
         scheduler.step(val_losses[epoch]);
 
-        if (epoch < 6) {
+        if (epoch < 7) {
             EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), last_lr);
         } else {
-            // After epoch 6, should have reduced (3 epochs of no improvement: 4,5,6)
+            // epoch 7: 4th consecutive non-improving epoch -> reduce
             last_lr = 0.05;
             EXPECT_NEAR(scheduler.get_last_lr(), last_lr, 1e-9);
         }

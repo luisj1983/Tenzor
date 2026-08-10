@@ -819,6 +819,25 @@ enum class OpId : uint16_t {
     CTCLossForward = 696,
 
     // =========================================================================
+    // Fused multi-tensor (foreach) operations (699)
+    //
+    // Batched elementwise ops over a list of tensor pairs, dispatched as a
+    // single backend kernel launch. The host-side foreach_add() in
+    // src/ops/foreach.cpp dispatches OpId::ForeachAdd when the active backend
+    // registers a fused kernel (is_op_supported); otherwise it falls back to
+    // the per-tensor add() loop. The fused kernel exists because the oneAPI
+    // SYCL/OpenCL runtime has ~0.2 ms per-launch overhead, so 1000 separate
+    // adds take ~200 ms in launch overhead alone (ForeachOps.PerfManyTensors);
+    // one fused launch drops it to a few ms. Inputs are interleaved
+    // {a0,b0,a1,b1,...} as a single span; N = span.size()/2.
+    //
+    // Slot 699 is the only free slot inside the pinned OP_COUNT=702 table:
+    // 698 = ConvTranspose1dForward, 700/701 = GridSample/AffineGrid backward,
+    // 695 is left for a future op so the foreach family keeps a single entry.
+    // =========================================================================
+    ForeachAdd = 699,             // Fused elementwise add over N tensor pairs (PyTorch _foreach_add)
+
+    // =========================================================================
     // Audit A.2 — virtual `Function::op_id()` returns this for subclasses that
     // haven't opted in to the OpId-based pattern matching (graph optimiser
     // fusion, vmap rule registry). Treated by matchers as "do not match" so

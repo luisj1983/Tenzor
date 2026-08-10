@@ -66,6 +66,27 @@ const std::set<OpId> kExportSkipList = {
     // standard LSTM/GRU layer decomposition — so they are skip-listed.
     OpId::LSTMCudnnTrainForward,
     OpId::GRUCudnnTrainForward,
+    // Registry-only sentinels -- no backend kernel anywhere, zero dispatch()
+    // calls (op_id.hpp:316-321): Tensor::to(Device) / view_as_real() /
+    // view_as_complex() are raw metadata / copy ops that never dispatch
+    // OpId, so they never appear in a traced forward graph. They exist purely
+    // so the matching *Backward can report a real OpId for JVP-rule lookup.
+    OpId::DeviceTransfer,
+    OpId::ViewAsReal,
+    OpId::ViewAsComplex,
+    // Linalg string-ord norm / slogdet have no standard ONNX operator (ONNX
+    // has no Det and no general linalg-norm -- only ReduceL1/L2 reductions).
+    // They are real forward ops but cannot map to a single standard ONNX
+    // node, and the per-jit-node exporter does not decompose; skip-listed
+    // rather than emit a non-importable custom op.
+    OpId::LinalgNorm,
+    OpId::LinalgSlogdet,
+    // foreach_add is a multi-tensor perf fusion (PyTorch _foreach_*,
+    // op_id.hpp:838): one fused backend launch over N tensor pairs. It is
+    // training/optimizer-internal -- inference forward graphs use individual
+    // Add nodes, never the fused foreach -- so it never appears in an
+    // exported inference graph (same rationale as FusedSGDStep above).
+    OpId::ForeachAdd,
 };
 
 // Backward / Inplace OpIds and unnamed enum-gap entries are filtered out

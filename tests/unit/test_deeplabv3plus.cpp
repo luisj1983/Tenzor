@@ -85,6 +85,13 @@ TEST_P(DeepLabV3PlusTest, DeepLabV3PlusDifferentSizes) {
     auto model = DeepLabV3Plus_ResNet50(21, 16, false);
     model->to(device);
 
+    // Forward-shape check only (no backward): wrap in NoGradGuard so the model
+    // params' default requires_grad does not build/retain an autograd graph.
+    // Without it the 256 forward's graph stays pinned by output_256 during the
+    // 1024 forward and OOMs the 8 GB GPU -- the same inference idiom (mirrors
+    // torch.no_grad()) used by test_mask_rcnn's forward-shape test.
+    NoGradGuard no_grad;
+
     // Test with 256x256
     Variable images_256(randn({1, 3, 256, 256}, DType::Float32, device), true);
     Variable output_256 = model->forward(images_256);

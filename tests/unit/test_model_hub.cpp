@@ -382,9 +382,13 @@ TEST_F(ModelHubTest, DownloadWeights_Caching) {
         cfg.verify_checksums = false;
         ModelHub::set_config(cfg);
     }
-    // Create a cached file
+    // Create a cached file. The cache filename extension must match the
+    // download URL's extension: ModelHub::get_cache_path derives the on-disk
+    // extension from the URL (hub.cpp:398-404 -- preserve format: .pth URL ->
+    // .pth cache file) so the loader picks the right deserialiser. The .pth
+    // URL below therefore looks for "cached_model.pth", not ".pt".
     std::string model_name = "cached_model";
-    std::string cache_path = test_cache_dir + "/" + model_name + ".pt";
+    std::string cache_path = test_cache_dir + "/" + model_name + ".pth";
     std::ofstream(cache_path) << "cached content";
 
     // Download should return cached path without hitting network

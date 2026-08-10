@@ -6,12 +6,36 @@
 #include "torch_interop.hpp"
 #include <torch/torch.h>
 #include <ATen/ATen.h>
-#include <ATen/DLConvertor.h>   // Audit J7: at::toDLPack / at::fromDLPack
-#include <tenzor/core/dlpack.hpp>  // Audit J7: tenzor::to_dlpack / from_dlpack
+#include <ATen/DLConvertor.h>   // Audit J7: at::toDLPack + ATen's dlpack.h (DLManagedTensor)
 #include <tenzor/utils/error.hpp>  // typed exceptions that map to Pythonic types
 #include <c10/core/ScalarType.h>
+#include <cuda_runtime.h>  // cudaMemcpy*/cudaGetDevice/cudaSetDevice for CUDA<->torch copies
 #include <stdexcept>
 #include <sstream>
+#include <optional>
+// Pybind11 + libtorch's python_variable.h: this TU is compiled into the
+// lazy-loaded interop plugin (tenzor_torch_interop.<abi>.so), so it -- not
+// tenzor_core.so -- carries the libtorch + Python-binding dependency. Include
+// pybind11 before python_variable.h so Python.h is configured by pybind first.
+#include <pybind11/pybind11.h>  // module_ / def_submodule (no separate module.h)
+#include <torch/csrc/autograd/python_variable.h>  // THPVariable_Wrap/Unpack: at::Tensor <-> py::object
+
+// Audit J7 (torch->tenzor zero-copy): the path is at::toDLPack() ->
+// tenzor::from_dlpack(). We deliberately do NOT include
+// <tenzor/core/dlpack.hpp> here: it pulls tenzor's bundled dlpack.h (v0.8,
+// guard TENZOR_DLPACK_H_) which would *redefine* the DLPack C structs
+// (DLTensor / DLManagedTensor / DLDeviceType) already supplied by ATen's
+// dlpack.h above (standard guard DLPACK_DLPACK_H_) -- a hard "conflicting
+// declaration" error, because tenzor renamed the standard guard. DLPack is a
+// stable ABI, so ATen's DLManagedTensor is binary-compatible with tenzor's
+// (identical C struct layout, and C++ name mangling keys on the type's
+// spelling `DLManagedTensor`, not its header origin). Forward-declare
+// tenzor::from_dlpack against ATen's DLManagedTensor to bridge the two
+// without bundling a second dlpack.h in this TU. The definition lives in
+// src/core/dlpack.cpp (compiled against tenzor's dlpack.h) and links cleanly.
+namespace tenzor {
+auto from_dlpack(DLManagedTensor* managed) -> Tensor;
+}  // namespace tenzor
 
 namespace tenzor {
 namespace torch_interop {
@@ -557,3 +581,112 @@ auto sync_gradients(Variable& tenzor_var,
 
 } // namespace torch_interop
 } // namespace tenzor
+
+// =============================================================================
+// Lazy-loaded plugin registration entry point.
+//
+// This TU is compiled into a *separate* shared library
+// (tenzor_torch_interop.<abi>.so) that tenzor_core dlopens on first
+// tenzor.torch_interop / to_torch / from_torch use -- NOT at `import tenzor`.
+// Keeping libtorch (and its libmpi/libfabric transitive deps) out of
+// tenzor_core.so's DT_NEEDED means `import tenzor` succeeds even when libtorch
+// cannot be loaded (e.g. oneAPI's libfabric shadowing the system one). Only
+// actual torch-interop use surfaces the load failure as a clear ImportError.
+//
+// tenzor_core's lazy loader (python/bindings.cpp) dlsym's this C entry point
+// and calls it with the tenzor_core module's PyObject*. We create the
+// `torch_interop` submodule on it and register the interop bindings, crossing
+// the Python<->libtorch boundary via THPVariable_Wrap / THPVariable_Unpack
+// (pybind11 has no built-in at::Tensor caster). Returns 0 on success, -1 with
+// a Python exception set on failure. The `visibility("default")` overrides
+// pybind11_add_module's -fvisibility=hidden so the symbol is dlsym-able.
+// =============================================================================
+extern "C" __attribute__((visibility("default")))
+int tenzor_load_torch_interop(PyObject* parent_module) {
+    namespace py = pybind11;
+    try {
+        py::module_ parent = py::reinterpret_borrow<py::module_>(py::handle(parent_module));
+        auto torch_mod = parent.def_submodule(
+            "torch_interop", "PyTorch tensor interoperability");
+
+        torch_mod.def("can_zero_copy_to_torch",
+            &tenzor::torch_interop::can_zero_copy_to_torch,
+            "Check if zero-copy conversion to PyTorch is possible");
+        // pybind11 has no built-in type_caster for at::Tensor / torch::Tensor,
+        // so functions that take or return a torch tensor cross the Python
+        // boundary through libtorch's THPVariable_Wrap (at::Tensor -> PyObject*)
+        // and THPVariable_Unpack (PyObject* -> const at::Tensor&). Passing the
+        // C++ function pointers directly to torch_mod.def() fails with "Unable
+        // to convert function return value" / "incompatible function arguments".
+        torch_mod.def("tensor_to_torch",
+            [](const tenzor::Tensor& tensor, bool requires_grad) {
+                at::Tensor t = tenzor::torch_interop::tensor_to_torch(tensor, requires_grad);
+                return py::reinterpret_steal<py::object>(THPVariable_Wrap(t));
+            },
+            py::arg("tensor"), py::arg("requires_grad") = false,
+            "Convert Tenzor tensor to PyTorch tensor");
+        torch_mod.def("tensor_from_torch",
+            [](py::object torch_tensor, py::object device) {
+                const at::Tensor& t = THPVariable_Unpack(torch_tensor.ptr());
+                std::optional<tenzor::Device> dev;
+                if (!device.is_none()) dev = device.cast<tenzor::Device>();
+                return tenzor::torch_interop::tensor_from_torch(t, dev);
+            },
+            py::arg("torch_tensor"), py::arg("device") = py::none(),
+            "Convert PyTorch tensor to Tenzor tensor");
+        torch_mod.def("can_zero_copy_from_torch",
+            [](py::object torch_tensor) {
+                const at::Tensor& t = THPVariable_Unpack(torch_tensor.ptr());
+                return tenzor::torch_interop::can_zero_copy_from_torch(t);
+            },
+            py::arg("torch_tensor"),
+            "Check if zero-copy conversion from PyTorch is possible");
+        torch_mod.def("variable_to_torch",
+            [](const tenzor::Variable& variable) {
+                at::Tensor t = tenzor::torch_interop::variable_to_torch(variable);
+                return py::reinterpret_steal<py::object>(THPVariable_Wrap(t));
+            },
+            py::arg("variable"),
+            "Convert Tenzor Variable to PyTorch Variable with autograd");
+        torch_mod.def("variable_from_torch",
+            [](py::object torch_variable) {
+                const at::Tensor& t = THPVariable_Unpack(torch_variable.ptr());
+                return tenzor::torch_interop::variable_from_torch(t);
+            },
+            py::arg("torch_variable"),
+            "Convert PyTorch Variable to Tenzor Variable");
+        torch_mod.def("dtype_to_torch", &tenzor::torch_interop::dtype_to_torch,
+            py::arg("dtype"),
+            "Map Tenzor DType to PyTorch ScalarType (as int)");
+        torch_mod.def("dtype_from_torch", &tenzor::torch_interop::dtype_from_torch,
+            py::arg("torch_dtype"),
+            "Map PyTorch ScalarType (as int) to Tenzor DType");
+        torch_mod.def("device_to_torch_string",
+            &tenzor::torch_interop::device_to_torch_string,
+            py::arg("device"),
+            "Map Tenzor Device to PyTorch device string");
+        torch_mod.def("device_from_torch_string",
+            &tenzor::torch_interop::device_from_torch_string,
+            py::arg("device_str"),
+            "Map PyTorch device string to Tenzor Device");
+        torch_mod.def("sync_gradients",
+            [](tenzor::Variable& tenzor_var, py::object torch_var, bool tenzor_to_torch) {
+                // THPVariable_Unpack returns const at::Tensor& for safety, but
+                // sync_gradients writes gradients back into the torch tensor.
+                // The THPVariable owns a mutable at::Tensor by value; the const
+                // is only Unpack's accessor guard, so cast it away here.
+                at::Tensor& t = const_cast<at::Tensor&>(THPVariable_Unpack(torch_var.ptr()));
+                tenzor::torch_interop::sync_gradients(tenzor_var, t, tenzor_to_torch);
+            },
+            py::arg("tenzor_var"), py::arg("torch_var"),
+            py::arg("tenzor_to_torch") = true,
+            "Synchronize gradient storage between Tenzor and PyTorch");
+        return 0;
+    } catch (py::error_already_set& e) {
+        e.restore();
+        return -1;
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_ImportError, e.what());
+        return -1;
+    }
+}
