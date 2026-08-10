@@ -45,11 +45,11 @@ The Float32 eps is clamped to `5e-4` to avoid catastrophic cancellation. Both me
 - **~6 classes** (`ELUBackward`, `GeLUBackward`, `MishBackward`, `SELUBackward`, `SwishBackward`,
   `TanhBackward`) are declared but never dispatched — superseded by the corresponding
   `*Backward_AG` variants that have full higher-order support.
-- **Genuinely missing implementations** (dispatched, non-linear, no stub): `SigmoidBackward` and
-  `LogSigmoidBackward` in `src/nn/activations/activations.cpp` (dead-code paths; production code
-  goes through `SigmoidBackward_AG` / `LogSigmoidBackward_AG` via `tenzor::sigmoid`), plus
-  `CTCLossBackward`, `MultiLabelMarginLossBackward`, `RReLUBackward`, and the `Nested*Backward`
-  family. These throw when `create_graph=true` is requested.
+- **Genuinely missing implementations** (dispatched, non-linear, no stub): `CTCLossBackward`,
+  `MultiLabelMarginLossBackward`, `RReLUBackward`, and the `Nested*Backward` family. These throw
+  when `create_graph=true` is requested. (`SigmoidBackward` and `LogSigmoidBackward` were
+  previously listed here — both resolved by the 2026-04-20 pass below: `SigmoidBackward` was
+  deleted as dead code, and `LogSigmoidBackward` gained a real higher-order backward.)
 
 **Ongoing work:** the genuinely-missing loss/nested ops need either real implementations or a
 structural-zero stub with a documented rationale. Tracked as a follow-up in the coverage plan's

@@ -253,7 +253,7 @@ Categories:
 - `DtypeUnsupportedOnBackend` — kernel doesn't register the dtype.
 - `ComplexFP16Unrepresentable` — no Float16 complex type.
 - `GradcheckFDPrecision` — finite-difference noise dominates at FP16.
-- `KernelNotImplemented` — feature is genuinely TODO.
+- `KernelNotImplemented` — feature is not yet implemented.
 - `RequiresMultiGPU` — multi-device distributed coverage.
 - `KnownBug` — tracked by issue number.
 
