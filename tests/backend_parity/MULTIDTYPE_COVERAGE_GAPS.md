@@ -194,6 +194,28 @@ tests/ops/test_new_ops.cpp                   # audit-9 LL.16: confirmed cross-ba
 tests/integration/test_nn.cpp                # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NNTest : public BackendTest). Integration coverage parametrised over backends; per-layer numeric parity comes from tests/nn/layers/*_multidtype.cpp companions.
 tests/integration/test_training.cpp          # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (TrainingTest : public BackendTest). Integration coverage parametrised over backends; per-op numeric parity comes from backend_parity/ tests.
 
+# audit-12 (2026-08-10): triaged the 13 remaining ratchet gaps surfaced by
+# tools/check_multidtype_coverage.py. All 13 are dtype-orthogonal by
+# construction — backend-specific infrastructure, CPU-only host logic, or
+# regression guards for bugs whose root cause is independent of compute
+# dtype. A MultiBackendDTypeTest companion would either skip every
+# non-Float32 combo (zero coverage) or re-test a dtype-orthogonal property
+# already swept across all backends at the canonical dtype. Documented here
+# as KNOWN-INTENTIONAL rather than papered over with a no-op companion.
+tests/backend/test_cuda_caching_allocator.cpp  # audit-12: backend-specific infrastructure — tests the CUDA CachingAllocator directly (cudaMalloc / cache-reuse / block-splitting) via TEST_F on ::testing::Test. The allocator is dtype-agnostic (no compute kernels); single-backend (CUDA) by design. No dtype or cross-backend axis.
+tests/backend/test_oneapi_fp16_kernels.cpp     # audit-12: backend-specific kernel-granularity test — OneAPI Float16 elementwise/reduction kernels on Device::oneapi(0) via TEST_F. The file IS the Float16 coverage for OneAPI (mirrors test_fp16_kernels.cpp for CUDA); a multidtype sweep is nonsensical since its entire purpose is the Float16 kernel path on one backend.
+tests/test_device_switching.cpp                # audit-12: backend-infrastructure test — DeviceGuard/WorkerPool per-thread device switching across backends (TestWithParam<BackendCase>). Dtype-irrelevant (tests device-context binding, not numeric ops); already parameterized over backends.
+tests/test_vulkan_batchnorm_fused_bessel.cpp   # audit-12: single-backend regression guard — Vulkan OpId::BatchNorm2dFusedTraining Bessel-correction running_var (was 50% low vs CPU/CUDA/ROCm/OneAPI). Hardcoded Vulkan; Float32-by-nature (the fused-training Bessel path is a Float32-specific issue). nn::BatchNorm2d gates the fused path to CUDA, so this tests the dispatch directly. No dtype axis.
+tests/unit/test_data_augment.cpp               # audit-12: CPU-only data-pipeline test — in-place augmentation transforms on Float32 CPU image tensors via TEST_F. Image augmentation is CPU + Float32-by-design (UInt8/Float32 image pipelines); no backend or dtype variance.
+tests/unit/test_dataset_hardening.cpp          # audit-12: data-pipeline hardening test — dataset/dataloader error paths (symlink creation, corrupted-sample handling) on UInt8 CPU image tensors. Infrastructure/error-path coverage; dtype- and backend-orthogonal.
+tests/unit/test_mps_fix_logic.cpp              # audit-12: host-logic unit test — executes the Metal-independent C++ logic of the mps-1/mps-2/mps-3 fixes (shader_name_for_dtype string mapping, broadcast-then-materialize) WITHOUT a device. Already covers Float32/Float16/Int/Float64 dtype-rejection in the string mapper; dtype-orthogonal host logic, no backend.
+tests/unit/test_op_id_names.cpp                # audit-12: dispatch-table audit — OpId enum <-> name string mapping. Pure infrastructure, dtype-irrelevant, backend-irrelevant. Single TEST.
+tests/unit/test_quantize_per_layer_config.cpp  # audit-12: quantization config-routing regression — quantize_dynamic(QuantizationConfig) honors skip_layers / layer_overrides; asserts module TYPE identity (QuantizedLinear vs Linear), not numeric values. Config routing is dtype- and device-orthogonal; CPU-only by design.
+tests/autograd/test_binary_input_order_regression.cpp # audit-12: gradcheck regression guard for a dtype-orthogonal bug — binary autograd wrappers (logaddexp/xlogy/vecdot/cosine_similarity) misaligned grad_fn slots when only the 2nd operand requires grad. Already sweeps all backends at Float64 (the canonical gradcheck precision); Float16 is gradcheck-infeasible (GradcheckFDPrecision), Float32 adds no slot-alignment coverage beyond F64×all-backends.
+tests/autograd/test_flash_attention_dropout_composed_multibatch.cpp # audit-12: regression guard for a dtype-orthogonal bug — Philox counter-convention mismatch (bh-combined vs 4-word) between the CPU forward and the composed dropout backward; mask-counter folding is independent of compute dtype. Already sweeps all backends at Float32; F16/F64 flash-attention numeric parity is covered by tests/integration/test_attention_parity.cpp (multidtype).
+tests/ops/test_argmax_tie_parity.cpp           # audit-12: regression guard for a dtype-orthogonal bug — CUDA argmax/argmin tree+warp combine failed lowest-index tie-break on FINITE ties. Tie-break is index-selection logic independent of value dtype (the integer-valued ties hold exactly in Float16/Float64 too). Already sweeps all backends at Float32.
+tests/ops/test_scatter_oob_contract.cpp        # audit-12: contract test — scatter/scatter_add OOB index validation throws on every backend. The OOB contract is on Int64 indices, independent of the value dtype; a dtype sweep adds no contract coverage. Already sweeps all backends at Float32.
+
 # Grandfathered pre-existing gaps as of audit-3 baseline (2026-05-22). These
 # are either infrastructure / backend-specific / regression-guard files
 # whose surface area does not benefit from a 5-backend × dtype sweep, or
