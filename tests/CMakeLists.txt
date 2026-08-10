@@ -927,6 +927,11 @@ add_executable(test_mask_rcnn_losses test_mask_rcnn_losses.cpp)
 target_link_libraries(test_mask_rcnn_losses PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_mask_rcnn_losses DISCOVERY_TIMEOUT 60)
 
+# Mask R-CNN loss tests — multi-dtype / multi-backend companion
+add_executable(test_mask_rcnn_losses_multidtype test_mask_rcnn_losses_multidtype.cpp)
+target_link_libraries(test_mask_rcnn_losses_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mask_rcnn_losses_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
 # Vulkan complete operations tests
 add_executable(test_vulkan_complete_ops test_vulkan_complete_ops.cpp)
 target_link_libraries(test_vulkan_complete_ops PRIVATE tenzor_core GTest::gtest_main)
