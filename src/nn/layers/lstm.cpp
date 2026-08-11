@@ -367,8 +367,19 @@ LSTM::LSTM(int64_t input_size, int64_t hidden_size, int64_t num_layers,
 // accumulates both contributions onto the shared inputs (input + weights).
 // `h_n` needs no node of its own — it is an autograd-aware slice of `output`, so
 // its gradient routes into output's last timestep, and cuDNN sums dy[last]+dhy
-// internally. Reusing the same reserve_space across the two backward calls is
-// verified safe with cuDNN v8.
+// internally.
+//
+// Audit (found via systematic debugging of a cross-backend LSTM-training
+// parity test failure): this comment previously claimed reusing the same
+// reserve_space across the two backward() calls was "verified safe with
+// cuDNN v8" — that was wrong. cudnnRNNBackwardData_v8/BackwardWeights_v8
+// mutate reserve_space in place, so whichever node's backward() ran first
+// corrupted the buffer before the second node read it, silently producing
+// wrong grad_input/grad_W_ih/grad_W_hh whenever a loss used both `output`
+// and `c_n` (i.e. almost always). backward() below now clones
+// reserve_space per call so each node gets its own independent,
+// pristine-post-forward copy — restoring the linear-superposition property
+// this two-node design actually depends on.
 class CudnnLSTMTrainBackward : public Function {
 public:
     CudnnLSTMTrainBackward(bool for_cell_state, bool has_bias_ih, bool has_bias_hh,
@@ -401,8 +412,24 @@ public:
             grad_out = g;
             grad_cy = zero0;
         }
+        // Root cause (found via systematic debugging of a cross-backend
+        // LSTM-training parity failure): cudnnRNNBackwardData_v8/
+        // cudnnRNNBackwardWeights_v8 mutate reserve_space in place (see the
+        // "cuDNN scribbles the reserve space" comment in cudnn_rnn.cu's
+        // run_backward()). Two independent CudnnLSTMTrainBackward instances
+        // are created per forward (one for `output`, one for `c_n`) and
+        // BOTH previously shared the exact same saved reserve_space Tensor
+        // — so whichever node's backward ran first corrupted the shared
+        // buffer before the second node read it, breaking the two-call
+        // linear-superposition design this class relies on (see the class
+        // doc comment above). Verified: a single-node loss (only `output`,
+        // no h_n/c_n term — so only one dispatch call, no shared-buffer
+        // reuse) already matched the per-timestep reference exactly;
+        // only the two-node case diverged. Each node must get its own
+        // independent copy of the pristine post-forward reserve_space so
+        // cuDNN mutating one node's copy cannot affect the other's.
         std::vector<Tensor> ins = {grad_out, zero0, grad_cy, input, h0, c0,
-                                   output, weight_space, reserve_space,
+                                   output, weight_space, reserve_space.clone(),
                                    W_ih, W_hh, b_ih, b_hh};
         auto grads = dispatch<OpId::LSTMCudnnBackward>(ins);
         // grads: [grad_input,grad_hx,grad_cx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
