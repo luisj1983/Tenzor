@@ -182,7 +182,38 @@ LstmProblem make_problem(int64_t seq_len, int64_t batch, int64_t input_size, int
     return p;
 }
 
-// Runs forward_training and returns the scalar loss L = sum(output) + sum(c_n),
+// Deterministic, non-constant weight tables for the finite-difference loss.
+//
+// The loss differentiated below is a *weighted* sum
+//     L = sum_{t,b,d} w[t,b,d] * output[t,b,d] + sum_{b,d} v[b,d] * c_n[b,d]
+// rather than a plain sum. A plain sum makes dL/d(output) and dL/d(c_n) all
+// ones, which would make the check blind to any timestep- or batch-indexing
+// bug in how lstm_backward_training consumes grad_output / grad_cy (reading
+// the wrong `t` slice, or transposing (b,d), gives numerically identical
+// results when every seed is 1.0). Giving every element a distinct value from
+// its flat index makes such a permutation observable.
+//
+// Since L is linear in output and c_n, dL/d(output[t,b,d]) = w[t,b,d] and
+// dL/d(c_n[b,d]) = v[b,d], so these tables are exactly the grad_output /
+// grad_cy seeds handed to lstm_backward_training.
+std::vector<float> make_output_grad_weights(size_t n) {
+    std::vector<float> w(n);
+    for (size_t i = 0; i < n; ++i) {
+        w[i] = 0.3f + 1.1f * static_cast<float>((i * 53 + 7) % 97) / 97.0f;
+    }
+    return w;
+}
+
+std::vector<float> make_cell_grad_weights(size_t n) {
+    std::vector<float> v(n);
+    for (size_t i = 0; i < n; ++i) {
+        v[i] = -0.7f + 1.3f * static_cast<float>((i * 29 + 5) % 89) / 89.0f;
+    }
+    return v;
+}
+
+// Runs forward_training and returns the scalar weighted loss
+//     L = sum(w * output) + sum(v * c_n),
 // matching the two independent autograd nodes the real LSTM wiring creates
 // (one for `output`, one for `c_n`) collapsed into one scalar for this
 // finite-difference check.
@@ -197,10 +228,12 @@ float run_loss(const LstmProblem& p) {
         gates_reserve.data(), cell_reserve.data(), tanh_cell_reserve.data(),
         p.seq_len, p.batch, p.input_size, p.hidden);
     (void)gate_size;
-    float loss = 0.0f;
-    for (float v : output) loss += v;
-    for (float v : c_n) loss += v;
-    return loss;
+    const auto w = make_output_grad_weights(output.size());
+    const auto v = make_cell_grad_weights(c_n.size());
+    double loss = 0.0;
+    for (size_t i = 0; i < output.size(); ++i) loss += static_cast<double>(w[i]) * output[i];
+    for (size_t i = 0; i < c_n.size(); ++i) loss += static_cast<double>(v[i]) * c_n[i];
+    return static_cast<float>(loss);
 }
 
 }  // namespace
@@ -219,9 +252,14 @@ TEST(LSTMFusedTrainKernel, BackwardMatchesFiniteDifference) {
         gates_reserve.data(), cell_reserve.data(), tanh_cell_reserve.data(),
         p.seq_len, p.batch, p.input_size, p.hidden);
 
-    // grad_output = all-ones (matches d(sum(output))/d(output)), grad_cy = all-ones.
-    std::vector<float> grad_output(p.seq_len * p.batch * p.hidden, 1.0f);
-    std::vector<float> grad_cy(p.batch * p.hidden, 1.0f);
+    // Seeds are exactly the weight tables of the loss run_loss() computes:
+    // L is linear in output/c_n, so dL/d(output) = w and dL/d(c_n) = v. These
+    // are deliberately non-uniform so a timestep/batch indexing regression in
+    // lstm_backward_training's consumption of them would change the result.
+    std::vector<float> grad_output =
+        make_output_grad_weights(static_cast<size_t>(p.seq_len * p.batch * p.hidden));
+    std::vector<float> grad_cy =
+        make_cell_grad_weights(static_cast<size_t>(p.batch * p.hidden));
 
     std::vector<float> grad_input(p.seq_len * p.batch * p.input_size);
     std::vector<float> grad_h0(p.batch * p.hidden), grad_c0(p.batch * p.hidden);
