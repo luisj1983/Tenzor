@@ -42,10 +42,11 @@ void reference_lstm_cell(
     }
 }
 
-}  // namespace
-
-TEST(LSTMFusedTrainKernel, ReserveCapturingCellMatchesExistingCellExactly) {
-    const int64_t batch = 3, hidden = 5;
+// Runs the ReserveCapturingCellMatchesExistingCellExactly checks for a given
+// `hidden` size, so callers can exercise the AVX512 (hidden >= 16) and AVX2
+// (hidden >= 8) SIMD reserve-store code paths in lstm_cell_fused, not just
+// the scalar remainder loop that hidden = 5 alone would hit.
+void run_reserve_capturing_cell_check(int64_t batch, int64_t hidden) {
     const int64_t gate_size = 4 * hidden;
 
     std::vector<float> gates_ih(batch * gate_size), W_hh(gate_size * hidden),
@@ -85,13 +86,32 @@ TEST(LSTMFusedTrainKernel, ReserveCapturingCellMatchesExistingCellExactly) {
     reference_lstm_cell(gates_ih, h, c, W_hh, bias, h_ref, c_ref, batch, hidden);
     for (int64_t i = 0; i < batch * hidden; ++i) {
         EXPECT_NEAR(c_ref[i], c_out_new[i], 1e-5f) << "c mismatch at " << i;
-        EXPECT_NEAR(c_ref[i], tanh_c_res[i] > 0 || tanh_c_res[i] <= 0
-                                   ? c_out_new[i]
-                                   : c_out_new[i],
-                    1e-5f);
         EXPECT_NEAR(std::tanh(c_ref[i]), tanh_c_res[i], 1e-5f) << "tanh(c) reserve mismatch at " << i;
         EXPECT_NEAR(o_res[i] * std::tanh(c_ref[i]), h_out_new[i], 1e-5f) << "h_out vs o*tanh(c) mismatch at " << i;
     }
+}
+
+}  // namespace
+
+TEST(LSTMFusedTrainKernel, ReserveCapturingCellMatchesExistingCellExactly) {
+    // hidden = 5: below the AVX2 (>=8) and AVX512 (>=16) loop guards, so
+    // every lane goes through the scalar remainder loop only.
+    run_reserve_capturing_cell_check(/*batch=*/3, /*hidden=*/5);
+}
+
+TEST(LSTMFusedTrainKernel, ReserveCapturingCellMatchesExistingCellExactlyAvx2Width) {
+    // hidden = 10: exercises the AVX2 loop guard (`d + 8 <= hidden`, one
+    // 8-wide iteration) with a 2-element scalar remainder, while staying
+    // below the AVX512 guard (`d + 16 <= hidden`) so the AVX512 block is not
+    // exercised here.
+    run_reserve_capturing_cell_check(/*batch=*/3, /*hidden=*/10);
+}
+
+TEST(LSTMFusedTrainKernel, ReserveCapturingCellMatchesExistingCellExactlyAvx512Width) {
+    // hidden = 20: exercises the AVX512 loop guard (`d + 16 <= hidden`, one
+    // 16-wide iteration) followed by a 4-element remainder that in turn
+    // exercises the scalar loop (falls below the AVX2 8-wide guard).
+    run_reserve_capturing_cell_check(/*batch=*/3, /*hidden=*/20);
 }
 
 TEST(LSTMFusedTrainKernel, ForwardTrainingMatchesInferenceForward) {
