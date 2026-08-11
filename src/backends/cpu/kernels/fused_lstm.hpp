@@ -369,7 +369,12 @@ inline void lstm_cell_fused(
     float* c_out,           // (batch, hidden) - new cell
     float* workspace,       // (batch, 4*hidden) - temp buffer for gates_hh
     int64_t batch,
-    int64_t hidden
+    int64_t hidden,
+    float* i_reserve = nullptr,      // (batch, hidden) post-activation i, or nullptr
+    float* f_reserve = nullptr,      // (batch, hidden) post-activation f, or nullptr
+    float* g_reserve = nullptr,      // (batch, hidden) post-activation g, or nullptr
+    float* o_reserve = nullptr,      // (batch, hidden) post-activation o, or nullptr
+    float* tanh_c_reserve = nullptr  // (batch, hidden) tanh(c_out), or nullptr
 ) {
     int64_t gate_size = 4 * hidden;
 
@@ -433,12 +438,19 @@ inline void lstm_cell_fused(
 
             // c_new = f * c_prev + i * g
             __m512 c_n = _mm512_fmadd_ps(f, c_p, _mm512_mul_ps(i, g));
+            __m512 tanh_cn = tanh_avx512(c_n);
 
             // h_new = o * tanh(c_new)
-            __m512 h_n = _mm512_mul_ps(o, tanh_avx512(c_n));
+            __m512 h_n = _mm512_mul_ps(o, tanh_cn);
 
             _mm512_storeu_ps(c_new + d, c_n);
             _mm512_storeu_ps(h_new + d, h_n);
+
+            if (i_reserve) _mm512_storeu_ps(i_reserve + b * hidden + d, i);
+            if (f_reserve) _mm512_storeu_ps(f_reserve + b * hidden + d, f);
+            if (g_reserve) _mm512_storeu_ps(g_reserve + b * hidden + d, g);
+            if (o_reserve) _mm512_storeu_ps(o_reserve + b * hidden + d, o);
+            if (tanh_c_reserve) _mm512_storeu_ps(tanh_c_reserve + b * hidden + d, tanh_cn);
         }
 #endif
 
@@ -476,12 +488,19 @@ inline void lstm_cell_fused(
 
             // c_new = f * c_prev + i * g
             __m256 c_n = _mm256_fmadd_ps(f, c_p, _mm256_mul_ps(i, g));
+            __m256 tanh_cn = tanh_avx2(c_n);
 
             // h_new = o * tanh(c_new)
-            __m256 h_n = _mm256_mul_ps(o, tanh_avx2(c_n));
+            __m256 h_n = _mm256_mul_ps(o, tanh_cn);
 
             _mm256_storeu_ps(c_new + d, c_n);
             _mm256_storeu_ps(h_new + d, h_n);
+
+            if (i_reserve) _mm256_storeu_ps(i_reserve + b * hidden + d, i);
+            if (f_reserve) _mm256_storeu_ps(f_reserve + b * hidden + d, f);
+            if (g_reserve) _mm256_storeu_ps(g_reserve + b * hidden + d, g);
+            if (o_reserve) _mm256_storeu_ps(o_reserve + b * hidden + d, o);
+            if (tanh_c_reserve) _mm256_storeu_ps(tanh_c_reserve + b * hidden + d, tanh_cn);
         }
 #endif
 
@@ -505,10 +524,17 @@ inline void lstm_cell_fused(
             float o = sigmoid_scalar(o_gate);
 
             float c_n = f * c_prev[d] + i * g;
-            float h_n = o * tanh_scalar(c_n);
+            float tanh_cn = tanh_scalar(c_n);
+            float h_n = o * tanh_cn;
 
             c_new[d] = c_n;
             h_new[d] = h_n;
+
+            if (i_reserve) i_reserve[b * hidden + d] = i;
+            if (f_reserve) f_reserve[b * hidden + d] = f;
+            if (g_reserve) g_reserve[b * hidden + d] = g;
+            if (o_reserve) o_reserve[b * hidden + d] = o;
+            if (tanh_c_reserve) tanh_c_reserve[b * hidden + d] = tanh_cn;
         }
     }
 }
@@ -661,6 +687,311 @@ inline void lstm_forward(
     std::memcpy(c_n, c_curr, batch * hidden * sizeof(float));
 
     // Workspace buffers are cached in thread-local storage, no cleanup needed
+}
+
+/**
+ * @brief Fused LSTM forward pass for entire sequence, TRAINING variant.
+ *
+ * Identical computation to lstm_forward (same batched input-gate GEMM, same
+ * per-timestep lstm_cell_fused call), but additionally captures the
+ * per-timestep post-activation gates and cell states needed by
+ * lstm_backward_training for analytic BPTT.
+ */
+inline void lstm_forward_training(
+    const float* input,     // (seq_len, batch, input_size)
+    const float* W_ih,      // (4*hidden, input_size)
+    const float* W_hh,      // (4*hidden, hidden)
+    const float* bias,      // (4*hidden) or nullptr
+    const float* h0,        // (batch, hidden)
+    const float* c0,        // (batch, hidden)
+    float* output,          // (seq_len, batch, hidden)
+    float* h_n,             // (batch, hidden)
+    float* c_n,             // (batch, hidden)
+    float* gates_reserve,      // (4, seq_len, batch, hidden): i,f,g,o back-to-back planes
+    float* cell_reserve,       // (seq_len, batch, hidden): c_t per timestep
+    float* tanh_cell_reserve,  // (seq_len, batch, hidden): tanh(c_t) per timestep
+    int64_t seq_len,
+    int64_t batch,
+    int64_t input_size,
+    int64_t hidden
+) {
+    int64_t gate_size = 4 * hidden;
+
+    std::vector<float> gates_ih(static_cast<size_t>(seq_len * batch * gate_size));
+    std::vector<float> gates_hh_workspace(static_cast<size_t>(batch * gate_size));
+    std::vector<float> h_curr(static_cast<size_t>(batch * hidden));
+    std::vector<float> c_curr(static_cast<size_t>(batch * hidden));
+
+    LSTM_SGEMM_NT(seq_len * batch, gate_size, input_size,
+                  1.0f, input, input_size,
+                  W_ih, input_size,
+                  0.0f, gates_ih.data(), gate_size);
+
+    std::memcpy(h_curr.data(), h0, batch * hidden * sizeof(float));
+    std::memcpy(c_curr.data(), c0, batch * hidden * sizeof(float));
+
+    // gates_reserve layout: 4 back-to-back (seq_len, batch, hidden) planes,
+    // one per gate, in i,f,g,o order — NOT interleaved per-timestep. This
+    // matches how lstm_cell_fused indexes each reserve pointer independently
+    // as base + b*hidden + d; a column-sliced pointer into an interleaved
+    // (batch, 4*hidden) buffer would read/write the wrong batch rows for
+    // b >= 1, since the cell's per-batch stride is `hidden`, not `4*hidden`.
+    const int64_t plane = seq_len * batch * hidden;
+    float* i_plane = gates_reserve;
+    float* f_plane = gates_reserve + plane;
+    float* g_plane = gates_reserve + 2 * plane;
+    float* o_plane = gates_reserve + 3 * plane;
+
+    for (int64_t t = 0; t < seq_len; ++t) {
+        const float* gates_ih_t = gates_ih.data() + t * batch * gate_size;
+        float* output_t = output + t * batch * hidden;
+        float* cell_reserve_t = cell_reserve + t * batch * hidden;
+        float* tanh_cell_reserve_t = tanh_cell_reserve + t * batch * hidden;
+
+        lstm_cell_fused(
+            gates_ih_t, h_curr.data(), c_curr.data(), W_hh, bias,
+            output_t, cell_reserve_t, gates_hh_workspace.data(), batch, hidden,
+            /*i_reserve=*/i_plane + t * batch * hidden,
+            /*f_reserve=*/f_plane + t * batch * hidden,
+            /*g_reserve=*/g_plane + t * batch * hidden,
+            /*o_reserve=*/o_plane + t * batch * hidden,
+            /*tanh_c_reserve=*/tanh_cell_reserve_t);
+
+        std::memcpy(c_curr.data(), cell_reserve_t, batch * hidden * sizeof(float));
+        std::memcpy(h_curr.data(), output_t, batch * hidden * sizeof(float));
+    }
+
+    std::memcpy(h_n, h_curr.data(), batch * hidden * sizeof(float));
+    std::memcpy(c_n, c_curr.data(), batch * hidden * sizeof(float));
+}
+
+/**
+ * @brief Analytic LSTM BPTT backward for the entire sequence, TRAINING variant.
+ *
+ * Two phases:
+ *  1. Sequential (unavoidable): walk t = seq_len-1 .. 0, using the reserve
+ *     buffers from lstm_forward_training to compute each timestep's
+ *     pre-activation gate gradients (d_gates_all), propagating dh/dc through
+ *     W_hh. Same per-step cost as the forward recurrence.
+ *  2. Batched (parallel): once d_gates_all is fully populated, grad_W_ih,
+ *     grad_W_hh, grad_bias, and grad_input are each one large GEMM/reduction
+ *     across all timesteps instead of per-timestep ones.
+ *
+ * Gate order throughout is i, f, g, o (see file header) — the same order
+ * lstm_forward_training's reserve buffers use, so no format translation.
+ *
+ * Forward reference (per timestep t, batch row b, unit d):
+ *   pre = W_ih @ x_t + W_hh @ h_{t-1} + bias   (row layout [i|f|g|o], 4*hidden)
+ *   i,f,o = sigmoid(pre), g = tanh(pre)
+ *   c_t = f*c_{t-1} + i*g,  h_t = o*tanh(c_t)
+ * so with dh_t = dL/dh_t (external grad_output plus the recurrent term):
+ *   dc_t   += dh_t * o * (1 - tanh(c_t)^2)
+ *   di      = dc_t * g,        df = dc_t * c_{t-1}
+ *   dg      = dc_t * i,        do = dh_t * tanh(c_t)
+ *   d_pre_i = di * i*(1-i),    d_pre_f = df * f*(1-f)
+ *   d_pre_g = dg * (1 - g^2),  d_pre_o = do * o*(1-o)
+ *   dc_{t-1} = dc_t * f,       dh_{t-1} = d_pre @ W_hh
+ */
+inline void lstm_backward_training(
+    const float* grad_output,   // (seq_len, batch, hidden): dL/d(output_t) for every t
+    const float* grad_cy,       // (batch, hidden): dL/d(c_n)
+    const float* input,         // (seq_len, batch, input_size)
+    const float* h0,            // (batch, hidden)
+    const float* c0,            // (batch, hidden)
+    const float* W_ih,          // (4*hidden, input_size)
+    const float* W_hh,          // (4*hidden, hidden)
+    const float* gates_reserve,      // (4, seq_len, batch, hidden) i,f,g,o planes (see lstm_forward_training)
+    const float* cell_reserve,       // (seq_len, batch, hidden)
+    const float* tanh_cell_reserve,  // (seq_len, batch, hidden)
+    float* grad_input,   // (seq_len, batch, input_size) OUT
+    float* grad_h0,      // (batch, hidden) OUT
+    float* grad_c0,      // (batch, hidden) OUT
+    float* grad_W_ih,    // (4*hidden, input_size) OUT
+    float* grad_W_hh,    // (4*hidden, hidden) OUT
+    float* grad_bias,    // (4*hidden) OUT (shared by b_ih and b_hh by the caller)
+    int64_t seq_len,
+    int64_t batch,
+    int64_t input_size,
+    int64_t hidden
+) {
+    const int64_t gate_size = 4 * hidden;
+    const int64_t plane = seq_len * batch * hidden;
+    const float* i_plane = gates_reserve;
+    const float* f_plane = gates_reserve + plane;
+    const float* g_plane = gates_reserve + 2 * plane;
+    const float* o_plane = gates_reserve + 3 * plane;
+
+    // Phase 1: sequential BPTT, accumulating d_gates_all (seq_len, batch, 4*hidden)
+    // in the SAME i,f,g,o column layout LSTM_SGEMM_NT/Linear expect (matches
+    // LSTMCell's gates layout, so grad_W_ih/grad_W_hh below need no reordering).
+    std::vector<float> d_gates_all(static_cast<size_t>(seq_len * batch * gate_size));
+    std::vector<float> dh_next(static_cast<size_t>(batch * hidden), 0.0f);
+    std::vector<float> dc_next(static_cast<size_t>(batch * hidden));
+    std::memcpy(dc_next.data(), grad_cy, batch * hidden * sizeof(float));
+
+    for (int64_t t = seq_len - 1; t >= 0; --t) {
+        const float* i_t = i_plane + t * batch * hidden;
+        const float* f_t = f_plane + t * batch * hidden;
+        const float* g_t = g_plane + t * batch * hidden;
+        const float* o_t = o_plane + t * batch * hidden;
+        const float* tanh_c_t = tanh_cell_reserve + t * batch * hidden;
+        const float* c_prev_t = (t == 0) ? c0 : (cell_reserve + (t - 1) * batch * hidden);
+        const float* grad_out_t = grad_output + t * batch * hidden;
+        float* d_gates_t = d_gates_all.data() + t * batch * gate_size;
+
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t d = 0; d < hidden; ++d) {
+                int64_t bh = b * hidden + d;
+                float dh_t = grad_out_t[bh] + dh_next[bh];
+                float i = i_t[bh], f = f_t[bh], g = g_t[bh], o = o_t[bh];
+                float tanh_c = tanh_c_t[bh];
+                float dc_t = dc_next[bh] + dh_t * o * (1.0f - tanh_c * tanh_c);
+
+                float di = dc_t * g;
+                float df = dc_t * c_prev_t[bh];
+                float dg = dc_t * i;
+                float do_ = dh_t * tanh_c;
+
+                float d_i_pre = di * i * (1.0f - i);
+                float d_f_pre = df * f * (1.0f - f);
+                float d_g_pre = dg * (1.0f - g * g);
+                float d_o_pre = do_ * o * (1.0f - o);
+
+                int64_t base = b * gate_size;
+                d_gates_t[base + d] = d_i_pre;
+                d_gates_t[base + hidden + d] = d_f_pre;
+                d_gates_t[base + 2 * hidden + d] = d_g_pre;
+                d_gates_t[base + 3 * hidden + d] = d_o_pre;
+
+                dc_next[bh] = dc_t * f;  // feeds t-1 (or becomes grad_c0 at t==0)
+            }
+        }
+
+        // dh_from_this_timestep = d_gates_t @ W_hh  -> (batch, hidden), feeds t-1
+        // (or becomes grad_h0 at t==0). W_hh is (4*hidden, hidden); this is a
+        // plain A @ B (no transpose) with A=(batch,4H), B=(4H,hidden).
+        detail::check_gemm_dims(batch, hidden, gate_size, gate_size, hidden, hidden);
+#ifdef TENZOR_LSTM_USE_MKL_GEMM
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<gemm_int>(batch), static_cast<gemm_int>(hidden), static_cast<gemm_int>(gate_size),
+                    1.0f, d_gates_t, static_cast<gemm_int>(gate_size),
+                    W_hh, static_cast<gemm_int>(hidden),
+                    0.0f, dh_next.data(), static_cast<gemm_int>(hidden));
+#else
+        // PERF: no oneDNN/generic-CBLAS NN/TN GEMM macro exists yet for this
+        // orientation (only LSTM_SGEMM_NT does); this scalar fallback is
+        // numerically correct but O(N) slower than the MKL path. On non-MKL
+        // builds this may reduce or eliminate the fused path's speed
+        // advantage over the per-timestep loop it replaces. Adding
+        // LSTM_SGEMM_NN/LSTM_SGEMM_TN macros (mirroring LSTM_SGEMM_NT's
+        // three-backend-variant structure) is tracked as follow-up work, not
+        // required for correctness.
+        std::fill(dh_next.begin(), dh_next.end(), 0.0f);
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t k = 0; k < gate_size; ++k) {
+                float dgv = d_gates_t[b * gate_size + k];
+                if (dgv == 0.0f) continue;
+                for (int64_t d = 0; d < hidden; ++d) {
+                    dh_next[b * hidden + d] += dgv * W_hh[k * hidden + d];
+                }
+            }
+        }
+#endif
+    }
+
+    std::memcpy(grad_h0, dh_next.data(), batch * hidden * sizeof(float));
+    std::memcpy(grad_c0, dc_next.data(), batch * hidden * sizeof(float));
+
+    // Phase 2: batched reductions across all timesteps.
+    const int64_t total_rows = seq_len * batch;
+
+    // grad_bias = column_sum(d_gates_all) over all (seq*batch) rows.
+    std::fill(grad_bias, grad_bias + gate_size, 0.0f);
+    for (int64_t r = 0; r < total_rows; ++r) {
+        const float* row = d_gates_all.data() + r * gate_size;
+        for (int64_t k = 0; k < gate_size; ++k) grad_bias[k] += row[k];
+    }
+
+    // grad_W_ih = d_gates_all^T @ input_all -> (4*hidden, input_size)
+    // grad_input = d_gates_all   @ W_ih     -> (seq*batch, input_size)
+    // (both use the flat (seq*batch, ...) row view of the sequence tensors,
+    //  since the input projection is timestep-independent.)
+    detail::check_gemm_dims(gate_size, input_size, total_rows, gate_size, input_size, input_size);
+#ifdef TENZOR_LSTM_USE_MKL_GEMM
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                static_cast<gemm_int>(gate_size), static_cast<gemm_int>(input_size), static_cast<gemm_int>(total_rows),
+                1.0f, d_gates_all.data(), static_cast<gemm_int>(gate_size),
+                input, static_cast<gemm_int>(input_size),
+                0.0f, grad_W_ih, static_cast<gemm_int>(input_size));
+
+    detail::check_gemm_dims(total_rows, input_size, gate_size, gate_size, input_size, input_size);
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<gemm_int>(total_rows), static_cast<gemm_int>(input_size), static_cast<gemm_int>(gate_size),
+                1.0f, d_gates_all.data(), static_cast<gemm_int>(gate_size),
+                W_ih, static_cast<gemm_int>(input_size),
+                0.0f, grad_input, static_cast<gemm_int>(input_size));
+#else
+    // PERF: no oneDNN/generic-CBLAS NN/TN GEMM macro exists yet for this
+    // orientation (only LSTM_SGEMM_NT does); this scalar fallback is
+    // numerically correct but O(N) slower than the MKL path. On non-MKL
+    // builds this may reduce or eliminate the fused path's speed advantage
+    // over the per-timestep loop it replaces. Adding LSTM_SGEMM_NN/
+    // LSTM_SGEMM_TN macros (mirroring LSTM_SGEMM_NT's three-backend-variant
+    // structure) is tracked as follow-up work, not required for correctness.
+    // (Covers both the grad_W_ih [TN] and grad_input [NN] products below.)
+    std::fill(grad_W_ih, grad_W_ih + gate_size * input_size, 0.0f);
+    for (int64_t r = 0; r < total_rows; ++r) {
+        const float* dg_row = d_gates_all.data() + r * gate_size;
+        const float* in_row = input + r * input_size;
+        for (int64_t k = 0; k < gate_size; ++k) {
+            float dgv = dg_row[k];
+            if (dgv == 0.0f) continue;
+            for (int64_t f = 0; f < input_size; ++f) grad_W_ih[k * input_size + f] += dgv * in_row[f];
+        }
+    }
+    std::fill(grad_input, grad_input + total_rows * input_size, 0.0f);
+    for (int64_t r = 0; r < total_rows; ++r) {
+        const float* dg_row = d_gates_all.data() + r * gate_size;
+        float* gi_row = grad_input + r * input_size;
+        for (int64_t k = 0; k < gate_size; ++k) {
+            float dgv = dg_row[k];
+            if (dgv == 0.0f) continue;
+            for (int64_t f = 0; f < input_size; ++f) gi_row[f] += dgv * W_ih[k * input_size + f];
+        }
+    }
+#endif
+
+    // grad_W_hh = d_gates_all^T @ h_prev_all, where h_prev_all is the sequence
+    // of hidden states FED INTO each timestep: [h0, h_0, h_1, ..., h_{T-2}].
+    // This function is not given the h-sequence buffer, but it can reconstruct
+    // it exactly from the reserves: lstm_forward_training defines
+    // h_t = o_t * tanh(c_t), and both o_t (gates_reserve's o plane) and
+    // tanh(c_t) (tanh_cell_reserve) are stored per timestep. So
+    //   t == 0 -> h0
+    //   t >  0 -> o_{t-1} * tanh_cell_reserve[t-1]   (== output[t-1])
+    // Because h_prev must be materialised per timestep, this is accumulated as
+    // a per-timestep rank-`batch` update rather than one batched GEMM.
+    std::fill(grad_W_hh, grad_W_hh + gate_size * hidden, 0.0f);
+    std::vector<float> h_prev(static_cast<size_t>(batch * hidden));
+    for (int64_t t = 0; t < seq_len; ++t) {
+        if (t == 0) {
+            std::memcpy(h_prev.data(), h0, batch * hidden * sizeof(float));
+        } else {
+            const float* o_prev = o_plane + (t - 1) * batch * hidden;
+            const float* tanh_c_prev = tanh_cell_reserve + (t - 1) * batch * hidden;
+            for (int64_t i = 0; i < batch * hidden; ++i) h_prev[i] = o_prev[i] * tanh_c_prev[i];
+        }
+        const float* d_gates_t = d_gates_all.data() + t * batch * gate_size;
+        for (int64_t b = 0; b < batch; ++b) {
+            const float* dg_row = d_gates_t + b * gate_size;
+            const float* h_row = h_prev.data() + b * hidden;
+            for (int64_t k = 0; k < gate_size; ++k) {
+                float dgv = dg_row[k];
+                if (dgv == 0.0f) continue;
+                for (int64_t d = 0; d < hidden; ++d) grad_W_hh[k * hidden + d] += dgv * h_row[d];
+            }
+        }
+    }
 }
 
 // RAII guard that sets MKL's per-thread count to `n` for the duration of its

@@ -7,6 +7,11 @@
 
 namespace tenzor::nn {
 
+// Forward declaration: TypeCastBackward::backward_with_variables() recurses
+// into variable_cast() (defined below) to build a properly graph-connected
+// second-order cast node -- see the root-cause note on that method.
+inline auto variable_cast(const Variable& input, DType target_dtype) -> Variable;
+
 /// Backward function for autograd-aware dtype casting.
 /// Gradients are cast back to the original (input) dtype so that parameter
 /// gradients match the parameter dtype (e.g., Float16 weight gets Float16 grad).
@@ -28,17 +33,39 @@ public:
         return {grad};
     }
 
+    // Root cause (found via systematic debugging of
+    // test_higher_order_nn_multidtype's LSTM/GRU_InnerLoop_Gradient/
+    // cpu_BFloat16 failures): a dtype cast's SECOND derivative is
+    // structurally zero, but that does not mean the cast should be a
+    // higher-order "stub" (disconnection point) -- the cast's FIRST
+    // derivative (needed to keep differentiating whatever comes after it
+    // in the graph, e.g. sigmoid/tanh/matmul inside LSTMCell) is a
+    // perfectly well-defined linear map, and a create_graph=true backward
+    // must keep that chain connected. The previous implementation
+    // returned `Variable(grad.tensor().to(dtype), grad.requires_grad())`
+    // with NO grad_fn -- a graph-severing op masquerading as one that
+    // "supports higher order" -- and ALSO set is_higher_order_stub()=true,
+    // which makes the engine (src/autograd/engine.cpp) hard-throw in the
+    // default HigherOrderGradMode::Error before the (silently broken)
+    // result above would even have been used. Recursing into
+    // variable_cast() below builds a genuine autograd-tracked cast node
+    // for the second-order graph, so this op is NOT a stub and should not
+    // be marked as one.
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
         auto& grad = grad_outputs[0];
         if (grad.dtype() != original_dtype_) {
-            return {Variable(grad.tensor().to(original_dtype_), grad.requires_grad())};
+            return {variable_cast(grad, original_dtype_)};
         }
         return {grad};
     }
 
-    // Type cast is linear; second derivative is zero.
+    // Genuinely supports higher-order gradients (see backward_with_variables
+    // above) -- do NOT also mark is_higher_order_stub()=true; that flag is
+    // for ops whose backward_with_variables is the generic disconnecting
+    // TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB() passthrough, which this is
+    // not. Leaving is_higher_order_stub() at the Function base class's
+    // default (false) is intentional and load-bearing, not an omission.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 /// Cast a Variable to a new dtype with proper autograd graph connectivity.

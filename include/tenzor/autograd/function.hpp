@@ -66,8 +66,10 @@ bool activation_offload_enabled();
  * `is_higher_order_stub()` overrides that forward to
  * `Function::passthrough_stub_backward()`. Use from inside a Function
  * subclass whose forward is linear or piecewise-linear (and therefore
- * whose second derivative is structurally zero) — pooling, dropout,
- * flatten, embedding, type-cast, bilinear upsample, ReLU, LeakyReLU.
+ * whose second derivative is structurally zero) AND that sits at the end
+ * of a chain where nothing downstream needs the first-order chain kept
+ * connected — pooling, dropout, flatten, embedding, bilinear upsample,
+ * ReLU, LeakyReLU.
  *
  * Example:
  * @code
@@ -81,6 +83,21 @@ bool activation_offload_enabled();
  * Do NOT use for genuinely non-linear ops (sigmoid, tanh, GeLU, conv,
  * batch/layer norm) — those need a real `backward_with_variables`
  * implementation that builds a gradient graph via Variable ops.
+ *
+ * Do NOT use for mid-graph linear pass-through ops either, even though
+ * their own second derivative is genuinely zero — a dtype cast
+ * (`TypeCastBackward`, include/tenzor/nn/utils/variable_cast.hpp) is the
+ * cautionary example: it once used this macro's pattern by hand and was
+ * a hard bug, because a cast sits in the MIDDLE of a graph (e.g. upcast
+ * BFloat16→Float32, run sigmoid/tanh/matmul, downcast the grad back) —
+ * disconnecting at the cast severs the derivative of the genuinely
+ * non-linear ops on the far side, which is not zero. The stub concept
+ * only applies when nothing downstream of THIS node in the second-order
+ * chain needs it kept connected; a mid-graph linear op needs a real
+ * `backward_with_variables()` that builds a proper graph-connected
+ * result (see `TypeCastBackward::backward_with_variables()` for the
+ * pattern: recurse into the same autograd-aware constructor the forward
+ * pass used).
  */
 #define TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()                               \
     auto backward_with_variables(std::vector<Variable> grad_outputs)             \
@@ -298,12 +315,20 @@ public:
      * means higher-order gradients through this operation will be zero.
      *
      * Stubs are appropriate for operations whose forward is linear or
-     * piecewise-linear (pooling, dropout, flatten, embedding, type-cast,
-     * bilinear upsample, ReLU/LeakyReLU), because the mathematical second
-     * derivative is structurally zero and the passthrough produces the
-     * correct result. Ops with genuinely non-linear forwards (sigmoid,
-     * tanh, GeLU, conv, normalization, ...) need real backward_with_variables
-     * implementations, not stubs.
+     * piecewise-linear AND that terminate the chain a downstream
+     * higher-order gradient would otherwise need (pooling, dropout,
+     * flatten, embedding, bilinear upsample, ReLU/LeakyReLU), because the
+     * mathematical second derivative is structurally zero and the
+     * passthrough produces the correct result. Ops with genuinely
+     * non-linear forwards (sigmoid, tanh, GeLU, conv, normalization, ...)
+     * need real backward_with_variables implementations, not stubs.
+     *
+     * NOT appropriate for a mid-graph linear pass-through op like a dtype
+     * cast (`TypeCastBackward`) — its own second derivative is zero, but
+     * disconnecting it severs the derivative of whatever genuinely
+     * non-linear ops sit on the other side of it. See
+     * `TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()`'s doc comment above for
+     * the full explanation; this was a real, shipped bug.
      *
      * @return true if backward_with_variables() is a passthrough stub
      */

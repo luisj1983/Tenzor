@@ -63,6 +63,22 @@ target_link_libraries(test_lstm_multidtype PRIVATE tenzor_core GTest::gtest_main
 add_executable(test_lstm_cuda_forward_regression test_lstm_cuda_forward_regression.cpp)
 target_link_libraries(test_lstm_cuda_forward_regression PRIVATE tenzor_core GTest::gtest_main)
 
+add_executable(test_lstm_fused_train_kernel test_lstm_fused_train_kernel.cpp)
+target_link_libraries(test_lstm_fused_train_kernel PRIVATE tenzor_core GTest::gtest_main)
+# This test #includes fused_lstm.hpp directly (to exercise the raw kernel, not
+# just the nn::LSTM module) and instantiates its GEMM macro (LSTM_SGEMM_NT) in
+# its own translation unit. tenzor_core links MKL PRIVATE, so that linkage
+# does not propagate to consumers — re-resolve MKL here the same way
+# src/CMakeLists.txt does, so this TU's cblas_sgemm call resolves and picks
+# the MKL fast path (matching tenzor_core's own LSTM behavior) instead of
+# silently falling back to the unresolvable generic-CBLAS declaration.
+include(${PROJECT_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE _MKL_MODULE_FOUND_TEST_LSTM)
+if(_MKL_MODULE_FOUND_TEST_LSTM AND MKL_FOUND)
+    target_link_libraries(test_lstm_fused_train_kernel PRIVATE ${MKL_LIBRARIES})
+    target_include_directories(test_lstm_fused_train_kernel PRIVATE ${MKL_INCLUDE_DIRS})
+    target_compile_definitions(test_lstm_fused_train_kernel PRIVATE TENZOR_USE_MKL)
+endif()
+
 # SDPA multi-backend × multi-dtype tests. Replaces the legacy CUDA-only
 # test_attention_sdpa_fp32.cpp; covers Float16/BFloat16/Float32/Float64
 # forward + backward across every non-MPS backend.
@@ -658,6 +674,7 @@ tenzor_discover_tests(test_lstm DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lstm_proj_size DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lstm_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_lstm_cuda_forward_regression DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_lstm_fused_train_kernel DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_attention_sdpa_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 tenzor_discover_tests(test_float16_regression DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gru DISCOVERY_TIMEOUT 60)
