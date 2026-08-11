@@ -2,7 +2,7 @@
 
 A multi-backend tensor computation and deep learning library written in modern C++23, with full reverse-mode autograd and a PyTorch-like API exposed in both C++ and Python.
 
-> **Status: alpha (v0.1.0).** Single-developer research project. The API is reasonably stable but has had no public-CI exposure on GPU hardware yet. Treat it as experimental, not as a production replacement for PyTorch or TensorFlow.
+> **Status: alpha (v0.2.0).** Single-developer research project. The API is reasonably stable but has had no public-CI exposure on GPU hardware yet. Treat it as experimental, not as a production replacement for PyTorch or TensorFlow.
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![C++](https://img.shields.io/badge/C%2B%2B-23-blue)]()
@@ -118,11 +118,36 @@ See [INSTALL.md](INSTALL.md) for per-backend setup details.
 
 ## Performance
 
-The benchmark harness is available in `scripts/ci_benchmark.sh` and `tools/regen_perf_baseline.py`. Publish benchmark reports from generated artifacts for the exact hardware, backend options, and dependency versions used.
+The benchmark harness is available in `scripts/ci_benchmark.sh` and `tools/regen_perf_baseline.py`, with a PyTorch-comparison suite in `benchmarks/python/` (`run_benchmarks.py --device cpu|cuda`). Numbers below are from the maintainer's own machine and are meant as orientation, not a competitive claim — re-run the harness on your own hardware before relying on any of this for a decision.
 
-**Honest read:** Tenzor is competitive on some unfused-compute primitives, but fused and vendor-library-heavy paths need per-backend benchmarking before making broad performance claims. See [`CHANGELOG.md`](CHANGELOG.md) for release-specific performance notes.
+**Test machine:** AMD Ryzen AI 9 HX 370 (12C/24T), 93 GiB RAM, NVIDIA RTX 5070 Laptop GPU (8 GB), Linux, PyTorch 2.13.0. 276 CPU-side and 300 CUDA-side op comparisons, 5 timed iterations each after 10 warmup iterations.
 
-If you need raw production throughput today, use PyTorch. If you want a clean, hackable C++23 codebase that's competitive on bread-and-butter linear algebra and that you can extend — Tenzor is for you.
+Reference point — 4096×4096 FP32 matmul, wall-clock mean:
+
+| | CPU | CUDA |
+|---|---|---|
+| Tenzor  | 181.1 ms (0.76 TFLOPS) | 10.23 ms (13.4 TFLOPS) |
+| PyTorch | 177.2 ms (0.78 TFLOPS) | 10.11 ms (13.6 TFLOPS) |
+
+Median Tenzor/PyTorch time ratio by op category (>1.0 = Tenzor slower; based on the run above, not a guarantee for other shapes or hardware):
+
+| Category | CPU | CUDA |
+|---|---|---|
+| matmul | 1.5x | 1.1x |
+| conv2d | 0.95x | 1.1x |
+| linear | 0.96x | 0.9x |
+| attention | 2.5x | 1.4x |
+| layernorm | 4.2x | 7.8x |
+| batchnorm | 1.0x | 1.3x |
+| rmsnorm | 1.5x | 1.3x |
+| embedding | 1.4x | 1.5x |
+| lstm / gru | 0.5–1.5x | 1.4–1.5x |
+
+Two things worth calling out rather than glossing over:
+- **LayerNorm is consistently slower** on both backends (4-8x) — the normalization kernels haven't had the tuning pass the matmul/conv paths have.
+- One CPU result (`Train small_mlp B=64`) showed Tenzor ~33x faster than PyTorch with low variance across repeated runs, which is large enough to be suspicious rather than a genuine win — likely a CPU thread-pool interaction between the two frameworks sharing a process (both are MKL/OpenMP-backed) rather than a real per-op advantage. Excluded from the table above pending isolated (single-process-per-framework) reproduction; treat any GPU/CPU number sourced from a mixed-framework harness like this one with the same skepticism until you've confirmed it in isolation.
+
+Fused and vendor-library-heavy paths (cuDNN/cuBLAS-backed ops in particular) are where an established library's engineering investment shows most. See [`CHANGELOG.md`](CHANGELOG.md) for release-specific performance notes, and treat any single number here as a snapshot of one machine on one day, not a general claim about either library.
 
 ## Architecture
 
@@ -147,7 +172,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full diagram and dispat
 - **No public CI proof for GPU backends.** GitHub Actions runs CPU smoke tests only; CUDA/ROCm/OneAPI/Vulkan are tested locally on the maintainer's hardware.
 - **GPU backend ops are expected to be native.** Backend gaps should fail clearly rather than silently dispatching through CPU behavior.
 - **MPS backend** (Apple Metal) is partial. Not yet at parity with the four primary GPU backends.
-- **CPU performance** is below PyTorch on the published benchmark suite. Conv2D in particular has a regression that needs investigation (one shape measures 0.07× — almost certainly a dispatch/warmup artifact).
+- **LayerNorm is unoptimized** relative to PyTorch on both CPU and CUDA (4-8x slower in the current benchmark run) — the normalization kernels haven't had the tuning pass matmul/conv have. See [Performance](#performance).
 - **Pretrained weights** are not distributed. The model files in `src/models/` are architectures only.
 - **Single maintainer.** Contributions, issues, and reviews are welcome.
 

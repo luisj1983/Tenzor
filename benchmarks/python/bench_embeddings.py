@@ -304,10 +304,12 @@ def benchmark_tenzor_position_embedding(
             def pos_embed_fn():
                 return pos_embedding.forward(positions)
 
+            sync_fn = get_tenzor_sync_fn(device)
             times = run_benchmark(
                 pos_embed_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             result = compute_statistics(

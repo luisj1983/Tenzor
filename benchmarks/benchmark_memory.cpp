@@ -10,6 +10,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/utils/benchmark.hpp"
 #include <iostream>
@@ -17,6 +18,13 @@
 
 using namespace tenzor;
 using namespace tenzor::benchmark;
+
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously this file never read argv at all, so
+// --device cuda silently benchmarked the CPU backend instead.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 constexpr size_t WARMUP_ITERATIONS = 5;
 constexpr size_t BENCHMARK_ITERATIONS = 100;
@@ -53,8 +61,8 @@ void benchmark_allocation() {
         Benchmark bench("Alloc - " + cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
-            auto t = zeros(cfg.shape);
+        auto result = bench.set_device(g_bench_device).run([&]() {
+            auto t = zeros(cfg.shape, DType::Float32, g_bench_device);
             volatile void* ptr = t.data_ptr();
             (void)ptr;
         });
@@ -84,7 +92,7 @@ void benchmark_clone() {
     };
 
     for (const auto& cfg : configs) {
-        auto t = randn(cfg.shape);
+        auto t = randn(cfg.shape, DType::Float32, g_bench_device);
 
         size_t num_elements = 1;
         for (auto dim : cfg.shape) {
@@ -95,7 +103,7 @@ void benchmark_clone() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto cloned = t.clone();
             volatile void* ptr = cloned.data_ptr();
             (void)ptr;
@@ -113,13 +121,13 @@ void benchmark_reshape() {
     std::cout << "  Tensor Reshape/View Benchmarks\n";
     std::cout << "========================================\n\n";
 
-    auto t = randn({1024, 1024});
+    auto t = randn({1024, 1024}, DType::Float32, g_bench_device);
 
     // Reshape (should be fast - just metadata change)
     {
         Benchmark bench("Reshape 1024x1024 -> 1x1048576", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS * 10);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto reshaped = t.reshape({1, 1024 * 1024});
             volatile void* ptr = reshaped.data_ptr();
             (void)ptr;
@@ -132,7 +140,7 @@ void benchmark_reshape() {
     {
         Benchmark bench("Transpose 1024x1024", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS * 10);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto transposed = t.transpose(0, 1);
             volatile void* ptr = transposed.data_ptr();
             (void)ptr;
@@ -148,7 +156,7 @@ void benchmark_reshape() {
         Benchmark bench("Make Contiguous 1024x1024", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(1024 * 1024 * sizeof(float) * 2);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto cont = non_contiguous.contiguous();
             volatile void* ptr = cont.data_ptr();
             (void)ptr;
@@ -166,13 +174,13 @@ void benchmark_slicing() {
     std::cout << "  Tensor Slicing Benchmarks\n";
     std::cout << "========================================\n\n";
 
-    auto t = randn({1024, 1024});
+    auto t = randn({1024, 1024}, DType::Float32, g_bench_device);
 
     // Basic slice
     {
         Benchmark bench("Slice [0:512, :]", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS * 10);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto sliced = t.slice(0, 0, 512);
             volatile void* ptr = sliced.data_ptr();
             (void)ptr;
@@ -185,7 +193,7 @@ void benchmark_slicing() {
     {
         Benchmark bench("Multiple Slices [:512, :512]", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto sliced1 = t.slice(0, 0, 512);
             auto sliced2 = sliced1.slice(1, 0, 512);
             volatile void* ptr = sliced2.data_ptr();
@@ -206,15 +214,15 @@ void benchmark_concatenation() {
 
     // Concatenate two tensors
     {
-        auto a = randn({512, 1024});
-        auto b = randn({512, 1024});
+        auto a = randn({512, 1024}, DType::Float32, g_bench_device);
+        auto b = randn({512, 1024}, DType::Float32, g_bench_device);
 
         size_t bytes = (512 * 1024 * 2) * sizeof(float) * 2;  // Read both + write result
 
         Benchmark bench("Cat 2 tensors [512x1024]", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto c = cat({a, b}, 0);
             volatile void* ptr = c.data_ptr();
             (void)ptr;
@@ -227,7 +235,7 @@ void benchmark_concatenation() {
     {
         std::vector<Tensor> tensors;
         for (int i = 0; i < 8; ++i) {
-            tensors.push_back(randn({128, 512}));
+            tensors.push_back(randn({128, 512}, DType::Float32, g_bench_device));
         }
 
         size_t bytes = (128 * 512 * 8) * sizeof(float) * 2;
@@ -235,7 +243,7 @@ void benchmark_concatenation() {
         Benchmark bench("Cat 8 tensors [128x512]", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto c = cat(tensors, 0);
             volatile void* ptr = c.data_ptr();
             (void)ptr;
@@ -248,7 +256,7 @@ void benchmark_concatenation() {
     {
         std::vector<Tensor> tensors;
         for (int i = 0; i < 4; ++i) {
-            tensors.push_back(randn({256, 256}));
+            tensors.push_back(randn({256, 256}, DType::Float32, g_bench_device));
         }
 
         size_t bytes = (256 * 256 * 4) * sizeof(float) * 2;
@@ -256,7 +264,7 @@ void benchmark_concatenation() {
         Benchmark bench("Stack 4 tensors [256x256]", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto s = stack(tensors, 0);
             volatile void* ptr = s.data_ptr();
             (void)ptr;
@@ -297,8 +305,8 @@ void benchmark_fill() {
             Benchmark bench("Zeros - " + cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             bench.set_bytes(bytes);
 
-            auto result = bench.run([&]() {
-                auto t = zeros(cfg.shape);
+            auto result = bench.set_device(g_bench_device).run([&]() {
+                auto t = zeros(cfg.shape, DType::Float32, g_bench_device);
                 volatile void* ptr = t.data_ptr();
                 (void)ptr;
             });
@@ -311,8 +319,8 @@ void benchmark_fill() {
             Benchmark bench("Ones - " + cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             bench.set_bytes(bytes);
 
-            auto result = bench.run([&]() {
-                auto t = ones(cfg.shape);
+            auto result = bench.set_device(g_bench_device).run([&]() {
+                auto t = ones(cfg.shape, DType::Float32, g_bench_device);
                 volatile void* ptr = t.data_ptr();
                 (void)ptr;
             });
@@ -325,8 +333,8 @@ void benchmark_fill() {
             Benchmark bench("Randn - " + cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
             bench.set_bytes(bytes);
 
-            auto result = bench.run([&]() {
-                auto t = randn(cfg.shape);
+            auto result = bench.set_device(g_bench_device).run([&]() {
+                auto t = randn(cfg.shape, DType::Float32, g_bench_device);
                 volatile void* ptr = t.data_ptr();
                 (void)ptr;
             });
@@ -359,7 +367,7 @@ void benchmark_memory_bandwidth() {
     std::vector<BenchmarkResult> results;
 
     for (const auto& test : tests) {
-        auto t = randn(test.shape);
+        auto t = randn(test.shape, DType::Float32, g_bench_device);
 
         size_t num_elements = 1;
         for (auto dim : test.shape) {
@@ -370,7 +378,7 @@ void benchmark_memory_bandwidth() {
         Benchmark bench(test.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 5);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto cloned = t.clone();
             volatile void* ptr = cloned.data_ptr();
             (void)ptr;
@@ -399,9 +407,12 @@ void benchmark_memory_bandwidth() {
 }
 
 int main(int argc, char** argv) {
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "  Tenzor Memory Benchmark Suite\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nTarget Performance Metrics:\n";
     std::cout << "  Memory Overhead:  < 10% (PyTorch: 15%)\n";

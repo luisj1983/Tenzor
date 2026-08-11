@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "tenzor/core/device.hpp"
 #include <chrono>
 #include <string>
 #include <vector>
@@ -200,6 +201,21 @@ public:
     ) -> BenchmarkResult;
 
     /**
+     * @brief Set the device the timed workload runs on.
+     *
+     * GPU backends (CUDA/ROCm/Vulkan/OneAPI) queue work asynchronously —
+     * the timed function returning does not mean the work is done. Without
+     * this, run()/run_stored() measure kernel-launch overhead, not compute
+     * time, which previously produced results like "30,293 TFLOPS" on a
+     * laptop GPU (~40-80 TFLOPS peak). Defaults to CPU, where synchronize()
+     * is a no-op, so existing CPU-only call sites are unaffected.
+     */
+    auto set_device(Device device) -> Benchmark& {
+        device_ = device;
+        return *this;
+    }
+
+    /**
      * @brief Set number of floating-point operations
      */
     auto set_flops(size_t num_flops) -> Benchmark& {
@@ -232,6 +248,7 @@ private:
     size_t num_flops_{0};
     size_t num_bytes_{0};
     std::function<void()> workload_{};
+    Device device_{Device::cpu()};
 };
 
 /**

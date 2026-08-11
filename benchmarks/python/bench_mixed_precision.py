@@ -81,10 +81,12 @@ def benchmark_tenzor_matmul_precision(
                 def matmul_fn():
                     return tz.matmul(a, b)
 
+                sync_fn = get_tenzor_sync_fn(device)
                 times = run_benchmark(
                     matmul_fn,
                     warmup_iterations=config.warmup_iterations,
                     benchmark_iterations=config.benchmark_iterations,
+                    sync_fn=sync_fn,
                 )
 
                 flops = 2 * m * k * n
@@ -223,10 +225,12 @@ def benchmark_tenzor_linear_precision(
                 def linear_fn():
                     return linear.forward(x_var)
 
+                sync_fn = get_tenzor_sync_fn(device)
                 times = run_benchmark(
                     linear_fn,
                     warmup_iterations=config.warmup_iterations,
                     benchmark_iterations=config.benchmark_iterations,
+                    sync_fn=sync_fn,
                 )
 
                 flops = 2 * batch * in_feat * out_feat

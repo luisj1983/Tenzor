@@ -68,10 +68,12 @@ def benchmark_tenzor_layernorm(
             def ln_fn():
                 return ln.forward(x_var)
 
+            sync_fn = get_tenzor_sync_fn(device)
             times = run_benchmark(
                 ln_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             num_elements = batch * seq_len * hidden
@@ -189,10 +191,12 @@ def benchmark_tenzor_batchnorm(
             def bn_fn():
                 return bn.forward(x_var)
 
+            sync_fn = get_tenzor_sync_fn(device)
             times = run_benchmark(
                 bn_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             num_elements = batch * channels * h * w
@@ -311,10 +315,12 @@ def benchmark_tenzor_rmsnorm(
             def rms_fn():
                 return rms.forward(x_var)
 
+            sync_fn = get_tenzor_sync_fn(device)
             times = run_benchmark(
                 rms_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             num_elements = batch * seq_len * hidden

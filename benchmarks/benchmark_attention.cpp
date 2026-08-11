@@ -85,8 +85,9 @@ void benchmark_multihead_attention() {
     for (const auto& cfg : configs) {
         auto attn = MultiheadAttention(cfg.embed_dim, cfg.num_heads, 0.0, true,
                                        false, false, 0, 0, true);
+        attn.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.seq_len, cfg.embed_dim});
+        auto input = randn({cfg.batch, cfg.seq_len, cfg.embed_dim}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         // Calculate FLOPs for attention:
@@ -103,7 +104,7 @@ void benchmark_multihead_attention() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(total_flops);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto [output, weights] = attn.forward(input_var, input_var, input_var,
                                                    Tensor{}, Tensor{}, false);
             volatile void* ptr = output.tensor().data_ptr();
@@ -166,9 +167,9 @@ void benchmark_scaled_dot_product() {
     };
 
     for (const auto& cfg : configs) {
-        auto query = randn({cfg.batch, cfg.heads, cfg.seq_q, cfg.head_dim});
-        auto key = randn({cfg.batch, cfg.heads, cfg.seq_kv, cfg.head_dim});
-        auto value = randn({cfg.batch, cfg.heads, cfg.seq_kv, cfg.head_dim});
+        auto query = randn({cfg.batch, cfg.heads, cfg.seq_q, cfg.head_dim}, DType::Float32, g_bench_device);
+        auto key = randn({cfg.batch, cfg.heads, cfg.seq_kv, cfg.head_dim}, DType::Float32, g_bench_device);
+        auto value = randn({cfg.batch, cfg.heads, cfg.seq_kv, cfg.head_dim}, DType::Float32, g_bench_device);
 
         float scale = 1.0f / std::sqrt(static_cast<float>(cfg.head_dim));
 
@@ -182,7 +183,7 @@ void benchmark_scaled_dot_product() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(total_flops);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             // Manual scaled dot-product attention
             auto key_t = key.transpose(-2, -1);
             auto scores = matmul(query, key_t);
@@ -216,7 +217,8 @@ void benchmark_causal_attention() {
     for (auto seq_len : seq_lengths) {
         auto attn = MultiheadAttention(embed_dim, num_heads, 0.0, true,
                                        false, false, 0, 0, true);
-        auto input = randn({batch, seq_len, embed_dim});
+        attn.to(g_bench_device);
+        auto input = randn({batch, seq_len, embed_dim}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         // Create causal mask
@@ -226,7 +228,7 @@ void benchmark_causal_attention() {
         Benchmark bench_bi("Bidirectional seq=" + std::to_string(seq_len),
                           WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result_bi = bench_bi.run([&]() {
+        auto result_bi = bench_bi.set_device(g_bench_device).run([&]() {
             auto [output, _] = attn.forward(input_var, input_var, input_var,
                                            Tensor{}, Tensor{}, false);
             volatile void* ptr = output.tensor().data_ptr();
@@ -238,7 +240,7 @@ void benchmark_causal_attention() {
         Benchmark bench_causal("Causal seq=" + std::to_string(seq_len),
                               WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result_causal = bench_causal.run([&]() {
+        auto result_causal = bench_causal.set_device(g_bench_device).run([&]() {
             auto [output, _] = attn.forward(input_var, input_var, input_var,
                                            Tensor{}, causal_mask, false);
             volatile void* ptr = output.tensor().data_ptr();
@@ -270,14 +272,15 @@ void benchmark_sequence_scaling() {
 
     auto attn = MultiheadAttention(embed_dim, num_heads, 0.0, true,
                                    false, false, 0, 0, true);
+    attn.to(g_bench_device);
 
     for (auto seq_len : seq_lengths) {
-        auto input = randn({batch, seq_len, embed_dim});
+        auto input = randn({batch, seq_len, embed_dim}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench("seq=" + std::to_string(seq_len), 3, 20);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto [output, _] = attn.forward(input_var, input_var, input_var,
                                            Tensor{}, Tensor{}, false);
             volatile void* ptr = output.tensor().data_ptr();
@@ -337,14 +340,15 @@ void benchmark_attention_backward() {
     for (const auto& cfg : configs) {
         auto attn = MultiheadAttention(cfg.embed_dim, cfg.num_heads, 0.0, true,
                                        false, false, 0, 0, true);
+        attn.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.seq_len, cfg.embed_dim});
+        auto input = randn({cfg.batch, cfg.seq_len, cfg.embed_dim}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, true);  // requires_grad=true
 
         // Forward only
         Benchmark bench_fwd(cfg.name + " (fwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
 
-        auto result_fwd = bench_fwd.run([&]() {
+        auto result_fwd = bench_fwd.set_device(g_bench_device).run([&]() {
             auto [output, _] = attn.forward(input_var, input_var, input_var,
                                            Tensor{}, Tensor{}, false);
             volatile void* ptr = output.tensor().data_ptr();
@@ -355,7 +359,7 @@ void benchmark_attention_backward() {
         // Forward + Backward
         Benchmark bench_bwd(cfg.name + " (fwd+bwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
 
-        auto result_bwd = bench_bwd.run([&]() {
+        auto result_bwd = bench_bwd.set_device(g_bench_device).run([&]() {
             auto [output, _] = attn.forward(input_var, input_var, input_var,
                                            Tensor{}, Tensor{}, false);
 
@@ -399,8 +403,9 @@ void benchmark_transformer_layer() {
     for (const auto& cfg : configs) {
         auto encoder_layer = TransformerEncoderLayer(
             cfg.d_model, cfg.nhead, cfg.dim_ff, 0.1, "relu", true);
+        encoder_layer.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.seq_len, cfg.d_model});
+        auto input = randn({cfg.batch, cfg.seq_len, cfg.d_model}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         // Calculate approximate FLOPs
@@ -414,8 +419,13 @@ void benchmark_transformer_layer() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(total_flops);
 
-        auto result = bench.run([&]() {
-            auto output = encoder_layer(input_var);
+        auto result = bench.set_device(g_bench_device).run([&]() {
+            // TransformerEncoderLayer's single-Variable Module::forward()
+            // deliberately throws (see forward_impl) — it takes source mask
+            // and key-padding mask arguments too, so calling operator()(x)
+            // was never valid. Pass empty Tensor{} for "no mask", matching
+            // tests/unit/test_transformer.cpp.
+            auto output = encoder_layer.forward(input_var, Tensor{}, Tensor{});
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });

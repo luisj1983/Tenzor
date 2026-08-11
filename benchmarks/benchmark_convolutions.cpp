@@ -10,6 +10,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/pooling.hpp"
 #include "tenzor/utils/benchmark.hpp"
@@ -19,6 +20,14 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::benchmark;
+
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously this file never read argv at all, so
+// every randn()/module construction was hardcoded to CPU regardless of the
+// --device flag the runner passed.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 constexpr size_t WARMUP_ITERATIONS = 3;
 constexpr size_t BENCHMARK_ITERATIONS = 30;
@@ -75,9 +84,10 @@ void benchmark_conv2d_basic() {
         // Create conv layer
         auto conv = Conv2d(cfg.in_channels, cfg.out_channels, cfg.kernel_size,
                           cfg.stride, cfg.kernel_size / 2);
+        conv.to(g_bench_device);
 
         // Create input
-        auto input = randn({cfg.batch, cfg.in_channels, cfg.input_h, cfg.input_w});
+        auto input = randn({cfg.batch, cfg.in_channels, cfg.input_h, cfg.input_w}, DType::Float32, g_bench_device);
 
         // Calculate output dimensions
         int64_t out_h = (cfg.input_h + 2 * (cfg.kernel_size / 2) - cfg.kernel_size) / cfg.stride + 1;
@@ -94,7 +104,7 @@ void benchmark_conv2d_basic() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(flops_count);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto input_var = Variable(input, false); auto output = conv.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -155,7 +165,8 @@ void benchmark_resnet50_layers() {
     for (const auto& layer : layers) {
         auto conv = Conv2d(layer.in_ch, layer.out_ch, layer.kernel,
                           layer.stride, layer.kernel / 2);
-        auto input = randn({1, layer.in_ch, layer.h, layer.w});
+        conv.to(g_bench_device);
+        auto input = randn({1, layer.in_ch, layer.h, layer.w}, DType::Float32, g_bench_device);
 
         int64_t out_h = (layer.h + 2 * (layer.kernel / 2) - layer.kernel) / layer.stride + 1;
         int64_t out_w = (layer.w + 2 * (layer.kernel / 2) - layer.kernel) / layer.stride + 1;
@@ -169,7 +180,7 @@ void benchmark_resnet50_layers() {
         Benchmark bench(layer.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(flops_count);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto input_var = Variable(input, false); auto output = conv.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -238,11 +249,12 @@ void benchmark_pooling() {
 
     for (const auto& cfg : configs) {
         auto pool = MaxPool2d(cfg.kernel, cfg.stride);
-        auto input = randn({cfg.batch, cfg.channels, cfg.h, cfg.w});
+        pool.to(g_bench_device);
+        auto input = randn({cfg.batch, cfg.channels, cfg.h, cfg.w}, DType::Float32, g_bench_device);
 
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto input_var = Variable(input, false); auto output = pool.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -270,11 +282,12 @@ void benchmark_avgpool() {
 
     for (const auto& [channels, h, w, name] : configs) {
         auto pool = AvgPool2d(2, 2);
-        auto input = randn({1, channels, h, w});
+        pool.to(g_bench_device);
+        auto input = randn({1, channels, h, w}, DType::Float32, g_bench_device);
 
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto input_var = Variable(input, false); auto output = pool.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -292,11 +305,13 @@ int main(int argc, char** argv) {
             json_output = true;
         }
     }
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
 
     if (!json_output) {
         std::cout << "\n";
         std::cout << "========================================\n";
         std::cout << "  Tenzor Convolution Benchmark Suite\n";
+        std::cout << "  device=" << g_bench_device.to_string() << "\n";
         std::cout << "========================================\n";
         std::cout << "\nTarget Performance Metrics:\n";
         std::cout << "  Conv2d (ResNet50):  < 1ms/layer (PyTorch: 1.2ms)\n";

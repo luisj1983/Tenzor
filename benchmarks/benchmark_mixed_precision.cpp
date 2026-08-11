@@ -11,6 +11,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
@@ -27,6 +28,16 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::benchmark;
+
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously this file never read argv at all, so
+// every randn()/module construction was hardcoded to CPU regardless of the
+// --device flag the runner passed — a run_benchmarks.py "device=cuda" pass
+// silently benchmarked the CPU backend instead (see benchmark_attention.cpp
+// for the same class of bug, which additionally crashed outright).
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 constexpr size_t WARMUP_ITERATIONS = 5;
 constexpr size_t BENCHMARK_ITERATIONS = 50;
@@ -83,13 +94,13 @@ void benchmark_matmul_precision() {
 
         // FP32
         {
-            auto a = randn({cfg.M, cfg.K}, DType::Float32);
-            auto b = randn({cfg.K, cfg.N}, DType::Float32);
+            auto a = randn({cfg.M, cfg.K}, DType::Float32, g_bench_device);
+            auto b = randn({cfg.K, cfg.N}, DType::Float32, g_bench_device);
 
             Benchmark bench("FP32", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             bench.set_flops(flops_count);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = matmul(a, b);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -100,13 +111,13 @@ void benchmark_matmul_precision() {
 
         // FP16
         {
-            auto a = randn({cfg.M, cfg.K}, DType::Float16);
-            auto b = randn({cfg.K, cfg.N}, DType::Float16);
+            auto a = randn({cfg.M, cfg.K}, DType::Float16, g_bench_device);
+            auto b = randn({cfg.K, cfg.N}, DType::Float16, g_bench_device);
 
             Benchmark bench("FP16", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             bench.set_flops(flops_count);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = matmul(a, b);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -117,13 +128,13 @@ void benchmark_matmul_precision() {
 
         // BF16 (if supported)
         try {
-            auto a = randn({cfg.M, cfg.K}, DType::BFloat16);
-            auto b = randn({cfg.K, cfg.N}, DType::BFloat16);
+            auto a = randn({cfg.M, cfg.K}, DType::BFloat16, g_bench_device);
+            auto b = randn({cfg.K, cfg.N}, DType::BFloat16, g_bench_device);
 
             Benchmark bench("BF16", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             bench.set_flops(flops_count);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = matmul(a, b);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -166,11 +177,12 @@ void benchmark_linear_precision() {
         // FP32
         {
             auto linear = Linear(cfg.in_features, cfg.out_features);
-            auto input = randn({cfg.batch, cfg.in_features}, DType::Float32);
+            linear.to(g_bench_device);
+            auto input = randn({cfg.batch, cfg.in_features}, DType::Float32, g_bench_device);
             auto input_var = Variable(input, false);
 
             Benchmark bench("  FP32", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto output = linear.forward(input_var);
                 volatile void* ptr = output.tensor().data_ptr();
                 (void)ptr;
@@ -181,11 +193,12 @@ void benchmark_linear_precision() {
         // FP16
         {
             auto linear = Linear(cfg.in_features, cfg.out_features);
-            auto input = randn({cfg.batch, cfg.in_features}, DType::Float16);
+            linear.to(g_bench_device);
+            auto input = randn({cfg.batch, cfg.in_features}, DType::Float16, g_bench_device);
             auto input_var = Variable(input, false);
 
             Benchmark bench("  FP16", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto output = linear.forward(input_var);
                 volatile void* ptr = output.tensor().data_ptr();
                 (void)ptr;
@@ -226,11 +239,12 @@ void benchmark_conv2d_precision() {
         // FP32
         {
             auto conv = Conv2d(cfg.in_ch, cfg.out_ch, cfg.kernel, 1, cfg.kernel / 2);
-            auto input = randn({cfg.batch, cfg.in_ch, cfg.h, cfg.w}, DType::Float32);
+            conv.to(g_bench_device);
+            auto input = randn({cfg.batch, cfg.in_ch, cfg.h, cfg.w}, DType::Float32, g_bench_device);
             auto input_var = Variable(input, false);
 
             Benchmark bench("  FP32", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto output = conv.forward(input_var);
                 volatile void* ptr = output.tensor().data_ptr();
                 (void)ptr;
@@ -241,11 +255,12 @@ void benchmark_conv2d_precision() {
         // FP16
         {
             auto conv = Conv2d(cfg.in_ch, cfg.out_ch, cfg.kernel, 1, cfg.kernel / 2);
-            auto input = randn({cfg.batch, cfg.in_ch, cfg.h, cfg.w}, DType::Float16);
+            conv.to(g_bench_device);
+            auto input = randn({cfg.batch, cfg.in_ch, cfg.h, cfg.w}, DType::Float16, g_bench_device);
             auto input_var = Variable(input, false);
 
             Benchmark bench("  FP16", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto output = conv.forward(input_var);
                 volatile void* ptr = output.tensor().data_ptr();
                 (void)ptr;
@@ -271,14 +286,15 @@ void benchmark_amp_training() {
     const int64_t out_features = 1000;
 
     auto model = std::make_shared<BenchmarkMLP>(in_features, hidden, out_features);
+    model->to(g_bench_device);
 
     // FP32 training
     {
-        auto input = randn({batch, in_features}, DType::Float32);
+        auto input = randn({batch, in_features}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, true);
 
         Benchmark bench("FP32 Training Step", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             model->train();
             auto output = model->forward(input_var);
             auto loss = mean(output);
@@ -294,11 +310,11 @@ void benchmark_amp_training() {
 
     // AMP training (FP16 forward, FP32 gradients)
     {
-        auto input = randn({batch, in_features}, DType::Float16);
+        auto input = randn({batch, in_features}, DType::Float16, g_bench_device);
         auto input_var = Variable(input, true);
 
         Benchmark bench("AMP Training Step", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             model->train();
 
             // Forward in FP16
@@ -368,14 +384,14 @@ void benchmark_precision_conversion() {
     for (auto size : sizes) {
         std::cout << "Size: " << (size / (1024 * 1024)) << "M elements\n";
 
-        auto fp32_tensor = randn({size}, DType::Float32);
+        auto fp32_tensor = randn({size}, DType::Float32, g_bench_device);
 
         // FP32 -> FP16
         {
             Benchmark bench("  FP32 -> FP16", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             bench.set_bytes(size * (4 + 2));  // read FP32, write FP16
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto fp16_tensor = fp32_tensor.to(DType::Float16);
                 volatile void* ptr = fp16_tensor.data_ptr();
                 (void)ptr;
@@ -390,7 +406,7 @@ void benchmark_precision_conversion() {
             Benchmark bench("  FP16 -> FP32", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             bench.set_bytes(size * (2 + 4));
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto back_to_fp32 = fp16_tensor.to(DType::Float32);
                 volatile void* ptr = back_to_fp32.data_ptr();
                 (void)ptr;
@@ -429,11 +445,12 @@ void benchmark_int8_inference() {
         // FP32 baseline
         {
             auto linear = Linear(cfg.in_features, cfg.out_features);
-            auto input = randn({cfg.batch, cfg.in_features}, DType::Float32);
+            linear.to(g_bench_device);
+            auto input = randn({cfg.batch, cfg.in_features}, DType::Float32, g_bench_device);
             auto input_var = Variable(input, false);
 
             Benchmark bench("  FP32 baseline", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto output = linear.forward(input_var);
                 volatile void* ptr = output.tensor().data_ptr();
                 (void)ptr;
@@ -444,13 +461,13 @@ void benchmark_int8_inference() {
         // Simulated INT8 (using INT8 storage)
         {
             // Note: Full INT8 quantized linear requires quantization infrastructure
-            auto input = randn({cfg.batch, cfg.in_features}, DType::Float32);
+            auto input = randn({cfg.batch, cfg.in_features}, DType::Float32, g_bench_device);
 
             // Quantize input
             float scale = 127.0f / max(abs(input)).item<float>();
 
             Benchmark bench("  Quantize+Dequant", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 // Simulate quantization overhead
                 auto scaled = input * scale;
                 auto rounded = round(scaled);
@@ -486,8 +503,8 @@ void benchmark_elementwise_precision() {
     for (const auto& [name, dtype] : dtypes) {
         std::cout << name << ":\n";
 
-        auto a = randn({size}, dtype);
-        auto b = randn({size}, dtype);
+        auto a = randn({size}, dtype, g_bench_device);
+        auto b = randn({size}, dtype, g_bench_device);
 
         // Addition
         {
@@ -495,7 +512,7 @@ void benchmark_elementwise_precision() {
             size_t bytes = size * dtype_size(dtype) * 3;  // 2 reads + 1 write
             bench.set_bytes(bytes);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = add(a, b);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -509,7 +526,7 @@ void benchmark_elementwise_precision() {
             size_t bytes = size * dtype_size(dtype) * 3;
             bench.set_bytes(bytes);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = mul(a, b);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -523,7 +540,7 @@ void benchmark_elementwise_precision() {
             size_t bytes = size * dtype_size(dtype) * 2;
             bench.set_bytes(bytes);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = exp(a);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -536,9 +553,11 @@ void benchmark_elementwise_precision() {
 }
 
 int main(int argc, char** argv) {
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "  Tenzor Mixed Precision Benchmark\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nTarget Performance Metrics:\n";
     std::cout << "  FP16 MatMul:      1.5-2x faster than FP32\n";

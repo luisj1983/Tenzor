@@ -85,6 +85,8 @@ First public alpha release. The library is feature-complete for the listed scope
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
 ### Added
 
 - Op count has grown to 702 registered operations across all five backends (up from
@@ -130,6 +132,7 @@ First public alpha release. The library is feature-complete for the listed scope
 
 | Version | Date       | Highlights                          |
 |---------|------------|-------------------------------------|
+| 0.2.0   | 2026-08-10 | 317→702 ops; CachingAllocator; CUDA LSTM/GRU, cuDNN SDPA FP32, Vulkan STFT, complex NumPy interop, C10d rendezvous, ONNX importer fixes. |
 | 0.1.0   | 2026-04-29 | First public alpha release.         |
 
 ---

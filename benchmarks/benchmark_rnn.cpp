@@ -12,6 +12,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/nn/layers/rnn.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/utils/benchmark.hpp"
@@ -22,6 +23,13 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::benchmark;
+
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously this file never read argv at all, so
+// --device cuda silently benchmarked the CPU backend instead.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 constexpr size_t WARMUP_ITERATIONS = 3;
 constexpr size_t BENCHMARK_ITERATIONS = 30;
@@ -68,9 +76,10 @@ void benchmark_lstm_forward() {
 
     for (const auto& cfg : configs) {
         auto lstm = LSTM(cfg.input_size, cfg.hidden_size, cfg.num_layers,
-                        true, 0.0, cfg.bidirectional, true);
+                        true, false, 0.0, cfg.bidirectional);
+        lstm.to(g_bench_device);
 
-        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size});
+        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         // FLOPs for LSTM: 4 * hidden * (input + hidden) per timestep per layer
@@ -82,7 +91,7 @@ void benchmark_lstm_forward() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(total_flops);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -120,9 +129,10 @@ void benchmark_gru_forward() {
 
     for (const auto& cfg : configs) {
         auto gru = GRU(cfg.input_size, cfg.hidden_size, cfg.num_layers,
-                      true, 0.0, cfg.bidirectional, true);
+                      true, false, 0.0, cfg.bidirectional);
+        gru.to(g_bench_device);
 
-        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size});
+        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         // GRU has 3 gates instead of 4, so ~75% of LSTM FLOPs
@@ -133,7 +143,7 @@ void benchmark_gru_forward() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(total_flops);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = gru.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -168,14 +178,15 @@ void benchmark_lstm_backward() {
 
     for (const auto& cfg : configs) {
         auto lstm = LSTM(cfg.input_size, cfg.hidden_size, cfg.num_layers,
-                        true, 0.0, false, true);
+                        true, false, 0.0, false);
+        lstm.to(g_bench_device);
 
-        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size});
+        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, true);
 
         // Forward only
         Benchmark bench_fwd(cfg.name + " (fwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_fwd = bench_fwd.run([&]() {
+        auto result_fwd = bench_fwd.set_device(g_bench_device).run([&]() {
             auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -184,7 +195,7 @@ void benchmark_lstm_backward() {
 
         // Forward + Backward
         Benchmark bench_bwd(cfg.name + " (fwd+bwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
-        auto result_bwd = bench_bwd.run([&]() {
+        auto result_bwd = bench_bwd.set_device(g_bench_device).run([&]() {
             auto output = lstm.forward(input_var);
             auto grad = ones_like(output.tensor());
             output.backward(grad);
@@ -217,7 +228,8 @@ void benchmark_sequence_length_scaling() {
 
     std::vector<int64_t> seq_lengths = {50, 100, 200, 500, 1000, 2000};
 
-    auto lstm = LSTM(input_size, hidden_size, num_layers, true, 0.0, false, true);
+    auto lstm = LSTM(input_size, hidden_size, num_layers, true, false, 0.0, false);
+    lstm.to(g_bench_device);
 
     std::cout << std::left << std::setw(12) << "Seq Len"
               << std::setw(15) << "Time (ms)"
@@ -229,12 +241,12 @@ void benchmark_sequence_length_scaling() {
     double base_time_per_step = 0;
 
     for (auto seq_len : seq_lengths) {
-        auto input = randn({seq_len, batch, input_size});
+        auto input = randn({seq_len, batch, input_size}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench("seq=" + std::to_string(seq_len), 3, 20);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -283,9 +295,10 @@ void benchmark_hidden_size_scaling() {
     std::cout << std::string(63, '-') << "\n";
 
     for (auto hidden_size : hidden_sizes) {
-        auto lstm = LSTM(hidden_size, hidden_size, num_layers, true, 0.0, false, true);
+        auto lstm = LSTM(hidden_size, hidden_size, num_layers, true, false, 0.0, false);
+        lstm.to(g_bench_device);
 
-        auto input = randn({seq_len, batch, hidden_size});
+        auto input = randn({seq_len, batch, hidden_size}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         size_t flops_per_step = 4 * hidden_size * (hidden_size + hidden_size) * 2;
@@ -297,7 +310,7 @@ void benchmark_hidden_size_scaling() {
         Benchmark bench("hidden=" + std::to_string(hidden_size), 3, 20);
         bench.set_flops(total_flops);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -350,16 +363,18 @@ void benchmark_lstm_vs_gru() {
 
     for (const auto& cfg : configs) {
         auto lstm = LSTM(cfg.input_size, cfg.hidden_size, cfg.num_layers,
-                        true, 0.0, false, true);
+                        true, false, 0.0, false);
         auto gru = GRU(cfg.input_size, cfg.hidden_size, cfg.num_layers,
-                      true, 0.0, false, true);
+                      true, false, 0.0, false);
+        lstm.to(g_bench_device);
+        gru.to(g_bench_device);
 
-        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size});
+        auto input = randn({cfg.seq_len, cfg.batch, cfg.input_size}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         // LSTM
         Benchmark bench_lstm("LSTM " + cfg.name, 3, 20);
-        auto result_lstm = bench_lstm.run([&]() {
+        auto result_lstm = bench_lstm.set_device(g_bench_device).run([&]() {
             auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -367,7 +382,7 @@ void benchmark_lstm_vs_gru() {
 
         // GRU
         Benchmark bench_gru("GRU " + cfg.name, 3, 20);
-        auto result_gru = bench_gru.run([&]() {
+        auto result_gru = bench_gru.set_device(g_bench_device).run([&]() {
             auto output = gru.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -413,14 +428,15 @@ void benchmark_layer_scaling() {
     double base_time_per_layer = 0;
 
     for (auto num_layers : layer_counts) {
-        auto lstm = LSTM(input_size, hidden_size, num_layers, true, 0.0, false, true);
+        auto lstm = LSTM(input_size, hidden_size, num_layers, true, false, 0.0, false);
+        lstm.to(g_bench_device);
 
-        auto input = randn({seq_len, batch, input_size});
+        auto input = randn({seq_len, batch, input_size}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench("layers=" + std::to_string(num_layers), 3, 20);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -447,9 +463,12 @@ void benchmark_layer_scaling() {
 }
 
 int main(int argc, char** argv) {
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "  Tenzor RNN Benchmark Suite\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nTarget Performance Metrics:\n";
     std::cout << "  LSTM 2L 256:      < 10ms for seq=100, batch=32\n";

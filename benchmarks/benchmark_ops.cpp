@@ -25,6 +25,15 @@ using namespace tenzor::benchmark;
 // Forward declarations - defined before main()
 static void collect_result(const BenchmarkResult& result);
 
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously main() parsed --device into a local
+// that was never used to target randn()/Benchmark — see the removed comment
+// admitting as much. A --device cuda run silently benchmarked the CPU
+// backend instead.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
+
 // Benchmark configuration
 constexpr size_t WARMUP_ITERATIONS = 5;
 constexpr size_t BENCHMARK_ITERATIONS = 50;
@@ -52,8 +61,8 @@ void benchmark_matmul_suite() {
 
     for (const auto& [M, K, N, name] : test_cases) {
         // Create tensors
-        auto a = randn({static_cast<int64_t>(M), static_cast<int64_t>(K)});
-        auto b = randn({static_cast<int64_t>(K), static_cast<int64_t>(N)});
+        auto a = randn({static_cast<int64_t>(M), static_cast<int64_t>(K)}, DType::Float32, g_bench_device);
+        auto b = randn({static_cast<int64_t>(K), static_cast<int64_t>(N)}, DType::Float32, g_bench_device);
 
         // Setup benchmark
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
@@ -61,7 +70,7 @@ void benchmark_matmul_suite() {
         bench.set_bytes(memory::matmul(M, N, K, 4));
 
         // Run benchmark
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto c = matmul(a, b);
             // Force computation (prevent lazy evaluation if any)
             volatile void* ptr = c.data_ptr();
@@ -111,14 +120,14 @@ void benchmark_bmm() {
     };
 
     for (const auto& [batch, M, K, N, name] : test_cases) {
-        auto a = randn({static_cast<int64_t>(batch), static_cast<int64_t>(M), static_cast<int64_t>(K)});
-        auto b = randn({static_cast<int64_t>(batch), static_cast<int64_t>(K), static_cast<int64_t>(N)});
+        auto a = randn({static_cast<int64_t>(batch), static_cast<int64_t>(M), static_cast<int64_t>(K)}, DType::Float32, g_bench_device);
+        auto b = randn({static_cast<int64_t>(batch), static_cast<int64_t>(K), static_cast<int64_t>(N)}, DType::Float32, g_bench_device);
 
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_flops(batch * flops::matmul(M, N, K));
         bench.set_bytes(batch * memory::matmul(M, N, K, 4));
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto c = bmm(a, b);
             volatile void* ptr = c.data_ptr();
             (void)ptr;
@@ -146,8 +155,8 @@ void benchmark_elementwise() {
     };
 
     for (const auto& [shape, name] : shapes) {
-        auto a = randn(shape);
-        auto b = randn(shape);
+        auto a = randn(shape, DType::Float32, g_bench_device);
+        auto b = randn(shape, DType::Float32, g_bench_device);
 
         size_t num_elements = 1;
         for (auto dim : shape) {
@@ -160,7 +169,7 @@ void benchmark_elementwise() {
             bench.set_flops(flops::elementwise(num_elements, 1));
             bench.set_bytes(memory::elementwise(num_elements, 2, 1, 4));
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = add(a, b);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -175,7 +184,7 @@ void benchmark_elementwise() {
             bench.set_flops(flops::elementwise(num_elements, 1));
             bench.set_bytes(memory::elementwise(num_elements, 2, 1, 4));
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = mul(a, b);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -190,7 +199,7 @@ void benchmark_elementwise() {
             bench.set_flops(flops::elementwise(num_elements, 1));
             bench.set_bytes(memory::elementwise(num_elements, 1, 1, 4));
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = exp(a);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -205,7 +214,7 @@ void benchmark_elementwise() {
             bench.set_flops(flops::elementwise(num_elements, 1));
             bench.set_bytes(memory::elementwise(num_elements, 1, 1, 4));
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto c = tanh(a);
                 volatile void* ptr = c.data_ptr();
                 (void)ptr;
@@ -231,7 +240,7 @@ void benchmark_reductions() {
     };
 
     for (const auto& [shape, name] : shapes) {
-        auto a = randn(shape);
+        auto a = randn(shape, DType::Float32, g_bench_device);
 
         size_t num_elements = 1;
         for (auto dim : shape) {
@@ -244,7 +253,7 @@ void benchmark_reductions() {
             bench.set_flops(flops::elementwise(num_elements, 1));
             bench.set_bytes(num_elements * 4);  // Read all elements
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto s = sum(a);
                 volatile void* ptr = s.data_ptr();
                 (void)ptr;
@@ -259,7 +268,7 @@ void benchmark_reductions() {
             bench.set_flops(flops::elementwise(num_elements, 2));  // sum + divide
             bench.set_bytes(num_elements * 4);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto m = mean(a);
                 volatile void* ptr = m.data_ptr();
                 (void)ptr;
@@ -280,12 +289,12 @@ void benchmark_backward() {
 
     // MatMul backward
     {
-        auto a = Variable(randn({512, 512}), true);
-        auto b = Variable(randn({512, 512}), true);
+        auto a = Variable(randn({512, 512}, DType::Float32, g_bench_device), true);
+        auto b = Variable(randn({512, 512}, DType::Float32, g_bench_device), true);
 
         Benchmark bench("MatMul Backward (512x512)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto c = matmul(a.tensor(), b.tensor());
             auto var_c = Variable(c, true);
 
@@ -303,12 +312,12 @@ void benchmark_backward() {
 
     // Element-wise backward
     {
-        auto a = Variable(randn({1024, 1024}), true);
-        auto b = Variable(randn({1024, 1024}), true);
+        auto a = Variable(randn({1024, 1024}, DType::Float32, g_bench_device), true);
+        auto b = Variable(randn({1024, 1024}, DType::Float32, g_bench_device), true);
 
         Benchmark bench("Add Backward (1024x1024)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto c = add(a.tensor(), b.tensor());
             auto var_c = Variable(c, true);
 
@@ -337,18 +346,13 @@ int main(int argc, char** argv) {
             json_output = true;
         }
     }
-    // HH.25: parse --device / --device-id from argv. benchmark_ops.cpp uses
-    // ``randn(shape)`` without an explicit device, so the parsed device is
-    // currently only reported in the header — actually re-targeting the
-    // creation calls is a follow-up. The flag is accepted so the Python
-    // runner can pass ``--device <name>`` uniformly across binaries.
-    tenzor::Device bench_device = tenzor::bench::parse_device_arg(argc, argv);
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
 
     if (!json_output) {
         std::cout << "\n";
         std::cout << "========================================\n";
         std::cout << "  Tenzor Operations Benchmark Suite\n";
-        std::cout << "  device=" << bench_device.to_string() << "\n";
+        std::cout << "  device=" << g_bench_device.to_string() << "\n";
         std::cout << "========================================\n";
         std::cout << "\nTarget Performance Metrics:\n";
         std::cout << "  MatMul (4096x4096):  < 20ms (PyTorch: 22ms)\n";

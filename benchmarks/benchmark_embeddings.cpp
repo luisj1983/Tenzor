@@ -11,6 +11,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/nn/layers/embedding.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/autograd/variable.hpp"
@@ -23,6 +24,16 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::benchmark;
+
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously this file never read argv at all, so
+// --device cuda silently benchmarked the CPU backend instead. Index tensors
+// are filled via a host raw-pointer loop (data<int64_t>()), so they're built
+// on CPU and moved to g_bench_device with .to() afterward rather than
+// created directly on-device.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 constexpr size_t WARMUP_ITERATIONS = 5;
 constexpr size_t BENCHMARK_ITERATIONS = 100;
@@ -67,6 +78,7 @@ void benchmark_embedding_forward() {
 
     for (const auto& cfg : configs) {
         auto embedding = Embedding(cfg.vocab_size, cfg.embed_dim);
+        embedding.to(g_bench_device);
 
         // Create random indices
         auto indices = zeros({cfg.batch, cfg.seq_len}, DType::Int64);
@@ -76,7 +88,7 @@ void benchmark_embedding_forward() {
         for (int64_t i = 0; i < cfg.batch * cfg.seq_len; ++i) {
             idx_ptr[i] = dist(gen);
         }
-        auto indices_var = Variable(indices, false);
+        auto indices_var = Variable(indices.to(g_bench_device), false);
 
         // Memory: read vocab_size * embed_dim (table) + write batch * seq * embed
         size_t bytes = cfg.batch * cfg.seq_len * cfg.embed_dim * sizeof(float);
@@ -84,7 +96,7 @@ void benchmark_embedding_forward() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = embedding.forward(indices_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -134,6 +146,7 @@ void benchmark_embedding_backward() {
 
     for (const auto& cfg : configs) {
         auto embedding = Embedding(cfg.vocab_size, cfg.embed_dim);
+        embedding.to(g_bench_device);
 
         auto indices = zeros({cfg.batch, cfg.seq_len}, DType::Int64);
         auto idx_ptr = indices.data<int64_t>();
@@ -142,11 +155,11 @@ void benchmark_embedding_backward() {
         for (int64_t i = 0; i < cfg.batch * cfg.seq_len; ++i) {
             idx_ptr[i] = dist(gen);
         }
-        auto indices_var = Variable(indices, false);
+        auto indices_var = Variable(indices.to(g_bench_device), false);
 
         // Forward only
         Benchmark bench_fwd(cfg.name + " (fwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_fwd = bench_fwd.run([&]() {
+        auto result_fwd = bench_fwd.set_device(g_bench_device).run([&]() {
             auto output = embedding.forward(indices_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -155,7 +168,7 @@ void benchmark_embedding_backward() {
 
         // Forward + Backward
         Benchmark bench_bwd(cfg.name + " (fwd+bwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
-        auto result_bwd = bench_bwd.run([&]() {
+        auto result_bwd = bench_bwd.set_device(g_bench_device).run([&]() {
             auto output = embedding.forward(indices_var);
             auto grad = ones_like(output.tensor());
             output.backward(grad);
@@ -199,6 +212,8 @@ void benchmark_combined_embedding() {
     for (const auto& cfg : configs) {
         auto token_embed = Embedding(cfg.vocab_size, cfg.embed_dim);
         auto pos_embed = Embedding(cfg.max_pos, cfg.embed_dim);
+        token_embed.to(g_bench_device);
+        pos_embed.to(g_bench_device);
 
         // Create indices
         auto token_ids = zeros({cfg.batch, cfg.seq_len}, DType::Int64);
@@ -217,12 +232,12 @@ void benchmark_combined_embedding() {
             }
         }
 
-        auto token_var = Variable(token_ids, false);
-        auto pos_var = Variable(pos_ids, false);
+        auto token_var = Variable(token_ids.to(g_bench_device), false);
+        auto pos_var = Variable(pos_ids.to(g_bench_device), false);
 
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto tok_emb = token_embed.forward(token_var);
             auto pos_emb = pos_embed.forward(pos_var);
 
@@ -260,6 +275,7 @@ void benchmark_vocab_scaling() {
 
     for (auto vocab_size : vocab_sizes) {
         auto embedding = Embedding(vocab_size, embed_dim);
+        embedding.to(g_bench_device);
 
         auto indices = zeros({batch, seq_len}, DType::Int64);
         auto idx_ptr = indices.data<int64_t>();
@@ -268,11 +284,11 @@ void benchmark_vocab_scaling() {
         for (int64_t i = 0; i < batch * seq_len; ++i) {
             idx_ptr[i] = dist(gen);
         }
-        auto indices_var = Variable(indices, false);
+        auto indices_var = Variable(indices.to(g_bench_device), false);
 
         Benchmark bench("vocab=" + std::to_string(vocab_size), 5, 50);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = embedding.forward(indices_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -317,6 +333,7 @@ void benchmark_embed_dim_scaling() {
 
     for (auto embed_dim : embed_dims) {
         auto embedding = Embedding(vocab_size, embed_dim);
+        embedding.to(g_bench_device);
 
         auto indices = zeros({batch, seq_len}, DType::Int64);
         auto idx_ptr = indices.data<int64_t>();
@@ -325,14 +342,14 @@ void benchmark_embed_dim_scaling() {
         for (int64_t i = 0; i < batch * seq_len; ++i) {
             idx_ptr[i] = dist(gen);
         }
-        auto indices_var = Variable(indices, false);
+        auto indices_var = Variable(indices.to(g_bench_device), false);
 
         size_t bytes = batch * seq_len * embed_dim * sizeof(float);
 
         Benchmark bench("dim=" + std::to_string(embed_dim), 5, 50);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = embedding.forward(indices_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -379,6 +396,8 @@ void benchmark_embed_projection() {
     for (const auto& cfg : configs) {
         auto embedding = Embedding(cfg.vocab_size, cfg.embed_dim);
         auto projection = Linear(cfg.embed_dim, cfg.proj_dim);
+        embedding.to(g_bench_device);
+        projection.to(g_bench_device);
 
         auto indices = zeros({cfg.batch, cfg.seq_len}, DType::Int64);
         auto idx_ptr = indices.data<int64_t>();
@@ -387,11 +406,11 @@ void benchmark_embed_projection() {
         for (int64_t i = 0; i < cfg.batch * cfg.seq_len; ++i) {
             idx_ptr[i] = dist(gen);
         }
-        auto indices_var = Variable(indices, false);
+        auto indices_var = Variable(indices.to(g_bench_device), false);
 
         // Embedding only
         Benchmark bench_embed(cfg.name + " (embed only)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_embed = bench_embed.run([&]() {
+        auto result_embed = bench_embed.set_device(g_bench_device).run([&]() {
             auto output = embedding.forward(indices_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -400,7 +419,7 @@ void benchmark_embed_projection() {
 
         // Embedding + projection
         Benchmark bench_both(cfg.name + " (embed+proj)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_both = bench_both.run([&]() {
+        auto result_both = bench_both.set_device(g_bench_device).run([&]() {
             auto emb_output = embedding.forward(indices_var);
             auto proj_output = projection.forward(emb_output);
             volatile void* ptr = proj_output.tensor().data_ptr();
@@ -415,9 +434,12 @@ void benchmark_embed_projection() {
 }
 
 int main(int argc, char** argv) {
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "  Tenzor Embedding Benchmark Suite\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nTarget Performance Metrics:\n";
     std::cout << "  Embedding lookup:     Memory bandwidth limited\n";

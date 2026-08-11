@@ -12,6 +12,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
@@ -33,6 +34,13 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::benchmark;
+
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously this file never read argv at all, so
+// --device cuda silently benchmarked the CPU backend instead.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 constexpr size_t WARMUP_ITERATIONS = 3;
 constexpr size_t BENCHMARK_ITERATIONS = 20;
@@ -79,7 +87,11 @@ public:
         : conv1_(std::make_shared<Conv2d>(3, 64, 7, 2, 3)),
           bn1_(std::make_shared<BatchNorm2d>(64)),
           pool_(std::make_shared<MaxPool2d>(3, 2, 1)),
-          fc_(std::make_shared<Linear>(64 * 7 * 7, num_classes)) {
+          // forward_impl() global-average-pools over H,W before the FC layer
+          // (see below), so the FC input is the channel count (64), not the
+          // un-pooled flattened 64*7*7 — that mismatch made every forward()
+          // throw "Linear: expected input last dim=3136, got 64".
+          fc_(std::make_shared<Linear>(64, num_classes)) {
         register_module("conv1", conv1_);
         register_module("bn1", bn1_);
         register_module("pool", pool_);
@@ -156,9 +168,12 @@ public:
         // Simple embedding lookup simulation
         auto x = embedding_->forward(input_ids);
 
-        // Pass through transformer layers
+        // Pass through transformer layers. TransformerEncoderLayer's
+        // single-Variable Module::forward() (i.e. operator()(x)) deliberately
+        // throws — it needs the (src, src_mask, src_key_padding_mask)
+        // overload. Tensor{} means "no mask" (see tests/unit/test_transformer.cpp).
         for (auto& layer : layers_) {
-            x = (*layer)(x);
+            x = layer->forward(x, Tensor{}, Tensor{});
         }
 
         // Pool first token
@@ -261,13 +276,14 @@ void benchmark_resnet_inference() {
     for (const auto& cfg : configs) {
         auto model = std::make_shared<BenchmarkResNet>(1000, cfg.blocks);
         model->eval();
+        model->to(g_bench_device);
 
-        auto input = randn({cfg.batch, 3, 224, 224});
+        auto input = randn({cfg.batch, 3, 224, 224}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = model->forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -295,22 +311,26 @@ void benchmark_resnet_training() {
     for (auto batch : batch_sizes) {
         auto model = std::make_shared<BenchmarkResNet>(1000, 4);
         model->train();
+        model->to(g_bench_device);
         auto optimizer = std::make_shared<optim::Adam>(model->parameters(), 0.001);
         auto criterion = std::make_shared<CrossEntropyLoss>();
 
-        auto input = randn({batch, 3, 224, 224});
+        auto input = randn({batch, 3, 224, 224}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, true);
 
-        // Create random targets
+        // Create random targets (filled via host pointer, so built on CPU
+        // then moved — writing through data<int64_t>() on a device tensor
+        // would be an invalid host write to device memory).
         auto targets = zeros({batch}, DType::Int64);
         auto target_ptr = targets.data<int64_t>();
         for (int64_t i = 0; i < batch; ++i) {
             target_ptr[i] = rand() % 1000;
         }
+        targets = targets.to(g_bench_device);
 
         Benchmark bench("Batch=" + std::to_string(batch), WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             optimizer->zero_grad();
             auto output = model->forward(input_var);
             auto loss = (*criterion)(output, targets);
@@ -356,14 +376,15 @@ void benchmark_bert_inference() {
         auto model = std::make_shared<BenchmarkBERT>(
             30522, cfg.hidden, cfg.layers, cfg.heads, cfg.hidden * 4);
         model->eval();
+        model->to(g_bench_device);
 
         // Simulate one-hot encoded input (simplified)
-        auto input = randn({cfg.batch, cfg.seq_len, 30522});
+        auto input = randn({cfg.batch, cfg.seq_len, 30522}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = model->forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -405,15 +426,16 @@ void benchmark_gpt_generation() {
         auto model = std::make_shared<BenchmarkGPT>(
             50257, cfg.hidden, cfg.layers, cfg.heads);
         model->eval();
+        model->to(g_bench_device);
 
         for (auto seq_len : seq_lengths) {
             // Simulate already-generated context
-            auto input = randn({1, seq_len, 50257});
+            auto input = randn({1, seq_len, 50257}, DType::Float32, g_bench_device);
             auto input_var = Variable(input, false);
 
             Benchmark bench("  seq=" + std::to_string(seq_len), 3, 10);
 
-            auto result = bench.run([&]() {
+            auto result = bench.set_device(g_bench_device).run([&]() {
                 auto output = model->forward(input_var);
                 volatile void* ptr = output.tensor().data_ptr();
                 (void)ptr;
@@ -442,6 +464,7 @@ void benchmark_batch_scaling() {
     // Use a simple model to isolate batch scaling behavior
     auto model = std::make_shared<BenchmarkResNet>(1000, 2);
     model->eval();
+    model->to(g_bench_device);
 
     std::vector<int64_t> batch_sizes = {1, 2, 4, 8, 16, 32, 64, 128};
     std::vector<double> latencies;
@@ -456,12 +479,12 @@ void benchmark_batch_scaling() {
     double base_throughput = 0;
 
     for (auto batch : batch_sizes) {
-        auto input = randn({batch, 3, 224, 224});
+        auto input = randn({batch, 3, 224, 224}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench("batch=" + std::to_string(batch), 3, 15);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = model->forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -527,19 +550,21 @@ void benchmark_model_size_scaling() {
         // Create a BERT-like encoder
         std::vector<std::shared_ptr<TransformerEncoderLayer>> layers;
         for (int64_t i = 0; i < cfg.layers; ++i) {
-            layers.push_back(std::make_shared<TransformerEncoderLayer>(
-                cfg.hidden, cfg.heads, cfg.hidden * 4, 0.0, "gelu", true));
+            auto layer = std::make_shared<TransformerEncoderLayer>(
+                cfg.hidden, cfg.heads, cfg.hidden * 4, 0.0, "gelu", true);
+            layer->to(g_bench_device);
+            layers.push_back(layer);
         }
 
-        auto input = randn({batch, seq_len, cfg.hidden});
+        auto input = randn({batch, seq_len, cfg.hidden}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench(cfg.name, 3, 10);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto x = input_var;
             for (auto& layer : layers) {
-                x = (*layer)(x);
+                x = layer->forward(x, Tensor{}, Tensor{});
             }
             volatile void* ptr = x.tensor().data_ptr();
             (void)ptr;
@@ -613,9 +638,12 @@ void benchmark_memory_footprint() {
 }
 
 int main(int argc, char** argv) {
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "  Tenzor Model Benchmark Suite\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nTarget Performance Metrics:\n";
     std::cout << "  ResNet batch=32:    > 100 images/sec\n";

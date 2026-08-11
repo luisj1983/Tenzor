@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "tenzor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-backend tensor and deep learning library in modern C++23 with PyTorch-like Python bindings"
 readme = "README.md"
 requires-python = ">=3.9"

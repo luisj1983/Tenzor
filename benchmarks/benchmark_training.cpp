@@ -142,10 +142,16 @@ private:
         auto out_h = (height - kernel_size) / stride + 1;
         auto out_w = (width - kernel_size) / stride + 1;
 
-        auto output = zeros({batch, channels, out_h, out_w}, input.dtype(), input.device());
+        // Naive reference impl below does raw host-pointer arithmetic
+        // (data<float>()), which segfaults on a GPU-resident tensor. Route
+        // through a CPU copy and move the result back to the input's
+        // original device — in production this would use an optimized
+        // device kernel instead.
+        auto input_cpu = input.device().type == Device::Type::CPU ? input : input.to(Device::cpu());
+        auto output = zeros({batch, channels, out_h, out_w}, input.dtype(), Device::cpu());
 
         // Simple implementation - in production would use optimized kernel
-        auto input_ptr = input.data<float>();
+        auto input_ptr = input_cpu.data<float>();
         auto output_ptr = output.data<float>();
 
         for (int64_t b = 0; b < batch; ++b) {
@@ -174,7 +180,7 @@ private:
             }
         }
 
-        return output;
+        return input.device().type == Device::Type::CPU ? output : output.to(input.device());
     }
 };
 
@@ -194,6 +200,7 @@ void benchmark_training_iteration() {
 
     for (const auto& [input_size, hidden_size, output_size, name] : configs) {
         auto model = std::make_shared<SimpleMLP>(input_size, hidden_size, output_size);
+        model->to(g_bench_device);
         auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
         auto criterion = std::make_shared<MSELoss>();
 
@@ -203,7 +210,7 @@ void benchmark_training_iteration() {
 
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             // Forward pass
             model->train();
             auto output = model->forward(input);
@@ -245,6 +252,7 @@ void benchmark_batch_training() {
 
     for (const auto& [batch_size, name] : batch_sizes) {
         auto model = std::make_shared<SimpleMLP>(256, 256, 10);
+        model->to(g_bench_device);
         auto optimizer = std::make_shared<optim::Adam>(model->parameters(), 0.001);
         auto criterion = std::make_shared<MSELoss>();
 
@@ -258,7 +266,7 @@ void benchmark_batch_training() {
 
         Benchmark bench(name, 2, 10);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             model->train();
 
             // Process all batches
@@ -296,6 +304,7 @@ void benchmark_cnn_training() {
 
     for (const auto& [batch_size, image_size, num_classes, name] : configs) {
         auto model = std::make_shared<SimpleCNN>(3, num_classes);
+        model->to(g_bench_device);
         auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
         auto criterion = std::make_shared<CrossEntropyLoss>();
 
@@ -315,7 +324,7 @@ void benchmark_cnn_training() {
 
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             model->train();
 
             // Forward
@@ -357,6 +366,7 @@ void benchmark_optimizers() {
     // Test SGD
     {
         auto model = std::make_shared<SimpleMLP>(input_size, hidden_size, output_size);
+        model->to(g_bench_device);
         auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01, 0.9);
         auto criterion = std::make_shared<MSELoss>();
 
@@ -365,7 +375,7 @@ void benchmark_optimizers() {
 
         Benchmark bench("SGD (momentum=0.9)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = model->forward(input);
             auto loss = (*criterion)(output, target);
             optimizer->zero_grad();
@@ -382,6 +392,7 @@ void benchmark_optimizers() {
     // Test Adam
     {
         auto model = std::make_shared<SimpleMLP>(input_size, hidden_size, output_size);
+        model->to(g_bench_device);
         auto optimizer = std::make_shared<optim::Adam>(model->parameters(), 0.001);
         auto criterion = std::make_shared<MSELoss>();
 
@@ -390,7 +401,7 @@ void benchmark_optimizers() {
 
         Benchmark bench("Adam", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = model->forward(input);
             auto loss = (*criterion)(output, target);
             optimizer->zero_grad();
@@ -422,6 +433,7 @@ void benchmark_gradient_accumulation() {
 
     for (const auto& [steps, name] : accum_steps) {
         auto model = std::make_shared<SimpleMLP>(256, 256, 10);
+        model->to(g_bench_device);
         auto optimizer = std::make_shared<optim::Adam>(model->parameters(), 0.001);
         auto criterion = std::make_shared<MSELoss>();
 
@@ -435,7 +447,7 @@ void benchmark_gradient_accumulation() {
 
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             optimizer->zero_grad();
 
             // Accumulate gradients
@@ -469,6 +481,7 @@ void benchmark_memory_patterns() {
     // Sequential layer processing
     {
         auto model = std::make_shared<SimpleMLP>(512, 512, 10);
+        model->to(g_bench_device);
         model->train();
 
         auto input = Variable(randn({32, 512}, DType::Float32, g_bench_device), true);
@@ -478,7 +491,7 @@ void benchmark_memory_patterns() {
 
         Benchmark bench("Full Training Step with Cleanup", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             // Training step
             auto output = model->forward(input);
             auto loss = (*criterion)(output, target);

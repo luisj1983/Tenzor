@@ -26,28 +26,36 @@ import subprocess
 # =============================================================================
 # Device Synchronization / Availability Helpers
 #
-# Tenzor's Python API doesn't expose a per-backend synchronize() (only a
-# generic, already-device-agnostic empty_cache() and is_backend_available()),
-# so unlike PyTorch (CUDA-only sync API) there's no separate "cuda" special
-# case needed on the Tenzor side beyond what check_tenzor_device_available
-# already does. GPU timings for tenzor ops rely on the fact that its ops
-# execute synchronously from Python's perspective; if a real async/stream API
-# is added later, wire it in here for all backends, not just CUDA.
+# GPU kernel launches (CUDA/ROCm/Vulkan/OneAPI) are asynchronous: the Python
+# call returns as soon as the work is *queued*, not when it's done. Without
+# an explicit sync, a Timer wrapped around the call only measures launch
+# overhead, not compute time — which previously made every Tenzor GPU
+# benchmark look implausibly fast (e.g. a 4096x4096 FP32 matmul reporting
+# 0.007ms, ~19.6 PFLOPS, on hardware capable of maybe 20 TFLOPS). Device now
+# exposes synchronize() (see python/bindings/bindings_core.cpp), so wire it
+# in here for every non-CPU backend, matching what get_pytorch_sync_fn does
+# for PyTorch via torch.cuda.synchronize().
 # =============================================================================
 
 def get_tenzor_sync_fn(device: str) -> Optional[Callable]:
     """Get the appropriate synchronization function for Tenzor GPU operations.
 
-    Returns None for CPU. Tenzor's Python bindings don't expose a per-device
-    synchronize() for any backend (CUDA included) — ops execute synchronously
-    from Python's perspective, so there's nothing to wait on here. This
-    previously special-cased "cuda" and fell back to torch.cuda.synchronize(),
-    which does nothing useful for tenzor's own (non-shared) CUDA context and
-    silently did nothing at all for rocm/vulkan/oneapi.
+    Returns None for CPU (nothing to wait on). For any GPU backend, returns
+    a callable that blocks until all queued work on that device completes.
     """
     if device == "cpu":
         return None
-    return None
+    try:
+        import tenzor as tz
+        tz.initialize()
+        if not tz.is_backend_available(device):
+            return None
+        dev = tz.Device(device)
+        return dev.synchronize
+    except ImportError:
+        return None
+    except Exception:
+        return None
 
 
 def get_pytorch_sync_fn(device: str) -> Optional[Callable]:

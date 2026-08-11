@@ -865,6 +865,15 @@ void register_core(py::module_& m) {
         .def_static("mps", &tenzor::Device::mps, py::arg("index") = 0)
         .def_readonly("type", &tenzor::Device::type)
         .def_readonly("index", &tenzor::Device::index)
+        .def("synchronize", &tenzor::Device::synchronize,
+            "Block the calling host thread until all queued work on this "
+            "device has completed. No-op on CPU. Required before timing "
+            "GPU operations from Python — kernel launches on CUDA/ROCm/"
+            "Vulkan/OneAPI are asynchronous, so wall-clock time around the "
+            "launch alone does not reflect actual compute time.")
+        .def("empty_cache", &tenzor::Device::empty_cache,
+            "Release this device's cached (but unused) allocator memory "
+            "back to the system.")
         .def("__repr__", [](const tenzor::Device& d) {
             return d.to_string();
         })

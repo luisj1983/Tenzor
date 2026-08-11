@@ -43,6 +43,7 @@ auto Benchmark::run(
     for (size_t i = 0; i < num_warmup_; ++i) {
         setup();
         fn();
+        device_.synchronize();
         teardown();
     }
 
@@ -52,6 +53,10 @@ auto Benchmark::run(
 
         timer.start();
         fn();
+        // Block until queued GPU work actually completes before stopping the
+        // clock — fn() returning only means the work was launched. No-op on
+        // CPU. See Benchmark::set_device().
+        device_.synchronize();
         double elapsed = timer.stop();
 
         teardown();

@@ -62,10 +62,12 @@ def benchmark_mlp_training_tenzor(
         optimizer.step()
         return loss
 
+    sync_fn = get_tenzor_sync_fn(device)
     times = run_benchmark(
         train_step,
         warmup_iterations=config.warmup_iterations,
         benchmark_iterations=config.benchmark_iterations,
+        sync_fn=sync_fn,
     )
 
     # Calculate FLOPs (forward + backward ≈ 3x forward)
@@ -210,10 +212,12 @@ def benchmark_cnn_training_tenzor(
         loss.backward()
         optimizer.step()
 
+    sync_fn = get_tenzor_sync_fn(device)
     times = run_benchmark(
         train_step,
         warmup_iterations=config.warmup_iterations,
         benchmark_iterations=config.benchmark_iterations,
+        sync_fn=sync_fn,
     )
 
     result = compute_statistics(
@@ -350,10 +354,12 @@ def benchmark_optimizer_comparison(device: str, config: BenchmarkConfig) -> List
             loss.backward()
             optimizer.step()
 
+        sync_fn = get_tenzor_sync_fn(device)
         times = run_benchmark(
             train_step,
             warmup_iterations=config.warmup_iterations,
             benchmark_iterations=config.benchmark_iterations,
+            sync_fn=sync_fn,
         )
 
         result = compute_statistics(

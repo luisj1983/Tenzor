@@ -12,6 +12,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/nn/layers/hrm.hpp"
@@ -25,6 +26,13 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::benchmark;
+
+// Global device parsed from argv in main(). Defaults to CPU so unflagged
+// invocations stay correct. Previously this file never read argv at all, so
+// --device cuda silently benchmarked the CPU backend instead.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 constexpr size_t WARMUP_ITERATIONS = 5;
 constexpr size_t BENCHMARK_ITERATIONS = 100;
@@ -63,8 +71,9 @@ void benchmark_batchnorm2d_training() {
     for (const auto& cfg : configs) {
         auto bn = BatchNorm2d(cfg.channels);
         bn.train();  // Training mode
+        bn.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width});
+        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, true);
 
         size_t num_elements = cfg.batch * cfg.channels * cfg.height * cfg.width;
@@ -72,7 +81,7 @@ void benchmark_batchnorm2d_training() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(num_elements * sizeof(float) * 3);  // read input, running stats; write output
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = bn.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -107,8 +116,9 @@ void benchmark_batchnorm2d_inference() {
     for (const auto& cfg : configs) {
         auto bn = BatchNorm2d(cfg.channels);
         bn.eval();  // Inference mode
+        bn.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width});
+        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         size_t num_elements = cfg.batch * cfg.channels * cfg.height * cfg.width;
@@ -116,7 +126,7 @@ void benchmark_batchnorm2d_inference() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS * 2);
         bench.set_bytes(num_elements * sizeof(float) * 2);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = bn.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -165,8 +175,9 @@ void benchmark_layernorm() {
 
     for (const auto& cfg : configs) {
         auto ln = LayerNorm({cfg.hidden});
+        ln.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.seq_len, cfg.hidden});
+        auto input = randn({cfg.batch, cfg.seq_len, cfg.hidden}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         size_t num_elements = cfg.batch * cfg.seq_len * cfg.hidden;
@@ -176,7 +187,7 @@ void benchmark_layernorm() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = ln.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -228,13 +239,14 @@ void benchmark_groupnorm() {
 
     for (const auto& cfg : configs) {
         auto gn = GroupNorm(cfg.groups, cfg.channels);
+        gn.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width});
+        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = gn.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -268,8 +280,9 @@ void benchmark_rmsnorm() {
 
     for (const auto& cfg : configs) {
         auto rms = RMSNorm(cfg.hidden);
+        rms.to(g_bench_device);
 
-        auto input = randn({cfg.batch, cfg.seq_len, cfg.hidden});
+        auto input = randn({cfg.batch, cfg.seq_len, cfg.hidden}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         size_t num_elements = cfg.batch * cfg.seq_len * cfg.hidden;
@@ -278,7 +291,7 @@ void benchmark_rmsnorm() {
         Benchmark bench(cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         bench.set_bytes(bytes);
 
-        auto result = bench.run([&]() {
+        auto result = bench.set_device(g_bench_device).run([&]() {
             auto output = rms.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -311,13 +324,15 @@ void benchmark_norm_comparison() {
     for (auto hidden : hidden_sizes) {
         auto ln = LayerNorm({hidden});
         auto rms = RMSNorm(hidden);
+        ln.to(g_bench_device);
+        rms.to(g_bench_device);
 
-        auto input = randn({batch, seq_len, hidden});
+        auto input = randn({batch, seq_len, hidden}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, false);
 
         // LayerNorm
         Benchmark bench_ln("LN h=" + std::to_string(hidden), 5, 50);
-        auto result_ln = bench_ln.run([&]() {
+        auto result_ln = bench_ln.set_device(g_bench_device).run([&]() {
             auto output = ln.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -325,7 +340,7 @@ void benchmark_norm_comparison() {
 
         // RMSNorm
         Benchmark bench_rms("RMS h=" + std::to_string(hidden), 5, 50);
-        auto result_rms = bench_rms.run([&]() {
+        auto result_rms = bench_rms.set_device(g_bench_device).run([&]() {
             auto output = rms.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -366,18 +381,19 @@ void benchmark_fused_batchnorm_relu() {
     };
 
     for (const auto& cfg : configs) {
-        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width});
-        auto mean = zeros({cfg.channels});
-        auto var = ones({cfg.channels});
-        auto gamma = ones({cfg.channels});
-        auto beta = zeros({cfg.channels});
+        auto input = randn({cfg.batch, cfg.channels, cfg.height, cfg.width}, DType::Float32, g_bench_device);
+        auto mean = zeros({cfg.channels}, DType::Float32, g_bench_device);
+        auto var = ones({cfg.channels}, DType::Float32, g_bench_device);
+        auto gamma = ones({cfg.channels}, DType::Float32, g_bench_device);
+        auto beta = zeros({cfg.channels}, DType::Float32, g_bench_device);
 
         // Unfused version
         auto bn = BatchNorm2d(cfg.channels);
         bn.eval();
+        bn.to(g_bench_device);
 
         Benchmark bench_unfused("Unfused " + cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_unfused = bench_unfused.run([&]() {
+        auto result_unfused = bench_unfused.set_device(g_bench_device).run([&]() {
             auto bn_out = bn.forward(Variable(input, false));
             auto relu_out = relu(bn_out);
             volatile void* ptr = relu_out.tensor().data_ptr();
@@ -387,7 +403,7 @@ void benchmark_fused_batchnorm_relu() {
 
         // Fused version
         Benchmark bench_fused("Fused " + cfg.name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_fused = bench_fused.run([&]() {
+        auto result_fused = bench_fused.set_device(g_bench_device).run([&]() {
             auto output = ops::fused_batchnorm_relu(input, mean, var, gamma, beta);
             volatile void* ptr = output.data_ptr();
             (void)ptr;
@@ -415,11 +431,12 @@ void benchmark_norm_backward() {
         const int64_t hidden = 768;
 
         auto ln = LayerNorm({hidden});
-        auto input = randn({batch, seq, hidden});
+        ln.to(g_bench_device);
+        auto input = randn({batch, seq, hidden}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, true);
 
         Benchmark bench_fwd("LayerNorm Forward", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_fwd = bench_fwd.run([&]() {
+        auto result_fwd = bench_fwd.set_device(g_bench_device).run([&]() {
             auto output = ln.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -427,7 +444,7 @@ void benchmark_norm_backward() {
         result_fwd.print();
 
         Benchmark bench_bwd("LayerNorm Forward+Backward", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
-        auto result_bwd = bench_bwd.run([&]() {
+        auto result_bwd = bench_bwd.set_device(g_bench_device).run([&]() {
             auto output = ln.forward(input_var);
             auto grad = ones_like(output.tensor());
             output.backward(grad);
@@ -449,11 +466,12 @@ void benchmark_norm_backward() {
 
         auto bn = BatchNorm2d(channels);
         bn.train();
-        auto input = randn({batch, channels, height, width});
+        bn.to(g_bench_device);
+        auto input = randn({batch, channels, height, width}, DType::Float32, g_bench_device);
         auto input_var = Variable(input, true);
 
         Benchmark bench_fwd("BatchNorm2d Forward", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
-        auto result_fwd = bench_fwd.run([&]() {
+        auto result_fwd = bench_fwd.set_device(g_bench_device).run([&]() {
             auto output = bn.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
@@ -461,7 +479,7 @@ void benchmark_norm_backward() {
         result_fwd.print();
 
         Benchmark bench_bwd("BatchNorm2d Forward+Backward", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
-        auto result_bwd = bench_bwd.run([&]() {
+        auto result_bwd = bench_bwd.set_device(g_bench_device).run([&]() {
             auto output = bn.forward(input_var);
             auto grad = ones_like(output.tensor());
             output.backward(grad);
@@ -476,9 +494,12 @@ void benchmark_norm_backward() {
 }
 
 int main(int argc, char** argv) {
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "  Tenzor Normalization Benchmark Suite\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nTarget Performance Metrics:\n";
     std::cout << "  BatchNorm2d inference:  Memory bandwidth limited\n";
