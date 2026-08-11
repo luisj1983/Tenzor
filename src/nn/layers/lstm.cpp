@@ -419,6 +419,66 @@ private:
     bool has_bias_hh_;
 };
 
+// Fused CPU-native LSTM training autograd node (single-layer, unidirectional,
+// no projection) — the CPU analog of CudnnLSTMTrainBackward above, but built
+// from a hand-written forward+BPTT kernel (fused_lstm.hpp) rather than a
+// vendor RNN primitive, since the codebase's own gate order (i,f,g,o) is
+// used consistently on both sides with no format translation. Same wiring
+// pattern: two instances per forward (one on `output`, one on `c_n`), the
+// autograd engine sums their contributions via linearity of grad_out/grad_cy.
+class LSTMFusedTrainBackward : public Function {
+public:
+    LSTMFusedTrainBackward(bool for_cell_state, bool has_bias_ih, bool has_bias_hh,
+                           std::vector<Tensor> saved)
+        : for_cell_state_(for_cell_state),
+          has_bias_ih_(has_bias_ih), has_bias_hh_(has_bias_hh) {
+        save_for_backward(std::move(saved));
+    }
+    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+        throw std::runtime_error("LSTMFusedTrainBackward::forward should not be called");
+    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto sv = saved_tensors();
+        // saved: [input,h0,c0,W_ih,W_hh,output,gates_reserve,cell_reserve,tanh_cell_reserve]
+        const Tensor& input = sv[0]; const Tensor& h0 = sv[1]; const Tensor& c0 = sv[2];
+        const Tensor& W_ih = sv[3]; const Tensor& W_hh = sv[4];
+        const Tensor& output = sv[5];
+        const Tensor& gates_reserve = sv[6]; const Tensor& cell_reserve = sv[7];
+        const Tensor& tanh_cell_reserve = sv[8];
+        const Tensor& g = grad_outputs[0];
+
+        // The kernel validates exact shapes: grad_output is (seq,batch,hidden)
+        // and grad_cy is (batch,hidden). h0 is already stored as (batch,hidden).
+        const std::vector<int64_t> out_shape(output.shape().begin(), output.shape().end());
+        const std::vector<int64_t> cy_shape(h0.shape().begin(), h0.shape().end());
+
+        Tensor grad_out, grad_cy;
+        if (for_cell_state_) {
+            grad_out = zeros(out_shape, output.dtype(), output.device());
+            // c_n is exposed to autograd as (1, batch, hidden); flatten it back.
+            grad_cy = g.reshape(cy_shape).contiguous();
+        } else {
+            grad_out = g.contiguous();
+            grad_cy = zeros(cy_shape, output.dtype(), output.device());
+        }
+
+        std::vector<Tensor> ins = {grad_out, grad_cy, input, h0, c0, W_ih, W_hh,
+                                   output, gates_reserve, cell_reserve, tanh_cell_reserve};
+        auto grads = dispatch<OpId::LSTMFusedTrainBackward>(ins);
+        // grads: [grad_input,grad_hx,grad_cx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
+        // Order must mirror the forward wiring of next_functions/input_variables:
+        // [input, h0, c0, W_ih, W_hh, (b_ih if present), (b_hh if present)].
+        std::vector<Tensor> result = {grads[0], grads[1], grads[2], grads[3], grads[4]};
+        if (has_bias_ih_) result.push_back(grads[5]);
+        if (has_bias_hh_) result.push_back(grads[6]);
+        return result;
+    }
+private:
+    bool for_cell_state_;
+    bool has_bias_ih_;
+    bool has_bias_hh_;
+};
+
 auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& hx,
                    const Tensor& lengths)
     -> std::pair<Variable, std::pair<Variable, Variable>> {
@@ -1000,6 +1060,148 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             Variable h_n_l = ::tenzor::slice(output_var, 0, seq_len - 1, seq_len);
 
             auto gfn_cy = std::make_shared<CudnnLSTMTrainBackward>(true, has_bias_ih, has_bias_hh, saved);
+            Variable c_n_l(cy_t.reshape({1, kb, hidden_size_}), true);
+            gfn_cy->set_next_functions(next_funcs);
+            gfn_cy->set_input_variables(in_vars);
+            c_n_l.set_grad_fn(gfn_cy);
+
+            h_n_layers.push_back(h_n_l);
+            c_n_layers.push_back(c_n_l);
+
+            layer_in = output_var;  // feed this layer's output into the next
+        }
+
+        Variable output_var = layer_in;  // last layer's output (seq, batch, hidden)
+        Variable output_out = batch_first_ ? ::tenzor::transpose(output_var, 0, 1) : output_var;
+        Variable h_n = num_layers_ == 1 ? h_n_layers[0] : ::tenzor::cat(h_n_layers, 0);
+        Variable c_n = num_layers_ == 1 ? c_n_layers[0] : ::tenzor::cat(c_n_layers, 0);
+        return {output_out, {h_n, c_n}};
+    }
+
+    // =========================================================================
+    // FUSED CPU-NATIVE TRAINING PATH (single-layer step, unidirectional, no
+    // projection). CPU analog of the cuDNN training path above, built from a
+    // hand-written forward+BPTT kernel (src/backends/cpu/kernels/fused_lstm.hpp)
+    // instead of a vendor RNN primitive — no gate-order translation risk since
+    // both forward and backward use the codebase's own i,f,g,o layout. Shares
+    // the same TENZOR_DISABLE_FUSED_LSTM_TRAIN escape hatch as the cuDNN path
+    // (the existing higher-order-gradient tests already set this var expecting
+    // it to disable "the fused path" on every backend). The
+    // is_op_supported(OpId::LSTMFusedTrainForward, ...) gate means this block
+    // only ever activates on a backend that registered the fused CPU training
+    // kernels — today that is the CPU backend alone.
+    // =========================================================================
+    // Same lengths gap as the paths above, so `lengths` excludes this path.
+    // Inter-layer dropout is also excluded (dropout_ is only non-null when
+    // dropout_p_ > 0 and num_layers_ > 1): the fused per-layer chain has no
+    // place to insert the dropout mask, so those configs fall through to the
+    // per-timestep loop rather than silently training without dropout.
+    if (std::getenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN") == nullptr &&
+        is_op_supported(OpId::LSTMFusedTrainForward, input.device().type) &&
+        input.dtype() == DType::Float32 &&
+        !bidirectional_ && proj_size_ == 0 &&
+        !dropout_ &&
+        tenzor::is_grad_enabled() &&
+        !(lengths.is_valid() && lengths.numel() > 0)) {
+
+        // Multi-layer is handled by chaining the single-layer fused step: each
+        // layer's output_var feeds the next layer's input, so the autograd
+        // graph threads through the Variables (one fused call per layer rather
+        // than one stacked call — still far faster than the per-timestep loop).
+        const int64_t kb = x.shape()[1];
+        std::vector<Variable> h_n_layers;
+        std::vector<Variable> c_n_layers;
+        h_n_layers.reserve(static_cast<size_t>(num_layers_));
+        c_n_layers.reserve(static_cast<size_t>(num_layers_));
+
+        Variable layer_in = x;  // (seq, batch, feat) seq-major; later (seq, batch, hidden)
+        for (int64_t layer = 0; layer < num_layers_; ++layer) {
+            auto& cell = forward_cells_[layer];
+            // Same lazy-device-placement alignment as the cuDNN block above:
+            // this path reads Parameter Variables directly for dispatch, so it
+            // must replicate Linear::forward_impl's autograd-aware to_device().
+            Variable W_ih_v = *cell->weight_ih()->weight();
+            Variable W_hh_v = *cell->weight_hh()->weight();
+            if (W_ih_v.tensor().device() != input.tensor().device()) {
+                W_ih_v = tenzor::to_device(W_ih_v, input.tensor().device());
+            }
+            if (W_hh_v.tensor().device() != input.tensor().device()) {
+                W_hh_v = tenzor::to_device(W_hh_v, input.tensor().device());
+            }
+            // Biases are independent: a cell may carry bias_ih without bias_hh.
+            const bool has_bias_ih = cell->weight_ih()->has_bias();
+            const bool has_bias_hh = cell->weight_hh()->has_bias();
+            Variable b_ih_v, b_hh_v;
+            Tensor b_ih_t, b_hh_t;
+            if (has_bias_ih) {
+                b_ih_v = *cell->weight_ih()->bias();
+                if (b_ih_v.tensor().device() != input.tensor().device()) {
+                    b_ih_v = tenzor::to_device(b_ih_v, input.tensor().device());
+                }
+                b_ih_t = b_ih_v.tensor();
+            } else {
+                b_ih_t = empty({0}, DType::Float32, input.device());
+            }
+            if (has_bias_hh) {
+                b_hh_v = *cell->weight_hh()->bias();
+                if (b_hh_v.tensor().device() != input.tensor().device()) {
+                    b_hh_v = tenzor::to_device(b_hh_v, input.tensor().device());
+                }
+                b_hh_t = b_hh_v.tensor();
+            } else {
+                b_hh_t = empty({0}, DType::Float32, input.device());
+            }
+
+            Tensor x_t = layer_in.tensor().contiguous();  // (seq, batch, in)
+            // Autograd-aware slice+reshape so h0_v/c0_v carry a real grad_fn
+            // back to the caller's h0/c0 Variables -- required for
+            // grad_hx/grad_cx to actually reach a learnable initial state.
+            Variable h0_v = tenzor::reshape(
+                tenzor::slice(h, 0, layer, layer + 1), {kb, hidden_size_});
+            Variable c0_v = tenzor::reshape(
+                tenzor::slice(c, 0, layer, layer + 1), {kb, hidden_size_});
+            Tensor h0_t = h0_v.tensor().contiguous();
+            Tensor c0_t = c0_v.tensor().contiguous();
+
+            std::vector<Tensor> fwd_in = {x_t, h0_t, c0_t,
+                                          W_ih_v.tensor(), W_hh_v.tensor(),
+                                          b_ih_t, b_hh_t};
+            // outs: [output, h_n, c_n, gates_reserve, cell_reserve, tanh_cell_reserve]
+            auto outs = dispatch<OpId::LSTMFusedTrainForward>(fwd_in);
+            Tensor output_t             = outs[0];  // (seq, batch, hidden)
+            Tensor cy_t                 = outs[2];  // (batch, hidden)
+            Tensor gates_reserve_t      = outs[3];
+            Tensor cell_reserve_t       = outs[4];
+            Tensor tanh_cell_reserve_t  = outs[5];
+
+            std::vector<Tensor> saved = {x_t, h0_t, c0_t, W_ih_v.tensor(), W_hh_v.tensor(),
+                                         output_t, gates_reserve_t, cell_reserve_t,
+                                         tanh_cell_reserve_t};
+
+            std::vector<std::shared_ptr<Function>> next_funcs = {
+                layer_in.grad_fn(), h0_v.grad_fn(), c0_v.grad_fn(),
+                W_ih_v.grad_fn(), W_hh_v.grad_fn()};
+            std::vector<Variable> in_vars = {layer_in, h0_v, c0_v, W_ih_v, W_hh_v};
+            if (has_bias_ih) {
+                next_funcs.push_back(b_ih_v.grad_fn());
+                in_vars.push_back(b_ih_v);
+            }
+            if (has_bias_hh) {
+                next_funcs.push_back(b_hh_v.grad_fn());
+                in_vars.push_back(b_hh_v);
+            }
+
+            auto gfn_out = std::make_shared<LSTMFusedTrainBackward>(false, has_bias_ih, has_bias_hh, saved);
+            Variable output_var(output_t, true);
+            gfn_out->set_next_functions(next_funcs);
+            gfn_out->set_input_variables(in_vars);
+            output_var.set_grad_fn(gfn_out);
+
+            // h_n is an autograd-aware slice of output: its gradient routes
+            // into output's last timestep, which the BPTT kernel handles.
+            Variable h_n_l = ::tenzor::slice(output_var, 0, seq_len - 1, seq_len);
+
+            auto gfn_cy = std::make_shared<LSTMFusedTrainBackward>(true, has_bias_ih, has_bias_hh, saved);
             Variable c_n_l(cy_t.reshape({1, kb, hidden_size_}), true);
             gfn_cy->set_next_functions(next_funcs);
             gfn_cy->set_input_variables(in_vars);

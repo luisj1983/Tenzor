@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
 #include <cmath>
+#include <cstdlib>
+#include <tuple>
+#include <utility>
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -346,6 +349,168 @@ TEST_P(LSTMTestFixture, LearnableInitialStateGradientFlow) {
 
     EXPECT_GT(h0_grad_sum, 0.0f) << "h0 gradient is all-zero on " << device.to_string();
     EXPECT_GT(c0_grad_sum, 0.0f) << "c0 gradient is all-zero on " << device.to_string();
+}
+
+// Hard requirement: the CPU fused training path (Task 5, see lstm.cpp's
+// "FUSED CPU TRAINING PATH" block) must be numerically indistinguishable
+// from the existing per-timestep autograd path for the same input. This
+// test runs the SAME nn::LSTM twice with the SAME weights/inputs: once with
+// the fused path enabled (default), once with TENZOR_DISABLE_FUSED_LSTM_TRAIN=1
+// forcing the per-timestep loop, and compares output/h_n/c_n and every
+// parameter gradient.
+TEST_P(LSTMTestFixture, FusedCpuTrainingMatchesPerTimestepPath) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "This test targets the CPU-specific fused training path.";
+    }
+
+    const int64_t input_size = 6, hidden_size = 8, seq_len = 5, batch = 3;
+
+    auto run = [&](bool disable_fused) -> std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor> {
+        if (disable_fused) {
+            setenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN", "1", 1);
+        } else {
+            unsetenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN");
+        }
+
+        nn::LSTM lstm(input_size, hidden_size, 1);
+        lstm.to(device);
+        lstm.train();
+
+        // Deterministic weights so both runs start identical.
+        for (auto& [name, param] : lstm.named_parameters()) {
+            auto shp = param->tensor().shape();
+            const DType pdt = param->tensor().dtype();
+            auto p = zeros(std::vector<int64_t>(shp.begin(), shp.end()), DType::Float32, Device::cpu());
+            float* data = p.data<float>();
+            for (int64_t i = 0; i < p.numel(); ++i) {
+                data[i] = 0.01f * static_cast<float>((i * 13 + static_cast<int64_t>(name.size())) % 97) / 97.0f - 0.05f;
+            }
+            param->set_data_view(p.to(pdt).to(device));
+        }
+
+        auto input_cpu = zeros({seq_len, batch, input_size}, DType::Float32, Device::cpu());
+        {
+            float* d = input_cpu.data<float>();
+            for (int64_t i = 0; i < input_cpu.numel(); ++i) d[i] = 0.02f * static_cast<float>((i * 7) % 53) / 53.0f - 0.1f;
+        }
+        auto h0_cpu = zeros({1, batch, hidden_size}, DType::Float32, Device::cpu());
+        auto c0_cpu = zeros({1, batch, hidden_size}, DType::Float32, Device::cpu());
+        {
+            float* d = h0_cpu.data<float>();
+            for (int64_t i = 0; i < h0_cpu.numel(); ++i) d[i] = 0.03f * static_cast<float>((i * 5) % 41) / 41.0f - 0.06f;
+        }
+        {
+            float* d = c0_cpu.data<float>();
+            for (int64_t i = 0; i < c0_cpu.numel(); ++i) d[i] = 0.03f * static_cast<float>((i * 3) % 41) / 41.0f - 0.06f;
+        }
+
+        auto input = Variable(input_cpu.to(device), true);
+        auto h0 = Variable(h0_cpu.to(device), true);
+        auto c0 = Variable(c0_cpu.to(device), true);
+
+        auto [output, states] = lstm.forward(input, {h0, c0});
+        auto [h_n, c_n] = states;
+        auto loss = sum(output) + sum(h_n) + sum(c_n);
+        loss.backward();
+
+        auto to_cpu = [](const Tensor& t) { return t.to(Device::cpu()).to(DType::Float32).contiguous(); };
+        Tensor grad_input = to_cpu(*input.grad());
+        auto named = lstm.named_parameters();
+        auto grad_by_name = [&](const std::string& want) -> Tensor {
+            for (auto& [name, param] : named) {
+                if (name == want) {
+                    EXPECT_TRUE(param->grad().has_value()) << want << " has no gradient";
+                    return to_cpu(*param->grad());
+                }
+            }
+            ADD_FAILURE() << "parameter not found: " << want;
+            return zeros({1}, DType::Float32, Device::cpu());
+        };
+        Tensor grad_W_ih = grad_by_name("forward_cell_0.weight_ih.weight");
+        Tensor grad_W_hh = grad_by_name("forward_cell_0.weight_hh.weight");
+
+        return {to_cpu(output.tensor()), to_cpu(h_n.tensor()), to_cpu(c_n.tensor()),
+                grad_input, grad_W_ih, grad_W_hh, to_cpu(*h0.grad())};
+    };
+
+    auto [out_fused, hn_fused, cn_fused, gin_fused, gwih_fused, gwhh_fused, gh0_fused] = run(/*disable_fused=*/false);
+    auto [out_slow, hn_slow, cn_slow, gin_slow, gwih_slow, gwhh_slow, gh0_slow] = run(/*disable_fused=*/true);
+    unsetenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN");
+
+    auto expect_close = [](const Tensor& a, const Tensor& b, const char* label) {
+        ASSERT_EQ(a.numel(), b.numel()) << label << " size mismatch";
+        const float* pa = a.data<float>();
+        const float* pb = b.data<float>();
+        for (int64_t i = 0; i < a.numel(); ++i) {
+            EXPECT_NEAR(pa[i], pb[i], 1e-3f) << label << " diverged at index " << i;
+        }
+    };
+
+    expect_close(out_fused, out_slow, "output");
+    expect_close(hn_fused, hn_slow, "h_n");
+    expect_close(cn_fused, cn_slow, "c_n");
+    expect_close(gin_fused, gin_slow, "grad_input");
+    expect_close(gwih_fused, gwih_slow, "grad_W_ih");
+    expect_close(gwhh_fused, gwhh_slow, "grad_W_hh");
+    expect_close(gh0_fused, gh0_slow, "grad_h0");
+}
+
+// Same idea, multi-layer: confirms the per-layer chaining in the fused path
+// (Task 5) produces the same result as the per-timestep path across layers.
+TEST_P(LSTMTestFixture, FusedCpuTrainingMatchesPerTimestepPathMultiLayer) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "This test targets the CPU-specific fused training path.";
+    }
+
+    const int64_t input_size = 4, hidden_size = 5, seq_len = 4, batch = 2, num_layers = 3;
+
+    auto run = [&](bool disable_fused) -> std::pair<Tensor, Tensor> {
+        if (disable_fused) {
+            setenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN", "1", 1);
+        } else {
+            unsetenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN");
+        }
+
+        nn::LSTM lstm(input_size, hidden_size, num_layers);
+        lstm.to(device);
+        lstm.train();
+        for (auto& [name, param] : lstm.named_parameters()) {
+            auto shp = param->tensor().shape();
+            const DType pdt = param->tensor().dtype();
+            auto p = zeros(std::vector<int64_t>(shp.begin(), shp.end()), DType::Float32, Device::cpu());
+            float* data = p.data<float>();
+            for (int64_t i = 0; i < p.numel(); ++i) {
+                data[i] = 0.01f * static_cast<float>((i * 11 + static_cast<int64_t>(name.size()) * 3) % 89) / 89.0f - 0.045f;
+            }
+            param->set_data_view(p.to(pdt).to(device));
+        }
+
+        auto input_cpu = zeros({seq_len, batch, input_size}, DType::Float32, Device::cpu());
+        float* d = input_cpu.data<float>();
+        for (int64_t i = 0; i < input_cpu.numel(); ++i) d[i] = 0.02f * static_cast<float>((i * 9) % 47) / 47.0f - 0.09f;
+
+        auto input = Variable(input_cpu.to(device), true);
+        auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
+        auto [h_n, c_n] = states;
+        auto loss = sum(output) + sum(h_n) + sum(c_n);
+        loss.backward();
+
+        auto to_cpu = [](const Tensor& t) { return t.to(Device::cpu()).to(DType::Float32).contiguous(); };
+        return {to_cpu(output.tensor()), to_cpu(*input.grad())};
+    };
+
+    auto [out_fused, gin_fused] = run(false);
+    auto [out_slow, gin_slow] = run(true);
+    unsetenv("TENZOR_DISABLE_FUSED_LSTM_TRAIN");
+
+    ASSERT_EQ(out_fused.numel(), out_slow.numel());
+    for (int64_t i = 0; i < out_fused.numel(); ++i) {
+        EXPECT_NEAR(out_fused.data<float>()[i], out_slow.data<float>()[i], 1e-3f) << "output diverged at " << i;
+    }
+    ASSERT_EQ(gin_fused.numel(), gin_slow.numel());
+    for (int64_t i = 0; i < gin_fused.numel(); ++i) {
+        EXPECT_NEAR(gin_fused.data<float>()[i], gin_slow.data<float>()[i], 1e-3f) << "grad_input diverged at " << i;
+    }
 }
 
 // The fused fast path (Float32, eval(), no_grad, unidirectional, no
