@@ -513,6 +513,88 @@ TEST_P(LSTMTestFixture, FusedCpuTrainingMatchesPerTimestepPathMultiLayer) {
     }
 }
 
+// Cross-backend parity: with the SAME weights/inputs, CPU (now using the
+// new fused training path) and CUDA (using the existing fused cuDNN
+// training path) must produce the same result to a loose-but-meaningful
+// float32 tolerance (looser than the same-backend check in Task 5, since
+// CPU and CUDA use genuinely different GEMM/activation implementations --
+// this is checking "no behavioral divergence", not bit-exactness).
+TEST_P(LSTMTestFixture, FusedTrainingCrossBackendParityWithCuda) {
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "Runs once, from the CPU parameterization, comparing against CUDA directly.";
+    }
+    bool cuda_available = true;
+    try {
+        auto probe = zeros({1}, DType::Float32, Device::cuda(0));
+        (void)probe;
+    } catch (...) {
+        cuda_available = false;
+    }
+    if (!cuda_available) {
+        GTEST_SKIP() << "CUDA not available in this environment.";
+    }
+
+    const int64_t input_size = 5, hidden_size = 6, seq_len = 4, batch = 2;
+
+    auto find_param = [](nn::LSTM& lstm, const std::string& want) -> std::shared_ptr<Variable> {
+        for (auto& [name, param] : lstm.named_parameters()) {
+            if (name == want) return param;
+        }
+        return nullptr;
+    };
+
+    nn::LSTM lstm_cpu(input_size, hidden_size, 1);
+    lstm_cpu.to(Device::cpu());
+    lstm_cpu.train();
+    for (auto& [name, param] : lstm_cpu.named_parameters()) {
+        auto shp = param->tensor().shape();
+        const DType pdt = param->tensor().dtype();
+        auto p = zeros(std::vector<int64_t>(shp.begin(), shp.end()), DType::Float32, Device::cpu());
+        float* data = p.data<float>();
+        for (int64_t i = 0; i < p.numel(); ++i) {
+            data[i] = 0.01f * static_cast<float>((i * 17 + static_cast<int64_t>(name.size())) % 83) / 83.0f - 0.05f;
+        }
+        param->set_data_view(p.to(pdt).to(Device::cpu()));
+    }
+
+    nn::LSTM lstm_cuda(input_size, hidden_size, 1);
+    lstm_cuda.to(Device::cuda());
+    lstm_cuda.train();
+    for (auto& [name, param] : lstm_cuda.named_parameters()) {
+        auto ref = find_param(lstm_cpu, name);
+        ASSERT_NE(ref, nullptr) << "missing matching CPU parameter: " << name;
+        param->set_data_view(ref->tensor().to(Device::cuda()).to(param->tensor().dtype()));
+    }
+
+    auto input_cpu = zeros({seq_len, batch, input_size}, DType::Float32, Device::cpu());
+    float* d = input_cpu.data<float>();
+    for (int64_t i = 0; i < input_cpu.numel(); ++i) d[i] = 0.02f * static_cast<float>((i * 19) % 61) / 61.0f - 0.1f;
+
+    auto run = [&](nn::LSTM& lstm, Device dev) {
+        auto input = Variable(input_cpu.to(dev), true);
+        auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
+        auto [h_n, c_n] = states;
+        auto loss = sum(output) + sum(h_n) + sum(c_n);
+        loss.backward();
+        auto to_cpu = [](const Tensor& t) { return t.to(Device::cpu()).to(DType::Float32).contiguous(); };
+        auto wih = find_param(lstm, "forward_cell_0.weight_ih.weight");
+        return std::make_tuple(to_cpu(output.tensor()), to_cpu(*input.grad()), to_cpu(*wih->grad()));
+    };
+
+    auto [out_cpu, gin_cpu, gwih_cpu] = run(lstm_cpu, Device::cpu());
+    auto [out_cuda, gin_cuda, gwih_cuda] = run(lstm_cuda, Device::cuda());
+
+    auto expect_close = [](const Tensor& a, const Tensor& b, const char* label, float tol) {
+        ASSERT_EQ(a.numel(), b.numel()) << label << " size mismatch";
+        for (int64_t i = 0; i < a.numel(); ++i) {
+            EXPECT_NEAR(a.data<float>()[i], b.data<float>()[i], tol) << label << " diverged at " << i;
+        }
+    };
+    expect_close(out_cpu, out_cuda, "output", 5e-3f);
+    expect_close(gin_cpu, gin_cuda, "grad_input", 5e-3f);
+    expect_close(gwih_cpu, gwih_cuda, "grad_W_ih", 5e-3f);
+}
+
 // The fused fast path (Float32, eval(), no_grad, unidirectional, no
 // projection -- the standard fast-path-eligible config) used to ignore
 // `lengths` entirely, processing the full padded seq_len for every batch
