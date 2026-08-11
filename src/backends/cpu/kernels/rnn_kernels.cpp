@@ -1084,13 +1084,14 @@ auto lstm_forward_training_kernel(
     int64_t seq_len = input_shape[0];
     int64_t batch = input_shape[1];
     int64_t input_size = input_shape[2];
+
+    if (h0.shape().size() != 2 || h0.shape()[0] != batch) {
+        throw std::invalid_argument("lstm_forward_training_kernel: h0 must have shape (batch, hidden)");
+    }
     int64_t hidden = h0.shape()[1];
 
     if (seq_len <= 0 || batch <= 0 || input_size <= 0 || hidden <= 0) {
         throw std::invalid_argument("lstm_forward_training_kernel: all dimensions must be positive");
-    }
-    if (h0.shape().size() != 2 || h0.shape()[0] != batch || h0.shape()[1] != hidden) {
-        throw std::invalid_argument("lstm_forward_training_kernel: h0 must have shape (batch, hidden)");
     }
     if (c0.shape().size() != 2 || c0.shape()[0] != batch || c0.shape()[1] != hidden) {
         throw std::invalid_argument("lstm_forward_training_kernel: c0 must have shape (batch, hidden)");
@@ -1156,12 +1157,51 @@ auto lstm_backward_training_kernel(
 ) -> std::vector<Tensor> {
     (void)output;  // output is not needed directly: grad_W_hh reconstructs h_prev from
                     // o_plane * tanh_cell_reserve, which equals output by construction.
+    if (input.dtype() != DType::Float32) {
+        throw std::runtime_error("lstm_backward_training_kernel: only Float32 is supported (caller must gate on dtype)");
+    }
     auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::invalid_argument(
+            "lstm_backward_training_kernel: input must be 3-D (seq_len, batch, input_size), got rank " +
+            std::to_string(input_shape.size()));
+    }
     int64_t seq_len = input_shape[0];
     int64_t batch = input_shape[1];
     int64_t input_size = input_shape[2];
+
+    if (h0.shape().size() != 2 || h0.shape()[0] != batch) {
+        throw std::invalid_argument("lstm_backward_training_kernel: h0 must have shape (batch, hidden)");
+    }
     int64_t hidden = h0.shape()[1];
+
+    if (seq_len <= 0 || batch <= 0 || input_size <= 0 || hidden <= 0) {
+        throw std::invalid_argument("lstm_backward_training_kernel: all dimensions must be positive");
+    }
+    if (c0.shape().size() != 2 || c0.shape()[0] != batch || c0.shape()[1] != hidden) {
+        throw std::invalid_argument("lstm_backward_training_kernel: c0 must have shape (batch, hidden)");
+    }
+    if (grad_output.shape().size() != 3 || grad_output.shape()[0] != seq_len ||
+        grad_output.shape()[1] != batch || grad_output.shape()[2] != hidden) {
+        throw std::invalid_argument(
+            "lstm_backward_training_kernel: grad_output must have shape (seq_len, batch, hidden)");
+    }
+    if (grad_cy.shape().size() != 2 || grad_cy.shape()[0] != batch || grad_cy.shape()[1] != hidden) {
+        throw std::invalid_argument("lstm_backward_training_kernel: grad_cy must have shape (batch, hidden)");
+    }
     int64_t gate_size = 4 * hidden;
+    if (gates_reserve.numel() != 4 * seq_len * batch * hidden) {
+        throw std::invalid_argument(
+            "lstm_backward_training_kernel: gates_reserve numel must equal 4*seq_len*batch*hidden");
+    }
+    if (cell_reserve.numel() != seq_len * batch * hidden) {
+        throw std::invalid_argument(
+            "lstm_backward_training_kernel: cell_reserve numel must equal seq_len*batch*hidden");
+    }
+    if (tanh_cell_reserve.numel() != seq_len * batch * hidden) {
+        throw std::invalid_argument(
+            "lstm_backward_training_kernel: tanh_cell_reserve numel must equal seq_len*batch*hidden");
+    }
 
     Tensor grad_output_c = grad_output.contiguous();
     Tensor grad_cy_c = grad_cy.contiguous();
@@ -1191,7 +1231,9 @@ auto lstm_backward_training_kernel(
         seq_len, batch, input_size, hidden);
 
     // grad_b_ih and grad_b_hh both equal grad_bias exactly (see design: gate_pre = ... + b_ih + b_hh).
-    Tensor grad_b_hh = grad_bias.contiguous();  // separate Tensor object, same values
+    // NOTE: grad_bias.contiguous() would early-return *this (shared storage) since grad_bias is
+    // already contiguous, so grad_b_hh must be allocated as genuinely separate storage before copying.
+    Tensor grad_b_hh = empty({gate_size}, DType::Float32, input.device());
     std::memcpy(grad_b_hh.data<float>(), grad_bias.data<float>(), static_cast<size_t>(gate_size) * sizeof(float));
 
     return {grad_input, grad_h0, grad_c0, grad_W_ih, grad_W_hh, grad_bias, grad_b_hh};

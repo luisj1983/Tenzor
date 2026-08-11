@@ -397,4 +397,14 @@ TEST(LSTMFusedTrainKernel, DispatchForwardBackwardRoundTrip) {
     for (int64_t i = 0; i < 4 * hidden; ++i) {
         EXPECT_EQ(b_ih_grad.data<float>()[i], b_hh_grad.data<float>()[i]);
     }
+
+    // Regression: grad_b_ih (bwd[5]) and grad_b_hh (bwd[6]) must be backed by
+    // genuinely separate storage, not aliases of the same buffer. Mutate one
+    // element of grad_b_ih in place and confirm grad_b_hh is unaffected.
+    {
+        float original = bwd[6].data<float>()[0];
+        bwd[5].data<float>()[0] = original + 12345.0f;
+        EXPECT_NE(bwd[5].data<float>()[0], bwd[6].data<float>()[0]);
+        EXPECT_EQ(bwd[6].data<float>()[0], original);
+    }
 }
