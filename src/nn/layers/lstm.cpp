@@ -413,6 +413,28 @@ public:
         if (has_bias_hh_) result.push_back(grads[6]);
         return result;
     }
+    // The fused cuDNN backward is a hand-written kernel call, not a graph of
+    // Variable ops, so it has no way to build a second-order gradient graph.
+    // Without this override, create_graph=true falls through to
+    // Function::backward_with_variables()'s default, which throws a
+    // library-internal message ("did not override backward_with_variables
+    // ... mark is_higher_order_stub()") that gives a CPU/CUDA LSTM caller no
+    // idea what to actually do. Throw an actionable message instead: name
+    // the escape hatch (the per-timestep path) that DOES support
+    // create_graph=true.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override {
+        for (auto& var : grad_outputs) {
+            if (var.requires_grad()) {
+                throw std::runtime_error(
+                    "nn::LSTM's fused cuDNN training path does not support "
+                    "second-order gradients (create_graph=true). Use a CPU "
+                    "device to fall back to the per-timestep path, which "
+                    "does support create_graph=true.");
+            }
+        }
+        return passthrough_stub_backward(std::move(grad_outputs));
+    }
 private:
     bool for_cell_state_;
     bool has_bias_ih_;
@@ -472,6 +494,29 @@ public:
         if (has_bias_ih_) result.push_back(grads[5]);
         if (has_bias_hh_) result.push_back(grads[6]);
         return result;
+    }
+    // Same gap as CudnnLSTMTrainBackward above: this node wraps a
+    // hand-written fused BPTT kernel (fused_lstm.hpp), not a graph of
+    // Variable ops, so create_graph=true cannot be supported through this
+    // path. Before this fused path existed, CPU LSTM double-backward worked
+    // via the per-timestep path (built from ops that DO support
+    // create_graph). Rather than let create_graph=true hit the base class's
+    // generic "did not override backward_with_variables" message, throw an
+    // actionable one that names the escape hatch back to that per-timestep
+    // path: TENZOR_DISABLE_FUSED_LSTM_TRAIN=1.
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override {
+        for (auto& var : grad_outputs) {
+            if (var.requires_grad()) {
+                throw std::runtime_error(
+                    "nn::LSTM's fused CPU training path does not support "
+                    "second-order gradients (create_graph=true). Set the "
+                    "TENZOR_DISABLE_FUSED_LSTM_TRAIN=1 environment variable "
+                    "to use the per-timestep path, which does support "
+                    "create_graph=true.");
+            }
+        }
+        return passthrough_stub_backward(std::move(grad_outputs));
     }
 private:
     bool for_cell_state_;

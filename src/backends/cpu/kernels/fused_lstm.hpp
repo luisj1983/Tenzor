@@ -878,6 +878,14 @@ inline void lstm_backward_training(
                     W_hh, static_cast<gemm_int>(hidden),
                     0.0f, dh_next.data(), static_cast<gemm_int>(hidden));
 #else
+        // PERF: no oneDNN/generic-CBLAS NN/TN GEMM macro exists yet for this
+        // orientation (only LSTM_SGEMM_NT does); this scalar fallback is
+        // numerically correct but O(N) slower than the MKL path. On non-MKL
+        // builds this may reduce or eliminate the fused path's speed
+        // advantage over the per-timestep loop it replaces. Adding
+        // LSTM_SGEMM_NN/LSTM_SGEMM_TN macros (mirroring LSTM_SGEMM_NT's
+        // three-backend-variant structure) is tracked as follow-up work, not
+        // required for correctness.
         std::fill(dh_next.begin(), dh_next.end(), 0.0f);
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t k = 0; k < gate_size; ++k) {
@@ -923,6 +931,14 @@ inline void lstm_backward_training(
                 W_ih, static_cast<gemm_int>(input_size),
                 0.0f, grad_input, static_cast<gemm_int>(input_size));
 #else
+    // PERF: no oneDNN/generic-CBLAS NN/TN GEMM macro exists yet for this
+    // orientation (only LSTM_SGEMM_NT does); this scalar fallback is
+    // numerically correct but O(N) slower than the MKL path. On non-MKL
+    // builds this may reduce or eliminate the fused path's speed advantage
+    // over the per-timestep loop it replaces. Adding LSTM_SGEMM_NN/
+    // LSTM_SGEMM_TN macros (mirroring LSTM_SGEMM_NT's three-backend-variant
+    // structure) is tracked as follow-up work, not required for correctness.
+    // (Covers both the grad_W_ih [TN] and grad_input [NN] products below.)
     std::fill(grad_W_ih, grad_W_ih + gate_size * input_size, 0.0f);
     for (int64_t r = 0; r < total_rows; ++r) {
         const float* dg_row = d_gates_all.data() + r * gate_size;
