@@ -1205,3 +1205,9 @@ tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS multi LABEL
 add_executable(test_distributions_samplers test_distributions_samplers.cpp)
 target_link_libraries(test_distributions_samplers PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_distributions_samplers DISCOVERY_TIMEOUT 120 BACKENDS multi LABELS "distributions")
+
+# CPU activation-op dispatch: equivalence lock for hand-written SIMD ReLU
+# forward (bypasses oneDNN) against the scalar std::max reference.
+add_executable(test_activation_dispatch test_activation_dispatch.cpp)
+target_link_libraries(test_activation_dispatch PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_activation_dispatch DISCOVERY_TIMEOUT 60)
