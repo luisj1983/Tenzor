@@ -1,11 +1,30 @@
 #include <gtest/gtest.h>
 #include "tenzor/core/tensor.hpp"
 #include "../../src/backends/cpu/kernels/fused_lstm.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/tenzor.hpp"
 #include <vector>
 #include <array>
 #include <cmath>
 
 using namespace tenzor;
+
+// Global test environment that initializes Tenzor (registers the CPU
+// dispatch table) before the DispatchForwardBackwardRoundTrip test runs
+// dispatch<OpId::...>. The other tests in this file call fused_lstm.hpp's
+// raw-pointer functions directly and don't need this, but gtest requires
+// the environment to be registered before RUN_ALL_TESTS regardless.
+class LSTMFusedTrainKernelTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const lstm_fused_train_kernel_env =
+    ::testing::AddGlobalTestEnvironment(new LSTMFusedTrainKernelTestEnvironment);
 
 namespace {
 
@@ -322,5 +341,60 @@ TEST(LSTMFusedTrainKernel, BackwardMatchesFiniteDifference) {
         p_minus.bias[idx] -= eps;
         numeric = (run_loss(p_plus) - run_loss(p_minus)) / (2 * eps);
         EXPECT_NEAR(numeric, grad_bias[idx], tol) << "grad_bias mismatch at " << idx;
+    }
+}
+
+namespace {
+// Tensor::shape() returns std::span<const int64_t>; convert to std::vector
+// so it can be compared against a braced-init vector via EXPECT_EQ.
+std::vector<int64_t> shape_vec(const Tensor& t) {
+    auto s = t.shape();
+    return std::vector<int64_t>(s.begin(), s.end());
+}
+}  // namespace
+
+TEST(LSTMFusedTrainKernel, DispatchForwardBackwardRoundTrip) {
+    const int64_t seq_len = 3, batch = 2, input_size = 3, hidden = 4;
+    Device dev = Device::cpu();
+
+    Tensor input = randn({seq_len, batch, input_size}, DType::Float32, dev);
+    Tensor h0 = randn({batch, hidden}, DType::Float32, dev);
+    Tensor c0 = randn({batch, hidden}, DType::Float32, dev);
+    Tensor W_ih = randn({4 * hidden, input_size}, DType::Float32, dev);
+    Tensor W_hh = randn({4 * hidden, hidden}, DType::Float32, dev);
+    Tensor b_ih = randn({4 * hidden}, DType::Float32, dev);
+    Tensor b_hh = empty({0}, DType::Float32, dev);
+
+    ASSERT_TRUE(is_op_supported(OpId::LSTMFusedTrainForward, Device::Type::CPU));
+    std::vector<Tensor> fwd_inputs{input, h0, c0, W_ih, W_hh, b_ih, b_hh};
+    auto fwd = dispatch<OpId::LSTMFusedTrainForward>(fwd_inputs);
+    ASSERT_EQ(fwd.size(), 6u);  // out, hy, cy, gates_reserve, cell_reserve, tanh_cell_reserve
+    Tensor output = fwd[0], h_n = fwd[1], c_n = fwd[2];
+    Tensor gates_reserve = fwd[3], cell_reserve = fwd[4], tanh_cell_reserve = fwd[5];
+
+    EXPECT_EQ(shape_vec(output), (std::vector<int64_t>{seq_len, batch, hidden}));
+    EXPECT_EQ(shape_vec(h_n), (std::vector<int64_t>{batch, hidden}));
+    EXPECT_EQ(shape_vec(c_n), (std::vector<int64_t>{batch, hidden}));
+
+    Tensor grad_out = ones({seq_len, batch, hidden}, DType::Float32, dev);
+    Tensor grad_cy = ones({batch, hidden}, DType::Float32, dev);
+
+    ASSERT_TRUE(is_op_supported(OpId::LSTMFusedTrainBackward, Device::Type::CPU));
+    std::vector<Tensor> bwd_inputs{grad_out, grad_cy, input, h0, c0, W_ih, W_hh,
+                                    output, gates_reserve, cell_reserve, tanh_cell_reserve};
+    auto bwd = dispatch<OpId::LSTMFusedTrainBackward>(bwd_inputs);
+    ASSERT_EQ(bwd.size(), 7u);  // grad_in, grad_hx, grad_cx, grad_W_ih, grad_W_hh, grad_b_ih, grad_b_hh
+    EXPECT_EQ(shape_vec(bwd[0]), (std::vector<int64_t>{seq_len, batch, input_size}));
+    EXPECT_EQ(shape_vec(bwd[1]), (std::vector<int64_t>{batch, hidden}));
+    EXPECT_EQ(shape_vec(bwd[2]), (std::vector<int64_t>{batch, hidden}));
+    EXPECT_EQ(shape_vec(bwd[3]), (std::vector<int64_t>{4 * hidden, input_size}));
+    EXPECT_EQ(shape_vec(bwd[4]), (std::vector<int64_t>{4 * hidden, hidden}));
+    EXPECT_EQ(shape_vec(bwd[5]), (std::vector<int64_t>{4 * hidden}));
+    EXPECT_EQ(shape_vec(bwd[6]), (std::vector<int64_t>{4 * hidden}));
+
+    // b_ih and b_hh both receive the identical column-sum gradient (see design).
+    auto b_ih_grad = bwd[5].contiguous(), b_hh_grad = bwd[6].contiguous();
+    for (int64_t i = 0; i < 4 * hidden; ++i) {
+        EXPECT_EQ(b_ih_grad.data<float>()[i], b_hh_grad.data<float>()[i]);
     }
 }

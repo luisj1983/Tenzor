@@ -487,6 +487,15 @@ namespace cpu {
                                 const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
                                 const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd,
                                 const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+    auto lstm_forward_training_kernel(const Tensor& input, const Tensor& h0, const Tensor& c0,
+                                       const Tensor& W_ih, const Tensor& W_hh,
+                                       const Tensor& bias_ih, const Tensor& bias_hh) -> std::vector<Tensor>;
+    auto lstm_backward_training_kernel(const Tensor& grad_output, const Tensor& grad_cy,
+                                        const Tensor& input, const Tensor& h0, const Tensor& c0,
+                                        const Tensor& W_ih, const Tensor& W_hh,
+                                        const Tensor& output, const Tensor& gates_reserve,
+                                        const Tensor& cell_reserve, const Tensor& tanh_cell_reserve)
+        -> std::vector<Tensor>;
 
     // RNN - Fused multi-layer operations
     auto lstm_multilayer_forward_kernel(const Tensor& input,
@@ -2649,6 +2658,25 @@ static void register_cpu_kernels_embedding_dropout(BackendDispatchTable& table) 
         // Combined inside kernel during cache setup for oneDNN
         return cpu::lstm_forward_kernel(inputs[0], inputs[1], inputs[2],
                                          inputs[3], inputs[4], inputs[5], inputs[6]);
+    });
+
+    // Fused CPU-native LSTM TRAINING forward (no vendor RNN primitive — see
+    // fused_lstm.hpp's lstm_forward_training). Turns the whole sequence into
+    // one autograd node instead of a per-timestep Variable-graph loop.
+    // inputs: [input, h0, c0, W_ih, W_hh, bias_ih, bias_hh]
+    // outputs: [output, hy, cy, gates_reserve, cell_reserve, tanh_cell_reserve]
+    table.register_kernel(OpId::LSTMFusedTrainForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cpu::lstm_forward_training_kernel(inputs[0], inputs[1], inputs[2],
+                                                  inputs[3], inputs[4], inputs[5], inputs[6]);
+    });
+
+    // inputs: [grad_out, grad_cy, input, h0, c0, W_ih, W_hh, output,
+    //          gates_reserve, cell_reserve, tanh_cell_reserve]
+    // outputs: [grad_input, grad_hx, grad_cx, grad_W_ih, grad_W_hh, grad_b_ih, grad_b_hh]
+    table.register_kernel(OpId::LSTMFusedTrainBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cpu::lstm_backward_training_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6],
+            inputs[7], inputs[8], inputs[9], inputs[10]);
     });
 
     table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {

@@ -1059,6 +1059,144 @@ auto lstm_forward_kernel(
     return {output, h_n, c_n};
 }
 
+// Tensor-level wrapper for tenzor::cpu::lstm::lstm_forward_training (fused_lstm.hpp).
+// Unlike lstm_forward_kernel above (inference-only, no reserve buffers), this
+// captures the per-gate/per-cell reserves needed by lstm_backward_training_kernel
+// so the whole sequence can be one autograd node (OpId::LSTMFusedTrainForward).
+auto lstm_forward_training_kernel(
+    const Tensor& input,
+    const Tensor& h0,
+    const Tensor& c0,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias_ih,
+    const Tensor& bias_hh
+) -> std::vector<Tensor> {
+    if (input.dtype() != DType::Float32) {
+        throw std::runtime_error("lstm_forward_training_kernel: only Float32 is supported (caller must gate on dtype)");
+    }
+    auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::invalid_argument(
+            "lstm_forward_training_kernel: input must be 3-D (seq_len, batch, input_size), got rank " +
+            std::to_string(input_shape.size()));
+    }
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[1];
+
+    if (seq_len <= 0 || batch <= 0 || input_size <= 0 || hidden <= 0) {
+        throw std::invalid_argument("lstm_forward_training_kernel: all dimensions must be positive");
+    }
+    if (h0.shape().size() != 2 || h0.shape()[0] != batch || h0.shape()[1] != hidden) {
+        throw std::invalid_argument("lstm_forward_training_kernel: h0 must have shape (batch, hidden)");
+    }
+    if (c0.shape().size() != 2 || c0.shape()[0] != batch || c0.shape()[1] != hidden) {
+        throw std::invalid_argument("lstm_forward_training_kernel: c0 must have shape (batch, hidden)");
+    }
+
+    Tensor input_c = input.contiguous();
+    Tensor W_ih_c = W_ih.contiguous();
+    Tensor W_hh_c = W_hh.contiguous();
+    Tensor h0_c = h0.contiguous();
+    Tensor c0_c = c0.contiguous();
+
+    bool has_bias_ih = bias_ih.numel() > 0;
+    bool has_bias_hh = bias_hh.numel() > 0;
+    int64_t gate_size = 4 * hidden;
+    std::vector<float> combined_bias;
+    const float* bias_ptr = nullptr;
+    if (has_bias_ih || has_bias_hh) {
+        combined_bias.resize(static_cast<size_t>(gate_size), 0.0f);
+        if (has_bias_ih) {
+            const float* b = bias_ih.contiguous().data<float>();
+            for (int64_t i = 0; i < gate_size; ++i) combined_bias[i] += b[i];
+        }
+        if (has_bias_hh) {
+            const float* b = bias_hh.contiguous().data<float>();
+            for (int64_t i = 0; i < gate_size; ++i) combined_bias[i] += b[i];
+        }
+        bias_ptr = combined_bias.data();
+    }
+
+    Tensor output = empty({seq_len, batch, hidden}, DType::Float32, input.device());
+    Tensor h_n = empty({batch, hidden}, DType::Float32, input.device());
+    Tensor c_n = empty({batch, hidden}, DType::Float32, input.device());
+    Tensor gates_reserve = empty({4, seq_len, batch, hidden}, DType::Float32, input.device());
+    Tensor cell_reserve = empty({seq_len, batch, hidden}, DType::Float32, input.device());
+    Tensor tanh_cell_reserve = empty({seq_len, batch, hidden}, DType::Float32, input.device());
+
+    lstm::lstm_forward_training(
+        input_c.data<float>(), W_ih_c.data<float>(), W_hh_c.data<float>(), bias_ptr,
+        h0_c.data<float>(), c0_c.data<float>(),
+        output.data<float>(), h_n.data<float>(), c_n.data<float>(),
+        gates_reserve.data<float>(), cell_reserve.data<float>(), tanh_cell_reserve.data<float>(),
+        seq_len, batch, input_size, hidden);
+
+    return {output, h_n, c_n, gates_reserve, cell_reserve, tanh_cell_reserve};
+}
+
+// Tensor-level wrapper for tenzor::cpu::lstm::lstm_backward_training (fused_lstm.hpp).
+// grad_b_ih and grad_b_hh are both set to the same underlying gradient values
+// (see fused_lstm.hpp: gate_pre = W_ih@x + W_hh@h + bias_ih + bias_hh, so the
+// two biases receive an identical gradient), returned as two separate Tensors.
+auto lstm_backward_training_kernel(
+    const Tensor& grad_output,
+    const Tensor& grad_cy,
+    const Tensor& input,
+    const Tensor& h0,
+    const Tensor& c0,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& output,
+    const Tensor& gates_reserve,
+    const Tensor& cell_reserve,
+    const Tensor& tanh_cell_reserve
+) -> std::vector<Tensor> {
+    (void)output;  // output is not needed directly: grad_W_hh reconstructs h_prev from
+                    // o_plane * tanh_cell_reserve, which equals output by construction.
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[1];
+    int64_t gate_size = 4 * hidden;
+
+    Tensor grad_output_c = grad_output.contiguous();
+    Tensor grad_cy_c = grad_cy.contiguous();
+    Tensor input_c = input.contiguous();
+    Tensor h0_c = h0.contiguous();
+    Tensor c0_c = c0.contiguous();
+    Tensor W_ih_c = W_ih.contiguous();
+    Tensor W_hh_c = W_hh.contiguous();
+    Tensor gates_reserve_c = gates_reserve.contiguous();
+    Tensor cell_reserve_c = cell_reserve.contiguous();
+    Tensor tanh_cell_reserve_c = tanh_cell_reserve.contiguous();
+
+    Tensor grad_input = empty({seq_len, batch, input_size}, DType::Float32, input.device());
+    Tensor grad_h0 = empty({batch, hidden}, DType::Float32, input.device());
+    Tensor grad_c0 = empty({batch, hidden}, DType::Float32, input.device());
+    Tensor grad_W_ih = empty({gate_size, input_size}, DType::Float32, input.device());
+    Tensor grad_W_hh = empty({gate_size, hidden}, DType::Float32, input.device());
+    Tensor grad_bias = empty({gate_size}, DType::Float32, input.device());
+
+    lstm::lstm_backward_training(
+        grad_output_c.data<float>(), grad_cy_c.data<float>(),
+        input_c.data<float>(), h0_c.data<float>(), c0_c.data<float>(),
+        W_ih_c.data<float>(), W_hh_c.data<float>(),
+        gates_reserve_c.data<float>(), cell_reserve_c.data<float>(), tanh_cell_reserve_c.data<float>(),
+        grad_input.data<float>(), grad_h0.data<float>(), grad_c0.data<float>(),
+        grad_W_ih.data<float>(), grad_W_hh.data<float>(), grad_bias.data<float>(),
+        seq_len, batch, input_size, hidden);
+
+    // grad_b_ih and grad_b_hh both equal grad_bias exactly (see design: gate_pre = ... + b_ih + b_hh).
+    Tensor grad_b_hh = grad_bias.contiguous();  // separate Tensor object, same values
+    std::memcpy(grad_b_hh.data<float>(), grad_bias.data<float>(), static_cast<size_t>(gate_size) * sizeof(float));
+
+    return {grad_input, grad_h0, grad_c0, grad_W_ih, grad_W_hh, grad_bias, grad_b_hh};
+}
+
 /**
  * @brief Bidirectional LSTM forward pass
  *
