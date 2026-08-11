@@ -369,7 +369,12 @@ inline void lstm_cell_fused(
     float* c_out,           // (batch, hidden) - new cell
     float* workspace,       // (batch, 4*hidden) - temp buffer for gates_hh
     int64_t batch,
-    int64_t hidden
+    int64_t hidden,
+    float* i_reserve = nullptr,      // (batch, hidden) post-activation i, or nullptr
+    float* f_reserve = nullptr,      // (batch, hidden) post-activation f, or nullptr
+    float* g_reserve = nullptr,      // (batch, hidden) post-activation g, or nullptr
+    float* o_reserve = nullptr,      // (batch, hidden) post-activation o, or nullptr
+    float* tanh_c_reserve = nullptr  // (batch, hidden) tanh(c_out), or nullptr
 ) {
     int64_t gate_size = 4 * hidden;
 
@@ -433,12 +438,19 @@ inline void lstm_cell_fused(
 
             // c_new = f * c_prev + i * g
             __m512 c_n = _mm512_fmadd_ps(f, c_p, _mm512_mul_ps(i, g));
+            __m512 tanh_cn = tanh_avx512(c_n);
 
             // h_new = o * tanh(c_new)
-            __m512 h_n = _mm512_mul_ps(o, tanh_avx512(c_n));
+            __m512 h_n = _mm512_mul_ps(o, tanh_cn);
 
             _mm512_storeu_ps(c_new + d, c_n);
             _mm512_storeu_ps(h_new + d, h_n);
+
+            if (i_reserve) _mm512_storeu_ps(i_reserve + b * hidden + d, i);
+            if (f_reserve) _mm512_storeu_ps(f_reserve + b * hidden + d, f);
+            if (g_reserve) _mm512_storeu_ps(g_reserve + b * hidden + d, g);
+            if (o_reserve) _mm512_storeu_ps(o_reserve + b * hidden + d, o);
+            if (tanh_c_reserve) _mm512_storeu_ps(tanh_c_reserve + b * hidden + d, tanh_cn);
         }
 #endif
 
@@ -476,12 +488,19 @@ inline void lstm_cell_fused(
 
             // c_new = f * c_prev + i * g
             __m256 c_n = _mm256_fmadd_ps(f, c_p, _mm256_mul_ps(i, g));
+            __m256 tanh_cn = tanh_avx2(c_n);
 
             // h_new = o * tanh(c_new)
-            __m256 h_n = _mm256_mul_ps(o, tanh_avx2(c_n));
+            __m256 h_n = _mm256_mul_ps(o, tanh_cn);
 
             _mm256_storeu_ps(c_new + d, c_n);
             _mm256_storeu_ps(h_new + d, h_n);
+
+            if (i_reserve) _mm256_storeu_ps(i_reserve + b * hidden + d, i);
+            if (f_reserve) _mm256_storeu_ps(f_reserve + b * hidden + d, f);
+            if (g_reserve) _mm256_storeu_ps(g_reserve + b * hidden + d, g);
+            if (o_reserve) _mm256_storeu_ps(o_reserve + b * hidden + d, o);
+            if (tanh_c_reserve) _mm256_storeu_ps(tanh_c_reserve + b * hidden + d, tanh_cn);
         }
 #endif
 
@@ -505,10 +524,17 @@ inline void lstm_cell_fused(
             float o = sigmoid_scalar(o_gate);
 
             float c_n = f * c_prev[d] + i * g;
-            float h_n = o * tanh_scalar(c_n);
+            float tanh_cn = tanh_scalar(c_n);
+            float h_n = o * tanh_cn;
 
             c_new[d] = c_n;
             h_new[d] = h_n;
+
+            if (i_reserve) i_reserve[b * hidden + d] = i;
+            if (f_reserve) f_reserve[b * hidden + d] = f;
+            if (g_reserve) g_reserve[b * hidden + d] = g;
+            if (o_reserve) o_reserve[b * hidden + d] = o;
+            if (tanh_c_reserve) tanh_c_reserve[b * hidden + d] = tanh_cn;
         }
     }
 }
@@ -661,6 +687,82 @@ inline void lstm_forward(
     std::memcpy(c_n, c_curr, batch * hidden * sizeof(float));
 
     // Workspace buffers are cached in thread-local storage, no cleanup needed
+}
+
+/**
+ * @brief Fused LSTM forward pass for entire sequence, TRAINING variant.
+ *
+ * Identical computation to lstm_forward (same batched input-gate GEMM, same
+ * per-timestep lstm_cell_fused call), but additionally captures the
+ * per-timestep post-activation gates and cell states needed by
+ * lstm_backward_training for analytic BPTT.
+ */
+inline void lstm_forward_training(
+    const float* input,     // (seq_len, batch, input_size)
+    const float* W_ih,      // (4*hidden, input_size)
+    const float* W_hh,      // (4*hidden, hidden)
+    const float* bias,      // (4*hidden) or nullptr
+    const float* h0,        // (batch, hidden)
+    const float* c0,        // (batch, hidden)
+    float* output,          // (seq_len, batch, hidden)
+    float* h_n,             // (batch, hidden)
+    float* c_n,             // (batch, hidden)
+    float* gates_reserve,      // (4, seq_len, batch, hidden): i,f,g,o back-to-back planes
+    float* cell_reserve,       // (seq_len, batch, hidden): c_t per timestep
+    float* tanh_cell_reserve,  // (seq_len, batch, hidden): tanh(c_t) per timestep
+    int64_t seq_len,
+    int64_t batch,
+    int64_t input_size,
+    int64_t hidden
+) {
+    int64_t gate_size = 4 * hidden;
+
+    std::vector<float> gates_ih(static_cast<size_t>(seq_len * batch * gate_size));
+    std::vector<float> gates_hh_workspace(static_cast<size_t>(batch * gate_size));
+    std::vector<float> h_curr(static_cast<size_t>(batch * hidden));
+    std::vector<float> c_curr(static_cast<size_t>(batch * hidden));
+
+    LSTM_SGEMM_NT(seq_len * batch, gate_size, input_size,
+                  1.0f, input, input_size,
+                  W_ih, input_size,
+                  0.0f, gates_ih.data(), gate_size);
+
+    std::memcpy(h_curr.data(), h0, batch * hidden * sizeof(float));
+    std::memcpy(c_curr.data(), c0, batch * hidden * sizeof(float));
+
+    // gates_reserve layout: 4 back-to-back (seq_len, batch, hidden) planes,
+    // one per gate, in i,f,g,o order — NOT interleaved per-timestep. This
+    // matches how lstm_cell_fused indexes each reserve pointer independently
+    // as base + b*hidden + d; a column-sliced pointer into an interleaved
+    // (batch, 4*hidden) buffer would read/write the wrong batch rows for
+    // b >= 1, since the cell's per-batch stride is `hidden`, not `4*hidden`.
+    const int64_t plane = seq_len * batch * hidden;
+    float* i_plane = gates_reserve;
+    float* f_plane = gates_reserve + plane;
+    float* g_plane = gates_reserve + 2 * plane;
+    float* o_plane = gates_reserve + 3 * plane;
+
+    for (int64_t t = 0; t < seq_len; ++t) {
+        const float* gates_ih_t = gates_ih.data() + t * batch * gate_size;
+        float* output_t = output + t * batch * hidden;
+        float* cell_reserve_t = cell_reserve + t * batch * hidden;
+        float* tanh_cell_reserve_t = tanh_cell_reserve + t * batch * hidden;
+
+        lstm_cell_fused(
+            gates_ih_t, h_curr.data(), c_curr.data(), W_hh, bias,
+            output_t, cell_reserve_t, gates_hh_workspace.data(), batch, hidden,
+            /*i_reserve=*/i_plane + t * batch * hidden,
+            /*f_reserve=*/f_plane + t * batch * hidden,
+            /*g_reserve=*/g_plane + t * batch * hidden,
+            /*o_reserve=*/o_plane + t * batch * hidden,
+            /*tanh_c_reserve=*/tanh_cell_reserve_t);
+
+        std::memcpy(c_curr.data(), cell_reserve_t, batch * hidden * sizeof(float));
+        std::memcpy(h_curr.data(), output_t, batch * hidden * sizeof(float));
+    }
+
+    std::memcpy(h_n, h_curr.data(), batch * hidden * sizeof(float));
+    std::memcpy(c_n, c_curr.data(), batch * hidden * sizeof(float));
 }
 
 // RAII guard that sets MKL's per-thread count to `n` for the duration of its
