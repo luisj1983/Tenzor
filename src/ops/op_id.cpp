@@ -407,6 +407,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::LSTMCudnnBackward)] = "lstm_cudnn_backward";
     names[static_cast<size_t>(OpId::GRUCudnnTrainForward)] = "gru_cudnn_train_forward";
     names[static_cast<size_t>(OpId::GRUCudnnBackward)] = "gru_cudnn_backward";
+    names[static_cast<size_t>(OpId::LSTMFusedTrainForward)] = "lstm_fused_train_forward";
+    names[static_cast<size_t>(OpId::LSTMFusedTrainBackward)] = "lstm_fused_train_backward";
 
     // Complex operations
     names[static_cast<size_t>(OpId::Conj)] = "conj";
@@ -629,7 +631,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 491;
+inline constexpr size_t EXPECTED_NAMED_OPS = 493;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

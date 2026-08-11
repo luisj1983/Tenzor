@@ -534,6 +534,12 @@ enum class OpId : uint16_t {
     LSTMCudnnBackward = 451,      // [grad_out,grad_hy,grad_cy,input,h0,c0,out,weight_space,reserve,W_ih,W_hh,b_ih,b_hh] -> [grad_in,grad_hx,grad_cx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
     GRUCudnnTrainForward = 452,   // [input,h0,W_ih,W_hh,b_ih,b_hh] -> [out,hy,reserve,weight_space]
     GRUCudnnBackward = 453,       // [grad_out,grad_hy,input,h0,out,weight_space,reserve,W_ih,W_hh,b_ih,b_hh] -> [grad_in,grad_hx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
+    LSTMFusedTrainForward = 454,  // CPU-native fused LSTM training forward (no vendor RNN primitive).
+                                   // [input,h0,c0,W_ih,W_hh,b_ih,b_hh] ->
+                                   // [out,hy,cy,gates_reserve,cell_reserve,tanh_cell_reserve]
+    LSTMFusedTrainBackward = 455, // [grad_out,grad_cy,input,h0,c0,W_ih,W_hh,
+                                   //  output,gates_reserve,cell_reserve,tanh_cell_reserve] ->
+                                   // [grad_in,grad_hx,grad_cx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
 
     // =========================================================================
     // Sparse Tensor Operations (460-469)
