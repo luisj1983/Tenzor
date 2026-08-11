@@ -2,6 +2,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "../../src/backends/cpu/kernels/fused_lstm.hpp"
 #include <vector>
+#include <array>
 #include <cmath>
 
 using namespace tenzor;
@@ -148,5 +149,140 @@ TEST(LSTMFusedTrainKernel, ForwardTrainingMatchesInferenceForward) {
     // cell_reserve at the last timestep must equal c_n exactly.
     for (int64_t i = 0; i < batch * hidden; ++i) {
         EXPECT_EQ(cn_new[i], cell_reserve[(seq_len - 1) * batch * hidden + i]);
+    }
+}
+
+namespace {
+
+struct LstmProblem {
+    int64_t seq_len, batch, input_size, hidden;
+    std::vector<float> input, W_ih, W_hh, bias, h0, c0;
+};
+
+LstmProblem make_problem(int64_t seq_len, int64_t batch, int64_t input_size, int64_t hidden) {
+    LstmProblem p{seq_len, batch, input_size, hidden, {}, {}, {}, {}, {}, {}};
+    int64_t gate_size = 4 * hidden;
+    p.input.resize(seq_len * batch * input_size);
+    p.W_ih.resize(gate_size * input_size);
+    p.W_hh.resize(gate_size * hidden);
+    p.bias.resize(gate_size);
+    p.h0.resize(batch * hidden);
+    p.c0.resize(batch * hidden);
+    auto fill = [](std::vector<float>& v, float scale, float offset) {
+        for (size_t i = 0; i < v.size(); ++i) {
+            v[i] = scale * static_cast<float>((i * 37 + 11) % 101) / 101.0f - offset;
+        }
+    };
+    fill(p.input, 0.4f, 0.2f);
+    fill(p.W_ih, 0.3f, 0.15f);
+    fill(p.W_hh, 0.25f, 0.12f);
+    fill(p.bias, 0.1f, 0.05f);
+    fill(p.h0, 0.2f, 0.1f);
+    fill(p.c0, 0.2f, 0.1f);
+    return p;
+}
+
+// Runs forward_training and returns the scalar loss L = sum(output) + sum(c_n),
+// matching the two independent autograd nodes the real LSTM wiring creates
+// (one for `output`, one for `c_n`) collapsed into one scalar for this
+// finite-difference check.
+float run_loss(const LstmProblem& p) {
+    int64_t gate_size = 4 * p.hidden;
+    std::vector<float> output(p.seq_len * p.batch * p.hidden), h_n(p.batch * p.hidden), c_n(p.batch * p.hidden);
+    std::vector<float> gates_reserve(4 * p.seq_len * p.batch * p.hidden);
+    std::vector<float> cell_reserve(p.seq_len * p.batch * p.hidden), tanh_cell_reserve(p.seq_len * p.batch * p.hidden);
+    tenzor::cpu::lstm::lstm_forward_training(
+        p.input.data(), p.W_ih.data(), p.W_hh.data(), p.bias.data(), p.h0.data(), p.c0.data(),
+        output.data(), h_n.data(), c_n.data(),
+        gates_reserve.data(), cell_reserve.data(), tanh_cell_reserve.data(),
+        p.seq_len, p.batch, p.input_size, p.hidden);
+    (void)gate_size;
+    float loss = 0.0f;
+    for (float v : output) loss += v;
+    for (float v : c_n) loss += v;
+    return loss;
+}
+
+}  // namespace
+
+TEST(LSTMFusedTrainKernel, BackwardMatchesFiniteDifference) {
+    auto p = make_problem(/*seq_len=*/4, /*batch=*/2, /*input_size=*/3, /*hidden=*/4);
+    int64_t gate_size = 4 * p.hidden;
+
+    // Forward + reserve capture.
+    std::vector<float> output(p.seq_len * p.batch * p.hidden), h_n(p.batch * p.hidden), c_n(p.batch * p.hidden);
+    std::vector<float> gates_reserve(4 * p.seq_len * p.batch * p.hidden);
+    std::vector<float> cell_reserve(p.seq_len * p.batch * p.hidden), tanh_cell_reserve(p.seq_len * p.batch * p.hidden);
+    tenzor::cpu::lstm::lstm_forward_training(
+        p.input.data(), p.W_ih.data(), p.W_hh.data(), p.bias.data(), p.h0.data(), p.c0.data(),
+        output.data(), h_n.data(), c_n.data(),
+        gates_reserve.data(), cell_reserve.data(), tanh_cell_reserve.data(),
+        p.seq_len, p.batch, p.input_size, p.hidden);
+
+    // grad_output = all-ones (matches d(sum(output))/d(output)), grad_cy = all-ones.
+    std::vector<float> grad_output(p.seq_len * p.batch * p.hidden, 1.0f);
+    std::vector<float> grad_cy(p.batch * p.hidden, 1.0f);
+
+    std::vector<float> grad_input(p.seq_len * p.batch * p.input_size);
+    std::vector<float> grad_h0(p.batch * p.hidden), grad_c0(p.batch * p.hidden);
+    std::vector<float> grad_W_ih(gate_size * p.input_size), grad_W_hh(gate_size * p.hidden);
+    std::vector<float> grad_bias(gate_size);
+
+    tenzor::cpu::lstm::lstm_backward_training(
+        grad_output.data(), grad_cy.data(),
+        p.input.data(), p.h0.data(), p.c0.data(), p.W_ih.data(), p.W_hh.data(),
+        gates_reserve.data(), cell_reserve.data(), tanh_cell_reserve.data(),
+        grad_input.data(), grad_h0.data(), grad_c0.data(),
+        grad_W_ih.data(), grad_W_hh.data(), grad_bias.data(),
+        p.seq_len, p.batch, p.input_size, p.hidden);
+
+    const float eps = 1e-3f;
+    const float tol = 3e-2f;  // finite-difference tolerance at eps=1e-3, float32
+
+    // Spot-check grad_input at a few (t,b,f) coordinates.
+    for (auto [t, b, f] : std::vector<std::array<int64_t, 3>>{{0, 0, 0}, {2, 1, 2}, {3, 0, 1}}) {
+        auto p_plus = p, p_minus = p;
+        size_t idx = static_cast<size_t>((t * p.batch + b) * p.input_size + f);
+        p_plus.input[idx] += eps;
+        p_minus.input[idx] -= eps;
+        float numeric = (run_loss(p_plus) - run_loss(p_minus)) / (2 * eps);
+        float analytic = grad_input[idx];
+        EXPECT_NEAR(numeric, analytic, tol) << "grad_input mismatch at t=" << t << " b=" << b << " f=" << f;
+    }
+
+    // Spot-check grad_h0 / grad_c0.
+    for (int64_t idx : {int64_t{0}, int64_t{3}, int64_t{7}}) {
+        auto p_plus = p, p_minus = p;
+        p_plus.h0[idx] += eps;
+        p_minus.h0[idx] -= eps;
+        float numeric = (run_loss(p_plus) - run_loss(p_minus)) / (2 * eps);
+        EXPECT_NEAR(numeric, grad_h0[idx], tol) << "grad_h0 mismatch at " << idx;
+
+        p_plus = p; p_minus = p;
+        p_plus.c0[idx] += eps;
+        p_minus.c0[idx] -= eps;
+        numeric = (run_loss(p_plus) - run_loss(p_minus)) / (2 * eps);
+        EXPECT_NEAR(numeric, grad_c0[idx], tol) << "grad_c0 mismatch at " << idx;
+    }
+
+    // Spot-check grad_W_ih / grad_W_hh / grad_bias.
+    for (int64_t idx : {int64_t{0}, int64_t{5}, int64_t{9}}) {
+        auto p_plus = p, p_minus = p;
+        p_plus.W_ih[idx] += eps;
+        p_minus.W_ih[idx] -= eps;
+        float numeric = (run_loss(p_plus) - run_loss(p_minus)) / (2 * eps);
+        EXPECT_NEAR(numeric, grad_W_ih[idx], tol) << "grad_W_ih mismatch at " << idx;
+
+        p_plus = p; p_minus = p;
+        p_plus.W_hh[idx] += eps;
+        p_minus.W_hh[idx] -= eps;
+        numeric = (run_loss(p_plus) - run_loss(p_minus)) / (2 * eps);
+        EXPECT_NEAR(numeric, grad_W_hh[idx], tol) << "grad_W_hh mismatch at " << idx;
+
+        p_plus = p; p_minus = p;
+        p_plus.bias[idx] += eps;
+        p_minus.bias[idx] -= eps;
+        numeric = (run_loss(p_plus) - run_loss(p_minus)) / (2 * eps);
+        EXPECT_NEAR(numeric, grad_bias[idx], tol) << "grad_bias mismatch at " << idx;
     }
 }
