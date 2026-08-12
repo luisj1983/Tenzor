@@ -38,7 +38,7 @@ namespace cpu {
 // ============================================================================
 
 auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
-    Tensor result(shape, dtype, device);
+    Tensor result = Tensor::empty_uninitialized(shape, dtype, device);
     // IEEE 754 float/double zero, all integer zeros, bool false, complex zero,
     // FP8 zero, and quantized raw-zero are all represented as all-bits-zero.
     // A single memset covers every advertised dtype correctly.
@@ -63,7 +63,7 @@ static inline void parallel_fill_n(T* dst, int64_t n, T value) {
 // ============================================================================
 
 auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
-    Tensor result(shape, dtype, device);
+    Tensor result = Tensor::empty_uninitialized(shape, dtype, device);
     int64_t n = result.numel();
 
     switch (dtype) {
@@ -345,7 +345,7 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
 // ============================================================================
 
 auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, const Device& device) -> Tensor {
-    Tensor result(shape, dtype, device);
+    Tensor result = Tensor::empty_uninitialized(shape, dtype, device);
     int64_t n = result.numel();
 
     switch (dtype) {
@@ -481,7 +481,7 @@ auto arange_kernel(double start, double end, double step, DType dtype, const Dev
     }
     int64_t numel = static_cast<int64_t>(count_d);
     if (numel < 0) numel = 0;
-    Tensor result({numel}, dtype, device);
+    Tensor result = Tensor::empty_uninitialized({numel}, dtype, device);
 
     switch (dtype) {
         case DType::Float16: {
@@ -687,7 +687,7 @@ static void fill_eye(Tensor& result, int64_t n, int64_t m, T one) {
 auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor {
     if (m < 0) m = n;  // Square matrix by default
 
-    Tensor result({n, m}, dtype, device);
+    Tensor result = Tensor::empty_uninitialized({n, m}, dtype, device);
 
     switch (dtype) {
         case DType::Float16:    fill_eye<Float16>(result, n, m, Float16(1.0f)); break;
