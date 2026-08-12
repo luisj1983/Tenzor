@@ -205,7 +205,11 @@ auto quantized_conv2d_kernel(
     // ~255*255=65025 times col_width > ~33k exceeds INT32_MAX). Mirrors the
     // int64 accumulators in quantized_linear.cpp.
     std::vector<int64_t> sum_w(out_channels, 0);
-    #pragma omp parallel for if(out_channels > ::tenzor::OmpThresholds::matmul())
+    // Gate on total work (out_channels * col_width), not the bare trip
+    // count: each iteration reduces over col_width elements, so for
+    // realistic channel/kernel sizes the trip count alone can sit at or
+    // below matmul() while the actual work is well above it.
+    #pragma omp parallel for if(out_channels * col_width > ::tenzor::OmpThresholds::matmul())
     for (int64_t oc = 0; oc < out_channels; ++oc) {
         int64_t s = 0;
         const int8_t* wr = weight + oc * col_width;
@@ -332,7 +336,9 @@ auto quantized_conv2d_per_channel_kernel(
     // int64 accumulation to avoid overflow on wide receptive fields (see the
     // matching note in quantized_conv2d_kernel).
     std::vector<int64_t> sum_w(out_channels, 0);
-    #pragma omp parallel for if(out_channels > ::tenzor::OmpThresholds::matmul())
+    // Gate on total work, not bare trip count (see rationale in
+    // quantized_conv2d_kernel above).
+    #pragma omp parallel for if(out_channels * col_width > ::tenzor::OmpThresholds::matmul())
     for (int64_t oc = 0; oc < out_channels; ++oc) {
         int64_t s = 0;
         const int8_t* wr = weight + oc * col_width;

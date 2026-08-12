@@ -204,12 +204,15 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         const int64_t d0 = output_shape[0], d1 = output_shape[1];
         const int64_t sa0 = strides_a[0], sa1 = strides_a[1];
         const int64_t sb0 = strides_b[0], sb1 = strides_b[1];
-        #pragma omp parallel for schedule(static) if(d0 * d1 >= ::tenzor::OmpThresholds::simple())
+        // collapse(2): d0 and d1 are the only two dims here, so this is the
+        // full loop nest -- every (i0,i1) pair is independent and maps to a
+        // unique out_idx, so no gaps/races are possible.
+        #pragma omp parallel for collapse(2) schedule(static) if(d0 * d1 >= ::tenzor::OmpThresholds::simple())
         for (int64_t i0 = 0; i0 < d0; ++i0) {
-            int64_t ba = i0 * sa0, bb = i0 * sb0;
-            int64_t out_idx = i0 * d1;
-            for (int64_t i1 = 0; i1 < d1; ++i1, ++out_idx)
-                c_data[out_idx] = op(a_data[ba + i1 * sa1], b_data[bb + i1 * sb1]);
+            for (int64_t i1 = 0; i1 < d1; ++i1) {
+                int64_t out_idx = i0 * d1 + i1;
+                c_data[out_idx] = op(a_data[i0 * sa0 + i1 * sa1], b_data[i0 * sb0 + i1 * sb1]);
+            }
         }
         return;
     }
@@ -217,12 +220,14 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         const int64_t d0 = output_shape[0], d1 = output_shape[1], d2 = output_shape[2];
         const int64_t sa0 = strides_a[0], sa1 = strides_a[1], sa2 = strides_a[2];
         const int64_t sb0 = strides_b[0], sb1 = strides_b[1], sb2 = strides_b[2];
-        #pragma omp parallel for schedule(static) if(d0 * d1 * d2 >= ::tenzor::OmpThresholds::simple())
+        // collapse(2) over the two outermost dims so small leading dims
+        // (e.g. batch=1) still get full thread utilization; the innermost
+        // i2 loop remains sequential per (i0,i1) pair.
+        #pragma omp parallel for collapse(2) schedule(static) if(d0 * d1 * d2 >= ::tenzor::OmpThresholds::simple())
         for (int64_t i0 = 0; i0 < d0; ++i0) {
-            int64_t ba0 = i0 * sa0, bb0 = i0 * sb0;
-            int64_t out_idx = i0 * d1 * d2;
             for (int64_t i1 = 0; i1 < d1; ++i1) {
-                int64_t ba1 = ba0 + i1 * sa1, bb1 = bb0 + i1 * sb1;
+                int64_t ba1 = i0 * sa0 + i1 * sa1, bb1 = i0 * sb0 + i1 * sb1;
+                int64_t out_idx = i0 * d1 * d2 + i1 * d2;
                 for (int64_t i2 = 0; i2 < d2; ++i2, ++out_idx)
                     c_data[out_idx] = op(a_data[ba1 + i2 * sa2], b_data[bb1 + i2 * sb2]);
             }
@@ -234,12 +239,13 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         const int64_t d2 = output_shape[2], d3 = output_shape[3];
         const int64_t sa0 = strides_a[0], sa1 = strides_a[1], sa2 = strides_a[2], sa3 = strides_a[3];
         const int64_t sb0 = strides_b[0], sb1 = strides_b[1], sb2 = strides_b[2], sb3 = strides_b[3];
-        #pragma omp parallel for schedule(static) if(d0 * d1 * d2 * d3 >= ::tenzor::OmpThresholds::simple())
+        // collapse(2) over the two outermost dims; i2/i3 remain sequential
+        // per (i0,i1) pair, computed via the closed-form out_idx base.
+        #pragma omp parallel for collapse(2) schedule(static) if(d0 * d1 * d2 * d3 >= ::tenzor::OmpThresholds::simple())
         for (int64_t i0 = 0; i0 < d0; ++i0) {
-            int64_t ba0 = i0 * sa0, bb0 = i0 * sb0;
-            int64_t out_idx = i0 * d1 * d2 * d3;
             for (int64_t i1 = 0; i1 < d1; ++i1) {
-                int64_t ba1 = ba0 + i1 * sa1, bb1 = bb0 + i1 * sb1;
+                int64_t ba1 = i0 * sa0 + i1 * sa1, bb1 = i0 * sb0 + i1 * sb1;
+                int64_t out_idx = i0 * d1 * d2 * d3 + i1 * d2 * d3;
                 for (int64_t i2 = 0; i2 < d2; ++i2) {
                     int64_t ba2 = ba1 + i2 * sa2, bb2 = bb1 + i2 * sb2;
                     for (int64_t i3 = 0; i3 < d3; ++i3, ++out_idx)

@@ -136,14 +136,18 @@ auto quantized_linear_kernel(
     // so we need the per-output-row weight sum and per-batch-row input sum.
     std::vector<int64_t> sum_w(out_features, 0);
     std::vector<int64_t> sum_x(batch_size, 0);
-    #pragma omp parallel for if(out_features > ::tenzor::OmpThresholds::matmul())
+    // Gate on total work (trip_count * in_features), not the bare trip count:
+    // each iteration does an O(in_features) reduction, so for e.g.
+    // out_features=1024, in_features=4096 the real cost (~4M ops) is far
+    // above matmul() even though the trip count alone (1024) is not > 1024.
+    #pragma omp parallel for if(out_features * in_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t o = 0; o < out_features; ++o) {
         int64_t s = 0;
         const int8_t* wrow = weight + o * in_features;
         for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(wrow[k]);
         sum_w[o] = s;
     }
-    #pragma omp parallel for if(batch_size > ::tenzor::OmpThresholds::matmul())
+    #pragma omp parallel for if(batch_size * in_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         int64_t s = 0;
         const int8_t* xrow = input + b * in_features;
@@ -151,8 +155,12 @@ auto quantized_linear_kernel(
         sum_x[b] = s;
     }
 
-    // Parallel over batch and output features
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
+    // Parallel over batch and output features. Real per-iteration cost is an
+    // O(in_features) dot product, so gate on the full batch*out_features*in_features
+    // work, not just batch_size*out_features (which can land exactly at/below
+    // matmul() for realistic decode shapes like batch=1, out_features=1024,
+    // in_features=4096, silently disabling parallelism for a ~4M-FLOP GEMM).
+    #pragma omp parallel for collapse(2) if(batch_size * out_features * in_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t o = 0; o < out_features; ++o) {
             // int64 accumulator matches the CUDA kernel: each int8*int8 product
@@ -280,14 +288,16 @@ auto quantized_linear_per_channel_kernel(
     // quantized_linear_kernel above).
     std::vector<int64_t> sum_w(out_features, 0);
     std::vector<int64_t> sum_x(batch_size, 0);
-    #pragma omp parallel for if(out_features > ::tenzor::OmpThresholds::matmul())
+    // Gate on total work, not bare trip count (see rationale in
+    // quantized_linear_kernel above).
+    #pragma omp parallel for if(out_features * in_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t o = 0; o < out_features; ++o) {
         int64_t s = 0;
         const int8_t* wrow = weight + o * in_features;
         for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(wrow[k]);
         sum_w[o] = s;
     }
-    #pragma omp parallel for if(batch_size > ::tenzor::OmpThresholds::matmul())
+    #pragma omp parallel for if(batch_size * in_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         int64_t s = 0;
         const int8_t* xrow = input + b * in_features;
@@ -295,7 +305,7 @@ auto quantized_linear_per_channel_kernel(
         sum_x[b] = s;
     }
 
-    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
+    #pragma omp parallel for collapse(2) if(batch_size * out_features * in_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t o = 0; o < out_features; ++o) {
             // int64 accumulator matches the CUDA kernel: each int8*int8 product
