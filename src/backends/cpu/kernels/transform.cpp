@@ -20,8 +20,9 @@ auto contiguous_kernel(const Tensor& input) -> Tensor;
 
 auto fill_kernel(const Tensor& input, double value) -> Tensor {
     // Create result tensor (clone)
-    Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(
+        std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+        input.dtype(), input.device());
 
     const int64_t total_elements = result.numel();
 
@@ -188,8 +189,9 @@ auto clone_kernel(const Tensor& input) -> Tensor {
     Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
 
     // Create new tensor
-    Tensor result(std::vector<int64_t>(cont.shape().begin(), cont.shape().end()),
-                  cont.dtype(), cont.device());
+    Tensor result = Tensor::empty_uninitialized(
+        std::vector<int64_t>(cont.shape().begin(), cont.shape().end()),
+        cont.dtype(), cont.device());
 
     // Copy data
     const size_t size_bytes = cont.numel() * dtype_size(cont.dtype());
@@ -341,8 +343,9 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     }
 
     // Create new contiguous tensor with same shape, dtype, device
-    Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(
+        std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+        input.dtype(), input.device());
 
     const int64_t total_elements = input.numel();
     const size_t element_size = dtype_size(input.dtype());

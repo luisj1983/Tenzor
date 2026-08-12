@@ -268,7 +268,7 @@ auto index_select_kernel(const Tensor& input_arg, int64_t dim, const Tensor& ind
     }
 
     // Create output tensor
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized(output_shape, input.dtype(), input.device());
 
     // Get index data (move to CPU if needed). Contiguify as well: the loop
     // below reads index_data flat (index_data[i]), so a non-contiguous index
