@@ -129,3 +129,56 @@ TEST(ActivationDispatch, SigmoidF32MatchesFastMathReferenceAcrossSizes) {
         }
     }
 }
+
+TEST(ActivationDispatch, TanhF32MatchesStdTanhAcrossSizes) {
+    // tanh's math is untouched by this fix (still exact std::tanh below
+    // threshold, oneDNN's own "exact" tanh above it) -- this locks in that
+    // BOTH paths produce the same values as std::tanh directly, at a size
+    // that stays below the new threshold and one that crosses above it.
+    for (int64_t n : {int64_t{512}, int64_t{262144}}) {
+        std::vector<float> input_vec(static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i) {
+            input_vec[static_cast<size_t>(i)] = 0.02f * static_cast<float>((i * 53 + 3) % 97) - 1.0f;
+        }
+        Tensor input({n}, DType::Float32, Device::cpu());
+        std::memcpy(input.data<float>(), input_vec.data(), static_cast<size_t>(n) * sizeof(float));
+
+        Variable input_var(input, false);
+        auto output = nn::tanh(input_var);
+        auto out_t = output.tensor().contiguous();
+        const float* out_data = out_t.data<float>();
+
+        for (int64_t i = 0; i < n; ++i) {
+            float expected = std::tanh(input_vec[static_cast<size_t>(i)]);
+            // oneDNN's primitive vs. std::tanh: allow float32 rounding-level
+            // tolerance only, not an approximation-level one -- this test
+            // exists specifically to catch it if oneDNN's "exact" claim
+            // (the existing code comment's words, not verified before this
+            // task) turns out to be inexact at the bit level.
+            EXPECT_NEAR(out_data[i], expected, 1e-6f) << "n=" << n << " i=" << i;
+        }
+    }
+}
+
+TEST(ActivationDispatch, GeluF32MatchesExactErfAcrossSizes) {
+    for (int64_t n : {int64_t{512}, int64_t{262144}}) {
+        std::vector<float> input_vec(static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i) {
+            input_vec[static_cast<size_t>(i)] = 0.02f * static_cast<float>((i * 59 + 13) % 89) - 0.9f;
+        }
+        Tensor input({n}, DType::Float32, Device::cpu());
+        std::memcpy(input.data<float>(), input_vec.data(), static_cast<size_t>(n) * sizeof(float));
+
+        Variable input_var(input, false);
+        auto output = nn::gelu(input_var);
+        auto out_t = output.tensor().contiguous();
+        const float* out_data = out_t.data<float>();
+
+        constexpr float INV_SQRT2_F = 0.70710678f;
+        for (int64_t i = 0; i < n; ++i) {
+            float x = input_vec[static_cast<size_t>(i)];
+            float expected = 0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F));
+            EXPECT_NEAR(out_data[i], expected, 1e-6f) << "n=" << n << " i=" << i;
+        }
+    }
+}

@@ -27,9 +27,31 @@
 #include "tenzor/backend/omp_thresholds.hpp"  // unified (F.5)
 #define ACTIVATION_OMP_THRESHOLD (::tenzor::OmpThresholds::simple())
 
-// oneDNN threshold - use oneDNN for tensors larger than this.
-// Lowered from 256K to 64K — primitive caching amortizes setup cost.
-constexpr size_t ONEDNN_ACTIVATION_THRESHOLD = 65536;  // 64K elements
+// oneDNN threshold for ReLU/Sigmoid is no longer used by this file's own
+// dispatch (see Task 1/2) -- ONEDNN_ACTIVATION_THRESHOLD now only governs
+// Tanh/GELU, whose exact std::tanh/std::erf math cannot be replaced by a
+// vectorized approximation (see the class comments in tanh_kernel/
+// gelu_kernel below) but can legitimately be routed to oneDNN's own exact
+// primitive much sooner than the old 65536, since oneDNN's fixed dispatch
+// cost is cheap relative to thousands of individual scalar transcendental
+// calls. Value below is from direct measurement (see
+// docs/superpowers/plans/2026-08-12-cpu-activation-dispatch.md Task 3) --
+// do not change without re-measuring.
+//
+// Measured (OMP_NUM_THREADS=1, single-thread, Release -O3 -mavx512f):
+//   scalar-loop (today's path) vs. oneDNN-forced (guard removed), per n:
+//     n       tanh scalar  tanh oneDNN   gelu scalar  gelu oneDNN
+//     512      0.00173 ms   0.01218 ms    0.00288 ms   0.02120 ms
+//     1024     0.00306 ms   0.01222 ms    0.00364 ms   0.02173 ms
+//     2048     0.00573 ms   0.01218 ms    0.00668 ms   0.02187 ms
+//     4096     0.01108 ms   0.01276 ms    0.01293 ms   0.02229 ms
+//     8192     0.02169 ms   0.01365 ms*   0.02831 ms   0.02405 ms*  <- crossover
+//     16384    0.04296 ms   0.01651 ms    0.07107 ms   0.02391 ms
+//     32768    0.08605 ms   0.01593 ms    0.16606 ms   0.02592 ms
+//   (* oneDNN becomes faster than the scalar loop starting at n=8192 for
+//   both ops -- the crossover coincides exactly, so a single shared
+//   constant is used rather than per-op constants.)
+constexpr size_t ONEDNN_ACTIVATION_THRESHOLD = 8192;  // 8K elements
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
