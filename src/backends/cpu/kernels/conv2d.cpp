@@ -1291,8 +1291,10 @@ void conv2d_backward_input_impl(
     int64_t col_rows = batch * out_h * out_w;
     int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
 
-    // Zero-initialize gradient input
-    std::memset(grad_input.data<T>(), 0, grad_input.numel() * sizeof(T));
+    // No explicit zero-init here: col2im_cpu is called once per (g, b) pair
+    // below, and its internal memset (see col2im_cpu) exhaustively and
+    // disjointly re-zeros every element of grad_input before any
+    // accumulation, since groups and batches partition grad_input fully.
 
     for (int64_t g = 0; g < groups; ++g) {
         int64_t in_start = g * in_channels_per_group;
@@ -1382,9 +1384,10 @@ auto conv2d_backward_input_kernel(
     Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
 
     // Initialize gradient w.r.t input with correct dtype. Left uninitialized
-    // here because conv2d_backward_input_impl's explicit memset (immediately
-    // below the "Zero-initialize gradient input" comment) is the sole zero —
-    // col2im_cpu scatter-adds into grad_input, so exactly one zero must remain.
+    // here because conv2d_backward_input_impl calls col2im_cpu once per
+    // (g, b) pair, and col2im_cpu's own internal memset exhaustively and
+    // disjointly re-zeros every element of grad_input before it scatter-adds
+    // into it — that is the sole zero-init; no other memset remains.
     Tensor grad_input = Tensor::empty_uninitialized(input_shape, grad_output.dtype(), grad_output.device());
 
     // Dispatch based on dtype
