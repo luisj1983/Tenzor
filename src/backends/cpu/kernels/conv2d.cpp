@@ -879,9 +879,6 @@ void conv2d_forward_impl(
     // fall through to the general im2col+GEMM path for any anisotropic config.
     bool symmetric = (stride_h == stride_w) && (pad_h == pad_w) && (dil_h == dil_w);
 
-    // Initialize output to zeros
-    std::memset(output.data<T>(), 0, output.numel() * sizeof(T));
-
     // Process each group separately
     int64_t out_channels_per_group = out_channels / groups;
 
@@ -1142,7 +1139,7 @@ auto conv2d_forward_kernel(
 
     // Create output tensor with correct dtype
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized(output_shape, input.dtype(), input.device());
 
 #ifdef TENZOR_USE_ONEDNN
     // oneDNN supports per-axis stride/pad/dilation; the wrapper still takes
@@ -1384,8 +1381,11 @@ auto conv2d_backward_input_kernel(
     Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
 
-    // Initialize gradient w.r.t input with correct dtype
-    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+    // Initialize gradient w.r.t input with correct dtype. Left uninitialized
+    // here because conv2d_backward_input_impl's explicit memset (immediately
+    // below the "Zero-initialize gradient input" comment) is the sole zero —
+    // col2im_cpu scatter-adds into grad_input, so exactly one zero must remain.
+    Tensor grad_input = Tensor::empty_uninitialized(input_shape, grad_output.dtype(), grad_output.device());
 
     // Dispatch based on dtype
     if (grad_output.dtype() == DType::Float32) {
@@ -1468,9 +1468,6 @@ void conv2d_backward_weight_impl(
     int64_t out_channels_per_group = out_channels / groups;
     int64_t col_rows = batch * out_h * out_w;
     int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
-
-    // Zero-initialize gradient weight
-    std::memset(grad_weight.data<T>(), 0, grad_weight.numel() * sizeof(T));
 
     for (int64_t g = 0; g < groups; ++g) {
         int64_t in_start = g * in_channels_per_group;
@@ -1558,7 +1555,7 @@ auto conv2d_backward_weight_kernel(
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
 
     // Initialize gradient w.r.t weight
-    Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
+    Tensor grad_weight = Tensor::empty_uninitialized(weight_shape, grad_output.dtype(), grad_output.device());
 
     // Dispatch based on dtype
     if (grad_output.dtype() == DType::Float32) {
@@ -1572,7 +1569,7 @@ auto conv2d_backward_weight_kernel(
         DType original_dtype = grad_output.dtype();
         auto grad_output_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);
-        Tensor grad_weight_f32(weight_shape, DType::Float32, grad_output.device());
+        Tensor grad_weight_f32 = Tensor::empty_uninitialized(weight_shape, DType::Float32, grad_output.device());
 
         conv2d_backward_weight_impl<float>(grad_output_f32, input_f32, grad_weight_f32, weight_shape,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
@@ -1623,7 +1620,6 @@ void conv2d_backward_bias_impl(
     int64_t out_w = grad_shape[3];
 
     T* grad_bias_data = grad_bias.data<T>();
-    std::memset(grad_bias_data, 0, out_channels * sizeof(T));
 
     const T* grad_out_data = grad_output.data<T>();
 
@@ -1652,7 +1648,7 @@ auto conv2d_backward_bias_kernel(
     int64_t out_channels = grad_shape[1];
 
     // Initialize gradient w.r.t bias
-    Tensor grad_bias({out_channels}, grad_output.dtype(), grad_output.device());
+    Tensor grad_bias = Tensor::empty_uninitialized({out_channels}, grad_output.dtype(), grad_output.device());
 
     // Dispatch based on dtype
     if (grad_output.dtype() == DType::Float32) {
@@ -1664,7 +1660,7 @@ auto conv2d_backward_bias_kernel(
         DType original_dtype = grad_output.dtype();
         auto grad_output_f32 = grad_output.to(DType::Float32);
         int64_t out_channels = grad_output.shape()[1];
-        Tensor grad_bias_f32({out_channels}, DType::Float32, grad_output.device());
+        Tensor grad_bias_f32 = Tensor::empty_uninitialized({out_channels}, DType::Float32, grad_output.device());
 
         conv2d_backward_bias_impl<float>(grad_output_f32, grad_bias_f32);
 

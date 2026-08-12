@@ -115,7 +115,6 @@ static void col3im_cpu(
     int64_t out_d, int64_t out_h, int64_t out_w
 ) {
     int64_t output_size = batch * channels * depth * height * width;
-    std::memset(output, 0, output_size * sizeof(T));
 
     int64_t col_cols = channels * kD * kH * kW;
 
@@ -259,8 +258,6 @@ static void conv3d_forward_impl(
     int64_t kD = ws[2], kH = ws[3], kW = ws[4];
     int64_t out_d = os[2], out_h = os[3], out_w = os[4];
     int64_t oc_per_g = out_channels / groups;
-
-    std::memset(output.data<T>(), 0, output.numel() * sizeof(T));
 
     // 1x1x1 fast path
     if (kD == 1 && kH == 1 && kW == 1 &&
@@ -451,8 +448,6 @@ static void conv3d_backward_weight_impl(
     int64_t out_d = gs[2], out_h = gs[3], out_w = gs[4];
     int64_t oc_per_g = out_channels / groups;
 
-    std::memset(grad_weight.data<T>(), 0, grad_weight.numel() * sizeof(T));
-
     for (int64_t g = 0; g < groups; ++g) {
         int64_t in_start = g * ic_per_g;
         int64_t out_start = g * oc_per_g;
@@ -545,7 +540,7 @@ auto conv3d_forward_kernel(
             "); kernel/dilation too large for the padded input");
     }
 
-    Tensor output({is[0], ws[0], out_d, out_h, out_w}, input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized({is[0], ws[0], out_d, out_h, out_w}, input.dtype(), input.device());
 
     // conv3d_forward_impl indexes input/weight as flat packed NCDHW/OIDHW
     // buffers, so a non-contiguous view (transposed / channels-last) would be
@@ -568,7 +563,7 @@ auto conv3d_forward_kernel(
         Tensor b_f32;
         const Tensor* b_ptr = nullptr;
         if (bias) { b_f32 = bias->to(DType::Float32); b_ptr = &b_f32; }
-        Tensor out_f32({is[0], ws[0], out_d, out_h, out_w}, DType::Float32, input.device());
+        Tensor out_f32 = Tensor::empty_uninitialized({is[0], ws[0], out_d, out_h, out_w}, DType::Float32, input.device());
         conv3d_forward_impl<float>(in_f32, w_f32, b_ptr, out_f32, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
         output = out_f32.to(orig);
     } else {
@@ -601,7 +596,11 @@ auto conv3d_backward_input_kernel(
             "conv3d_backward_input: groups must be positive (got " +
             std::to_string(groups) + ")");
     }
-    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+    // Left uninitialized: conv3d_backward_input_impl's explicit memset (the
+    // "Zero-initialize" line right before the per-group loop) is the sole
+    // zero — the inner loop does `gi_ptr[i] += tmp[i]` for every element,
+    // so exactly one zero must remain.
+    Tensor grad_input = Tensor::empty_uninitialized(input_shape, grad_output.dtype(), grad_output.device());
 
     // Flat-indexing impl: contiguify grad_output/weight (a non-contiguous
     // grad_output is common when an upstream transpose feeds the gradient).
@@ -616,7 +615,7 @@ auto conv3d_backward_input_kernel(
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
-        Tensor gi_f32(input_shape, DType::Float32, grad_output.device());
+        Tensor gi_f32 = Tensor::empty_uninitialized(input_shape, DType::Float32, grad_output.device());
         conv3d_backward_input_impl<float>(go_f32, w_f32, gi_f32, input_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
         grad_input = gi_f32.to(orig);
     } else {
@@ -649,7 +648,7 @@ auto conv3d_backward_weight_kernel(
             "conv3d_backward_weight: groups must be positive (got " +
             std::to_string(groups) + ")");
     }
-    Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
+    Tensor grad_weight = Tensor::empty_uninitialized(weight_shape, grad_output.dtype(), grad_output.device());
 
     // Flat-indexing impl: contiguify grad_output/input before use.
     const Tensor go_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
@@ -663,7 +662,7 @@ auto conv3d_backward_weight_kernel(
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
-        Tensor gw_f32(weight_shape, DType::Float32, grad_output.device());
+        Tensor gw_f32 = Tensor::empty_uninitialized(weight_shape, DType::Float32, grad_output.device());
         conv3d_backward_weight_impl<float>(go_f32, in_f32, gw_f32, weight_shape, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups);
         grad_weight = gw_f32.to(orig);
     } else {
@@ -687,7 +686,7 @@ auto conv3d_backward_bias_kernel(const Tensor& grad_output) -> Tensor {
     int64_t batch = shape[0], out_channels = shape[1];
     int64_t spatial = shape[2] * shape[3] * shape[4];
 
-    Tensor grad_bias({out_channels}, grad_output.dtype(), grad_output.device());
+    Tensor grad_bias = Tensor::empty_uninitialized({out_channels}, grad_output.dtype(), grad_output.device());
 
     if (grad_output.dtype() == DType::Float32) {
         const float* data = grad_output.data<float>();
@@ -857,8 +856,6 @@ static void conv_transpose3d_backward_input_impl(
     const T* go_ptr = grad_output.data<T>();
     const T* w_ptr = weight.data<T>();
     T* gi_ptr = grad_input.data<T>();
-
-    std::memset(gi_ptr, 0, batch * in_channels * in_spatial * sizeof(T));
 
     // Backward of transposed conv = forward conv
     // For each (batch, group): im3col(grad_output) then GEMM with weight
@@ -1043,7 +1040,12 @@ auto conv_transpose3d_forward_kernel(
     const Tensor* bias_ptr = bias;
     if (bias && !bias->is_contiguous()) { bias_c = bias->contiguous(); bias_ptr = &bias_c; }
 
-    Tensor output({batch, out_channels, out_d, out_h, out_w}, input.dtype(), input.device());
+    // Left uninitialized: conv_transpose3d_forward_impl's explicit memset
+    // (right before the batch/group loop) is the sole zero — the inner loop
+    // does `out_g[...] += col_buf[...]` (overlapping kernel positions
+    // scatter-add into the same output element), so exactly one zero must
+    // remain.
+    Tensor output = Tensor::empty_uninitialized({batch, out_channels, out_d, out_h, out_w}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         conv_transpose3d_forward_impl<float>(in_c, w_c, bias_ptr, output, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
@@ -1056,7 +1058,7 @@ auto conv_transpose3d_forward_kernel(
         const Tensor* b_f32_ptr = nullptr;
         Tensor b_f32;
         if (bias) { b_f32 = bias->to(DType::Float32); b_f32_ptr = &b_f32; }
-        Tensor out_f32({batch, out_channels, out_d, out_h, out_w}, DType::Float32, input.device());
+        Tensor out_f32 = Tensor::empty_uninitialized({batch, out_channels, out_d, out_h, out_w}, DType::Float32, input.device());
         conv_transpose3d_forward_impl<float>(in_f32, w_f32, b_f32_ptr, out_f32, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
         output = out_f32.to(orig);
     } else {
@@ -1092,7 +1094,7 @@ auto conv_transpose3d_backward_input_kernel(
             "conv_transpose3d_backward_input: groups must be positive (got " +
             std::to_string(groups) + ")");
     }
-    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+    Tensor grad_input = Tensor::empty_uninitialized(input_shape, grad_output.dtype(), grad_output.device());
 
     // Flat-indexing impl: contiguify grad_output/weight (a non-contiguous
     // grad_output is common when an upstream transpose feeds the gradient).
@@ -1107,7 +1109,7 @@ auto conv_transpose3d_backward_input_kernel(
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
-        Tensor gi_f32(input_shape, DType::Float32, grad_output.device());
+        Tensor gi_f32 = Tensor::empty_uninitialized(input_shape, DType::Float32, grad_output.device());
         conv_transpose3d_backward_input_impl<float>(go_f32, w_f32, gi_f32, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
         grad_input = gi_f32.to(orig);
     } else {
@@ -1143,7 +1145,12 @@ auto conv_transpose3d_backward_weight_kernel(
             "conv_transpose3d_backward_weight: groups must be positive (got " +
             std::to_string(groups) + ")");
     }
-    Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
+    // Left uninitialized: conv_transpose3d_backward_weight_impl's explicit
+    // memset (right before the batch/group loop) is the sole zero — for
+    // fixed group g, gw_g's offset does not depend on batch b, so the inner
+    // loop's `gw_g[i] += temp_gw[i]` genuinely accumulates across the batch
+    // dimension into the same memory; exactly one zero must remain.
+    Tensor grad_weight = Tensor::empty_uninitialized(weight_shape, grad_output.dtype(), grad_output.device());
 
     // Flat-indexing impl: contiguify grad_output/input before use.
     const Tensor go_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
@@ -1157,7 +1164,7 @@ auto conv_transpose3d_backward_weight_kernel(
         DType orig = grad_output.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);
-        Tensor gw_f32(weight_shape, DType::Float32, grad_output.device());
+        Tensor gw_f32 = Tensor::empty_uninitialized(weight_shape, DType::Float32, grad_output.device());
         conv_transpose3d_backward_weight_impl<float>(go_f32, in_f32, gw_f32, sD, sH, sW, pD, pH, pW, opD, opH, opW, dD, dH, dW, groups);
         grad_weight = gw_f32.to(orig);
     } else {
