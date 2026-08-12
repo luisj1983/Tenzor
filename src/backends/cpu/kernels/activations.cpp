@@ -535,8 +535,18 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
 #ifdef TENZOR_USE_ONEDNN
-        // Try oneDNN for large tensors (significantly faster than SIMD for sigmoid)
-        if (onednn_eltwise_forward(in_data, out_data, n, dnnl::algorithm::eltwise_logistic)) {
+        // measured 2026-08-12 (task-2, cpu-activation-dispatch/task-2-report.md):
+        // unlike ReLU (task 1), Sigmoid's oneDNN eltwise path is genuinely
+        // faster than the fast_math::sigmoid_avx512/avx2 SIMD loop below at
+        // larger sizes -- up to ~2x faster by n=4194304 -- so it is kept,
+        // but only above the measured crossover. At n=65536 SIMD was
+        // consistently faster (~0.019-0.027ms vs oneDNN's un-gated
+        // ~0.024-0.027ms); at n=131072 the two were roughly tied
+        // (SIMD ~0.039ms avg vs oneDNN ~0.038ms avg); from n=262144 upward
+        // oneDNN was reliably and increasingly faster (e.g. n=4194304:
+        // oneDNN ~0.70ms vs SIMD ~1.44ms). 131072 is the first tested size
+        // where oneDNN stopped losing, so that is the gate.
+        if (n >= 131072 && onednn_eltwise_forward(in_data, out_data, n, dnnl::algorithm::eltwise_logistic)) {
             return output;
         }
 #endif

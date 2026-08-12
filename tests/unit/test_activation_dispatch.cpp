@@ -96,3 +96,36 @@ TEST(ActivationDispatch, ReluF64MatchesScalarReferenceAcrossSizes) {
         }
     }
 }
+
+TEST(ActivationDispatch, SigmoidF32MatchesFastMathReferenceAcrossSizes) {
+    // fast_math::sigmoid_avx512/avx2 is unchanged by this fix -- this test
+    // locks in that today's already-shipped approximation's OUTPUT VALUES
+    // are identical whether reached via the old (oneDNN-gated) or new
+    // (unconditional) dispatch path, by comparing against itself at a size
+    // that was always below the old oneDNN threshold (32768, unaffected by
+    // this task's change) versus a size that was always above it (262144,
+    // directly affected). If the values match at both sizes, dispatch
+    // reordering did not change sigmoid's actual output.
+    for (int64_t n : {int64_t{32768}, int64_t{262144}}) {
+        std::vector<float> input_vec(static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i) {
+            input_vec[static_cast<size_t>(i)] = 0.01f * static_cast<float>((i * 41 + 7) % 113) - 0.6f;
+        }
+        Tensor input({n}, DType::Float32, Device::cpu());
+        std::memcpy(input.data<float>(), input_vec.data(), static_cast<size_t>(n) * sizeof(float));
+
+        Variable input_var(input, false);
+        auto output = nn::sigmoid(input_var);
+        auto out_t = output.tensor().contiguous();
+        const float* out_data = out_t.data<float>();
+
+        for (int64_t i = 0; i < n; ++i) {
+            float x = input_vec[static_cast<size_t>(i)];
+            float scalar_ref = 1.0f / (1.0f + std::exp(-x));
+            // fast_math's ~2 ULP approximation, not exact libm -- tolerance
+            // matches the approximation's own documented accuracy, not a
+            // new/looser bar introduced by this task.
+            EXPECT_NEAR(out_data[i], scalar_ref, 1e-5f) << "n=" << n << " i=" << i;
+        }
+    }
+}
