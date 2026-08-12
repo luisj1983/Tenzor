@@ -1043,8 +1043,9 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
     }
     int64_t batch_size = input.numel() / norm_size;
 
-    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
-                  input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()),
+        input.dtype(), input.device());
     // rrms stores reciprocal RMS for each batch element. Store it at Float32 for
     // half inputs (and Float64 for Float64) so the backward reconstructs the
     // gradient from the full-precision statistic rather than a half-rounded one.
@@ -1136,8 +1137,9 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
     const int64_t norm_size = weight.numel();
     int64_t batch_size = input.numel() / norm_size;
 
-    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                      input.dtype(), input.device());
+    Tensor grad_input = Tensor::empty_uninitialized(
+        std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+        input.dtype(), input.device());
     Tensor grad_weight({norm_size}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -2530,7 +2532,7 @@ static Tensor fused_conv2d_bn_relu_kernel_impl(
     int64_t out_h = (height + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
     int64_t out_w = (width  + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
-    Tensor output({batch, out_channels, out_h, out_w}, kDType, input.device());
+    Tensor output = Tensor::empty_uninitialized({batch, out_channels, out_h, out_w}, kDType, input.device());
 
     if (training) {
         // Training path: compute batch stats inline
@@ -2554,15 +2556,16 @@ static Tensor fused_conv2d_bn_relu_kernel_impl(
         // input — folding into that view would silently corrupt the caller's
         // weight tensor across subsequent calls (audit item A.1).  Materialise
         // a private buffer per call.
-        Tensor weight_folded({out_channels, in_channels_per_group, kernel_h, kernel_w},
-                             kDType, input.device());
+        Tensor weight_folded = Tensor::empty_uninitialized(
+            {out_channels, in_channels_per_group, kernel_h, kernel_w},
+            kDType, input.device());
         {
             Tensor weight_src = weight_c;
             std::memcpy(weight_folded.data<T>(), weight_src.data<T>(),
                         static_cast<size_t>(out_channels) * in_channels_per_group *
                             kernel_h * kernel_w * sizeof(T));
         }
-        Tensor bias_folded({out_channels}, kDType, input.device());
+        Tensor bias_folded = Tensor::empty_uninitialized({out_channels}, kDType, input.device());
         if (conv_bias.numel() > 0) {
             Tensor bias_src = conv_bias.contiguous();
             std::memcpy(bias_folded.data<T>(), bias_src.data<T>(),

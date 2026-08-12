@@ -483,7 +483,7 @@ auto batchnorm2d_forward_kernel(const Tensor& input_orig,
     Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    Tensor output(shape_vec, input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
 
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -842,7 +842,7 @@ auto batchnorm2d_forward_affine_kernel(const Tensor& input_orig,
     Tensor beta = beta_orig.is_contiguous() ? beta_orig : beta_orig.contiguous();
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    Tensor output(shape_vec, input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
 
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1144,7 +1144,7 @@ auto batchnorm2d_backward_kernel(const Tensor& grad_output_orig,
 
     // Allocate output gradients
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    Tensor grad_input(shape_vec, input.dtype(), input.device());
+    Tensor grad_input = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     Tensor grad_gamma({C}, input.dtype(), input.device());
     Tensor grad_beta({C}, input.dtype(), input.device());
 
