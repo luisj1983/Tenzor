@@ -1370,6 +1370,14 @@ __global__ void fused_rms_norm_kernel(
     typename rms_acc_type<T>::type eps
 ) {
     using Acc = typename rms_acc_type<T>::type;
+    // RMSNorm's reduction is a pure sum-of-squares (every term non-negative) --
+    // unlike LayerNorm's mean/variance, there's no subtraction of near-equal
+    // large values, so it carries none of the catastrophic-cancellation risk
+    // that requires double precision. SumAcc uses native Float32 accumulation
+    // for float/half/bfloat16 (full FP32 throughput instead of the ~1/64
+    // FP64 throughput this GPU has), and stays double only when the input
+    // itself is Float64.
+    using SumAcc = std::conditional_t<std::is_same_v<T, double>, double, float>;
     int64_t b = blockIdx.x;
     if (b >= batch_size) return;
 
@@ -1380,9 +1388,7 @@ __global__ void fused_rms_norm_kernel(
     // T=float; F16/BF16 take the scalar widen-on-load path so sum_sq stays
     // in Acc (F32) — sums of squares of half-precision values can otherwise
     // overflow F16's max (65504) for moderate norm_size.
-    // Accumulate sum-of-squares in double (matching LayerNorm); rrms is still
-    // stored as Acc so the forward/backward storage contract is unchanged.
-    double sum_sq = 0.0;
+    SumAcc sum_sq = SumAcc(0);
     if constexpr (std::is_same_v<T, float>) {
         // float4 requires every row offset (b*norm_size) to be 16-byte aligned,
         // which holds only when norm_size % 4 == 0; otherwise a misaligned float4
@@ -1393,17 +1399,17 @@ __global__ void fused_rms_norm_kernel(
             const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
             for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
                 float4 v = batch_in_vec[i];
-                sum_sq += static_cast<double>(v.x) * v.x + static_cast<double>(v.y) * v.y + static_cast<double>(v.z) * v.z + static_cast<double>(v.w) * v.w;
+                sum_sq += static_cast<SumAcc>(v.x) * v.x + static_cast<SumAcc>(v.y) * v.y + static_cast<SumAcc>(v.z) * v.z + static_cast<SumAcc>(v.w) * v.w;
             }
         } else {
             for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-                double val = static_cast<double>(batch_in[i]);
+                SumAcc val = static_cast<SumAcc>(batch_in[i]);
                 sum_sq += val * val;
             }
         }
     } else {
         for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-            double val = static_cast<double>(batch_in[i]);
+            SumAcc val = static_cast<SumAcc>(batch_in[i]);
             sum_sq += val * val;
         }
     }
@@ -1414,7 +1420,7 @@ __global__ void fused_rms_norm_kernel(
         sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
     }
 
-    __shared__ double warp_sums[32];
+    __shared__ SumAcc warp_sums[32];
     int lane = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
@@ -1424,7 +1430,7 @@ __global__ void fused_rms_norm_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        sum_sq = (lane < (BLOCK_SIZE / 32)) ? warp_sums[lane] : 0.0;
+        sum_sq = (lane < (BLOCK_SIZE / 32)) ? warp_sums[lane] : SumAcc(0);
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
@@ -1433,9 +1439,11 @@ __global__ void fused_rms_norm_kernel(
 
     __shared__ Acc shared_rrms;
     if (threadIdx.x == 0) {
-        double mean_sq = sum_sq / static_cast<double>(norm_size);
-        // 1/sqrt in double (not the rsqrt approximation) — matches CPU/JIT (JIT-F060).
-        shared_rrms = static_cast<Acc>(1.0 / sqrt(mean_sq + static_cast<double>(eps)));
+        SumAcc mean_sq = sum_sq / static_cast<SumAcc>(norm_size);
+        // 1/sqrt at SumAcc precision (not the rsqrt approximation) — matches
+        // CPU/JIT (JIT-F060) at Float64, and stays native Float32 throughput
+        // for the common Float32/F16/BF16 case.
+        shared_rrms = static_cast<Acc>(SumAcc(1) / sqrt(mean_sq + static_cast<SumAcc>(eps)));
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();

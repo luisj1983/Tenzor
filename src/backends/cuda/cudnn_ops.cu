@@ -3446,6 +3446,78 @@ __device__ __forceinline__ double blockReduceSumDouble(double val, double* share
  *
  * Performance: ~2x faster than naive implementation
  */
+/**
+ * @brief Welford's online (mean, M2) accumulator kept in Float32 -- native
+ * throughput, no double-precision math. Unlike a plain sum/sum-of-squares
+ * accumulation, this tracks deviations from a running mean rather than
+ * squares of the raw values, so it stays numerically stable even when the
+ * input mean is large relative to its variance (e.g. mean=1e6, std=1.0,
+ * where sum-of-squares would need ~12 significant digits to resolve the
+ * variance signal and Float32 only has ~7). Combining two partial
+ * accumulators uses Chan's parallel-merge formula.
+ */
+struct WelfordAcc {
+    float count;
+    float mean;
+    float m2;
+};
+
+__device__ __forceinline__ void welfordUpdate(WelfordAcc& acc, float x) {
+    acc.count += 1.0f;
+    float delta = x - acc.mean;
+    acc.mean += delta / acc.count;
+    float delta2 = x - acc.mean;
+    acc.m2 += delta * delta2;
+}
+
+__device__ __forceinline__ WelfordAcc welfordCombine(WelfordAcc a, WelfordAcc b) {
+    if (a.count == 0.0f) return b;
+    if (b.count == 0.0f) return a;
+    float count = a.count + b.count;
+    float delta = b.mean - a.mean;
+    float mean = a.mean + delta * b.count / count;
+    float m2 = a.m2 + b.m2 + delta * delta * a.count * b.count / count;
+    return WelfordAcc{count, mean, m2};
+}
+
+/**
+ * @brief Block-level Welford reduction using warp shuffles + shared memory.
+ *
+ * Mirrors blockReduceSum's warp-then-shared-memory structure, but combines
+ * (count, mean, M2) triples instead of scalars. Result is only valid on
+ * thread 0 of the block.
+ */
+template<int BLOCK_SIZE>
+__device__ __forceinline__ WelfordAcc blockReduceWelford(WelfordAcc val, WelfordAcc* shared) {
+    const int lane = threadIdx.x % 32;
+    const int wid = threadIdx.x / 32;
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        WelfordAcc other;
+        other.count = __shfl_down_sync(0xffffffff, val.count, offset);
+        other.mean = __shfl_down_sync(0xffffffff, val.mean, offset);
+        other.m2 = __shfl_down_sync(0xffffffff, val.m2, offset);
+        val = welfordCombine(val, other);
+    }
+
+    if (lane == 0) {
+        shared[wid] = val;
+    }
+    __syncthreads();
+
+    constexpr int numWarps = BLOCK_SIZE / 32;
+    WelfordAcc result{0.0f, 0.0f, 0.0f};
+    if (threadIdx.x == 0) {
+        result = shared[0];
+        #pragma unroll
+        for (int i = 1; i < numWarps; ++i) {
+            result = welfordCombine(result, shared[i]);
+        }
+    }
+    return result;
+}
+
 template<int BLOCK_SIZE>
 __global__ void optimized_layer_norm_kernel(
     const float* __restrict__ input,
@@ -3464,14 +3536,14 @@ __global__ void optimized_layer_norm_kernel(
     const float* batch_in = input + b * norm_size;
     float* batch_out = output + b * norm_size;
 
-    // Accumulate mean/variance stats in double to avoid catastrophic
-    // cancellation, matching the non-cuDNN-build fused_layer_norm_kernel
-    // (fused_ops.cu, `Acc = double`) and CPU/ROCm. This kernel previously
-    // accumulated in float, which was a build-flag-dependent (TENZOR_HAS_CUDNN)
-    // correctness divergence for the exact same Float32 LayerNorm op. Only
-    // the final mean/inv_std (saved for backward) and the normalized output
-    // are narrowed back to float.
-    __shared__ double shared[BLOCK_SIZE / 32];
+    // Single-pass Welford reduction, entirely in Float32 (native throughput,
+    // no double-precision math). Deviation-based (never squares the raw
+    // input), so it stays stable even for large-mean/small-variance rows --
+    // see WelfordAcc's doc comment and LayerNormVarianceStability's
+    // LargeMeanProducesValidVariance test (mean=1e6, std=1.0), which a plain
+    // sum/sum-of-squares accumulation cannot pass at Float32 precision no
+    // matter how carefully the summation itself is done.
+    __shared__ WelfordAcc shared[BLOCK_SIZE / 32];
 
     // Use vectorized loads only when each per-row base is 16-byte aligned.
     // cudaMalloc guarantees 256-byte base alignment, but per-row bases are
@@ -3483,54 +3555,33 @@ __global__ void optimized_layer_norm_kernel(
     const int64_t vec_norm_size = (norm_size % vec_size == 0) ? (norm_size / vec_size) : 0;
     const int64_t remainder_start = vec_norm_size * vec_size;
 
-    // ===== Pass 1: Compute mean =====
-    // The previous one-pass `E[x²] - E[x]²` variance formula is numerically
-    // unstable: when mean² is close to E[x²], the subtraction cancels and
-    // we lose precision. The stable two-pass `Σ(x - mean)²` form matches
-    // every other LayerNorm backend (CPU oneDNN, ROCm) bit-for-bit at
-    // Float32 precision.
-    double sum = 0.0;
     const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
+    WelfordAcc local{0.0f, 0.0f, 0.0f};
     for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
         float4 v = batch_in_vec[i];
-        sum += static_cast<double>(v.x) + static_cast<double>(v.y) +
-               static_cast<double>(v.z) + static_cast<double>(v.w);
+        welfordUpdate(local, v.x);
+        welfordUpdate(local, v.y);
+        welfordUpdate(local, v.z);
+        welfordUpdate(local, v.w);
     }
     for (int64_t i = remainder_start + threadIdx.x; i < norm_size; i += blockDim.x) {
-        sum += static_cast<double>(batch_in[i]);
+        welfordUpdate(local, batch_in[i]);
     }
-    sum = blockReduceSumDouble<BLOCK_SIZE>(sum, shared);
 
-    __shared__ double mean_shared;
+    WelfordAcc block_result = blockReduceWelford<BLOCK_SIZE>(local, shared);
+
+    __shared__ float mean_shared;
+    __shared__ float inv_std_shared;
     if (threadIdx.x == 0) {
-        mean_shared = sum / static_cast<double>(norm_size);
+        float variance = block_result.m2 / static_cast<float>(norm_size);
+        mean_shared = block_result.mean;
+        inv_std_shared = 1.0f / sqrtf(variance + eps);
+        mean_out[b] = mean_shared;
+        inv_std_out[b] = inv_std_shared;
     }
     __syncthreads();
-    double mean = mean_shared;
-
-    // ===== Pass 2: Compute variance via Σ(x - mean)² =====
-    double var_sum = 0.0;
-    for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
-        float4 v = batch_in_vec[i];
-        double dx = static_cast<double>(v.x) - mean, dy = static_cast<double>(v.y) - mean,
-               dz = static_cast<double>(v.z) - mean, dw = static_cast<double>(v.w) - mean;
-        var_sum += dx * dx + dy * dy + dz * dz + dw * dw;
-    }
-    for (int64_t i = remainder_start + threadIdx.x; i < norm_size; i += blockDim.x) {
-        double diff = static_cast<double>(batch_in[i]) - mean;
-        var_sum += diff * diff;
-    }
-    var_sum = blockReduceSumDouble<BLOCK_SIZE>(var_sum, shared);
-
-    __shared__ double inv_std_shared;
-    if (threadIdx.x == 0) {
-        double variance = var_sum / static_cast<double>(norm_size);
-        inv_std_shared = 1.0 / sqrt(variance + static_cast<double>(eps));
-        mean_out[b] = static_cast<float>(mean);
-        inv_std_out[b] = static_cast<float>(inv_std_shared);
-    }
-    __syncthreads();
-    double inv_std = inv_std_shared;
+    float mean = mean_shared;
+    float inv_std = inv_std_shared;
 
     // ===== Second pass: Normalize and apply affine transform =====
     // Vectorized writes

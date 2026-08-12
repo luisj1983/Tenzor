@@ -360,6 +360,128 @@ void pack_weights(cudnnRNNDescriptor_t rnn_desc,
     cudnnDestroyTensorDescriptor(b_desc);
 }
 
+/**
+ * @brief Cached packed cuDNN RNN weight buffer, reused across forward calls
+ * when the source weight/bias tensors haven't changed.
+ *
+ * pack_weights() above copies every individual W_ih/W_hh/b_ih/b_hh (and
+ * W_hr, for LSTMP) tensor into cuDNN's single flat packed layout via
+ * cudnnGetRNNWeightParams -- a real GPU kernel (~108us measured on this
+ * hardware for a 1-layer 256-hidden LSTM), the same cost PyTorch's
+ * `flatten_parameters()` pays. PyTorch pays it once per weight set and
+ * caches the flat buffer on the module; this file was paying it on every
+ * single forward call regardless of whether the weights had changed.
+ *
+ * Cache validity is determined by each source tensor's (data pointer,
+ * mutation version) -- `Tensor::version()` is the same counter autograd
+ * uses to detect in-place mutation of saved-for-backward tensors, so this
+ * cache is invalidated correctly the moment any weight is replaced *or*
+ * mutated in place (e.g. an optimizer step), and is safely reused
+ * otherwise. `weight_space_size` is included as a cheap extra guard
+ * against the (astronomically unlikely) case of a freed allocation being
+ * reused at the same address for a differently-shaped tensor.
+ *
+ * A small per-thread fixed-size slot list (not a hash map): a model has
+ * only a handful of distinct weight sets live at once (one per RNN
+ * layer/direction), so linear fingerprint comparison across a handful of
+ * slots is cheaper and simpler than hashing, and entirely avoids any
+ * hash-collision correctness risk.
+ */
+class CuDNNRNNWeightCache {
+public:
+    // Returns the cached packed-weight Tensor (a cheap shared-storage copy,
+    // not a raw pointer) so the caller can keep it alive as its own
+    // ForwardResult.weight_space exactly as if it had packed a fresh one --
+    // the cache slot may later be evicted and reassigned to a different
+    // weight set without affecting a Tensor copy a caller is still holding.
+    static Tensor get_or_pack(
+        cudnnRNNDescriptor_t rnn_desc,
+        size_t weight_space_size,
+        cudnnRNNMode_t mode,
+        int num_layers,
+        bool bidirectional,
+        const std::vector<Tensor>& W_ih,
+        const std::vector<Tensor>& W_hh,
+        const std::vector<Tensor>& b_ih,
+        const std::vector<Tensor>& b_hh,
+        const std::vector<Tensor>& W_hr,
+        bool has_projection,
+        cudaStream_t stream,
+        const Device& device) {
+        Fingerprint fp;
+        fp.weight_space_size = weight_space_size;
+        fp.device_index = device.index;
+        fp.add_all(W_ih);
+        fp.add_all(W_hh);
+        fp.add_all(b_ih);
+        fp.add_all(b_hh);
+        fp.add_all(W_hr);
+
+        thread_local Registry registry;
+        return registry.get_or_build(rnn_desc, weight_space_size, mode, num_layers,
+                                      bidirectional, W_ih, W_hh, b_ih, b_hh, W_hr,
+                                      has_projection, stream, device, fp);
+    }
+
+private:
+    struct Fingerprint {
+        std::vector<std::pair<const void*, uint64_t>> entries;
+        size_t weight_space_size = 0;
+        int device_index = -1;
+
+        void add_all(const std::vector<Tensor>& ts) {
+            for (const auto& t : ts) {
+                entries.emplace_back(t.data_ptr(), t.version());
+            }
+        }
+
+        bool operator==(const Fingerprint& other) const {
+            return weight_space_size == other.weight_space_size &&
+                   device_index == other.device_index &&
+                   entries == other.entries;
+        }
+    };
+
+    struct Slot {
+        Fingerprint fp;
+        Tensor weight_space;  // owns the packed buffer; empty until first use
+        bool valid = false;
+    };
+
+    struct Registry {
+        static constexpr size_t kNumSlots = 16;
+        std::vector<Slot> slots{kNumSlots};
+        size_t next_evict = 0;
+
+        Tensor get_or_build(
+            cudnnRNNDescriptor_t rnn_desc, size_t weight_space_size,
+            cudnnRNNMode_t mode, int num_layers, bool bidirectional,
+            const std::vector<Tensor>& W_ih, const std::vector<Tensor>& W_hh,
+            const std::vector<Tensor>& b_ih, const std::vector<Tensor>& b_hh,
+            const std::vector<Tensor>& W_hr, bool has_projection,
+            cudaStream_t stream, const Device& device, const Fingerprint& fp) {
+            for (auto& slot : slots) {
+                if (slot.valid && slot.fp == fp) {
+                    return slot.weight_space;
+                }
+            }
+
+            // Cache miss: round-robin evict and rebuild in that slot.
+            Slot& slot = slots[next_evict];
+            next_evict = (next_evict + 1) % kNumSlots;
+
+            slot.weight_space = Tensor({static_cast<int64_t>(weight_space_size)},
+                                       DType::UInt8, device);
+            pack_weights(rnn_desc, weight_space_size, slot.weight_space.data_ptr(),
+                        mode, num_layers, bidirectional, W_ih, W_hh, b_ih, b_hh,
+                        W_hr, has_projection, stream);
+            slot.fp = fp;
+            slot.valid = true;
+            return slot.weight_space;
+        }
+    };
+};
+
 // Unpack a packed weight-gradient buffer back into per-layer tensors with
 // the same layout as the forward call's inputs. The output vectors are
 // sized to `num_layers * num_directions`.
@@ -551,18 +673,29 @@ ForwardResult run_forward(
     // single-layer model; we create one with the requested probability and
     // a deterministic seed (the layers above are responsible for
     // disabling/enabling dropout via `is_training()`).
-    DropoutDescriptor dropout_desc;
-    size_t dropout_state_size = 0;
-    CUDNN_CHECK(cudnnDropoutGetStatesSize(handle, &dropout_state_size));
-    Tensor dropout_state;
-    void* dropout_state_ptr = nullptr;
-    if (dropout_state_size > 0) {
-        dropout_state = Tensor({static_cast<int64_t>(dropout_state_size)},
-                               DType::UInt8, device);
-        dropout_state_ptr = dropout_state.data_ptr();
+    // dropout==0 (the overwhelmingly common inference case) never reads its
+    // RNG state, so reuse a per-(thread,device) cached descriptor instead of
+    // paying for a fresh cudnnSetDropoutDescriptor (curand init) on every
+    // call -- see CuDNNZeroDropoutCache's doc comment. Real (>0) dropout
+    // still builds a fresh descriptor+state per call, unchanged from before.
+    DropoutDescriptor owned_dropout_desc;
+    cudnnDropoutDescriptor_t dropout_desc_handle;
+    if (dropout > 0.0f) {
+        size_t dropout_state_size = 0;
+        CUDNN_CHECK(cudnnDropoutGetStatesSize(handle, &dropout_state_size));
+        Tensor dropout_state;
+        void* dropout_state_ptr = nullptr;
+        if (dropout_state_size > 0) {
+            dropout_state = Tensor({static_cast<int64_t>(dropout_state_size)},
+                                   DType::UInt8, device);
+            dropout_state_ptr = dropout_state.data_ptr();
+        }
+        owned_dropout_desc.set(handle, dropout, dropout_state_ptr, dropout_state_size,
+                               /*seed=*/0ULL);
+        dropout_desc_handle = owned_dropout_desc.get();
+    } else {
+        dropout_desc_handle = CuDNNZeroDropoutCache::get(handle);
     }
-    dropout_desc.set(handle, dropout, dropout_state_ptr, dropout_state_size,
-                     /*seed=*/0ULL);
 
     RNNDescriptor rnn_desc;
     const auto cudnn_dtype = to_cudnn_dtype_rnn(dtype);
@@ -574,7 +707,7 @@ ForwardResult run_forward(
                           static_cast<int>(proj_size),
                           static_cast<int>(num_layers),
                           bidirectional,
-                          dropout_desc.get(),
+                          dropout_desc_handle,
                           cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else if (cell_mode == CUDNN_GRU) {
         rnn_desc.set_gru(handle,
@@ -582,7 +715,7 @@ ForwardResult run_forward(
                         static_cast<int>(hidden_size),
                         static_cast<int>(num_layers),
                         bidirectional,
-                        dropout_desc.get(),
+                        dropout_desc_handle,
                         cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else {
         rnn_desc.set_rnn(handle,
@@ -590,7 +723,7 @@ ForwardResult run_forward(
                         static_cast<int>(hidden_size),
                         static_cast<int>(num_layers),
                         bidirectional,
-                        dropout_desc.get(),
+                        dropout_desc_handle,
                         cudnn_dtype, cell_mode, math_prec, rnn_math_type(dtype));
     }
 
@@ -668,16 +801,33 @@ ForwardResult run_forward(
             stream));
     }
 
-    // Allocate the weight space, pack inputs into it.
+    // Weight space: reuse the cached packed buffer when W_ih/W_hh/b_ih/b_hh
+    // (and W_hr) are unchanged since the last call -- see
+    // CuDNNRNNWeightCache's doc comment. Only valid for inference: training
+    // needs a distinguishable weight_space per call so cudnnRNNBackwardData
+    // reads the exact weights that produced this specific forward's output,
+    // and skipping the fresh pack would also skip zeroing gate slots that a
+    // stale cached buffer might have used differently (omitted bias, no
+    // projection) -- inference-only keeps this a pure perf win with no
+    // change to training numerics.
     size_t weight_space_size = 0;
     CUDNN_CHECK(cudnnGetRNNWeightSpaceSize(handle, rnn_desc.get(),
                                             &weight_space_size));
-    Tensor weight_space({static_cast<int64_t>(weight_space_size)},
-                        DType::UInt8, device);
-    pack_weights(rnn_desc.get(), weight_space_size, weight_space.data_ptr(),
-                 cell_mode, static_cast<int>(num_layers), bidirectional,
-                 W_ih, W_hh, b_ih, b_hh, W_hr,
-                 /*has_projection=*/proj_size > 0, stream);
+    Tensor weight_space;
+    if (fwd_mode == CUDNN_FWD_MODE_INFERENCE) {
+        weight_space = CuDNNRNNWeightCache::get_or_pack(
+            rnn_desc.get(), weight_space_size, cell_mode,
+            static_cast<int>(num_layers), bidirectional,
+            W_ih, W_hh, b_ih, b_hh, W_hr,
+            /*has_projection=*/proj_size > 0, stream, device);
+    } else {
+        weight_space = Tensor({static_cast<int64_t>(weight_space_size)},
+                              DType::UInt8, device);
+        pack_weights(rnn_desc.get(), weight_space_size, weight_space.data_ptr(),
+                     cell_mode, static_cast<int>(num_layers), bidirectional,
+                     W_ih, W_hh, b_ih, b_hh, W_hr,
+                     /*has_projection=*/proj_size > 0, stream);
+    }
 
     // Workspace + reserve space sizes.
     size_t work_space_size = 0;
@@ -769,18 +919,27 @@ BackwardResult run_backward(
 
     // Re-create dropout / RNN descriptors with the same settings as the
     // forward call. The reserve_space carries the random state across.
-    DropoutDescriptor dropout_desc;
-    size_t dropout_state_size = 0;
-    CUDNN_CHECK(cudnnDropoutGetStatesSize(handle, &dropout_state_size));
-    Tensor dropout_state;
-    void* dropout_state_ptr = nullptr;
-    if (dropout_state_size > 0) {
-        dropout_state = Tensor({static_cast<int64_t>(dropout_state_size)},
-                               DType::UInt8, device);
-        dropout_state_ptr = dropout_state.data_ptr();
+    // dropout==0 never reads its RNG state, so reuse the same cached
+    // descriptor forward used instead of paying for a fresh
+    // cudnnSetDropoutDescriptor (curand init) on every call.
+    DropoutDescriptor owned_dropout_desc;
+    cudnnDropoutDescriptor_t dropout_desc_handle;
+    if (dropout > 0.0f) {
+        size_t dropout_state_size = 0;
+        CUDNN_CHECK(cudnnDropoutGetStatesSize(handle, &dropout_state_size));
+        Tensor dropout_state;
+        void* dropout_state_ptr = nullptr;
+        if (dropout_state_size > 0) {
+            dropout_state = Tensor({static_cast<int64_t>(dropout_state_size)},
+                                   DType::UInt8, device);
+            dropout_state_ptr = dropout_state.data_ptr();
+        }
+        owned_dropout_desc.set(handle, dropout, dropout_state_ptr, dropout_state_size,
+                               /*seed=*/0ULL);
+        dropout_desc_handle = owned_dropout_desc.get();
+    } else {
+        dropout_desc_handle = CuDNNZeroDropoutCache::get(handle);
     }
-    dropout_desc.set(handle, dropout, dropout_state_ptr, dropout_state_size,
-                     /*seed=*/0ULL);
 
     RNNDescriptor rnn_desc;
     const auto cudnn_dtype = to_cudnn_dtype_rnn(dtype);
@@ -792,7 +951,7 @@ BackwardResult run_backward(
                           static_cast<int>(proj_size),
                           static_cast<int>(num_layers),
                           bidirectional,
-                          dropout_desc.get(),
+                          dropout_desc_handle,
                           cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else if (cell_mode == CUDNN_GRU) {
         rnn_desc.set_gru(handle,
@@ -800,7 +959,7 @@ BackwardResult run_backward(
                         static_cast<int>(hidden_size),
                         static_cast<int>(num_layers),
                         bidirectional,
-                        dropout_desc.get(),
+                        dropout_desc_handle,
                         cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else {
         rnn_desc.set_rnn(handle,
@@ -808,7 +967,7 @@ BackwardResult run_backward(
                         static_cast<int>(hidden_size),
                         static_cast<int>(num_layers),
                         bidirectional,
-                        dropout_desc.get(),
+                        dropout_desc_handle,
                         cudnn_dtype, cell_mode, math_prec, rnn_math_type(dtype));
     }
 
@@ -1228,18 +1387,10 @@ void cudnn_lstm_unpack_weight_grads(
     auto handle = CuDNNHandle::get();
     CUDNN_CHECK(cudnnSetStream(handle, stream));
 
-    DropoutDescriptor dropout_desc;
-    size_t dropout_state_size = 0;
-    CUDNN_CHECK(cudnnDropoutGetStatesSize(handle, &dropout_state_size));
-    Tensor dropout_state;
-    void* dropout_state_ptr = nullptr;
-    if (dropout_state_size > 0) {
-        dropout_state = Tensor({static_cast<int64_t>(dropout_state_size)},
-                               DType::UInt8, weight_space_grad.device());
-        dropout_state_ptr = dropout_state.data_ptr();
-    }
     // dropout=0 here; we only need the descriptor for weight layout queries.
-    dropout_desc.set(handle, 0.0f, dropout_state_ptr, dropout_state_size, 0ULL);
+    // Reuse the cached zero-dropout descriptor instead of paying for a
+    // fresh cudnnSetDropoutDescriptor (curand init) on every call.
+    cudnnDropoutDescriptor_t dropout_desc_handle = CuDNNZeroDropoutCache::get(handle);
 
     RNNDescriptor rnn_desc;
     rnn_desc.set_lstm(handle,
@@ -1248,7 +1399,7 @@ void cudnn_lstm_unpack_weight_grads(
                       static_cast<int>(proj_size),
                       static_cast<int>(num_layers),
                       bidirectional,
-                      dropout_desc.get(),
+                      dropout_desc_handle,
                       CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT);
 
     unpack_grads(rnn_desc.get(),
@@ -1413,17 +1564,9 @@ void cudnn_rnn_unpack_weight_grads(
     auto handle = CuDNNHandle::get();
     CUDNN_CHECK(cudnnSetStream(handle, stream));
 
-    DropoutDescriptor dropout_desc;
-    size_t dropout_state_size = 0;
-    CUDNN_CHECK(cudnnDropoutGetStatesSize(handle, &dropout_state_size));
-    Tensor dropout_state;
-    void* dropout_state_ptr = nullptr;
-    if (dropout_state_size > 0) {
-        dropout_state = Tensor({static_cast<int64_t>(dropout_state_size)},
-                               DType::UInt8, weight_space_grad.device());
-        dropout_state_ptr = dropout_state.data_ptr();
-    }
-    dropout_desc.set(handle, 0.0f, dropout_state_ptr, dropout_state_size, 0ULL);
+    // Reuse the cached zero-dropout descriptor instead of paying for a
+    // fresh cudnnSetDropoutDescriptor (curand init) on every call.
+    cudnnDropoutDescriptor_t dropout_desc_handle = CuDNNZeroDropoutCache::get(handle);
 
     RNNDescriptor rnn_desc;
     if (cell_mode == CUDNN_GRU) {
@@ -1432,7 +1575,7 @@ void cudnn_rnn_unpack_weight_grads(
                         static_cast<int>(hidden_size),
                         static_cast<int>(num_layers),
                         bidirectional,
-                        dropout_desc.get(),
+                        dropout_desc_handle,
                         CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT);
     } else {
         rnn_desc.set_rnn(handle,
@@ -1440,7 +1583,7 @@ void cudnn_rnn_unpack_weight_grads(
                         static_cast<int>(hidden_size),
                         static_cast<int>(num_layers),
                         bidirectional,
-                        dropout_desc.get(),
+                        dropout_desc_handle,
                         CUDNN_DATA_FLOAT, cell_mode, CUDNN_DATA_FLOAT);
     }
 

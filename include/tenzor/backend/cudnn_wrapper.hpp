@@ -765,6 +765,29 @@ private:
  * features introduced in v8 (recurrent projection, math-type selection, the
  * `auxFlags` bitmap) since they don't exist in the older library.
  */
+/**
+ * @brief Pick a cuDNN RNN algorithm for the given configuration.
+ *
+ * CUDNN_RNN_ALGO_STANDARD launches one GEMM + pointwise kernel pair per
+ * timestep (like the portable non-cuDNN fallback, just via cuBLAS/cuDNN
+ * primitives) -- for the small-to-medium hidden sizes typical of RNN/LSTM/
+ * GRU layers, CUDNN_RNN_ALGO_PERSIST_STATIC instead keeps the recurrent
+ * weights resident across the whole sequence (one kernel launch covers all
+ * timesteps), which is what lets cuDNN avoid STANDARD's per-timestep
+ * launch overhead. Gated conservatively per NVIDIA's documented
+ * constraints: Float32 only, hidden_size <= 512, and unidirectional only
+ * (PERSIST_STATIC's bidirectional support has been inconsistent across
+ * cuDNN versions) -- outside that envelope, fall back to STANDARD, which
+ * is unconditionally correct.
+ */
+inline cudnnRNNAlgo_t pick_rnn_algo(int hidden_size, bool bidirectional,
+                                     cudnnDataType_t math_prec) {
+    if (!bidirectional && hidden_size <= 512 && math_prec == CUDNN_DATA_FLOAT) {
+        return CUDNN_RNN_ALGO_PERSIST_STATIC;
+    }
+    return CUDNN_RNN_ALGO_STANDARD;
+}
+
 class RNNDescriptor {
 public:
     RNNDescriptor() {
@@ -887,7 +910,7 @@ private:
         // cuDNN 8.x and 9.x: a single v8 setter accepts every option.
         CUDNN_CHECK(cudnnSetRNNDescriptor_v8(
             desc_,
-            CUDNN_RNN_ALGO_STANDARD,
+            pick_rnn_algo(hidden_size, bidirectional, math_prec),
             cell_mode,
             bias_mode,
             direction,
@@ -928,7 +951,7 @@ private:
             input_mode,
             direction,
             cell_mode,
-            CUDNN_RNN_ALGO_STANDARD,
+            pick_rnn_algo(hidden_size, bidirectional, math_prec),
             math_prec));
         (void)bias_mode;
         (void)input_size;
@@ -1086,6 +1109,85 @@ public:
 
 private:
     cudnnDropoutDescriptor_t desc_ = nullptr;
+};
+
+/**
+ * @brief Cached "no dropout" (p=0) DropoutDescriptor, reused across every
+ * inference-mode RNN forward call.
+ *
+ * cudnnSetDropoutDescriptor initializes a curand RNG state buffer on the
+ * GPU (the `cudnn::initstates` kernel) every time it's called. Measured at
+ * ~240us on this hardware -- for a small LSTM/GRU forward pass that
+ * otherwise takes ~1-2ms total, rebuilding this descriptor (and its
+ * curand state) on *every* forward call was 20%+ of total runtime, spent
+ * on state that is never read: at p=0 dropout is a no-op regardless of
+ * seed. Since a p=0 descriptor's behavior can't depend on its RNG state,
+ * it's always correct to build one per (thread, device) and reuse it --
+ * unlike p>0 (real training dropout), which still gets a fresh
+ * descriptor+state per call so distinct forward passes draw distinct
+ * masks. Mirrors CuDNNWorkspace's thread_local-registry-keyed-by-device
+ * pattern above.
+ */
+class CuDNNZeroDropoutCache {
+public:
+    static cudnnDropoutDescriptor_t get(cudnnHandle_t handle) {
+        int device = 0;
+        cudaGetDevice(&device);
+        thread_local Registry registry;
+        return registry.get_for_device(handle, device);
+    }
+
+    CuDNNZeroDropoutCache(const CuDNNZeroDropoutCache&) = delete;
+    CuDNNZeroDropoutCache& operator=(const CuDNNZeroDropoutCache&) = delete;
+
+private:
+    struct Entry {
+        DropoutDescriptor desc;
+        void* state = nullptr;
+    };
+
+    struct Registry {
+        std::unordered_map<int, Entry> entries;
+
+        cudnnDropoutDescriptor_t get_for_device(cudnnHandle_t handle, int device) {
+            auto it = entries.find(device);
+            if (it != entries.end()) {
+                return it->second.desc.get();
+            }
+            // Default-construct directly in the map: Entry holds a
+            // DropoutDescriptor, which is move-disabled, so build the
+            // state in place rather than constructing a temporary and
+            // moving/copying it in.
+            Entry& entry = entries[device];
+            size_t state_size = 0;
+            CUDNN_CHECK(cudnnDropoutGetStatesSize(handle, &state_size));
+            if (state_size > 0) {
+                cudaError_t err = cudaMalloc(&entry.state, state_size);
+                if (err != cudaSuccess) {
+                    entry.state = nullptr;
+                    throw std::runtime_error(
+                        std::string("CuDNNZeroDropoutCache: cudaMalloc(") +
+                        std::to_string(state_size) + ") failed: " +
+                        cudaGetErrorString(err));
+                }
+            }
+            entry.desc.set(handle, 0.0f, entry.state, state_size, /*seed=*/0ULL);
+            return entry.desc.get();
+        }
+
+        ~Registry() {
+            for (auto& [device, entry] : entries) {
+                if (entry.state) {
+                    int prev = 0;
+                    cudaGetDevice(&prev);
+                    if (device != prev) cudaSetDevice(device);
+                    cudaDeviceSynchronize();
+                    cudaFree(entry.state);
+                    if (device != prev) cudaSetDevice(prev);
+                }
+            }
+        }
+    };
 };
 
 // ============================================================================
