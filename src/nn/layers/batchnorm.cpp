@@ -9,6 +9,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/utils/autograd_wrap.hpp"
 #include "tenzor/jit/tracer.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 #include <cmath>
 
 // SIMD headers for optimized BatchNorm
@@ -490,31 +491,37 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             }
         }
 
-        // Apply normalization with SIMD
-        for (int64_t n = 0; n < N; n++) {
-            for (int64_t c = 0; c < C; c++) {
-                const float s = scale[c];
-                const float b = shift[c];
-                const int64_t idx = (n * C + c) * spatial_size;
+        // Apply normalization with SIMD. Flattened over N*C and parallelized:
+        // the hand-rolled loop below was previously fully serial (unlike the
+        // dispatch()-routed training-mode path, which is OMP-parallelized),
+        // making eval-mode 2-6x slower than PyTorch at ResNet-scale shapes
+        // purely from not using the machine's other cores. Threshold matches
+        // the codebase's other "moderate ops" gate (OmpThresholds::medium()).
+        const int64_t nc = N * C;
+        #pragma omp parallel for if(nc * spatial_size > ::tenzor::OmpThresholds::medium())
+        for (int64_t j = 0; j < nc; j++) {
+            const int64_t c = j % C;
+            const float s = scale[c];
+            const float b = shift[c];
+            const int64_t idx = j * spatial_size;
 
-                #if defined(__AVX512F__)
-                __m512 v_scale = _mm512_set1_ps(s);
-                __m512 v_shift = _mm512_set1_ps(b);
-                int64_t i = 0;
-                for (; i + 16 <= spatial_size; i += 16) {
-                    __m512 v_in = _mm512_loadu_ps(input_data + idx + i);
-                    __m512 v_out = _mm512_fmadd_ps(v_in, v_scale, v_shift);
-                    _mm512_storeu_ps(output_data + idx + i, v_out);
-                }
-                for (; i < spatial_size; i++) {
-                    output_data[idx + i] = input_data[idx + i] * s + b;
-                }
-                #else
-                for (int64_t i = 0; i < spatial_size; i++) {
-                    output_data[idx + i] = input_data[idx + i] * s + b;
-                }
-                #endif
+            #if defined(__AVX512F__)
+            __m512 v_scale = _mm512_set1_ps(s);
+            __m512 v_shift = _mm512_set1_ps(b);
+            int64_t i = 0;
+            for (; i + 16 <= spatial_size; i += 16) {
+                __m512 v_in = _mm512_loadu_ps(input_data + idx + i);
+                __m512 v_out = _mm512_fmadd_ps(v_in, v_scale, v_shift);
+                _mm512_storeu_ps(output_data + idx + i, v_out);
             }
+            for (; i < spatial_size; i++) {
+                output_data[idx + i] = input_data[idx + i] * s + b;
+            }
+            #else
+            for (int64_t i = 0; i < spatial_size; i++) {
+                output_data[idx + i] = input_data[idx + i] * s + b;
+            }
+            #endif
         }
 
         return Variable(output, false);
