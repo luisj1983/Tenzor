@@ -17,6 +17,8 @@
 #include <omp.h>
 #endif
 
+#include "tenzor/backend/omp_thresholds.hpp"
+
 namespace tenzor {
 namespace nn {
 namespace quantization {
@@ -203,7 +205,7 @@ auto quantized_conv2d_kernel(
     // ~255*255=65025 times col_width > ~33k exceeds INT32_MAX). Mirrors the
     // int64 accumulators in quantized_linear.cpp.
     std::vector<int64_t> sum_w(out_channels, 0);
-    #pragma omp parallel for
+    #pragma omp parallel for if(out_channels > ::tenzor::OmpThresholds::matmul())
     for (int64_t oc = 0; oc < out_channels; ++oc) {
         int64_t s = 0;
         const int8_t* wr = weight + oc * col_width;
@@ -211,8 +213,20 @@ auto quantized_conv2d_kernel(
         sum_w[oc] = s;
     }
 
-    // im2col + GEMM approach with grouped convolution support
-    #pragma omp parallel
+    // im2col + GEMM approach with grouped convolution support.
+    //
+    // This region parallelizes over `batch` only (see the `#pragma omp for`
+    // below) -- with batch <= 1 there is exactly one loop trip so spawning
+    // threads buys zero speedup while still paying full thread-spawn cost
+    // plus a per-thread col_buffer/sum_col allocation. OmpThresholds::matmul()
+    // (1024) is the wrong gate here: out_channels*spatial_out*batch trivially
+    // exceeds it even at batch=1 for realistic channel/spatial sizes, so it
+    // would never actually skip the region in the common batch=1 inference
+    // case this guard exists for. Instead mirror the established convention
+    // for this exact per-thread-buffer/single-batch-axis shape used elsewhere
+    // (nn_kernels.cpp GroupNorm/InstanceNorm/LayerNorm backward, rnn_kernels.cpp,
+    // fused_ops.cpp): gate on batch_size alone against a small fixed threshold.
+    #pragma omp parallel if(batch > 16)
     {
         // Per-thread column buffer to avoid allocation contention
         std::vector<int8_t> col_buffer(spatial_out * col_width);
@@ -318,7 +332,7 @@ auto quantized_conv2d_per_channel_kernel(
     // int64 accumulation to avoid overflow on wide receptive fields (see the
     // matching note in quantized_conv2d_kernel).
     std::vector<int64_t> sum_w(out_channels, 0);
-    #pragma omp parallel for
+    #pragma omp parallel for if(out_channels > ::tenzor::OmpThresholds::matmul())
     for (int64_t oc = 0; oc < out_channels; ++oc) {
         int64_t s = 0;
         const int8_t* wr = weight + oc * col_width;
@@ -326,7 +340,11 @@ auto quantized_conv2d_per_channel_kernel(
         sum_w[oc] = s;
     }
 
-    #pragma omp parallel
+    // Same rationale as quantized_conv2d_kernel above: this region
+    // parallelizes over `batch` only, so gate on batch_size against the
+    // small fixed threshold used by the matching per-thread-buffer /
+    // single-batch-axis pattern elsewhere in the CPU backend, not matmul().
+    #pragma omp parallel if(batch > 16)
     {
         std::vector<int8_t> col_buffer(spatial_out * col_width);
         std::vector<int64_t> sum_col(spatial_out);

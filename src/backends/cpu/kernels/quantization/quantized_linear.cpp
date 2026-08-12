@@ -15,6 +15,8 @@
 #include <omp.h>
 #endif
 
+#include "tenzor/backend/omp_thresholds.hpp"
+
 namespace tenzor {
 namespace nn {
 namespace quantization {
@@ -134,14 +136,14 @@ auto quantized_linear_kernel(
     // so we need the per-output-row weight sum and per-batch-row input sum.
     std::vector<int64_t> sum_w(out_features, 0);
     std::vector<int64_t> sum_x(batch_size, 0);
-    #pragma omp parallel for
+    #pragma omp parallel for if(out_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t o = 0; o < out_features; ++o) {
         int64_t s = 0;
         const int8_t* wrow = weight + o * in_features;
         for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(wrow[k]);
         sum_w[o] = s;
     }
-    #pragma omp parallel for
+    #pragma omp parallel for if(batch_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         int64_t s = 0;
         const int8_t* xrow = input + b * in_features;
@@ -150,7 +152,7 @@ auto quantized_linear_kernel(
     }
 
     // Parallel over batch and output features
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t o = 0; o < out_features; ++o) {
             // int64 accumulator matches the CUDA kernel: each int8*int8 product
@@ -278,14 +280,14 @@ auto quantized_linear_per_channel_kernel(
     // quantized_linear_kernel above).
     std::vector<int64_t> sum_w(out_features, 0);
     std::vector<int64_t> sum_x(batch_size, 0);
-    #pragma omp parallel for
+    #pragma omp parallel for if(out_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t o = 0; o < out_features; ++o) {
         int64_t s = 0;
         const int8_t* wrow = weight + o * in_features;
         for (int64_t k = 0; k < in_features; ++k) s += static_cast<int64_t>(wrow[k]);
         sum_w[o] = s;
     }
-    #pragma omp parallel for
+    #pragma omp parallel for if(batch_size > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         int64_t s = 0;
         const int8_t* xrow = input + b * in_features;
@@ -293,7 +295,7 @@ auto quantized_linear_per_channel_kernel(
         sum_x[b] = s;
     }
 
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) if(batch_size * out_features > ::tenzor::OmpThresholds::matmul())
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t o = 0; o < out_features; ++o) {
             // int64 accumulator matches the CUDA kernel: each int8*int8 product
