@@ -29,105 +29,124 @@ auto fill_kernel(const Tensor& input, double value) -> Tensor {
     // Fill based on dtype
     if (input.dtype() == DType::Float32) {
         auto* data = result.data<float>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = value;
         }
     } else if (input.dtype() == DType::Float64) {
         auto* data = result.data<double>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<double>(value);
         }
     } else if (input.dtype() == DType::Int32) {
         auto* data = result.data<int32_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<int32_t>(value);
         }
     } else if (input.dtype() == DType::Int64) {
         auto* data = result.data<int64_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<int64_t>(value);
         }
     } else if (input.dtype() == DType::Float16) {
         auto* data = result.data<Float16>();
         Float16 val(static_cast<float>(value));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::BFloat16) {
         auto* data = result.data<BFloat16>();
         BFloat16 val(static_cast<float>(value));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::Int8) {
         auto* data = result.data<int8_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<int8_t>(value);
         }
     } else if (input.dtype() == DType::Int16) {
         auto* data = result.data<int16_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<int16_t>(value);
         }
     } else if (input.dtype() == DType::UInt8) {
         auto* data = result.data<uint8_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<uint8_t>(value);
         }
     } else if (input.dtype() == DType::UInt16) {
         auto* data = result.data<uint16_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<uint16_t>(value);
         }
     } else if (input.dtype() == DType::UInt32) {
         auto* data = result.data<uint32_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<uint32_t>(value);
         }
     } else if (input.dtype() == DType::UInt64) {
         auto* data = result.data<uint64_t>();
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = static_cast<uint64_t>(value);
         }
     } else if (input.dtype() == DType::Bool) {
         auto* data = result.data<bool>();
         bool val = (value != 0.0f);
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::Complex64) {
         auto* data = result.data<std::complex<float>>();
         std::complex<float> val(value, 0.0f);
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::Complex128) {
         auto* data = result.data<std::complex<double>>();
         std::complex<double> val(static_cast<double>(value), 0.0);
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::FP8_E4M3) {
         auto* data = result.data<FP8_E4M3>();
         FP8_E4M3 val(static_cast<float>(value));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::FP8_E5M2) {
         auto* data = result.data<FP8_E5M2>();
         FP8_E5M2 val(static_cast<float>(value));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::FP8_E4M3FNUZ) {
         auto* data = result.data<FP8_E4M3FNUZ>();
         FP8_E4M3FNUZ val(static_cast<float>(value));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
     } else if (input.dtype() == DType::FP8_E5M2FNUZ) {
         auto* data = result.data<FP8_E5M2FNUZ>();
         FP8_E5M2FNUZ val(static_cast<float>(value));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
@@ -142,6 +161,7 @@ auto fill_kernel(const Tensor& input, double value) -> Tensor {
                              + input.q_zero_point();
         const int8_t qbyte = static_cast<int8_t>(
             std::clamp(qval, static_cast<int64_t>(-128), static_cast<int64_t>(127)));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = qbyte;
         }
@@ -156,6 +176,7 @@ auto fill_kernel(const Tensor& input, double value) -> Tensor {
                              + input.q_zero_point();
         const uint8_t qbyte = static_cast<uint8_t>(
             std::clamp(qval, static_cast<int64_t>(0), static_cast<int64_t>(255)));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = qbyte;
         }
@@ -173,6 +194,7 @@ auto fill_kernel(const Tensor& input, double value) -> Tensor {
                              + input.q_zero_point();
         const int64_t clamped = std::clamp(qval, static_cast<int64_t>(-8), static_cast<int64_t>(7));
         const uint8_t qbyte = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = qbyte;
         }
