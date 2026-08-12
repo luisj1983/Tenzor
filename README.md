@@ -120,32 +120,40 @@ See [INSTALL.md](INSTALL.md) for per-backend setup details.
 
 The benchmark harness is available in `scripts/ci_benchmark.sh` and `tools/regen_perf_baseline.py`, with a PyTorch-comparison suite in `benchmarks/python/` (`run_benchmarks.py --device cpu|cuda`). Numbers below are from the maintainer's own machine and are meant as orientation, not a competitive claim — re-run the harness on your own hardware before relying on any of this for a decision.
 
-**Test machine:** AMD Ryzen AI 9 HX 370 (12C/24T), 93 GiB RAM, NVIDIA RTX 5070 Laptop GPU (8 GB), Linux, PyTorch 2.13.0. 276 CPU-side and 300 CUDA-side op comparisons, 5 timed iterations each after 10 warmup iterations.
+**Test machine:** AMD Ryzen AI 9 HX 370 (12C/24T), 93 GiB RAM, NVIDIA RTX 5070 Laptop GPU (8 GB), Linux, PyTorch 2.13.0. CPU side re-run 2026-08-12: 275 CPU results, 126 op configurations with a matching PyTorch counterpart, 5 timed iterations each after 10 warmup iterations (CUDA column below is from the prior pass and hasn't been re-verified in this update).
 
 Reference point — 4096×4096 FP32 matmul, wall-clock mean:
 
 | | CPU | CUDA |
 |---|---|---|
-| Tenzor  | 181.1 ms (0.76 TFLOPS) | 10.23 ms (13.4 TFLOPS) |
-| PyTorch | 177.2 ms (0.78 TFLOPS) | 10.11 ms (13.6 TFLOPS) |
+| Tenzor  | 271.2 ms (506.8 GFLOPS) | 10.23 ms (13.4 TFLOPS) |
+| PyTorch | 271.7 ms (505.9 GFLOPS) | 10.11 ms (13.6 TFLOPS) |
 
 Median Tenzor/PyTorch time ratio by op category (>1.0 = Tenzor slower; based on the run above, not a guarantee for other shapes or hardware):
 
 | Category | CPU | CUDA |
 |---|---|---|
-| matmul | 1.5x | 1.1x |
-| conv2d | 0.95x | 1.1x |
-| linear | 0.96x | 0.9x |
-| attention | 2.5x | 1.4x |
-| layernorm | 4.2x | 7.8x |
-| batchnorm | 1.0x | 1.3x |
-| rmsnorm | 1.5x | 1.3x |
-| embedding | 1.4x | 1.5x |
-| lstm / gru | 0.5–1.5x | 1.4–1.5x |
+| matmul | 1.1x | 1.1x |
+| conv2d | 0.9x | 1.1x |
+| linear | 0.6x | 0.9x |
+| attention | 2.0x | 1.4x |
+| layernorm | 1.7x | 7.8x |
+| batchnorm | 0.9x | 1.3x |
+| rmsnorm | 2.3x | 1.3x |
+| embedding | 1.3x | 1.5x |
+| lstm | 1.5x (train: 2.9x) | 1.4–1.5x* |
+| gru | 0.4x | 1.4–1.5x* |
+| elementwise activations | 2.6x | — |
+| full training step (end-to-end) | 1.1x | — |
 
-Two things worth calling out rather than glossing over:
-- **LayerNorm is consistently slower** on both backends (4-8x) — the normalization kernels haven't had the tuning pass the matmul/conv paths have.
-- One CPU result (`Train small_mlp B=64`) showed Tenzor ~33x faster than PyTorch with low variance across repeated runs, which is large enough to be suspicious rather than a genuine win — likely a CPU thread-pool interaction between the two frameworks sharing a process (both are MKL/OpenMP-backed) rather than a real per-op advantage. Excluded from the table above pending isolated (single-process-per-framework) reproduction; treat any GPU/CPU number sourced from a mixed-framework harness like this one with the same skepticism until you've confirmed it in isolation.
+\* CUDA wasn't re-split into lstm/gru for this update; treat the combined figure as stale relative to the CPU row.
+
+Three things worth calling out rather than glossing over:
+- **LSTM vs. GRU diverge sharply on CPU** despite similar recurrent structure: GRU is consistently *faster* than PyTorch at every size tested (up to 2.8x), while LSTM is consistently *slower*, worst in training (`LSTM Medium 2L (train)`: 764 ms vs. PyTorch's 261 ms — the single largest absolute regression found). This points at an LSTM-specific kernel/backward inefficiency, not generic RNN or autograd overhead — next thing to profile.
+- **CNN training is 5-10x slower end-to-end** (`Train CNN (LeNet-style) B=64`: 102 ms vs. 10 ms) even though standalone conv2d forward kernels are at parity or faster in isolation. The gap lives in the backward path (conv2d backward / MaxPool2d backward), not the forward conv kernel.
+- **LayerNorm improved substantially** since the last measurement (4.2x → 1.7x on CPU), consistent with the OMP-threshold fixes landed across recent commits; CUDA LayerNorm (7.8x) is unchanged and still the worst-tuned kernel in the library. Elementwise activations (Sigmoid/ReLU/GELU/Tanh) at small-to-medium sizes are now the more notable CPU gap (2.6x median), likely sitting under the OMP parallelization threshold and running single-threaded.
+
+The previously-flagged `Train small_mlp` anomaly (Tenzor ~40x faster) reproduces consistently across all three batch sizes tested (32/64/128) with low variance, using the same benchmark harness path as every other entry in this table — it's very likely a genuine per-step Python/dispatch-overhead difference for tiny models rather than a measurement artifact, but it's still overhead-dominated rather than a kernel-throughput result, so it's excluded from the category medians above.
 
 Fused and vendor-library-heavy paths (cuDNN/cuBLAS-backed ops in particular) are where an established library's engineering investment shows most. See [`CHANGELOG.md`](CHANGELOG.md) for release-specific performance notes, and treat any single number here as a snapshot of one machine on one day, not a general claim about either library.
 
@@ -172,7 +180,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full diagram and dispat
 - **No public CI proof for GPU backends.** GitHub Actions runs CPU smoke tests only; CUDA/ROCm/OneAPI/Vulkan are tested locally on the maintainer's hardware.
 - **GPU backend ops are expected to be native.** Backend gaps should fail clearly rather than silently dispatching through CPU behavior.
 - **MPS backend** (Apple Metal) is partial. Not yet at parity with the four primary GPU backends.
-- **LayerNorm is unoptimized** relative to PyTorch on both CPU and CUDA (4-8x slower in the current benchmark run) — the normalization kernels haven't had the tuning pass matmul/conv have. See [Performance](#performance).
+- **LayerNorm is unoptimized on CUDA** relative to PyTorch (7.8x slower in the current benchmark run); the CPU side has closed most of the gap (down to 1.7x) after recent OMP-threshold fixes. See [Performance](#performance).
+- **LSTM is notably slower than PyTorch on CPU**, especially in training (up to ~2.9x on the median, worst case ~2.9x wall-clock on a 2-layer model) — GRU does not show the same gap, so this looks like an LSTM-specific kernel/backward issue rather than general RNN overhead. CNN training is also 5-10x slower end-to-end despite conv2d forward kernels being at parity, pointing at the conv2d/MaxPool2d backward path. Neither has been root-caused yet. See [Performance](#performance).
 - **Pretrained weights** are not distributed. The model files in `src/models/` are architectures only.
 - **Single maintainer.** Contributions, issues, and reviews are welcome.
 
