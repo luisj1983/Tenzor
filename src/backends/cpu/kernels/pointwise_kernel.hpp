@@ -16,14 +16,67 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 #include "broadcast.hpp"
 #include "fp8_emulation.hpp"
+#include <algorithm>
 #include <cstddef>
 #include <complex>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "simd_traits.hpp"
 
 namespace tenzor::cpu {
+
+namespace detail {
+// Caps the OMP thread count used to chunk a pointwise op so tiny tensors
+// just above the threshold don't get split into more chunks than there is
+// useful work per chunk (each chunk still needs to clear the
+// SimdTrait::apply call's own fixed overhead). Mirrors the existing
+// ACTIVATION_OMP_THRESHOLD-family convention of gating parallelism by size,
+// just applied per-chunk instead of per-element.
+inline int pointwise_num_threads(size_t n) {
+    int max_threads = 1;
+#ifdef _OPENMP
+    max_threads = omp_get_max_threads();
+#endif
+    // At least ~65536 elements per thread so each chunk's SIMD loop
+    // amortizes its own fixed costs; never fewer than 1 thread.
+    int by_work = static_cast<int>(std::max<size_t>(1, n / 65536));
+    return std::max(1, std::min(max_threads, by_work));
+}
+
+// Chunked-parallel dispatch for the same-shape fast path. Pulled out into its
+// own (non-macro-expanded) function template so the `#pragma omp` directive
+// isn't embedded inside TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX's macro
+// argument list -- GCC accepts directives-in-macro-args syntactically
+// (C++23) but this build fails to parse it correctly when nested inside the
+// dispatch macro's generated switch/lambda, so keep the pragma in ordinary
+// code instead.
+template<typename Op, typename scalar_t>
+void pointwise_apply_parallel(const scalar_t* a_data, const scalar_t* b_data,
+                               scalar_t* c_data, size_t n) {
+    if (static_cast<int64_t>(n) >= ::tenzor::OmpThresholds::simple()) {
+        const int num_threads = pointwise_num_threads(n);
+        #pragma omp parallel for schedule(static) num_threads(num_threads)
+        for (int t = 0; t < num_threads; ++t) {
+            const size_t chunk = (n + static_cast<size_t>(num_threads) - 1)
+                                 / static_cast<size_t>(num_threads);
+            const size_t start = static_cast<size_t>(t) * chunk;
+            const size_t end = std::min(start + chunk, n);
+            if (start < end) {
+                SimdTrait<Op, scalar_t>::apply(a_data + start, b_data + start,
+                                                c_data + start, end - start);
+            }
+        }
+    } else {
+        SimdTrait<Op, scalar_t>::apply(a_data, b_data, c_data, n);
+    }
+}
+} // namespace detail
 
 // ============================================================================
 // binary_pointwise_kernel — the main entry point
@@ -67,7 +120,7 @@ auto binary_pointwise_kernel(
     std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
 
     std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
-    Tensor result(output_shape, a.dtype(), a.device());
+    Tensor result = Tensor::empty_uninitialized(output_shape, a.dtype(), a.device());
 
     // Early return for zero-element outputs (e.g. broadcasting with empty tensors)
     if (result.numel() == 0) {
@@ -76,14 +129,19 @@ auto binary_pointwise_kernel(
 
     bool same_shape = (shape_a_vec == shape_b_vec);
     if (same_shape) {
-        // Contiguous fast path with SIMD
+        // Contiguous fast path with SIMD, parallelized over chunks. Each
+        // chunk still runs through the existing, unmodified SimdTrait::apply
+        // (itself vectorized/ISA-dispatched) -- this parallelizes over
+        // *chunks* rather than touching the ~10 leaf SIMD functions
+        // individually, avoiding any risk of nested parallel regions inside
+        // dispatch::g_dispatch's function-pointer chain.
         size_t n = static_cast<size_t>(a.numel());
 
         TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX(a.dtype(), "binary_pointwise", [&] {
             const scalar_t* a_data = a.data<scalar_t>();
             const scalar_t* b_data = b.data<scalar_t>();
             scalar_t* c_data = result.data<scalar_t>();
-            SimdTrait<Op, scalar_t>::apply(a_data, b_data, c_data, n);
+            detail::pointwise_apply_parallel<Op, scalar_t>(a_data, b_data, c_data, n);
         });
     } else {
         // Broadcasting path

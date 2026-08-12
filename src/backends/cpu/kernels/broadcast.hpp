@@ -2,10 +2,15 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/backend/omp_thresholds.hpp"
 #include <type_traits>
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace tenzor {
 namespace cpu {
@@ -142,10 +147,12 @@ bool try_scalar_broadcast(const T* a_data, const T* b_data, T* c_data,
     // Simple loop — the compiler auto-vectorizes for basic ops (add, mul, etc.)
     // and we avoid the expensive per-element index computation entirely.
     if (scalar_is_rhs) {
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             c_data[i] = op(vec_data[i], scalar_val);
         }
     } else {
+        #pragma omp parallel for schedule(static) if(total_elements >= ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < total_elements; ++i) {
             c_data[i] = op(scalar_val, vec_data[i]);
         }
@@ -188,6 +195,7 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
     // Specialized loops for common dimensions (avoid per-element coordinate tracking)
     if (ndim == 1) {
         const int64_t sa0 = strides_a[0], sb0 = strides_b[0];
+        #pragma omp parallel for schedule(static) if(output_shape[0] >= ::tenzor::OmpThresholds::simple())
         for (int64_t i0 = 0; i0 < output_shape[0]; ++i0)
             c_data[i0] = op(a_data[i0 * sa0], b_data[i0 * sb0]);
         return;
@@ -196,9 +204,10 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         const int64_t d0 = output_shape[0], d1 = output_shape[1];
         const int64_t sa0 = strides_a[0], sa1 = strides_a[1];
         const int64_t sb0 = strides_b[0], sb1 = strides_b[1];
-        int64_t out_idx = 0;
+        #pragma omp parallel for schedule(static) if(d0 * d1 >= ::tenzor::OmpThresholds::simple())
         for (int64_t i0 = 0; i0 < d0; ++i0) {
             int64_t ba = i0 * sa0, bb = i0 * sb0;
+            int64_t out_idx = i0 * d1;
             for (int64_t i1 = 0; i1 < d1; ++i1, ++out_idx)
                 c_data[out_idx] = op(a_data[ba + i1 * sa1], b_data[bb + i1 * sb1]);
         }
@@ -208,9 +217,10 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         const int64_t d0 = output_shape[0], d1 = output_shape[1], d2 = output_shape[2];
         const int64_t sa0 = strides_a[0], sa1 = strides_a[1], sa2 = strides_a[2];
         const int64_t sb0 = strides_b[0], sb1 = strides_b[1], sb2 = strides_b[2];
-        int64_t out_idx = 0;
+        #pragma omp parallel for schedule(static) if(d0 * d1 * d2 >= ::tenzor::OmpThresholds::simple())
         for (int64_t i0 = 0; i0 < d0; ++i0) {
             int64_t ba0 = i0 * sa0, bb0 = i0 * sb0;
+            int64_t out_idx = i0 * d1 * d2;
             for (int64_t i1 = 0; i1 < d1; ++i1) {
                 int64_t ba1 = ba0 + i1 * sa1, bb1 = bb0 + i1 * sb1;
                 for (int64_t i2 = 0; i2 < d2; ++i2, ++out_idx)
@@ -224,9 +234,10 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         const int64_t d2 = output_shape[2], d3 = output_shape[3];
         const int64_t sa0 = strides_a[0], sa1 = strides_a[1], sa2 = strides_a[2], sa3 = strides_a[3];
         const int64_t sb0 = strides_b[0], sb1 = strides_b[1], sb2 = strides_b[2], sb3 = strides_b[3];
-        int64_t out_idx = 0;
+        #pragma omp parallel for schedule(static) if(d0 * d1 * d2 * d3 >= ::tenzor::OmpThresholds::simple())
         for (int64_t i0 = 0; i0 < d0; ++i0) {
             int64_t ba0 = i0 * sa0, bb0 = i0 * sb0;
+            int64_t out_idx = i0 * d1 * d2 * d3;
             for (int64_t i1 = 0; i1 < d1; ++i1) {
                 int64_t ba1 = ba0 + i1 * sa1, bb1 = bb0 + i1 * sb1;
                 for (int64_t i2 = 0; i2 < d2; ++i2) {
@@ -239,7 +250,11 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         return;
     }
 
-    // Generic fallback for ndim > 4: carry-based coordinate tracking
+    // Generic fallback for ndim > 4: carry-based coordinate tracking is
+    // inherently sequential (each iteration depends on the previous one's
+    // carry). Not parallelized -- >4D broadcasts are rare, and converting
+    // this to an independent-per-index computation is out of scope for the
+    // 2026-08-12 elementwise-ops OMP fix (see design doc).
     std::vector<int64_t> coords(ndim, 0);
 
     for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
