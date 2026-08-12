@@ -115,7 +115,7 @@ auto grid_sample_forward_impl(const Tensor& input, const Tensor& grid,
     const T* grid_data = grid.data<T>();
 
     constexpr DType out_dt = std::is_same_v<T, double> ? DType::Float64 : DType::Float32;
-    Tensor output({N, C, H_out, W_out}, out_dt, input.device());
+    Tensor output = Tensor::empty_uninitialized({N, C, H_out, W_out}, out_dt, input.device());
     T* out_data = output.data<T>();
 
     int64_t spatial_size = H_in * W_in;

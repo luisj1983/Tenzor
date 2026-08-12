@@ -1322,8 +1322,9 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
     int64_t output_h = grad_shape[2];
     int64_t output_w = grad_shape[3];
 
-    Tensor grad_input({batch_size, channels, feat_height, feat_width},
-                      grad_output.dtype(), grad_output.device());
+    Tensor grad_input = Tensor::empty_uninitialized(
+        {batch_size, channels, feat_height, feat_width},
+        grad_output.dtype(), grad_output.device());
     std::memset(grad_input.data<uint8_t>(), 0,
                 grad_input.numel() * dtype_size(grad_input.dtype()));
 
@@ -1594,7 +1595,8 @@ auto fold_kernel(const Tensor& input_in, const std::vector<int64_t>& output_size
     int64_t H_col = (H_out + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
     int64_t W_col = (W_out + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
 
-    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized(
+        {N, C, H_out, W_out}, input.dtype(), input.device());
     std::memset(output.data<uint8_t>(), 0, output.numel() * dtype_size(output.dtype()));
 
     auto fold_impl = [&]<typename T>(const T* in_data, T* out_data) {
@@ -1629,7 +1631,8 @@ auto fold_kernel(const Tensor& input_in, const std::vector<int64_t>& output_size
         fold_impl(input.data<double>(), output.data<double>());
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
-        auto output_f32 = Tensor({N, C, H_out, W_out}, DType::Float32, input.device());
+        auto output_f32 = Tensor::empty_uninitialized(
+            {N, C, H_out, W_out}, DType::Float32, input.device());
         std::memset(output_f32.data<uint8_t>(), 0, output_f32.numel() * dtype_size(output_f32.dtype()));
         fold_impl(input_f32.data<float>(), output_f32.data<float>());
         return output_f32.to(input.dtype());
