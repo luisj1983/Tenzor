@@ -2738,7 +2738,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i] * beta;
             // Numerically stable softplus
@@ -2755,7 +2755,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         double* out_data = output.data<double>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i] * static_cast<double>(beta);
             double thresh = static_cast<double>(threshold);
@@ -2772,7 +2772,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float result;
@@ -2790,7 +2790,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         BFloat16* out_data = output.data<BFloat16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float result;
