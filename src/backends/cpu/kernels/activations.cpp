@@ -607,8 +607,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
 #ifdef TENZOR_USE_ONEDNN
-        // measured 2026-08-12 (task-2, cpu-activation-dispatch/task-2-report.md):
-        // unlike ReLU (task 1), Sigmoid's oneDNN eltwise path is genuinely
+        // Measured 2026-08-12: unlike ReLU, Sigmoid's oneDNN eltwise path is genuinely
         // faster than the fast_math::sigmoid_avx512/avx2 SIMD loop below at
         // larger sizes -- up to ~2x faster by n=4194304 -- so it is kept,
         // but only above the measured crossover. At n=65536 SIMD was
