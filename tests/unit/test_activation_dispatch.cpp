@@ -5,6 +5,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 using namespace tenzor;
@@ -56,10 +57,17 @@ std::vector<double> make_relu_test_input_f64(int64_t n) {
 
 TEST(ActivationDispatch, ReluF32MatchesScalarReferenceAcrossSizes) {
     // Sizes chosen to cross every relevant boundary: below/above the old
-    // ONEDNN_ACTIVATION_THRESHOLD (65536), and the exact benchmark sizes
-    // that showed the regression (32768, 262144, 2097152).
+    // ONEDNN_ACTIVATION_THRESHOLD (65536), the exact benchmark sizes that
+    // showed the regression (32768, 262144, 2097152), and 8388608 -- which
+    // is genuinely `>` RELU_SIGMOID_OMP_THRESHOLD's measured 2097152 floor
+    // (the pragmas use strict `>`, so 2097152 itself never enters the
+    // parallel branch) and stays above that floor even after
+    // OmpThresholds::simple()'s core-count scaling on any machine with a
+    // sane core count, so this size actually exercises the multithreaded
+    // SIMD loop rather than only the single-thread fallback.
     for (int64_t n : {int64_t{1}, int64_t{15}, int64_t{16}, int64_t{17},
-                       int64_t{32768}, int64_t{65536}, int64_t{262144}, int64_t{2097152}}) {
+                       int64_t{32768}, int64_t{65536}, int64_t{262144},
+                       int64_t{2097152}, int64_t{8388608}}) {
         auto input_vec = make_relu_test_input_f32(n);
         Tensor input({n}, DType::Float32, Device::cpu());
         std::memcpy(input.data<float>(), input_vec.data(), static_cast<size_t>(n) * sizeof(float));
@@ -105,8 +113,13 @@ TEST(ActivationDispatch, SigmoidF32MatchesFastMathReferenceAcrossSizes) {
     // that was always below the old oneDNN threshold (32768, unaffected by
     // this task's change) versus a size that was always above it (262144,
     // directly affected). If the values match at both sizes, dispatch
-    // reordering did not change sigmoid's actual output.
-    for (int64_t n : {int64_t{32768}, int64_t{262144}}) {
+    // reordering did not change sigmoid's actual output. 4194304 is also
+    // included: it is genuinely `>` RELU_SIGMOID_OMP_THRESHOLD's measured
+    // 2097152 floor (pragmas use strict `>`), so on builds without oneDNN
+    // (TENZOR_USE_ONEDNN off) this exercises sigmoid_kernel's multithreaded
+    // SIMD fallback loop; on oneDNN builds it still validates output
+    // correctness at a size well above the F32 oneDNN gate (n>=131072).
+    for (int64_t n : {int64_t{32768}, int64_t{262144}, int64_t{4194304}}) {
         std::vector<float> input_vec(static_cast<size_t>(n));
         for (int64_t i = 0; i < n; ++i) {
             input_vec[static_cast<size_t>(i)] = 0.01f * static_cast<float>((i * 41 + 7) % 113) - 0.6f;
