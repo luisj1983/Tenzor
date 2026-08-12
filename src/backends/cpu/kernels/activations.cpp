@@ -2823,7 +2823,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i] * beta;
             float sigmoid_x;
@@ -2842,7 +2842,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
 
-        #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i] * static_cast<double>(beta);
             double thresh = static_cast<double>(threshold);
@@ -2862,7 +2862,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float sigmoid_x;
@@ -2881,7 +2881,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
         size_t n = input.numel();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::matmul())
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float sigmoid_x;
