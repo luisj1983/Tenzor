@@ -28,13 +28,20 @@
 #define ACTIVATION_OMP_THRESHOLD (::tenzor::OmpThresholds::simple())
 
 // oneDNN threshold for ReLU/Sigmoid is no longer used by this file's own
-// dispatch (see Task 1/2) -- ONEDNN_ACTIVATION_THRESHOLD now only governs
-// Tanh/GELU, whose exact std::tanh/std::erf math cannot be replaced by a
-// vectorized approximation (see the class comments in tanh_kernel/
-// gelu_kernel below) but can legitimately be routed to oneDNN's own exact
-// primitive much sooner than the old 65536, since oneDNN's fixed dispatch
-// cost is cheap relative to thousands of individual scalar transcendental
-// calls. Value below is from direct measurement (see
+// dispatch (see Task 1/2). ONEDNN_ACTIVATION_THRESHOLD retains its original
+// value and continues to govern softmax's oneDNN dispatch only
+// (onednn_softmax_forward) -- this task does not touch softmax's threshold
+// at all.
+//
+// ONEDNN_TRANSCENDENTAL_THRESHOLD is a new, independent constant that
+// governs Tanh/GELU only (via onednn_eltwise_forward, called from
+// tanh_kernel/gelu_kernel below), whose exact std::tanh/std::erf math
+// cannot be replaced by a vectorized approximation (see the class comments
+// in tanh_kernel/gelu_kernel below) but can legitimately be routed to
+// oneDNN's own exact primitive much sooner than the old 65536, since
+// oneDNN's fixed dispatch cost is cheap relative to thousands of
+// individual scalar transcendental calls. Value below is from direct
+// measurement (see
 // docs/superpowers/plans/2026-08-12-cpu-activation-dispatch.md Task 3) --
 // do not change without re-measuring.
 //
@@ -51,7 +58,8 @@
 //   (* oneDNN becomes faster than the scalar loop starting at n=8192 for
 //   both ops -- the crossover coincides exactly, so a single shared
 //   constant is used rather than per-op constants.)
-constexpr size_t ONEDNN_ACTIVATION_THRESHOLD = 8192;  // 8K elements
+constexpr size_t ONEDNN_ACTIVATION_THRESHOLD = 65536;  // 64K elements (softmax, unchanged by this task)
+constexpr size_t ONEDNN_TRANSCENDENTAL_THRESHOLD = 8192;  // 8K elements (Tanh/GELU only)
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -171,7 +179,7 @@ static bool onednn_eltwise_forward(
     const float* input, float* output, size_t n,
     dnnl::algorithm alg, float alpha = 0.0f, float beta = 0.0f) {
 
-    if (n < ONEDNN_ACTIVATION_THRESHOLD) {
+    if (n < ONEDNN_TRANSCENDENTAL_THRESHOLD) {
         return false;  // Fall back to SIMD for small tensors
     }
 

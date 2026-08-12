@@ -135,7 +135,12 @@ TEST(ActivationDispatch, TanhF32MatchesStdTanhAcrossSizes) {
     // threshold, oneDNN's own "exact" tanh above it) -- this locks in that
     // BOTH paths produce the same values as std::tanh directly, at a size
     // that stays below the new threshold and one that crosses above it.
-    for (int64_t n : {int64_t{512}, int64_t{262144}}) {
+    // n=16384 is the size that actually exercises this task's change: it is
+    // below the old threshold (65536, so it used to run scalar std::tanh)
+    // but above the new ONEDNN_TRANSCENDENTAL_THRESHOLD (8192, so it now
+    // runs through oneDNN) -- 512 and 262144 alone would leave that band
+    // completely uncovered.
+    for (int64_t n : {int64_t{512}, int64_t{16384}, int64_t{262144}}) {
         std::vector<float> input_vec(static_cast<size_t>(n));
         for (int64_t i = 0; i < n; ++i) {
             input_vec[static_cast<size_t>(i)] = 0.02f * static_cast<float>((i * 53 + 3) % 97) - 1.0f;
@@ -161,7 +166,12 @@ TEST(ActivationDispatch, TanhF32MatchesStdTanhAcrossSizes) {
 }
 
 TEST(ActivationDispatch, GeluF32MatchesExactErfAcrossSizes) {
-    for (int64_t n : {int64_t{512}, int64_t{262144}}) {
+    // n=16384 sits between the old threshold (65536) and the new
+    // ONEDNN_TRANSCENDENTAL_THRESHOLD (8192) -- it is the size this task's
+    // change actually reroutes from scalar std::erf to oneDNN, so it must
+    // be covered here rather than just the always-scalar (512) and
+    // always-oneDNN (262144) sizes.
+    for (int64_t n : {int64_t{512}, int64_t{16384}, int64_t{262144}}) {
         std::vector<float> input_vec(static_cast<size_t>(n));
         for (int64_t i = 0; i < n; ++i) {
             input_vec[static_cast<size_t>(i)] = 0.02f * static_cast<float>((i * 59 + 13) % 89) - 0.9f;
