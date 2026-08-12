@@ -59,9 +59,11 @@ TEST(ActivationDispatch, ReluF32MatchesScalarReferenceAcrossSizes) {
     // Sizes chosen to cross every relevant boundary: below/above the old
     // ONEDNN_ACTIVATION_THRESHOLD (65536), the exact benchmark sizes that
     // showed the regression (32768, 262144, 2097152), and 8388608 -- which
-    // is genuinely `>` RELU_SIGMOID_OMP_THRESHOLD's measured 2097152 floor
-    // (the pragmas use strict `>`, so 2097152 itself never enters the
-    // parallel branch) and stays above that floor even after
+    // is above RELU_SIGMOID_OMP_THRESHOLD's measured 2097152 floor (the
+    // pragmas use `>=`, so 2097152 itself does enter the parallel branch --
+    // this was a real boundary bug with strict `>` that regressed exactly
+    // this size, fixed by switching to `>=`) and stays above that floor
+    // even after
     // OmpThresholds::simple()'s core-count scaling on any machine with a
     // sane core count, so this size actually exercises the multithreaded
     // SIMD loop rather than only the single-thread fallback.
@@ -114,8 +116,9 @@ TEST(ActivationDispatch, SigmoidF32MatchesFastMathReferenceAcrossSizes) {
     // this task's change) versus a size that was always above it (262144,
     // directly affected). If the values match at both sizes, dispatch
     // reordering did not change sigmoid's actual output. 4194304 is also
-    // included: it is genuinely `>` RELU_SIGMOID_OMP_THRESHOLD's measured
-    // 2097152 floor (pragmas use strict `>`), so on builds without oneDNN
+    // included: it is above RELU_SIGMOID_OMP_THRESHOLD's measured 2097152
+    // floor (pragmas use `>=`, so 2097152 itself is already included), so
+    // on builds without oneDNN
     // (TENZOR_USE_ONEDNN off) this exercises sigmoid_kernel's multithreaded
     // SIMD fallback loop; on oneDNN builds it still validates output
     // correctness at a size well above the F32 oneDNN gate (n>=131072).

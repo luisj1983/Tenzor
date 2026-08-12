@@ -103,6 +103,18 @@ inline int64_t relu_sigmoid_omp_threshold() {
 }
 #define RELU_SIGMOID_OMP_THRESHOLD (relu_sigmoid_omp_threshold())
 
+// Bug found via fresh benchmark re-run after this fix landed: every call site
+// below uses `>=`, not `>`. With `>`, n exactly equal to the threshold never
+// parallelizes -- and 2097152 is not just this constant's floor, it is also
+// literally 128*16384, one of the three sizes the CPU benchmark suite actually
+// exercises for ReLU. That one entry sat precisely on the excluded side of the
+// boundary and regressed to WORSE than before this whole fix (measured 9.98x
+// slower than PyTorch, vs 7.08x before any of this work started) even though
+// every other size improved -- purely because n never crossed a strict `>`
+// against its own exact value. Verified directly: n=2097152 (excluded) ran at
+// 0.356ms; n=2097153 (included) ran at 0.269ms, a genuine ~25% win from
+// crossing the threshold. `>=` closes this off; do not change back to `>`.
+
 // SIMD intrinsics
 #if defined(__AVX512F__)
 #include <immintrin.h>
@@ -372,7 +384,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         const size_t simd_end = (n / simd_width) * simd_width;
         __m512 zero = _mm512_setzero_ps();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __m512 result = _mm512_max_ps(x, zero);
@@ -386,7 +398,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         const size_t simd_end = (n / simd_width) * simd_width;
         __m256 zero = _mm256_setzero_ps();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 result = _mm256_max_ps(x, zero);
@@ -396,7 +408,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
             out_data[i] = std::max(0.0f, in_data[i]);
         }
 #else
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::max(0.0f, in_data[i]);
         }
@@ -478,7 +490,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         const size_t simd_end = (n / simd_width) * simd_width;
         __m512 zero = _mm512_setzero_ps();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __m512 grad_out = _mm512_loadu_ps(grad_out_data + i);
@@ -495,7 +507,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         const size_t simd_end = (n / simd_width) * simd_width;
         __m256 zero = _mm256_setzero_ps();
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 grad_out = _mm256_loadu_ps(grad_out_data + i);
@@ -508,7 +520,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : 0.0f);
         }
 #else
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : 0.0f);
         }
@@ -626,7 +638,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         const size_t simd_width = 16;
         const size_t simd_end = (n / simd_width) * simd_width;
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __m512 result = fast_math::sigmoid_avx512(x);
@@ -642,7 +654,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         const size_t simd_width = 8;
         const size_t simd_end = (n / simd_width) * simd_width;
 
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 result = fast_math::sigmoid_avx2(x);
@@ -655,7 +667,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
             out_data[i] = 1.0f / (1.0f + std::exp(-x));
         }
 #else
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
             out_data[i] = 1.0f / (1.0f + std::exp(-x));
@@ -743,7 +755,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
 
 #ifdef TENZOR_HAS_AVX512
         __m512 one = _mm512_set1_ps(1.0f);
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t ii = 0; ii < n / 16; ++ii) {
             size_t offset = ii * 16;
             __m512 x = _mm512_loadu_ps(in_data + offset);
@@ -759,7 +771,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
         }
 #elif defined(TENZOR_HAS_AVX2)
         __m256 one = _mm256_set1_ps(1.0f);
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t ii = 0; ii < n / 8; ++ii) {
             size_t offset = ii * 8;
             __m256 x = _mm256_loadu_ps(in_data + offset);
@@ -774,7 +786,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
             grad_in_data[j] = grad_out_data[j] * sigmoid_x * (1.0f - sigmoid_x);
         }
 #else
-        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > RELU_SIGMOID_OMP_THRESHOLD)
+        #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float sigmoid_x = 1.0f / (1.0f + std::exp(-in_data[i]));
             grad_in_data[i] = grad_out_data[i] * sigmoid_x * (1.0f - sigmoid_x);
