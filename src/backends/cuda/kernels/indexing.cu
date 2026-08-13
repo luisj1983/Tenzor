@@ -1926,6 +1926,26 @@ __global__ void embedding_kernel_impl(
         const bool copy = ok && !(padding_idx >= 0 && token_idx == padding_idx);
         T* dst = output + i * embedding_dim;
         const T* src = copy ? (weight + token_idx * embedding_dim) : nullptr;
+
+        // Vectorized float4 path: each row is embedding_dim*4 bytes, so a
+        // multiple-of-4 embedding_dim guarantees every row (both the output
+        // row and the gathered weight row) starts 16-byte aligned, since the
+        // underlying tensors are cudaMalloc'd (>=256-byte base alignment).
+        // Measured at ~74% of DRAM peak bandwidth before vectorizing (ncu);
+        // quartering the transaction count closes most of that gap, mirroring
+        // the same fix already applied to the BatchNorm/LayerNorm kernels.
+        if constexpr (std::is_same_v<T, float>) {
+            if (embedding_dim % 4 == 0) {
+                float4* dst4 = reinterpret_cast<float4*>(dst);
+                const float4* src4 = reinterpret_cast<const float4*>(src);
+                const int64_t dim4 = embedding_dim / 4;
+                const float4 zero4 = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (int64_t j = threadIdx.x; j < dim4; j += blockDim.x) {
+                    dst4[j] = copy ? src4[j] : zero4;
+                }
+                continue;
+            }
+        }
         for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
             dst[j] = copy ? src[j] : T{};
         }
@@ -1956,7 +1976,15 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     std::vector<int64_t> output_shape(idx_shape.begin(), idx_shape.end());
     output_shape.push_back(embedding_dim);
 
-    Tensor output(output_shape, weight_c.dtype(), weight_c.device());
+    // empty_uninitialized skips Tensor's default zero-init memset. Safe here:
+    // embedding_kernel_impl's gather loop writes every (i, j) output element
+    // unconditionally (padding_idx/OOB rows write a T{} zero value through
+    // the same store, not a skip), so the whole buffer is always fully
+    // overwritten. The default zero-init was pure waste -- measured via
+    // nsys at ~95% of this op's total memory-op time for a 50MB output
+    // (position-embedding-sized), since it zeros the full buffer right
+    // before unconditionally overwriting it.
+    Tensor output = Tensor::empty_uninitialized(output_shape, weight_c.dtype(), weight_c.device());
 
     if (num_indices == 0) return output;
 
@@ -1985,9 +2013,22 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     // Row-per-block launch: one block per index row, block sized to the
     // embedding dim (warp-rounded, capped at 256). Matches the gather kernel's
     // row-oriented loop and avoids wasting a 256-thread block on small dims.
+    //
+    // Float32 rows take a float4-vectorized fast path in the kernel when
+    // embedding_dim % 4 == 0 (see embedding_kernel_impl), processing
+    // embedding_dim/4 float4 elements per row instead of embedding_dim
+    // scalars. Sizing the block off the scalar embedding_dim in that case
+    // left dim - dim/4 threads permanently idle every pass -- e.g. 64 of
+    // 256 threads (75% utilization) for a 768-wide embedding -- which
+    // measurably hurt occupancy (94% -> 79% warps-active, measured via
+    // ncu). Sizing off the vectorized element count instead keeps every
+    // thread in the block doing useful work each pass.
     (void)total_elements;
+    const bool use_vec4_block = (weight_c.dtype() == DType::Float32) &&
+                                 (embedding_dim % 4 == 0);
+    const int64_t emb_block_dim = use_vec4_block ? (embedding_dim / 4) : embedding_dim;
     const int emb_block = static_cast<int>(
-        std::min<int64_t>(256, std::max<int64_t>(32, ((embedding_dim + 31) / 32) * 32)));
+        std::min<int64_t>(256, std::max<int64_t>(32, ((emb_block_dim + 31) / 32) * 32)));
     int emb_grid = static_cast<int>(std::min<int64_t>(num_indices, 2147483647LL));
     if (emb_grid < 1) emb_grid = 1;
 
@@ -2059,125 +2100,336 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
 }
 
 // ============================================================================
-// embedding_backward kernel (gradient accumulation)
+// embedding_backward: sorted/segmented (unique-index) kernels
 // ============================================================================
+//
+// Replaces a previous atomicAdd-scatter algorithm for the actual grad_weight
+// write. That algorithm needed a full [num_embeddings, embedding_dim] zero
+// memset before scattering (atomicAdd requires a zeroed destination), which
+// dominates runtime for large-vocab/low-coverage configs (the memset scales
+// with vocab size, not with how many rows are actually touched) -- see
+// perf investigation notes. The full-table zero-write itself is a bandwidth
+// floor no algorithm can avoid (every output row needs *some* value written,
+// real or zero), but the atomicAdd read-modify-write + separate memset pass
+// for TOUCHED rows is avoidable: sort (index, position) pairs so each
+// touched row's contributing grad_output rows become a contiguous segment,
+// then have each output-row block either sum its segment and write once
+// (no atomics) or write zero directly (untouched row) -- a single fused
+// pass over grad_weight instead of memset-then-scatter.
+//
+// Per-block binary search over `sorted_unique_keys` (size num_runs) finds
+// whether `row` has a segment; O(log num_runs) is cheap next to the
+// per-column work. Pathological case: an index repeated enormously many
+// times (e.g. a dominant padding token) serializes that one row's column
+// loop over its whole segment -- acceptable for realistic NLP-style index
+// distributions, not attempted to be parallelized further here.
 
-// Row-oriented backward: one block per index row, threads stride over
-// embedding_dim. This eliminates the per-element int64 div/mod of the old
-// element-parallel kernel (which dominated runtime), keeps grad_output reads
-// and grad_weight atomics fully coalesced, and computes each row's base
-// offsets once. atomicAdd handles overlapping (repeated) indices.
-template<typename T, typename IndexT>
-__global__ void embedding_backward_kernel_impl(
-    const T* grad_output,      // [*, embedding_dim]
-    const IndexT* indices,     // [*]
-    T* grad_weight,            // [num_embeddings, embedding_dim]
-    int64_t num_indices,
+template<typename T, typename IdxT>
+__global__ void embedding_backward_sorted_kernel(
+    const T* __restrict__ grad_output,           // [num_indices, embedding_dim]
+    const IdxT* __restrict__ sorted_unique_keys,  // [num_runs]
+    const int64_t* __restrict__ offsets,          // [num_runs], exclusive prefix sum of counts
+    const int64_t* __restrict__ counts,           // [num_runs]
+    const int64_t* __restrict__ sorted_positions, // [num_indices], original grad_output row per sorted slot
+    T* __restrict__ grad_weight,                  // [num_embeddings, embedding_dim]
+    int64_t num_runs,
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
-        int64_t token_idx = static_cast<int64_t>(indices[i]);
-        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
-        if (token_idx < 0 || token_idx >= num_embeddings) continue;
-        const T* go = grad_output + i * embedding_dim;
-        T* gw = grad_weight + token_idx * embedding_dim;
-        for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
-            atomicAdd(&gw[j], go[j]);
+    for (int64_t row = blockIdx.x; row < num_embeddings; row += gridDim.x) {
+        __shared__ int64_t seg_idx_shared;
+        if (threadIdx.x == 0) {
+            int64_t lo = 0, hi = num_runs - 1, found = -1;
+            while (lo <= hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                int64_t v = static_cast<int64_t>(sorted_unique_keys[mid]);
+                if (v == row) { found = mid; break; }
+                else if (v < row) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            seg_idx_shared = found;
         }
+        __syncthreads();
+        const int64_t seg_idx = seg_idx_shared;
+        T* gw = grad_weight + row * embedding_dim;
+
+        if (seg_idx < 0) {
+            if constexpr (std::is_same_v<T, float>) {
+                if (embedding_dim % 4 == 0) {
+                    float4* gw4 = reinterpret_cast<float4*>(gw);
+                    const int64_t dim4 = embedding_dim / 4;
+                    const float4 zero4 = make_float4(0.f, 0.f, 0.f, 0.f);
+                    for (int64_t j = threadIdx.x; j < dim4; j += blockDim.x) gw4[j] = zero4;
+                    __syncthreads();
+                    continue;
+                }
+            }
+            for (int64_t d = threadIdx.x; d < embedding_dim; d += blockDim.x) gw[d] = T(0);
+            __syncthreads();
+            continue;
+        }
+
+        const int64_t start = offsets[seg_idx];
+        const int64_t cnt = counts[seg_idx];
+
+        if constexpr (std::is_same_v<T, float>) {
+            if (embedding_dim % 4 == 0) {
+                float4* gw4 = reinterpret_cast<float4*>(gw);
+                const int64_t dim4 = embedding_dim / 4;
+                for (int64_t j = threadIdx.x; j < dim4; j += blockDim.x) {
+                    float4 sum = make_float4(0.f, 0.f, 0.f, 0.f);
+                    for (int64_t k = 0; k < cnt; ++k) {
+                        const int64_t orig_row = sorted_positions[start + k];
+                        const float4 g = reinterpret_cast<const float4*>(
+                            grad_output + orig_row * embedding_dim)[j];
+                        sum.x += g.x; sum.y += g.y; sum.z += g.z; sum.w += g.w;
+                    }
+                    gw4[j] = sum;
+                }
+                __syncthreads();
+                continue;
+            }
+        }
+        for (int64_t d = threadIdx.x; d < embedding_dim; d += blockDim.x) {
+            T sum = T(0);
+            for (int64_t k = 0; k < cnt; ++k) {
+                const int64_t orig_row = sorted_positions[start + k];
+                sum += grad_output[orig_row * embedding_dim + d];
+            }
+            gw[d] = sum;
+        }
+        __syncthreads();
     }
 }
 
-// Separate FP16 backward kernel (cannot partially specialize function templates)
-template<typename IndexT>
-__global__ void embedding_backward_fp16_kernel_impl(
-    const __half* grad_output,
-    const IndexT* indices,
-    __half* grad_weight,
-    int64_t num_indices,
-    int64_t embedding_dim,
-    int64_t num_embeddings) {
-
-    for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
-        int64_t token_idx = static_cast<int64_t>(indices[i]);
-        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
-        if (token_idx < 0 || token_idx >= num_embeddings) continue;
-        const __half* go = grad_output + i * embedding_dim;
-        for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
-            int64_t flat = token_idx * embedding_dim + j;
-#if __CUDA_ARCH__ >= 700
-            atomicAdd(&grad_weight[flat], go[j]);
-#else
-            // Fallback for older architectures: compare-and-swap based atomic add.
-            // The 32-bit CAS touches two packed halves; pick a 4-byte-aligned
-            // window that stays in bounds so the partner half is never OOB.
-            float val = __half2float(go[j]);
-            const int64_t total = num_embeddings * embedding_dim;
-            int64_t base = flat & ~1;            // word covers [base, base+1]
-            int lane = static_cast<int>(flat & 1);
-            if (base + 1 >= total && base >= 1) {
-                base -= 1;                       // slide window down; our half is high
-                lane = 1;
-            }
-            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[base]);
-            unsigned int old_val, new_val;
-            do {
-                old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
-                __half* h = reinterpret_cast<__half*>(&old_val);
-                // W.7: NaN-preserving conversion.
-                __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[lane]) + val);
-                new_val = old_val;
-                reinterpret_cast<__half*>(&new_val)[lane] = result;
-            } while (atomicCAS(addr, old_val, new_val) != old_val);
-#endif
+// FP16/BF16: accumulate in float (the old atomicAdd path accumulated
+// natively in half precision on SM>=70/80; summing in float here is strictly
+// more precise, not a regression, matching the project's established
+// widen-accumulate-narrow pattern).
+template<typename HalfT, typename ToFloat, typename FromFloat>
+__device__ __forceinline__ void embedding_backward_sorted_half_row(
+    const HalfT* __restrict__ grad_output,
+    const int64_t* __restrict__ sorted_positions,
+    HalfT* __restrict__ gw,
+    int64_t start, int64_t cnt, int64_t embedding_dim,
+    ToFloat to_f, FromFloat from_f) {
+    for (int64_t d = threadIdx.x; d < embedding_dim; d += blockDim.x) {
+        float sum = 0.f;
+        for (int64_t k = 0; k < cnt; ++k) {
+            const int64_t orig_row = sorted_positions[start + k];
+            sum += to_f(grad_output[orig_row * embedding_dim + d]);
         }
+        gw[d] = from_f(sum);
     }
 }
 
-// Separate BF16 backward kernel — atomicAdd(__nv_bfloat16) requires SM >= 80
-template<typename IndexT>
-__global__ void embedding_backward_bf16_kernel_impl(
-    const __nv_bfloat16* grad_output,
-    const IndexT* indices,
-    __nv_bfloat16* grad_weight,
-    int64_t num_indices,
+template<typename IdxT>
+__global__ void embedding_backward_sorted_fp16_kernel(
+    const __half* __restrict__ grad_output,
+    const IdxT* __restrict__ sorted_unique_keys,
+    const int64_t* __restrict__ offsets,
+    const int64_t* __restrict__ counts,
+    const int64_t* __restrict__ sorted_positions,
+    __half* __restrict__ grad_weight,
+    int64_t num_runs,
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
-        int64_t token_idx = static_cast<int64_t>(indices[i]);
-        // Negative indices are OUT OF RANGE, not wrapped (see forward kernel above).
-        if (token_idx < 0 || token_idx >= num_embeddings) continue;
-        const __nv_bfloat16* go = grad_output + i * embedding_dim;
-        for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
-            int64_t flat = token_idx * embedding_dim + j;
-#if __CUDA_ARCH__ >= 800
-            atomicAdd(&grad_weight[flat], go[j]);
-#else
-            // Fallback for SM < 80: CAS-based atomic add via float conversion.
-            // The 32-bit CAS touches two packed halves; pick a 4-byte-aligned
-            // window that stays in bounds so the partner half is never OOB.
-            float val = __bfloat162float(go[j]);
-            const int64_t total = num_embeddings * embedding_dim;
-            int64_t base = flat & ~1;            // word covers [base, base+1]
-            int lane = static_cast<int>(flat & 1);
-            if (base + 1 >= total && base >= 1) {
-                base -= 1;                       // slide window down; our half is high
-                lane = 1;
+    for (int64_t row = blockIdx.x; row < num_embeddings; row += gridDim.x) {
+        __shared__ int64_t seg_idx_shared;
+        if (threadIdx.x == 0) {
+            int64_t lo = 0, hi = num_runs - 1, found = -1;
+            while (lo <= hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                int64_t v = static_cast<int64_t>(sorted_unique_keys[mid]);
+                if (v == row) { found = mid; break; }
+                else if (v < row) lo = mid + 1;
+                else hi = mid - 1;
             }
-            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[base]);
-            unsigned int old_val, new_val;
-            do {
-                old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read (avoids data race)
-                __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
-                // W.7: NaN-preserving conversion.
-                __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[lane]) + val);
-                new_val = old_val;
-                reinterpret_cast<__nv_bfloat16*>(&new_val)[lane] = result;
-            } while (atomicCAS(addr, old_val, new_val) != old_val);
-#endif
+            seg_idx_shared = found;
         }
+        __syncthreads();
+        const int64_t seg_idx = seg_idx_shared;
+        __half* gw = grad_weight + row * embedding_dim;
+
+        if (seg_idx < 0) {
+            for (int64_t d = threadIdx.x; d < embedding_dim; d += blockDim.x) gw[d] = __float2half(0.f);
+            __syncthreads();
+            continue;
+        }
+        embedding_backward_sorted_half_row(
+            grad_output, sorted_positions, gw, offsets[seg_idx], counts[seg_idx], embedding_dim,
+            [] __device__ (__half h) { return __half2float(h); },
+            [] __device__ (float f) { return __float2half(f); });
+        __syncthreads();
     }
+}
+
+template<typename IdxT>
+__global__ void embedding_backward_sorted_bf16_kernel(
+    const __nv_bfloat16* __restrict__ grad_output,
+    const IdxT* __restrict__ sorted_unique_keys,
+    const int64_t* __restrict__ offsets,
+    const int64_t* __restrict__ counts,
+    const int64_t* __restrict__ sorted_positions,
+    __nv_bfloat16* __restrict__ grad_weight,
+    int64_t num_runs,
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
+
+    for (int64_t row = blockIdx.x; row < num_embeddings; row += gridDim.x) {
+        __shared__ int64_t seg_idx_shared;
+        if (threadIdx.x == 0) {
+            int64_t lo = 0, hi = num_runs - 1, found = -1;
+            while (lo <= hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                int64_t v = static_cast<int64_t>(sorted_unique_keys[mid]);
+                if (v == row) { found = mid; break; }
+                else if (v < row) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            seg_idx_shared = found;
+        }
+        __syncthreads();
+        const int64_t seg_idx = seg_idx_shared;
+        __nv_bfloat16* gw = grad_weight + row * embedding_dim;
+
+        if (seg_idx < 0) {
+            for (int64_t d = threadIdx.x; d < embedding_dim; d += blockDim.x) gw[d] = __float2bfloat16(0.f);
+            __syncthreads();
+            continue;
+        }
+        embedding_backward_sorted_half_row(
+            grad_output, sorted_positions, gw, offsets[seg_idx], counts[seg_idx], embedding_dim,
+            [] __device__ (__nv_bfloat16 h) { return __bfloat162float(h); },
+            [] __device__ (float f) { return __float2bfloat16(f); });
+        __syncthreads();
+    }
+}
+
+__global__ void embedding_backward_iota_kernel(int64_t* out, int64_t n) {
+    for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
+         i += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        out[i] = i;
+    }
+}
+
+// Sorts (index, position) pairs, run-length-encodes to find each unique
+// index's contiguous segment, computes segment offsets via exclusive
+// prefix sum, then launches the fused write kernel (one pass over the
+// full grad_weight, no separate memset, no atomics). Templated on the
+// index dtype (int32_t/int64_t) since CUB's radix sort is keyed on it.
+template<typename IdxT>
+static void embedding_backward_sorted_dispatch(const Tensor& grad_output, const Tensor& indices,
+                                                Tensor& grad_weight, int64_t num_indices,
+                                                int64_t embedding_dim, int64_t num_embeddings,
+                                                cudaStream_t stream) {
+    backend::CachedMemoryGuard d_positions_guard(num_indices * sizeof(int64_t));
+    auto* d_positions = static_cast<int64_t*>(d_positions_guard.get());
+    {
+        constexpr int kIotaBlock = 256;
+        int64_t blocks64 = (num_indices + kIotaBlock - 1) / kIotaBlock;
+        int iota_blocks = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(blocks64, 2147483647LL)));
+        embedding_backward_iota_kernel<<<iota_blocks, kIotaBlock, 0, stream>>>(d_positions, num_indices);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // Sort (index, position) pairs by index -- occurrences of the same
+    // index become a contiguous run in the sorted arrays.
+    backend::CachedMemoryGuard d_sorted_keys_guard(num_indices * sizeof(IdxT));
+    auto* d_sorted_keys = static_cast<IdxT*>(d_sorted_keys_guard.get());
+    backend::CachedMemoryGuard d_sorted_positions_guard(num_indices * sizeof(int64_t));
+    auto* d_sorted_positions = static_cast<int64_t*>(d_sorted_positions_guard.get());
+    const IdxT* d_keys_in = indices.data<IdxT>();
+
+    {
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        cub::DeviceRadixSort::SortPairs(d_temp, temp_bytes,
+            d_keys_in, d_sorted_keys, d_positions, d_sorted_positions,
+            num_indices, 0, static_cast<int>(sizeof(IdxT) * 8), stream);
+        backend::CachedMemoryGuard d_temp_guard(temp_bytes);
+        d_temp = d_temp_guard.get();
+        cub::DeviceRadixSort::SortPairs(d_temp, temp_bytes,
+            d_keys_in, d_sorted_keys, d_positions, d_sorted_positions,
+            num_indices, 0, static_cast<int>(sizeof(IdxT) * 8), stream);
+    }
+
+    // Run-length-encode the sorted keys: unique index values + how many
+    // sorted slots (a contiguous run) each one occupies.
+    backend::CachedMemoryGuard d_unique_keys_guard(num_indices * sizeof(IdxT));
+    auto* d_unique_keys = static_cast<IdxT*>(d_unique_keys_guard.get());
+    backend::CachedMemoryGuard d_counts_guard(num_indices * sizeof(int64_t));
+    auto* d_counts = static_cast<int64_t*>(d_counts_guard.get());
+    backend::CachedMemoryGuard d_num_runs_guard(sizeof(int64_t));
+    auto* d_num_runs = static_cast<int64_t*>(d_num_runs_guard.get());
+
+    {
+        void* d_temp2 = nullptr;
+        size_t temp_bytes2 = 0;
+        cub::DeviceRunLengthEncode::Encode(d_temp2, temp_bytes2,
+            d_sorted_keys, d_unique_keys, d_counts, d_num_runs, num_indices, stream);
+        backend::CachedMemoryGuard d_temp2_guard(temp_bytes2);
+        d_temp2 = d_temp2_guard.get();
+        cub::DeviceRunLengthEncode::Encode(d_temp2, temp_bytes2,
+            d_sorted_keys, d_unique_keys, d_counts, d_num_runs, num_indices, stream);
+    }
+
+    int64_t num_runs = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&num_runs, d_num_runs, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Exclusive prefix sum of run lengths -> each segment's starting slot
+    // in the sorted arrays.
+    backend::CachedMemoryGuard d_offsets_guard(std::max<int64_t>(num_runs, 1) * sizeof(int64_t));
+    auto* d_offsets = static_cast<int64_t*>(d_offsets_guard.get());
+    if (num_runs > 0) {
+        void* d_temp3 = nullptr;
+        size_t temp_bytes3 = 0;
+        cub::DeviceScan::ExclusiveSum(d_temp3, temp_bytes3, d_counts, d_offsets, num_runs, stream);
+        backend::CachedMemoryGuard d_temp3_guard(temp_bytes3);
+        d_temp3 = d_temp3_guard.get();
+        cub::DeviceScan::ExclusiveSum(d_temp3, temp_bytes3, d_counts, d_offsets, num_runs, stream);
+    }
+
+    // Same vec4 block-sizing rationale as the old atomicAdd path's
+    // use_vec4_block: size the block off embedding_dim/4 (not embedding_dim)
+    // when the Float32 vec4 fast path is active, so no threads sit idle.
+    const bool use_vec4_block = (grad_output.dtype() == DType::Float32) && (embedding_dim % 4 == 0);
+    const int64_t block_dim = use_vec4_block ? (embedding_dim / 4) : embedding_dim;
+    const int block_size = static_cast<int>(
+        std::min<int64_t>(256, std::max<int64_t>(32, ((block_dim + 31) / 32) * 32)));
+    // One block per grad_weight row; grid-stride in the kernel covers any
+    // num_embeddings beyond the launched grid.
+    const int num_blocks = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(num_embeddings, 2147483647LL)));
+
+    switch (grad_output.dtype()) {
+        case DType::Float32:
+            embedding_backward_sorted_kernel<float, IdxT><<<num_blocks, block_size, 0, stream>>>(
+                grad_output.data<float>(), d_unique_keys, d_offsets, d_counts, d_sorted_positions,
+                grad_weight.data<float>(), num_runs, embedding_dim, num_embeddings);
+            break;
+        case DType::Float64:
+            embedding_backward_sorted_kernel<double, IdxT><<<num_blocks, block_size, 0, stream>>>(
+                grad_output.data<double>(), d_unique_keys, d_offsets, d_counts, d_sorted_positions,
+                grad_weight.data<double>(), num_runs, embedding_dim, num_embeddings);
+            break;
+        case DType::Float16:
+            embedding_backward_sorted_fp16_kernel<IdxT><<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const __half*>(grad_output.data_ptr()), d_unique_keys, d_offsets, d_counts,
+                d_sorted_positions, reinterpret_cast<__half*>(grad_weight.data_ptr()),
+                num_runs, embedding_dim, num_embeddings);
+            break;
+        case DType::BFloat16:
+            embedding_backward_sorted_bf16_kernel<IdxT><<<num_blocks, block_size, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()), d_unique_keys, d_offsets, d_counts,
+                d_sorted_positions, reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
+                num_runs, embedding_dim, num_embeddings);
+            break;
+        default:
+            throw std::runtime_error("embedding_backward: unsupported dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
@@ -2190,23 +2442,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     int64_t embedding_dim = grad_shape[grad_shape.size() - 1];
     int64_t num_indices = indices.numel();
 
-    // Create zero-initialized gradient weight tensor
     std::vector<int64_t> grad_weight_shape = {num_embeddings, embedding_dim};
-    Tensor grad_weight(grad_weight_shape, grad_output.dtype(), grad_output.device());
-
-    // Zero initialize
-    cudaMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * dtype_size(grad_output.dtype()), stream);
-
-    if (num_indices == 0) return grad_weight;
-
-    // Row-per-block launch: one block per index row, block sized to the
-    // embedding dim (warp-rounded, capped at 256) so small dims don't waste a
-    // full 256-thread block, and the grid spans the index rows (grid-stride
-    // covers any overflow).
-    int block_size = static_cast<int>(
-        std::min<int64_t>(256, std::max<int64_t>(32, ((embedding_dim + 31) / 32) * 32)));
-    int num_blocks = static_cast<int>(std::min<int64_t>(num_indices, 2147483647LL));
-    if (num_blocks < 1) num_blocks = 1;
 
     bool idx_is_int32 = (indices.dtype() == DType::Int32);
     bool idx_is_int64 = (indices.dtype() == DType::Int64);
@@ -2214,55 +2450,31 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         throw std::invalid_argument("embedding_backward: indices must be Int32 or Int64");
     }
 
-    #define LAUNCH_EMBEDDING_BWD(T) \
-        if (idx_is_int32) \
-            embedding_backward_kernel_impl<T, int32_t><<<num_blocks, block_size, 0, stream>>>( \
-                grad_output.data<T>(), indices.data<int32_t>(), grad_weight.data<T>(), \
-                num_indices, embedding_dim, num_embeddings); \
-        else \
-            embedding_backward_kernel_impl<T, int64_t><<<num_blocks, block_size, 0, stream>>>( \
-                grad_output.data<T>(), indices.data<int64_t>(), grad_weight.data<T>(), \
-                num_indices, embedding_dim, num_embeddings); \
-        CUDA_CHECK(cudaGetLastError())
-
-    switch (grad_output.dtype()) {
-        case DType::Float32: LAUNCH_EMBEDDING_BWD(float); break;
-        case DType::Float64: LAUNCH_EMBEDDING_BWD(double); break;
-        case DType::Float16:
-            if (idx_is_int32)
-                embedding_backward_fp16_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
-                    reinterpret_cast<const __half*>(grad_output.data_ptr()),
-                    indices.data<int32_t>(),
-                    reinterpret_cast<__half*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings);
-            else
-                embedding_backward_fp16_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
-                    reinterpret_cast<const __half*>(grad_output.data_ptr()),
-                    indices.data<int64_t>(),
-                    reinterpret_cast<__half*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings);
-            CUDA_CHECK(cudaGetLastError());
-            break;
-        case DType::BFloat16:
-            if (idx_is_int32)
-                embedding_backward_bf16_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
-                    reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
-                    indices.data<int32_t>(),
-                    reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings);
-            else
-                embedding_backward_bf16_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
-                    reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
-                    indices.data<int64_t>(),
-                    reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings);
-            CUDA_CHECK(cudaGetLastError());
-            break;
-        default:
-            throw std::runtime_error("embedding_backward: unsupported dtype");
+    if (num_indices == 0) {
+        // No contributions at all -- every row is genuinely all-zero.
+        return Tensor(grad_weight_shape, grad_output.dtype(), grad_output.device());
     }
 
-    #undef LAUNCH_EMBEDDING_BWD
+    // The row-index kernels below read raw linear offsets, so both operands
+    // must be contiguous (mirrors the forward gather kernel's guard).
+    Tensor grad_output_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+    Tensor indices_c = indices.is_contiguous() ? indices : indices.contiguous();
+
+    // Every row of grad_weight is written unconditionally by the fused
+    // sorted-segment kernel dispatched below (each row either sums its
+    // segment or writes zero directly), so no upfront zero-init memset is
+    // needed -- see the perf-investigation comment above
+    // embedding_backward_sorted_kernel for why this replaced the previous
+    // memset-then-atomicAdd-scatter algorithm.
+    Tensor grad_weight = Tensor::empty_uninitialized(grad_weight_shape, grad_output.dtype(), grad_output.device());
+
+    if (idx_is_int32) {
+        embedding_backward_sorted_dispatch<int32_t>(grad_output_c, indices_c, grad_weight,
+                                                     num_indices, embedding_dim, num_embeddings, stream);
+    } else {
+        embedding_backward_sorted_dispatch<int64_t>(grad_output_c, indices_c, grad_weight,
+                                                     num_indices, embedding_dim, num_embeddings, stream);
+    }
 
     CUDA_CHECK(cudaGetLastError());
     return grad_weight;

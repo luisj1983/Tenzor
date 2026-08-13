@@ -76,6 +76,14 @@ target_include_directories(tenzor_backend_cpu PRIVATE
 # Link against core library
 target_link_libraries(tenzor_backend_cpu PRIVATE
     tenzor_core
+    # spdlog is only linked PRIVATE to tenzor_core (kept out of the exported
+    # TenzorConfig), but include/tenzor/utils/log.hpp is a public header that
+    # #includes <spdlog/spdlog.h> directly and is pulled in transitively by
+    # utils/logging.hpp, which this backend's sources include. Without this,
+    # a FetchContent'd spdlog (no system package found) builds headers into a
+    # non-default include path and every TU here fails with
+    # "spdlog/spdlog.h: No such file or directory".
+    spdlog::spdlog
 )
 
 # Link OpenMP if available

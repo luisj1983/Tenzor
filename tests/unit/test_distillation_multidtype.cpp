@@ -136,7 +136,10 @@ protected:
     }
 
     float sum_tolerance() const {
-        if (dtype() == DType::Float16) return 1e-2f;
+        // BFloat16 has fewer mantissa bits (7) than Float16 (10), so it
+        // needs at least as loose a tolerance -- it was previously falling
+        // through to the Float32-tight 1e-4f branch below.
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) return 1e-2f;
         if (dtype() == DType::Float64) return 1e-9f;
         return 1e-4f;
     }

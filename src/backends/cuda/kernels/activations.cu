@@ -1999,7 +1999,7 @@ auto relu_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;  // Handle empty tensors
@@ -2076,7 +2076,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -2161,7 +2161,7 @@ auto sigmoid_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2237,7 +2237,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2314,7 +2314,7 @@ auto swish_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2389,7 +2389,7 @@ auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_ra
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2467,7 +2467,7 @@ auto tanh_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2542,7 +2542,7 @@ auto tanh_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2619,7 +2619,7 @@ auto gelu_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2694,7 +2694,7 @@ auto gelu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2771,7 +2771,7 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha, cudaStream_t strea
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         return result;
@@ -2844,7 +2844,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -2922,7 +2922,7 @@ auto elu_kernel(const Tensor& input_raw, float alpha, cudaStream_t stream) -> Te
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -2969,7 +2969,7 @@ auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw,
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3017,7 +3017,7 @@ auto selu_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3066,7 +3066,7 @@ auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3114,7 +3114,7 @@ auto mish_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3163,7 +3163,7 @@ auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3211,7 +3211,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold, cudaS
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3258,7 +3258,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (n == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3304,18 +3304,13 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
 // Softmax wrapper
 auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
-
-    // Initialize result to zero
-    if (input.dtype() == DType::Float32) {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(float), stream));
-    } else if (input.dtype() == DType::Float64) {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(double), stream));
-    } else if (input.dtype() == DType::Float16) {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(__half), stream));
-    } else if (input.dtype() == DType::BFloat16) {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(__nv_bfloat16), stream));
-    }
+    // Every element of `result` is written unconditionally by the softmax
+    // kernel below (softmax_grid_blocks(batch_size) covers every row, and
+    // each row's dim_size elements are all written), so the zero-init here
+    // was doubly wasteful: Tensor's own default zero_init=true PLUS this
+    // now-removed explicit memset. Same fix as elsewhere this session
+    // (LayerNorm/RMSNorm/BatchNorm/Embedding/MatMul).
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (input.numel() == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3475,7 +3470,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 // Log Softmax wrapper
 auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
 
     if (input.numel() == 0) {
         // NOTE: Removed sync - no operations for empty tensors
@@ -3755,7 +3750,7 @@ auto hardswish_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
     if (n == 0) return result;
     int num_blocks = get_num_blocks(n);
     if (input.dtype() == DType::Float32) {
@@ -3783,7 +3778,7 @@ auto hardsigmoid_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor 
     auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
-    Tensor result(shape, input.dtype(), input.device());
+    Tensor result = Tensor::empty_uninitialized(shape, input.dtype(), input.device());
     if (n == 0) return result;
     int num_blocks = get_num_blocks(n);
     if (input.dtype() == DType::Float32) {

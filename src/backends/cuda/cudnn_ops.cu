@@ -4046,9 +4046,17 @@ auto cudnn_layer_norm_forward(
             "cudnn_layer_norm_forward: normalized row count exceeds INT_MAX");
     }
 
-    // Create output tensors
+    // Create output tensors. empty_uninitialized skips Tensor's default
+    // zero-init memset: the LayerNorm kernels below write every output
+    // element unconditionally (the normalize pass covers the full row via
+    // its vec4+remainder loops) and every mean/inv_std slot exactly once
+    // (thread 0 of each row's block), so the whole buffer is always fully
+    // overwritten -- the zero-init was pure waste. Mirrors the same fix
+    // applied to embedding_kernel (see its comment for the measured impact:
+    // ~95% of that op's memory-op time was this exact wasted memset).
     auto shape = input.shape();
-    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+    Tensor output = Tensor::empty_uninitialized(
+        std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
     // M4: mean/inv_std are always saved at Float32, even for F16/BF16 input —
     // narrowing them to the input's half-precision dtype risks rstd
     // overflowing FP16's max (65504) when variance is tiny, saturating to
@@ -4057,8 +4065,8 @@ auto cudnn_layer_norm_forward(
     const bool narrow_stats =
         (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
     const DType stats_dtype = narrow_stats ? DType::Float32 : input.dtype();
-    Tensor mean_tensor({batch_size}, stats_dtype, input.device());
-    Tensor inv_std_tensor({batch_size}, stats_dtype, input.device());
+    Tensor mean_tensor = Tensor::empty_uninitialized({batch_size}, stats_dtype, input.device());
+    Tensor inv_std_tensor = Tensor::empty_uninitialized({batch_size}, stats_dtype, input.device());
 
     // Ensure tensors are contiguous
     Tensor input_c = input.is_contiguous() ? input : input.contiguous();

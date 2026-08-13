@@ -1619,10 +1619,29 @@ auto scaled_dot_product_attention(
     // transpose, scale, and mask additions. Previously these wrapped raw
     // tensor results which silently severed the autograd chain.
     auto kt = ::tenzor::transpose(key, -2, -1);
-    auto scores = tenzor::matmul(query, kt);
-    Variable scale_var(::tenzor::full({1}, scale,
-                                       scores.tensor().dtype(), scores.tensor().device()), false);
-    auto scaled = scores * scale_var;
+    // Fold the 1/sqrt(d_k) scale into the QK^T GEMM's alpha parameter via
+    // baddbmm (beta=0) instead of a separate elementwise multiply kernel.
+    // Profiling (CUDA, Float32, seq=128) showed the standalone scale
+    // multiply (a general broadcast_kernel) was the single largest kernel in
+    // this manual-attention path -- ~30% of wall time, larger than either
+    // GEMM. baddbmm requires 3D batch tensors, so collapse the leading batch
+    // dims and restore them after.
+    auto q_shape = query.shape();
+    int64_t L = q_shape[q_shape.size() - 2];
+    int64_t E = q_shape.back();
+    int64_t S = kt.shape().back();
+    std::vector<int64_t> batch_dims(q_shape.begin(), q_shape.end() - 2);
+    int64_t batch_flat = 1;
+    for (auto d : batch_dims) batch_flat *= d;
+
+    Variable q3 = ::tenzor::reshape(query, std::vector<int64_t>{batch_flat, L, E});
+    Variable kt3 = ::tenzor::reshape(kt, std::vector<int64_t>{batch_flat, E, S});
+    Variable zero_var(::tenzor::zeros({1}, query.tensor().dtype(), query.tensor().device()), false);
+    Variable scaled3 = ::tenzor::baddbmm(zero_var, q3, kt3, /*beta=*/0.0, /*alpha=*/static_cast<double>(scale));
+    std::vector<int64_t> scores_shape = batch_dims;
+    scores_shape.push_back(L);
+    scores_shape.push_back(S);
+    auto scaled = ::tenzor::reshape(scaled3, scores_shape);
 
     // Causal mask: use triu to build mask on-device (no CPU fallback).
     // Build the additive sentinel with a large-negative value that is

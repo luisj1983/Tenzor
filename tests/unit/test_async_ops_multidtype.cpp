@@ -172,8 +172,15 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncTanhCorrectness) {
     const float* e = expected_cpu.data<float>();
 
     for (int64_t i = 0; i < result.numel(); ++i) {
-        EXPECT_GT(r[i], -1.0f);
-        EXPECT_LT(r[i], 1.0f);
+        // >= / <= rather than strict >/<: tanh's true range is the open
+        // interval (-1, 1), but at low mantissa precision (BFloat16 in
+        // particular, 7 bits) a large-|x| input's true near-saturated value
+        // can round to exactly +/-1.0 -- a legitimate representable output
+        // at that precision, not a bug (both async and sync compute the
+        // same dtype-correct saturation, so this doesn't weaken the
+        // async-vs-sync equivalence check below).
+        EXPECT_GE(r[i], -1.0f);
+        EXPECT_LE(r[i], 1.0f);
         EXPECT_NEAR(r[i], e[i], atol());
     }
 }

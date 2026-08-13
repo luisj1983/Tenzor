@@ -489,6 +489,45 @@ __global__ void batchnorm_forward_affine_vec4_inline_kernel(
     }
 }
 
+// Fast path for the common case where HW % 4 == 0 (true for e.g. 28x28, 14x14,
+// but not 7x7): every float4 group then lies entirely within one channel, so
+// mean/variance/gamma/beta and rsqrtf need to be resolved and computed once
+// per vector instead of once per lane. The generic vec4_inline kernel above
+// pays for 4x the global loads and 4x the rsqrtf calls unconditionally, which
+// was found (ResNet stage2/3 eval BatchNorm ~1.8x slower than cuDNN) to be
+// the dominant per-call overhead at these small-tensor sizes.
+__global__ void batchnorm_forward_affine_vec4_uniform_kernel(
+    const float4* __restrict__ input,
+    float4* __restrict__ output,
+    const float* __restrict__ mean,
+    const float* __restrict__ variance,
+    const float* __restrict__ gamma,
+    const float* __restrict__ beta,
+    float epsilon,
+    int64_t total_vec4,
+    int64_t C,
+    int64_t HW_vec4) {
+
+    const int64_t grid_stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total_vec4; idx += grid_stride) {
+        int64_t c = (idx / HW_vec4) % C;
+
+        float m = mean[c];
+        float invstd = rsqrtf(variance[c] + epsilon);
+        float scale = gamma[c] * invstd;
+        float bias = __fmaf_rn(-m, scale, beta[c]);
+
+        float4 in = input[idx];
+        float4 out;
+        out.x = __fmaf_rn(in.x, scale, bias);
+        out.y = __fmaf_rn(in.y, scale, bias);
+        out.z = __fmaf_rn(in.z, scale, bias);
+        out.w = __fmaf_rn(in.w, scale, bias);
+        output[idx] = out;
+    }
+}
+
 // ============================================================================
 // BatchNorm2d Running Statistics Update Kernel
 // ============================================================================
@@ -976,7 +1015,11 @@ auto batchnorm2d_forward_affine_optimized(const Tensor& input_orig,
     }
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    Tensor output(shape_vec, input.dtype(), input.device());
+    // empty_uninitialized: every element of output is written unconditionally
+    // by the affine kernels below (parallel/vec4 paths both cover the full
+    // total_size range), so the default zero-init memset was pure waste --
+    // same fix as embedding_kernel/cudnn_layer_norm_forward/fused_rms_norm_cuda.
+    Tensor output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
 
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -992,15 +1035,28 @@ auto batchnorm2d_forward_affine_optimized(const Tensor& input_orig,
                              (reinterpret_cast<uintptr_t>(output.data<float>()) % 16 == 0);
 
         if (can_vectorize && total_size >= 1024) {
-            // Use vectorized kernel for large tensors
+            // Use vectorized kernel for large tensors. When HW is itself a
+            // multiple of 4, every float4 group falls entirely within one
+            // channel (channel boundaries land on vec4 boundaries), so the
+            // uniform-channel kernel resolves mean/variance/gamma/beta and
+            // rsqrtf once per vector instead of once per lane.
             int64_t total_vec4 = total_size / 4;
             int vec_blocks = get_num_blocks(total_vec4);
-            batchnorm_forward_affine_vec4_inline_kernel<<<vec_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const float4*>(input.data<float>()),
-                reinterpret_cast<float4*>(output.data<float>()),
-                mean.data<float>(), variance.data<float>(),
-                gamma.data<float>(), beta.data<float>(),
-                epsilon, total_vec4, C, HW);
+            if (HW % 4 == 0) {
+                batchnorm_forward_affine_vec4_uniform_kernel<<<vec_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input.data<float>()),
+                    reinterpret_cast<float4*>(output.data<float>()),
+                    mean.data<float>(), variance.data<float>(),
+                    gamma.data<float>(), beta.data<float>(),
+                    epsilon, total_vec4, C, HW / 4);
+            } else {
+                batchnorm_forward_affine_vec4_inline_kernel<<<vec_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input.data<float>()),
+                    reinterpret_cast<float4*>(output.data<float>()),
+                    mean.data<float>(), variance.data<float>(),
+                    gamma.data<float>(), beta.data<float>(),
+                    epsilon, total_vec4, C, HW);
+            }
             CUDA_CHECK(cudaGetLastError());
         } else {
             // Use parallel kernel (single kernel launch, processes all elements)

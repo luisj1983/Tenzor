@@ -153,12 +153,18 @@ void batchnorm_forward_affine_f32(
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    // Precompute per-channel scale and bias
-    std::vector<float> scale(C), bias_vec(C);
+    // Precompute per-channel scale only. Do NOT precompute bias = beta -
+    // mean*scale and then compute scale*x + bias: when mean is large and
+    // scale is large (tiny variance), scale*x and bias are each huge and
+    // nearly cancel, so the result inherits ~ulp(scale*mean) of rounding
+    // noise instead of the true near-zero answer -- catastrophic
+    // cancellation. Compute (x - mean) * scale + beta directly instead,
+    // which subtracts the raw (similar-magnitude) x and mean first, matching
+    // the numerically stable form the CUDA kernel already uses.
+    std::vector<float> scale(C);
     for (int64_t c = 0; c < C; c++) {
         float invstd = 1.0f / std::sqrt(variance[c] + epsilon);
         scale[c] = gamma[c] * invstd;
-        bias_vec[c] = beta[c] - mean[c] * scale[c];
     }
 
 #ifdef _OPENMP
@@ -173,7 +179,8 @@ void batchnorm_forward_affine_f32(
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
             __m512 vscale = _mm512_set1_ps(scale[c]);
-            __m512 vbias = _mm512_set1_ps(bias_vec[c]);
+            __m512 vmean = _mm512_set1_ps(mean[c]);
+            __m512 vbeta = _mm512_set1_ps(beta[c]);
 
             const float* in_ptr = input + (n * C + c) * spatial_size;
             float* out_ptr = output + (n * C + c) * spatial_size;
@@ -182,12 +189,13 @@ void batchnorm_forward_affine_f32(
             // Process 16 floats at a time with AVX-512 FMA
             for (; hw + 16 <= spatial_size; hw += 16) {
                 __m512 vin = _mm512_loadu_ps(in_ptr + hw);
-                __m512 vout = _mm512_fmadd_ps(vscale, vin, vbias);
+                __m512 vdiff = _mm512_sub_ps(vin, vmean);
+                __m512 vout = _mm512_fmadd_ps(vscale, vdiff, vbeta);
                 _mm512_storeu_ps(out_ptr + hw, vout);
             }
             // Handle remainder
             for (; hw < spatial_size; hw++) {
-                out_ptr[hw] = scale[c] * in_ptr[hw] + bias_vec[c];
+                out_ptr[hw] = scale[c] * (in_ptr[hw] - mean[c]) + beta[c];
             }
         }
     }

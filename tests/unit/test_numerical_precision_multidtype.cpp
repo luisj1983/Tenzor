@@ -68,9 +68,16 @@ TEST_P(NumericalPrecisionMultiBackendDTypeTest, SoftmaxLargePositiveValues) {
     // Sum should be approximately 1.0
     EXPECT_NEAR(total, 1.0f, atol());
 
-    // The maximum element (index 1, value 1001) should have the largest probability
-    EXPECT_GT(r_ptr[1], r_ptr[0]);
-    EXPECT_GT(r_ptr[1], r_ptr[2]);
+    // The maximum element (index 1, value 1001) should have the largest
+    // probability -- but skip the strict ordering on BFloat16: its 7-bit
+    // mantissa gives a representable step of ~8 near magnitude 1000, so
+    // 1000/1001/999/998 can round to the SAME BFloat16 value, making their
+    // softmax outputs legitimately tie rather than strictly order. The
+    // NaN/Inf/sum-to-1 checks above already cover BFloat16 correctness.
+    if (dtype() != DType::BFloat16) {
+        EXPECT_GT(r_ptr[1], r_ptr[0]);
+        EXPECT_GT(r_ptr[1], r_ptr[2]);
+    }
 }
 
 TEST_P(NumericalPrecisionMultiBackendDTypeTest, SoftmaxVeryLargeValues) {
@@ -128,10 +135,15 @@ TEST_P(NumericalPrecisionMultiBackendDTypeTest, SoftmaxLargeNegativeValues) {
     }
     EXPECT_NEAR(total, 1.0f, atol());
 
-    // Index 1 (-999) should have the largest probability
-    EXPECT_GT(r_ptr[1], r_ptr[0]);
-    EXPECT_GT(r_ptr[1], r_ptr[2]);
-    EXPECT_GT(r_ptr[1], r_ptr[3]);
+    // Index 1 (-999) should have the largest probability -- skip the strict
+    // ordering on BFloat16 for the same reason as SoftmaxLargePositiveValues
+    // (its ~8-wide representable step near magnitude 1000 can collapse
+    // -1000/-999/-1001/-1002 to the same value).
+    if (dtype() != DType::BFloat16) {
+        EXPECT_GT(r_ptr[1], r_ptr[0]);
+        EXPECT_GT(r_ptr[1], r_ptr[2]);
+        EXPECT_GT(r_ptr[1], r_ptr[3]);
+    }
 }
 
 // ============================================================================

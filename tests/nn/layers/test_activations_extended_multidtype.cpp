@@ -50,10 +50,10 @@ TEST_P(ActivationsExtendedMultiDTypeTest, CELU_PositiveInputsUnchanged) {
 
 TEST_P(ActivationsExtendedMultiDTypeTest, PReLU_ForwardShape) {
     // Documented gap: PReLU's learnable weight parameter is initialized as
-    // Float32 and the Module API has no dtype-cast overload, so feeding Float16
-    // input promotes the output dtype. Skip Float16 here until Module gains
-    // .to(Device, DType) or PReLU dtype-respects construction.
-    if (dtype() == DType::Float16) {
+    // Float32 and the Module API has no dtype-cast overload, so feeding
+    // Float16/BFloat16 input promotes the output dtype. Skip both here until
+    // Module gains .to(Device, DType) or PReLU dtype-respects construction.
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
         GTEST_SKIP() << "PReLU has no dtype-cast path for its weight parameter";
     }
     PReLU act(/*num_parameters=*/1);

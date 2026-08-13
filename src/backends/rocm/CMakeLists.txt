@@ -159,6 +159,15 @@ target_include_directories(tenzor_rocm_kernels PRIVATE
     /opt/rocm/include
 )
 
+# spdlog is only linked PRIVATE to tenzor_core (kept out of the exported
+# TenzorConfig), but include/tenzor/utils/log.hpp is a public header that
+# #includes <spdlog/spdlog.h> directly and is pulled in transitively by
+# utils/logging.hpp, which some of these kernel sources include. Without
+# this, a FetchContent'd spdlog (no system package found) builds headers
+# into a non-default include path and those TUs fail with
+# "spdlog/spdlog.h: No such file or directory".
+target_link_libraries(tenzor_rocm_kernels PRIVATE spdlog::spdlog)
+
 # HIP-specific compile options
 # Note: Removed -fgpu-rdc to avoid relocatable device code linking issues
 target_compile_options(tenzor_rocm_kernels PRIVATE
@@ -458,6 +467,14 @@ target_link_libraries(tenzor_backend_rocm PRIVATE
     hip::device
     hip::host
     $<TARGET_NAME_IF_EXISTS:hip::amdhip64>
+    # spdlog is only linked PRIVATE to tenzor_core (kept out of the exported
+    # TenzorConfig), but include/tenzor/utils/log.hpp is a public header that
+    # #includes <spdlog/spdlog.h> directly and is pulled in transitively by
+    # utils/logging.hpp, which this backend's sources include. Without this,
+    # a FetchContent'd spdlog (no system package found) builds headers into a
+    # non-default include path and every TU here fails with
+    # "spdlog/spdlog.h: No such file or directory".
+    spdlog::spdlog
 )
 
 # Link RCCL if available (equivalent to NCCL)

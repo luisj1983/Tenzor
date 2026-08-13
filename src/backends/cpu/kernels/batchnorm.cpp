@@ -727,12 +727,14 @@ static void batchnorm_forward_affine_simd_f32(
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    // Precompute per-channel scale and bias
-    std::vector<float> scale(C), bias_vec(C);
+    // Precompute per-channel scale only -- see the AVX-512 variant's comment
+    // (batchnorm_avx512.cpp) for why precomputing bias = beta - mean*scale
+    // and using scale*x + bias is a catastrophic-cancellation trap when mean
+    // is large and scale is large. Compute (x - mean) * scale + beta instead.
+    std::vector<float> scale(C);
     for (int64_t c = 0; c < C; c++) {
         float invstd = 1.0f / std::sqrt(variance[c] + epsilon);
         scale[c] = gamma[c] * invstd;
-        bias_vec[c] = beta[c] - mean[c] * scale[c];
     }
 
     // Use fewer threads for memory-bound operations
@@ -749,7 +751,8 @@ static void batchnorm_forward_affine_simd_f32(
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
             __m256 vscale = _mm256_set1_ps(scale[c]);
-            __m256 vbias = _mm256_set1_ps(bias_vec[c]);
+            __m256 vmean = _mm256_set1_ps(mean[c]);
+            __m256 vbeta = _mm256_set1_ps(beta[c]);
 
             const float* in_ptr = input + (n * C + c) * spatial_size;
             float* out_ptr = output + (n * C + c) * spatial_size;
@@ -758,12 +761,13 @@ static void batchnorm_forward_affine_simd_f32(
             // Process 8 floats at a time with AVX2 FMA
             for (; hw + 8 <= spatial_size; hw += 8) {
                 __m256 vin = _mm256_loadu_ps(in_ptr + hw);
-                __m256 vout = _mm256_fmadd_ps(vscale, vin, vbias);
+                __m256 vdiff = _mm256_sub_ps(vin, vmean);
+                __m256 vout = _mm256_fmadd_ps(vscale, vdiff, vbeta);
                 _mm256_storeu_ps(out_ptr + hw, vout);
             }
             // Handle remainder
             for (; hw < spatial_size; hw++) {
-                out_ptr[hw] = scale[c] * in_ptr[hw] + bias_vec[c];
+                out_ptr[hw] = scale[c] * (in_ptr[hw] - mean[c]) + beta[c];
             }
         }
     }
@@ -787,17 +791,23 @@ void batchnorm_forward_affine_impl(const T* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    // Precompute per-channel scale and bias: y = scale * x + bias
-    // where scale = gamma / sqrt(var + eps), bias = beta - mean * scale
-    // Compute scale/bias in a float accumulator for half types (Float16/BFloat16);
-    // half-precision invstd/scale/bias diverge from the CPU float reference.
+    // Precompute per-channel scale only: y = (x - mean) * scale + beta,
+    // where scale = gamma / sqrt(var + eps). Deliberately NOT precomputing
+    // bias = beta - mean*scale and using scale*x + bias: when mean is large
+    // and scale is large (tiny variance), scale*x and bias are each huge and
+    // nearly cancel, so the result inherits the rounding noise of those large
+    // intermediates instead of the true near-zero answer -- catastrophic
+    // cancellation (see batchnorm_avx512.cpp's affine kernel for the same
+    // fix). Subtracting the raw (similar-magnitude) x and mean first avoids
+    // it, matching CUDA's kernel.
+    // Compute scale in a float accumulator for half types (Float16/BFloat16);
+    // half-precision invstd/scale diverges from the CPU float reference.
     using Acc = std::conditional_t<
         std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, T>;
-    std::vector<Acc> scale(C), bias(C);
+    std::vector<Acc> scale(C);
     for (int64_t c = 0; c < C; c++) {
         Acc invstd = Acc(1.0) / safe_sqrt(static_cast<Acc>(variance[c]) + static_cast<Acc>(epsilon));
         scale[c] = static_cast<Acc>(gamma[c]) * invstd;
-        bias[c] = static_cast<Acc>(beta[c]) - static_cast<Acc>(mean[c]) * scale[c];
     }
 
     // Use fewer threads for memory-bound operations
@@ -815,12 +825,15 @@ void batchnorm_forward_affine_impl(const T* input,
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
             Acc sc = scale[c];
-            Acc bi = bias[c];
+            Acc mn = static_cast<Acc>(mean[c]);
+            Acc bt = static_cast<Acc>(beta[c]);
             int64_t base_idx = (n * C + c) * spatial_size;
 
-            // Simple fused multiply-add over spatial dimensions
+            // (x - mean) * scale + beta, not scale*x + (beta - mean*scale):
+            // see the comment above `scale` for why.
             for (int64_t hw = 0; hw < spatial_size; hw++) {
-                output[base_idx + hw] = static_cast<T>(sc * static_cast<Acc>(input[base_idx + hw]) + bi);
+                output[base_idx + hw] = static_cast<T>(
+                    sc * (static_cast<Acc>(input[base_idx + hw]) - mn) + bt);
             }
         }
     }

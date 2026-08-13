@@ -2,7 +2,7 @@
  * @file test_gradcheck_multidtype.cpp
  * @brief Multi-backend multi-dtype tests for gradient checking functionality
  *
- * Converted from test_gradcheck.cpp. Gradcheck tests skip Float16 due to
+ * Converted from test_gradcheck.cpp. Gradcheck tests skip Float16 and BFloat16 due to
  * insufficient precision for finite-difference numerical gradient computation.
  */
 
@@ -28,7 +28,7 @@ protected:
 
 // Test basic quadratic function: f(x) = x^2
 TEST_P(GradCheckMultiDTypeTest, QuadraticFunction) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -52,7 +52,7 @@ TEST_P(GradCheckMultiDTypeTest, QuadraticFunction) {
 
 // Test linear function: f(x) = 2*x + 3
 TEST_P(GradCheckMultiDTypeTest, LinearFunction) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * 2.0f + 3.0f;
@@ -76,7 +76,7 @@ TEST_P(GradCheckMultiDTypeTest, LinearFunction) {
 
 // Test sum reduction: f(x) = sum(x)
 TEST_P(GradCheckMultiDTypeTest, SumReduction) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return tenzor::sum(x);
@@ -100,7 +100,7 @@ TEST_P(GradCheckMultiDTypeTest, SumReduction) {
 
 // Test element-wise operations: f(x) = x * x + x
 TEST_P(GradCheckMultiDTypeTest, ElementWiseOps) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x + x;
@@ -124,7 +124,7 @@ TEST_P(GradCheckMultiDTypeTest, ElementWiseOps) {
 
 // Test multi-dimensional input: f(x) = sum(x^2)
 TEST_P(GradCheckMultiDTypeTest, MultiDimensional) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         Variable x_squared = x * x;
@@ -149,7 +149,7 @@ TEST_P(GradCheckMultiDTypeTest, MultiDimensional) {
 
 // Test detailed gradient check result
 TEST_P(GradCheckMultiDTypeTest, DetailedResult) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -180,7 +180,7 @@ TEST_P(GradCheckMultiDTypeTest, DetailedResult) {
 
 // Test exception on requires_grad = false
 TEST_P(GradCheckMultiDTypeTest, RequiresGradCheck) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x;
@@ -199,7 +199,7 @@ TEST_P(GradCheckMultiDTypeTest, RequiresGradCheck) {
 
 // Test numerical gradient computation
 TEST_P(GradCheckMultiDTypeTest, NumericalGradientComputation) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x * 3.0f;
@@ -226,7 +226,7 @@ TEST_P(GradCheckMultiDTypeTest, NumericalGradientComputation) {
 
 // Test compare_gradients function
 TEST_P(GradCheckMultiDTypeTest, CompareGradients) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     Tensor num_grad = zeros({3}, dtype(), device());
     Tensor ana_grad = zeros({3}, dtype(), device());
@@ -264,7 +264,7 @@ TEST_P(GradCheckMultiDTypeTest, CompareGradients) {
 
 // Test with different epsilon values
 TEST_P(GradCheckMultiDTypeTest, EpsilonSensitivity) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x * x;
@@ -288,7 +288,7 @@ TEST_P(GradCheckMultiDTypeTest, EpsilonSensitivity) {
 
 // Test scalar output (single element)
 TEST_P(GradCheckMultiDTypeTest, ScalarOutput) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return tenzor::sum(x * x);
@@ -312,7 +312,7 @@ TEST_P(GradCheckMultiDTypeTest, ScalarOutput) {
 
 // Performance test - measure gradcheck time
 TEST_P(GradCheckMultiDTypeTest, PerformanceBenchmark) {
-    if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16/BFloat16 gradcheck precision");
 
     auto f = [](const Variable& x) -> Variable {
         return x * x + x;

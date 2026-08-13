@@ -6,8 +6,9 @@
  * numerical gradients for core operations across all backends and dtypes.
  * Uses small tensor sizes for speed.
  *
- * Float16 is skipped because finite-difference numerical gradients require
- * more precision than Float16 can provide.
+ * Float16 and BFloat16 are skipped because finite-difference numerical
+ * gradients require more precision than either can provide (BFloat16's
+ * 7-bit mantissa is even coarser than Float16's 10-bit mantissa).
  */
 
 #include <gtest/gtest.h>
@@ -28,9 +29,9 @@ protected:
     void SetUp() override {
         MultiBackendDTypeTest::SetUp();
 
-        // Float16 lacks sufficient precision for numerical gradient checks
-        if (dtype() == DType::Float16) {
-            GTEST_SKIP() << "Float16 lacks precision for numerical gradient verification";
+        // Float16/BFloat16 lack sufficient precision for numerical gradient checks
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+            GTEST_SKIP() << "Float16/BFloat16 lack precision for numerical gradient verification";
         }
 
         // Seed the RNG so `make_var` produces deterministic inputs across

@@ -43,6 +43,19 @@ namespace tenzor::cuda::matmul {
 // no-op: it just re-affirms the default.
 // Once resolved, explicit set_allow_tf32() calls still override the default.
 //
+// scaled_dot_product_attention's manual (non-flash) path routes its QK^T and
+// @V GEMMs through baddbmm_kernel/matmul_kernel above, so it already inherits
+// this flag with no attention-specific code. Measured with TF32 on: attention
+// softmax output diverges from the exact-FP32 CPU reference by ~1.5e-3 to
+// 2.2e-3 max relative error (flat across seq_len 128-4096) -- in line with
+// PyTorch's own TF32-enabled test tolerances (~0.001-0.005 for matmul/conv/
+// attention ops in their tf32_on_and_off-decorated tests) -- and ~2x faster
+// on the QK^T+scale+softmax+@V chain (measured via nsys kernel timing).
+// Deliberately NOT special-cased to default on for attention: same F-108
+// parity rationale applies, and PyTorch's own current default is TF32-off too
+// (torch.set_float32_matmul_precision('highest')). Users who want the speedup
+// opt in the same way as any other Float32 CUDA matmul.
+//
 // IMPORTANT: these flags MUST be process-global (atomic), not thread_local.
 // cuBLAS calls dispatched from the runtime can execute on worker threads
 // distinct from the one that called set_allow_tf32() / set the env var, and
@@ -2251,11 +2264,18 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
             );
         }
 
-        // Create output tensor
-        Tensor result({M, N}, a_contig.dtype(), a_contig.device());
+        // K==0 (contracted dim empty) is mathematically the zero matrix and
+        // no GEMM call below would write it, so it needs an actual zero-fill.
+        if (K == 0) {
+            return Tensor({M, N}, a_contig.dtype(), a_contig.device());
+        }
+        // Every element of `result` is written unconditionally by the GEMM
+        // dispatched below (when M,N > 0), so the default zero-init memset
+        // was pure waste -- same fix as LayerNorm/RMSNorm/BatchNorm/Embedding.
+        Tensor result = Tensor::empty_uninitialized({M, N}, a_contig.dtype(), a_contig.device());
 
-        // Handle zero-dimension case: return zero-filled tensor
-        if (M == 0 || N == 0 || K == 0) {
+        // Handle zero-dimension case: nothing to write either way.
+        if (M == 0 || N == 0) {
             return result;
         }
 
@@ -2362,8 +2382,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
             );
         }
 
-        // Create output tensor
-        Tensor result({batch_size, M, N}, a_contig.dtype(), a_contig.device());
+        // K==0 (contracted dim empty) is mathematically the zero matrix; keep
+        // it on the real zero-init path rather than relying on each batched
+        // GEMM helper to correctly zero-write a K==0 case.
+        if (K == 0) {
+            return Tensor({batch_size, M, N}, a_contig.dtype(), a_contig.device());
+        }
+        // Every element of `result` is written unconditionally by the batched
+        // GEMM dispatched below, so the default zero-init memset was pure
+        // waste -- same fix as the 2D matmul path above.
+        Tensor result = Tensor::empty_uninitialized({batch_size, M, N}, a_contig.dtype(), a_contig.device());
 
         // Dispatch based on dtype
         if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
@@ -2627,7 +2655,14 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
     Tensor b1_cont = batch1.is_contiguous() ? batch1 : batch1.contiguous();
     Tensor b2_cont = batch2.is_contiguous() ? batch2 : batch2.contiguous();
 
-    Tensor output({B, M, N}, batch1.dtype(), batch1.device());
+    // Every element of `output` is written before the GEMM either way: the
+    // beta!=0 branch fully overwrites it via memcpy from `input` below, and
+    // beta==0 never reads it at all (by BLAS/cuBLAS convention, beta=0 means
+    // C := alpha*op(A)*op(B) unconditionally -- specifically so 0*NaN in a
+    // stale/uninitialized C can't propagate -- and the GEMM always writes
+    // every element of C regardless of K). So the default zero-init memset
+    // was pure waste in both cases.
+    Tensor output = Tensor::empty_uninitialized({B, M, N}, batch1.dtype(), batch1.device());
 
     if (beta != 0.0) {
         auto inp_shape = input.shape();
@@ -2642,8 +2677,6 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
                                               B * M * N * dtype_size(batch1.dtype()),
                                               cudaMemcpyDeviceToDevice, stream));
         }
-    } else {
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, B * M * N * dtype_size(batch1.dtype()), stream));
     }
 
     // F-110: guard against int64 overflow in the per-batch stride computation,

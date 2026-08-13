@@ -52,13 +52,15 @@ inline unsigned int softmax_grid_blocks(int64_t batch_size) {
     return static_cast<unsigned int>(batch_size);
 }
 
-// Helper to create a zero-initialized CUDA tensor
+// Helper to create a zero-initialized CUDA tensor. The `Tensor t(shape,
+// dtype, device)` constructor already zero-inits by default (zero_init=true)
+// -- this used to ALSO issue an explicit cudaMemsetAsync on top, zeroing
+// the same buffer twice on every single call site that uses this helper.
+// The (void)stream cast documents that `stream` is intentionally unused now
+// that there's no second memset left to issue on it.
 inline Tensor create_cuda_zeros(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream = nullptr) {
-    Tensor t(shape, dtype, device);
-    size_t bytes = t.numel() * dtype_size(dtype);
-    // Use data_ptr() which returns void* for any dtype
-    TENZOR_CUDA_CHECK(cudaMemsetAsync(t.data_ptr(), 0, bytes, stream));
-    return t;
+    (void)stream;
+    return Tensor(shape, dtype, device);
 }
 
 // Helper to convert span to vector
@@ -1514,12 +1516,18 @@ auto fused_rms_norm_cuda(
         batch_size *= shape[i];
     }
 
-    Tensor output = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device());
+    // empty_uninitialized: fused_rms_norm_kernel writes every output element
+    // unconditionally (the normalize pass covers the full row) and every
+    // rrms slot exactly once (one block per row, thread 0 writes
+    // rrms_out[blockIdx.x]), so the whole buffer is always fully
+    // overwritten -- zero-init was pure waste. Same fix as embedding_kernel
+    // and cudnn_layer_norm_forward.
+    Tensor output = Tensor::empty_uninitialized(to_vector(input.shape()), input.dtype(), input.device());
     // rrms stays F32 for F16/BF16 inputs (per LayerNorm precedent).
     DType rrms_dtype = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
                             ? DType::Float32
                             : input.dtype();
-    Tensor rrms = create_cuda_zeros({batch_size}, rrms_dtype, input.device());
+    Tensor rrms = Tensor::empty_uninitialized({batch_size}, rrms_dtype, input.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
