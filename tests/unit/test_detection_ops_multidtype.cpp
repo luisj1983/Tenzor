@@ -42,29 +42,32 @@ protected:
         }
     }
 
-    // Helper to initialize box data
-    template<typename T>
-    void initializeBoxData(Tensor& boxes, int num_boxes, T x_step, T box_size) {
-        auto boxes_cpu = boxes.to(Device::cpu());
-        T* data = boxes_cpu.data<T>();
+    // Helper to initialize box data. Computed in double and narrowed via
+    // Tensor::to() so it works for every dtype under test (Float32/Float64/
+    // BFloat16/...), instead of requiring arithmetic operators on T (which
+    // BFloat16/Float16 don't provide).
+    template<typename T = double>
+    void initializeBoxData(Tensor& boxes, int num_boxes, double x_step, double box_size) {
+        Tensor boxes_f64({num_boxes, 4}, DType::Float64, Device::cpu());
+        double* data = boxes_f64.data<double>();
         for (int i = 0; i < num_boxes; ++i) {
-            data[i*4 + 0] = static_cast<T>(i) * x_step;           // x1
-            data[i*4 + 1] = static_cast<T>(i) * x_step;           // y1
-            data[i*4 + 2] = static_cast<T>(i) * x_step + box_size; // x2
-            data[i*4 + 3] = static_cast<T>(i) * x_step + box_size; // y2
+            data[i*4 + 0] = static_cast<double>(i) * x_step;            // x1
+            data[i*4 + 1] = static_cast<double>(i) * x_step;            // y1
+            data[i*4 + 2] = static_cast<double>(i) * x_step + box_size; // x2
+            data[i*4 + 3] = static_cast<double>(i) * x_step + box_size; // y2
         }
-        boxes = boxes_cpu.to(device());
+        boxes = boxes_f64.to(dtype()).to(device());
     }
 
     // Helper to initialize score data
-    template<typename T>
-    void initializeScoreData(Tensor& scores, int num_scores, T decay_rate) {
-        auto scores_cpu = scores.to(Device::cpu());
-        T* data = scores_cpu.data<T>();
+    template<typename T = double>
+    void initializeScoreData(Tensor& scores, int num_scores, double decay_rate) {
+        Tensor scores_f64({num_scores}, DType::Float64, Device::cpu());
+        double* data = scores_f64.data<double>();
         for (int i = 0; i < num_scores; ++i) {
-            data[i] = static_cast<T>(1.0) - static_cast<T>(i) * decay_rate;
+            data[i] = 1.0 - static_cast<double>(i) * decay_rate;
         }
-        scores = scores_cpu.to(device());
+        scores = scores_f64.to(dtype()).to(device());
     }
 };
 
@@ -219,30 +222,18 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxIOUComputation) {
     Tensor boxes2({5, 4}, dtype(), device());
 
     // Initialize with test boxes
-    if (dtype() == DType::Float32) {
-        initializeBoxData<float>(boxes1, 5, 20.0f, 40.0f);
-        // boxes2 - slightly offset
-        auto boxes2_cpu = boxes2.to(Device::cpu());
-        float* data2 = boxes2_cpu.data<float>();
-        for (int i = 0; i < 5; ++i) {
-            data2[i*4 + 0] = static_cast<float>(i * 20 + 5);
-            data2[i*4 + 1] = static_cast<float>(i * 20 + 5);
-            data2[i*4 + 2] = static_cast<float>(i * 20 + 45);
-            data2[i*4 + 3] = static_cast<float>(i * 20 + 45);
-        }
-        boxes2 = boxes2_cpu.to(device());
-    } else {
-        initializeBoxData<double>(boxes1, 5, 20.0, 40.0);
-        // boxes2 - slightly offset
-        auto boxes2_cpu = boxes2.to(Device::cpu());
-        double* data2 = boxes2_cpu.data<double>();
+    initializeBoxData(boxes1, 5, 20.0, 40.0);
+    // boxes2 - slightly offset
+    {
+        Tensor boxes2_f64({5, 4}, DType::Float64, Device::cpu());
+        double* data2 = boxes2_f64.data<double>();
         for (int i = 0; i < 5; ++i) {
             data2[i*4 + 0] = static_cast<double>(i * 20 + 5);
             data2[i*4 + 1] = static_cast<double>(i * 20 + 5);
             data2[i*4 + 2] = static_cast<double>(i * 20 + 45);
             data2[i*4 + 3] = static_cast<double>(i * 20 + 45);
         }
-        boxes2 = boxes2_cpu.to(device());
+        boxes2 = boxes2_f64.to(dtype()).to(device());
     }
 
     auto ious = box_iou(boxes1, boxes2);
@@ -262,15 +253,12 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxIOUDegenerateBoxesReturnsZero) {
     Tensor boxes2({2, 4}, dtype(), Device::cpu());
 
     auto fill = [&](Tensor& t, std::initializer_list<double> vals) {
-        if (dtype() == DType::Float32) {
-            float* p = t.data<float>();
-            size_t i = 0;
-            for (double v : vals) p[i++] = static_cast<float>(v);
-        } else {
-            double* p = t.data<double>();
-            size_t i = 0;
-            for (double v : vals) p[i++] = v;
-        }
+        Tensor t_f64(std::vector<int64_t>(t.shape().begin(), t.shape().end()),
+                     DType::Float64, Device::cpu());
+        double* p = t_f64.data<double>();
+        size_t i = 0;
+        for (double v : vals) p[i++] = v;
+        t = t_f64.to(dtype());
     };
 
     // Row 0: an inverted box (x2<x1, y2<y1 -> negative area) vs a normal box.
@@ -303,30 +291,18 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingDecoding) {
     Tensor anchors({10, 4}, dtype(), device());
 
     // Initialize with test data
-    if (dtype() == DType::Float32) {
+    {
         // Boxes with offset
-        auto boxes_cpu = boxes.to(Device::cpu());
-        float* box_data = boxes_cpu.data<float>();
-        for (int i = 0; i < 10; ++i) {
-            box_data[i*4 + 0] = static_cast<float>(i * 10 + 5);
-            box_data[i*4 + 1] = static_cast<float>(i * 10 + 5);
-            box_data[i*4 + 2] = static_cast<float>(i * 10 + 35);
-            box_data[i*4 + 3] = static_cast<float>(i * 10 + 35);
-        }
-        boxes = boxes_cpu.to(device());
-        initializeBoxData<float>(anchors, 10, 10.0f, 40.0f);
-    } else {
-        // Boxes with offset
-        auto boxes_cpu = boxes.to(Device::cpu());
-        double* box_data = boxes_cpu.data<double>();
+        Tensor boxes_f64({10, 4}, DType::Float64, Device::cpu());
+        double* box_data = boxes_f64.data<double>();
         for (int i = 0; i < 10; ++i) {
             box_data[i*4 + 0] = static_cast<double>(i * 10 + 5);
             box_data[i*4 + 1] = static_cast<double>(i * 10 + 5);
             box_data[i*4 + 2] = static_cast<double>(i * 10 + 35);
             box_data[i*4 + 3] = static_cast<double>(i * 10 + 35);
         }
-        boxes = boxes_cpu.to(device());
-        initializeBoxData<double>(anchors, 10, 10.0, 40.0);
+        boxes = boxes_f64.to(dtype()).to(device());
+        initializeBoxData(anchors, 10, 10.0, 40.0);
     }
 
     // Encode boxes relative to anchors

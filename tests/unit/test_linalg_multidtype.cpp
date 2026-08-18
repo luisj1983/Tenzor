@@ -113,8 +113,14 @@ TEST_P(LinalgMultiDTypeTest, QR3x3) {
     auto A_orig_cpu = A.to(Device::cpu()).to(DType::Float32);
     auto* rp = A_rec_cpu.data<float>();
     auto* op = A_orig_cpu.data<float>();
-    float tol = (dtype() == DType::Float64) ? 1e-6f : 1e-3f;
+    // Reconstructed entries run up to ~10 in magnitude; a fixed absolute
+    // tolerance tuned for Float32 doesn't account for BFloat16's ULP
+    // growing with magnitude (~1/128 relative), so combine atol() with
+    // rtol() scaled by the entry's own magnitude (matches numpy.allclose).
     for (int i = 0; i < 9; ++i) {
+        float tol = (dtype() == DType::Float64)
+            ? 1e-6f
+            : std::max(atol(), 1e-3f) + rtol() * std::fabs(op[i]);
         EXPECT_NEAR(rp[i], op[i], tol) << "index=" << i;
     }
 }

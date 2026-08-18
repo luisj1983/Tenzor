@@ -1217,10 +1217,45 @@ if(TENZOR_BUILD_PYTHON)
             if(test_name MATCHES "jit")
                 set(_py_labels "${_py_labels};jit;mlir")
             endif()
+
+            set(_py_test_env "${PYTHON_TEST_ENV}")
+            # Tests that `import torch` need the SYSTEM libfabric, not
+            # oneAPI's bundled one. When oneAPI's setvars.sh has been sourced
+            # in the invoking shell, its LD_LIBRARY_PATH entry
+            # (.../oneapi/<ver>/opt/mpi/libfabric/lib) resolves first and
+            # shadows /usr/lib's libfabric -- but that bundled libfabric only
+            # exports symbol versions up to FABRIC_1.8, while
+            # /usr/lib/libmpi.so.40 (a transitive dep of libtorch's
+            # libtorch_global_deps.so) needs fi_getinfo/fi_freeinfo/fi_dupinfo
+            # at FABRIC_1.9, which only /usr/lib/libfabric.so has.
+            #
+            # Fix by removing ONLY the .../opt/mpi/libfabric/lib segment, not
+            # by prepending /usr/lib wholesale: /usr/lib also ships its own
+            # (non-SYCL) libdnnl.so.3, and putting /usr/lib ahead of oneAPI's
+            # lib dir made tenzor_backend_oneapi.so resolve THAT one instead
+            # of oneAPI's SYCL-enabled libdnnl -- "undefined symbol:
+            # dnnl_sycl_interop_stream_create" at import time. With just the
+            # libfabric segment stripped, oneapi/lib and oneapi/compiler/lib
+            # stay first in the path for everything else, and libfabric.so.1
+            # falls through to ldconfig's cached /usr/lib entry (confirmed
+            # present via `ldconfig -p`) with no explicit path needed. This
+            # must be set via ctest's ENVIRONMENT property (i.e. before the
+            # process is spawned) -- glibc's dynamic linker caches
+            # LD_LIBRARY_PATH at process start, so mutating os.environ from
+            # inside the already-running Python script would be too late to
+            # affect dlopen() resolution.
+            if(test_name MATCHES "torch")
+                set(_ldp "$ENV{LD_LIBRARY_PATH}")
+                string(REPLACE ":" ";" _ldp_list "${_ldp}")
+                list(FILTER _ldp_list EXCLUDE REGEX "/opt/mpi/libfabric/lib$")
+                string(REPLACE ";" ":" _ldp_filtered "${_ldp_list}")
+                set(_py_test_env "${_py_test_env};LD_LIBRARY_PATH=${_ldp_filtered}")
+            endif()
+
             set_tests_properties("cpu_python_${test_name}" PROPERTIES
                 LABELS "${_py_labels}"
                 TIMEOUT ${TENZOR_TEST_TIMEOUT}
-                ENVIRONMENT "${PYTHON_TEST_ENV}"
+                ENVIRONMENT "${_py_test_env}"
             )
         endforeach()
     endif()

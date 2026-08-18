@@ -224,6 +224,7 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         case OpId::GRUMultiLayerForward:     return "GRU";
         case OpId::LSTMCellForward:          return "LSTM";
         case OpId::GRUCellForward:           return "GRU";
+        case OpId::LSTMFusedTrainForward:    return "LSTM";
 
         // Embedding
         case OpId::Embedding:    return "Gather";      // ONNX uses Gather for embedding lookup

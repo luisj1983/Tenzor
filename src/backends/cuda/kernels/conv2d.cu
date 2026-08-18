@@ -1741,6 +1741,24 @@ auto conv_transpose2d_forward_kernel(
             has_bias
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::BFloat16) {
+        // No dedicated BFloat16 kernel: widen to Float32, compute, narrow
+        // back -- matches the Float16 widen path above and the ROCm/Vulkan
+        // conv_transpose2d BFloat16 handling.
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (has_bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        Tensor result = conv_transpose2d_forward_kernel(
+            input_f32, weight_f32, bias_f32_ptr,
+            stride_h, stride_w, padding_h, padding_w,
+            output_padding_h, output_padding_w,
+            dilation_h, dilation_w, groups, stream);
+        return result.to(DType::BFloat16);
     } else {
         // Float32 path (default)
         const float* input_ptr = input.data<float>();

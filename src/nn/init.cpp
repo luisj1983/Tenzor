@@ -203,8 +203,23 @@ auto get_rng() -> std::mt19937& {
     static thread_local std::mt19937 rng{std::random_device{}()};
     static thread_local bool     applied = false;
     static thread_local uint64_t applied_seed = 0;
-    if (g_init_seed_active.load(std::memory_order_acquire)) {
-        const uint64_t desired = g_init_seed.load(std::memory_order_acquire);
+
+    bool seed_active = g_init_seed_active.load(std::memory_order_acquire);
+    uint64_t desired = g_init_seed.load(std::memory_order_acquire);
+    if (!seed_active && tenzor::detail::get_global_manual_seed_set()) {
+        // nn::init::manual_seed() was never called directly, but
+        // tenzor::manual_seed() was -- the top-level entry point everyone
+        // (tests, users) actually calls to seed rand()/randn(). Without this
+        // fallback, weight initialization stayed genuinely nondeterministic
+        // (still drawing from the random_device-seeded default above) even
+        // after a "reproducible" seeded run, since this RNG is a completely
+        // separate engine from ops/creation.cpp's. Matches PyTorch's
+        // torch.manual_seed() semantics: one call seeds both tensor creation
+        // and parameter initialization.
+        seed_active = true;
+        desired = tenzor::detail::get_global_manual_seed_value();
+    }
+    if (seed_active) {
         // (Re)seed this thread's generator whenever the manual seed changes so
         // that repeated draws after a single manual_seed() call are stable.
         if (!applied || applied_seed != desired) {

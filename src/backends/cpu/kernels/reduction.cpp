@@ -3006,8 +3006,9 @@ auto argsort_kernel(const Tensor& input_raw, int64_t dim, bool descending) -> Te
                             dim, descending);
             break;
         }
-        case DType::Float16: {
-            // Convert Float16 to Float32 for sorting
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Convert Float16/BFloat16 to Float32 for sorting
             auto input_f32 = input.to(DType::Float32);
             auto* input_data = input_f32.data<float>();
             argsort_along_dim(input_data, output_data,

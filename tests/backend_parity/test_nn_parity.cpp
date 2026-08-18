@@ -10,6 +10,7 @@
 #include <tenzor/tenzor.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
+#include "parity_tolerances.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -42,7 +43,7 @@ TEST_P(NNOperationParity, Conv2d_Basic) {
         auto input_dev = input.to(backends[i]);
         auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
         backends[i].synchronize();
-        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+        EXPECT_TENSORS_CLOSE(ref_output, output, parity::CONV_RTOL, parity::CONV_ATOL);
     }
 }
 
@@ -66,7 +67,7 @@ TEST_P(NNOperationParity, Conv2d_Stride2) {
         auto input_dev = input.to(backends[i]);
         auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
         backends[i].synchronize();
-        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+        EXPECT_TENSORS_CLOSE(ref_output, output, parity::CONV_RTOL, parity::CONV_ATOL);
     }
 }
 
@@ -90,7 +91,7 @@ TEST_P(NNOperationParity, Conv2d_Padding2) {
         auto input_dev = input.to(backends[i]);
         auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
         backends[i].synchronize();
-        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+        EXPECT_TENSORS_CLOSE(ref_output, output, parity::CONV_RTOL, parity::CONV_ATOL);
     }
 }
 
@@ -114,7 +115,7 @@ TEST_P(NNOperationParity, Conv2d_Dilation) {
         auto input_dev = input.to(backends[i]);
         auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
         backends[i].synchronize();
-        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+        EXPECT_TENSORS_CLOSE(ref_output, output, parity::CONV_RTOL, parity::CONV_ATOL);
     }
 }
 
@@ -138,7 +139,7 @@ TEST_P(NNOperationParity, Conv2d_Groups) {
         auto input_dev = input.to(backends[i]);
         auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
         backends[i].synchronize();
-        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+        EXPECT_TENSORS_CLOSE(ref_output, output, parity::CONV_RTOL, parity::CONV_ATOL);
     }
 }
 
@@ -162,7 +163,7 @@ TEST_P(NNOperationParity, ConvTranspose2d) {
         auto input_dev = input.to(backends[i]);
         auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
         backends[i].synchronize();
-        EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+        EXPECT_TENSORS_CLOSE(ref_output, output, parity::CONV_RTOL, parity::CONV_ATOL);
     }
 }
 

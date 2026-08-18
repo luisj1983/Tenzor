@@ -44,10 +44,14 @@ TEST_P(SpecialMathMultiDTypeTest, Lgamma) {
     auto result = tenzor::lgamma(x);
     auto r_cpu = result.to(Device::cpu()).to(DType::Float32);
     auto* d = r_cpu.data<float>();
+    // Combine atol() with rtol() scaled by the expected magnitude: lgamma(10)
+    // ~= 12.8, and BFloat16's ~0.4% relative precision means a fixed 1e-2
+    // absolute tolerance (tuned for Float32) can be a hair too tight there.
+    auto tol_for = [&](float expected) { return atol() + rtol() * std::fabs(expected); };
     EXPECT_NEAR(d[0], 0.0f, atol());
     EXPECT_NEAR(d[1], 0.0f, atol());
-    EXPECT_NEAR(d[2], std::lgamma(5.0f), 1e-3f);
-    EXPECT_NEAR(d[3], std::lgamma(10.0f), 1e-2f);
+    EXPECT_NEAR(d[2], std::lgamma(5.0f), std::max(1e-3f, tol_for(std::lgamma(5.0f))));
+    EXPECT_NEAR(d[3], std::lgamma(10.0f), std::max(1e-2f, tol_for(std::lgamma(10.0f))));
 }
 
 TEST_P(SpecialMathMultiDTypeTest, Beta) {

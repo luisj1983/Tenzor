@@ -36,7 +36,7 @@ protected:
     float GetEpsilon() const {
         if (dtype() == DType::Float64) {
             return 1e-6f;
-        } else if (dtype() == DType::Float16) {
+        } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
             return 1e-2f;
         }
         return 1e-5f;
@@ -129,6 +129,10 @@ TEST_P(GradScalerMultiDTypeTest, InfDetection) {
         // Float16 storage is 2 bytes; data<float>() would misinterpret it.
         Float16* grad_data = grad_cpu.data<Float16>();
         grad_data[1] = Float16(std::numeric_limits<float>::infinity());
+    } else if (dtype() == DType::BFloat16) {
+        // BFloat16 storage is 2 bytes; data<float>() would misinterpret it.
+        BFloat16* grad_data = grad_cpu.data<BFloat16>();
+        grad_data[1] = BFloat16(std::numeric_limits<float>::infinity());
     } else {
         float* grad_data = grad_cpu.data<float>();
         grad_data[1] = std::numeric_limits<float>::infinity();
@@ -161,6 +165,10 @@ TEST_P(GradScalerMultiDTypeTest, NanDetection) {
         // Float16 storage is 2 bytes; data<float>() would misinterpret it.
         Float16* grad_data = grad_cpu.data<Float16>();
         grad_data[2] = Float16(std::numeric_limits<float>::quiet_NaN());
+    } else if (dtype() == DType::BFloat16) {
+        // BFloat16 storage is 2 bytes; data<float>() would misinterpret it.
+        BFloat16* grad_data = grad_cpu.data<BFloat16>();
+        grad_data[2] = BFloat16(std::numeric_limits<float>::quiet_NaN());
     } else {
         float* grad_data = grad_cpu.data<float>();
         grad_data[2] = std::numeric_limits<float>::quiet_NaN();

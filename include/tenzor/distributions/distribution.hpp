@@ -16,6 +16,7 @@
 #include "../ops/indexing.hpp"
 #include "../ops/transform.hpp"
 #include "../utils/error.hpp"
+#include "../utils/safe_math.hpp"
 #include <vector>
 #include <cmath>
 #include <optional>
@@ -2193,8 +2194,11 @@ public:
             ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())
             : sample_shape;
         auto u = rand(shape, loc_.dtype(), loc_.device());
-        // Clamp to avoid log(0) and log(-log(0))
-        constexpr float kEps = 1e-7f;
+        // Clamp to avoid log(0) and log(-log(0)). The margin must exceed the
+        // dtype's own rounding error near 1.0, or the clamp is a no-op once
+        // narrowed back to a low-precision storage type (see
+        // boundary_clamp_epsilon).
+        const float kEps = tenzor::detail::boundary_clamp_epsilon(loc_.dtype());
         auto u_clamped = tenzor::clamp(u, kEps, 1.0f - kEps);
         // x = loc - scale * log(-log(u))
         return loc_ - scale_ * tenzor::log(tenzor::neg(tenzor::log(u_clamped)));
@@ -3629,7 +3633,10 @@ public:
             ? std::vector<int64_t>(scale_.shape().begin(), scale_.shape().end())
             : sample_shape;
         auto u = rand(shape, scale_.dtype(), scale_.device());
-        u = tenzor::clamp(u, 1e-7f, 1.0f - 1e-7f);
+        // See boundary_clamp_epsilon: a fixed Float32-scale epsilon rounds
+        // back to the exact 0/1 boundary once narrowed to FP16/BF16.
+        const float kEps = tenzor::detail::boundary_clamp_epsilon(scale_.dtype());
+        u = tenzor::clamp(u, kEps, 1.0f - kEps);
         auto neg_log = tenzor::neg(tenzor::log(1.0f - u));
         return scale_ * tenzor::exp(tenzor::log(neg_log) / concentration_);
     }

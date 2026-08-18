@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <tenzor/tenzor.hpp>
 #include <tenzor/utils/benchmark.hpp>
 #include <thread>
 #include <chrono>
@@ -14,9 +15,21 @@ using namespace tenzor::benchmark;
 
 class BenchmarkTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
+    static bool initialized_;
+
+    void SetUp() override {
+        // Benchmark::run() calls Device::synchronize() (added so GPU timing
+        // waits for async kernels to finish instead of measuring only
+        // dispatch overhead) which requires a registered backend.
+        if (!initialized_) {
+            tenzor::initialize();
+            initialized_ = true;
+        }
+    }
     void TearDown() override {}
 };
+
+bool BenchmarkTest::initialized_ = false;
 
 // Test 1: Timer basic functionality
 TEST_F(BenchmarkTest, TimerBasic) {

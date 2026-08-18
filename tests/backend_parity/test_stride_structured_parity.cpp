@@ -20,6 +20,7 @@
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
+#include "parity_tolerances.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -63,7 +64,7 @@ TEST_P(StrideStructuredParity, Conv2d_NonContigInput) {
             return tenzor::nn::functional::conv2d(in, w, std::nullopt,
                                                   {1, 1}, {1, 1}).tensor();
         },
-        {input, weight}, device, 1e-4f, 1e-5f, "Conv2d non-contig input");
+        {input, weight}, device, parity::CONV_RTOL, parity::CONV_ATOL, "Conv2d non-contig input");
 }
 
 // ---------------------------------------------------------------------------
