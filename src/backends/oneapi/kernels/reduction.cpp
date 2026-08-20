@@ -1614,6 +1614,12 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             // native Float64 argmax; argmax indices are invariant under the widen.
             return argmax_kernel(input_raw.to(DType::Float64), dim, keepdim, queue);
         }
+        if (dt == DType::BFloat16) {
+            // No native BFloat16 argmax kernel (unlike Float16, which has one).
+            // Widen to Float32 on device -- argmax indices are order-invariant
+            // under this widen, and the native Float32 kernel handles the rest.
+            return argmax_kernel(input_raw.to(DType::Float32), dim, keepdim, queue);
+        }
     }
     // Ensure contiguous input: the shape-derived offset math below assumes row-major
     // contiguous layout, so a non-contiguous view must be materialized first.
@@ -1815,6 +1821,12 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             // (32-bit casts are safe, unlike the 16-bit case above) and run the
             // native Float64 argmin; argmin indices are invariant under the widen.
             return argmin_kernel(input_raw.to(DType::Float64), dim, keepdim, queue);
+        }
+        if (dt == DType::BFloat16) {
+            // No native BFloat16 argmin kernel (unlike Float16, which has one).
+            // Widen to Float32 on device -- argmin indices are order-invariant
+            // under this widen, and the native Float32 kernel handles the rest.
+            return argmin_kernel(input_raw.to(DType::Float32), dim, keepdim, queue);
         }
     }
     // Ensure contiguous input: the shape-derived offset math below assumes row-major

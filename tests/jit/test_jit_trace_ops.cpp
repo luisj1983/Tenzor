@@ -3797,7 +3797,10 @@ TEST(JitDetectionOps, GenerateProposalsRefusesToTrace) {
 TEST(JitDetectionOps, ProcessMasksRefusesToTrace) {
     auto mask_logits = randn({1, 1, 4, 4}, DType::Float32, Device::cpu());
     auto boxes = box_tensor({{0.0f, 0.0f, 3.0f, 3.0f}});
-    auto class_labels = int64_1d_tensor({1});
+    // process_masks' class_labels are 0-indexed directly over mask_logits'
+    // channels (see mask_head.cpp); with 1 channel here, 0 is the only
+    // valid label.
+    auto class_labels = int64_1d_tensor({0});
 
     auto fn = [&](const Variable& dummy) {
         (void)dummy;

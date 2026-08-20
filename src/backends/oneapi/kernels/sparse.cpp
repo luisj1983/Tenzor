@@ -113,9 +113,14 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         Tensor x_cont = x.is_contiguous() ? x : x.contiguous();
         auto* crow_ptr = crow.data<std::int64_t>();
         auto* col_ptr  = col.data<std::int64_t>();
-        auto* val_ptr  = vals.data<uint16_t>();
-        auto* x_ptr    = x_cont.data<uint16_t>();
-        auto* y_ptr    = y.data<uint16_t>();
+        // Tenzor stores BFloat16 as `tenzor::BFloat16` (a 2-byte {uint16_t
+        // bits} struct), not a raw uint16_t -- data<uint16_t>() on a
+        // BFloat16 tensor throws a dtype-mismatch. reinterpret to uint16_t*
+        // for the bit-level ops below (matches the Float16 branch's
+        // reinterpret_cast<sycl::half*> just above).
+        auto* val_ptr  = reinterpret_cast<uint16_t*>(vals.data<tenzor::BFloat16>());
+        auto* x_ptr    = reinterpret_cast<uint16_t*>(x_cont.data<tenzor::BFloat16>());
+        auto* y_ptr    = reinterpret_cast<uint16_t*>(y.data<tenzor::BFloat16>());
         queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
             [=](sycl::id<1> idx) {
                 int64_t row = static_cast<int64_t>(idx[0]);

@@ -256,12 +256,18 @@ auto process_masks(const Tensor& mask_logits,
     auto* boxes_data = boxes_cpu.data<float>();
 
     for (int64_t i = 0; i < num_detections; ++i) {
-        // Get class label and select corresponding mask. Labels are 1-indexed
-        // (0 = background, 1..num_classes = foreground); mask_pred_ emits one channel
-        // per foreground class, so subtract 1 to reach the 0-indexed mask channel,
-        // matching the box head's label - 1 convention in roi_head.cpp.
+        // Get class label and select corresponding mask. Unlike mask_loss()
+        // above (whose class_labels are 1-indexed ground-truth ROI matches,
+        // background=0), process_masks' caller (MaskRCNN::forward_test) has
+        // already sliced off the background column before argmax --
+        // `det_labels` there is 0-indexed directly over mask_logits' real
+        // classes (see the detailed rationale in models/mask_rcnn.cpp around
+        // the `cls_probs_no_bg` slice), so no -1 remap here. A stale copy of
+        // mask_loss's -1 convention previously rejected label 0 (a
+        // perfectly valid first real class) as "out of range", and silently
+        // selected the WRONG channel for every other label as an off-by-one.
         int64_t label = class_labels_data[i];
-        int64_t class_idx = label - 1;
+        int64_t class_idx = label;
 
         // Bounds-check the channel index against mask_logits' class dim before
         // selecting (mask_loss validates the same; process_masks did not, so a
@@ -270,7 +276,7 @@ auto process_masks(const Tensor& mask_logits,
         if (class_idx < 0 || class_idx >= num_classes) {
             throw std::invalid_argument(
                 "MaskHead::process_masks: class label " + std::to_string(label) +
-                " out of range [1, " + std::to_string(num_classes) + "]");
+                " out of range [0, " + std::to_string(num_classes) + ")");
         }
 
         // Extract mask logits for this class: (mask_h, mask_w)

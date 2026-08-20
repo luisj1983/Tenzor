@@ -667,8 +667,11 @@ TEST_P(TrainingLoopsMultiDType, MNISTWithEarlyStopping) {
     // flaked once the Float64 path stopped crashing before reaching this
     // point). What IS an invariant: the bookkeeping stays sane and the loop
     // never diverges to non-finite loss.
+    // patience_counter is incremented THEN checked against patience (>=)
+    // before breaking, so it legitimately equals `patience` exactly at the
+    // moment early stopping fires -- EXPECT_LT here was off by one.
     EXPECT_GE(patience_counter, 0);
-    EXPECT_LT(patience_counter, patience);
+    EXPECT_LE(patience_counter, patience);
     EXPECT_TRUE(std::isfinite(best_val_loss)) << "Validation loss should remain finite";
 }
 

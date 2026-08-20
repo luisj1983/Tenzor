@@ -909,6 +909,15 @@ auto linalg_svd_kernel(const Tensor& input, bool full_matrices, sycl::queue& que
 // LinalgQR - QR Decomposition via geqrf + orgqr
 // ============================================================================
 auto linalg_qr_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    // oneMKL's geqrf/orgqr LAPACK routines only instantiate for Float32/
+    // Float64. Widen Float16/BFloat16 to Float32, run the native path, and
+    // narrow back -- matches the non-oneMKL fallback linalg_qr_kernel below.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType odt = input.dtype();
+        auto [Q, R] = linalg_qr_kernel(input.to(DType::Float32), queue);
+        return {Q.to(odt), R.to(odt)};
+    }
+
     auto shape = input.shape();
     int64_t m = shape[shape.size() - 2];
     int64_t n = shape[shape.size() - 1];
