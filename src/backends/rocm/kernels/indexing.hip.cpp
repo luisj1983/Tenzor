@@ -3563,6 +3563,18 @@ __global__ void nonzero_flag_kernel_hip<__half>(
     }
 }
 
+// Specialization for hip_bfloat16
+template<>
+__global__ void nonzero_flag_kernel_hip<hip_bfloat16>(
+    const hip_bfloat16* input,
+    int64_t* flags,
+    int64_t n) {
+
+    HIP_KERNEL_LOOP(i, n) {
+        flags[i] = (static_cast<float>(input[i]) != 0.0f) ? 1 : 0;
+    }
+}
+
 // Decompose compacted flat indices into multi-dimensional indices
 __global__ void decompose_flat_indices_kernel_hip(
     const int64_t* flat_indices,
@@ -3623,6 +3635,12 @@ auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(nonzero_flag_kernel_hip<__half>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
+            HIP_POST_LAUNCH_CHECK();
+            break;
+        case DType::BFloat16:
+            hipLaunchKernelGGL(nonzero_flag_kernel_hip<hip_bfloat16>,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(input.data_ptr()), d_flags, n);
             HIP_POST_LAUNCH_CHECK();
             break;
         default:

@@ -35,18 +35,29 @@ auto DeadCodeEliminationPass::run(Graph& graph) -> bool {
     auto reachable = mark_reachable_nodes(graph);
 
     bool modified = false;
-    auto& nodes = const_cast<std::vector<std::shared_ptr<Node>>&>(graph.nodes());
 
-    // Remove unreachable nodes
-    auto it = nodes.begin();
-    while (it != nodes.end()) {
-        if (reachable.find(it->get()) == reachable.end()) {
-            it = nodes.erase(it);
-            modified = true;
-        } else {
-            ++it;
+    // Collect unreachable nodes first (mutating graph.nodes() while iterating
+    // it would invalidate the iterator), then remove each via
+    // Graph::remove_node -- NOT a raw vector erase. remove_node also calls
+    // input->remove_use(node) for every input of the removed node; a raw
+    // nodes_.erase() here skipped that, leaving a dangling weak_ptr in the
+    // uses_ list of whatever value fed the dead node. That stale entry
+    // inflates value->uses().size() for a live, still-used value, which
+    // breaks every later fusion pass's single_consumer()/next_op() helper
+    // (they require exactly one ALIVE consumer at each hop) -- e.g. it
+    // silently defeated FuseConvBatchNormReluPass on any graph where DCE
+    // had pruned a dead sibling consumer of the Conv->BN norm-cast output.
+    std::vector<std::shared_ptr<Node>> dead;
+    for (const auto& node : graph.nodes()) {
+        if (reachable.find(node.get()) == reachable.end()) {
+            dead.push_back(node);
         }
     }
+    for (auto& node : dead) {
+        graph.remove_node(node);
+        modified = true;
+    }
+    const auto& nodes = graph.nodes();
 
     // Recurse into control-flow subgraphs of the surviving nodes. Each subgraph
     // is a self-contained graph (it receives its inputs through forward(), it

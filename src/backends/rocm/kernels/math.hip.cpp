@@ -8711,6 +8711,12 @@ __global__ void igamma_kernel_f16(const __half* a, const __half* x, __half* outp
     }
 }
 
+__global__ void igamma_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* x, hip_bfloat16* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = tenzor::rocm::f32_to_bf16_rne(device_igamma_f32(static_cast<float>(a[idx]), static_cast<float>(x[idx])));
+    }
+}
+
 __global__ void igammac_kernel_f32(const float* a, const float* x, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         output[idx] = device_igammac_f32(a[idx], x[idx]);
@@ -8726,6 +8732,12 @@ __global__ void igammac_kernel_f64(const double* a, const double* x, double* out
 __global__ void igammac_kernel_f16(const __half* a, const __half* x, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         output[idx] = tenzor::rocm::safe_f2h(device_igammac_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(x[idx])));
+    }
+}
+
+__global__ void igammac_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* x, hip_bfloat16* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = tenzor::rocm::f32_to_bf16_rne(device_igammac_f32(static_cast<float>(a[idx]), static_cast<float>(x[idx])));
     }
 }
 
@@ -9163,8 +9175,13 @@ auto igamma_kernel(const Tensor& a, const Tensor& x, hipStream_t stream) -> Tens
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(x.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(igamma_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(x.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
     } else {
-        throw std::runtime_error("igamma operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("igamma operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -9199,8 +9216,13 @@ auto igammac_kernel(const Tensor& a, const Tensor& x, hipStream_t stream) -> Ten
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(x.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(igammac_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(x.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
     } else {
-        throw std::runtime_error("igammac operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("igammac operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -10804,6 +10826,13 @@ __global__ void signbit_kernel_f16(const __half* input, uint8_t* output, int64_t
         output[idx] = static_cast<uint8_t>((bits >> 31) & 1u);
     }
 }
+__global__ void signbit_kernel_bf16(const hip_bfloat16* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = static_cast<float>(input[idx]);
+        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
+        output[idx] = static_cast<uint8_t>((bits >> 31) & 1u);
+    }
+}
 
 auto signbit_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
     // JIT-R163: input.data<T>() is a raw pointer with NO stride handling --
@@ -10824,6 +10853,10 @@ auto signbit_kernel(const Tensor& input_in, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(signbit_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(signbit_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             result.data<uint8_t>(), n);
     } else {
         // Integer types: check if value < 0

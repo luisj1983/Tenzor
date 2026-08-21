@@ -2909,12 +2909,19 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         throw std::runtime_error("triu: input must be at least 2D");
     }
 
+    Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t total_elements = input.numel();
+    if (total_elements == 0) {
+        // get_num_blocks(0) == 0 -> hipLaunchKernelGGL with a 0-sized grid
+        // dimension throws "invalid configuration argument"; nothing to do anyway.
+        return result;
+    }
+
     // The kernel indexes by flat contiguous offset, so materialize a contiguous
     // input for non-contiguous (e.g. transposed/strided) views to match CPU.
     auto cont = input.is_contiguous() ? input : input.contiguous();
-
-    Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-                  input.dtype(), input.device());
 
     int64_t rows = input_shape[ndim - 2];
     int64_t cols = input_shape[ndim - 1];
@@ -2925,7 +2932,6 @@ auto triu_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         batch_size *= input_shape[i];
     }
 
-    int64_t total_elements = input.numel();
     int num_blocks = get_num_blocks(total_elements);
 
     if (input.dtype() == DType::Float32) {
@@ -2998,12 +3004,19 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         throw std::runtime_error("tril: input must be at least 2D");
     }
 
+    Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t total_elements = input.numel();
+    if (total_elements == 0) {
+        // get_num_blocks(0) == 0 -> hipLaunchKernelGGL with a 0-sized grid
+        // dimension throws "invalid configuration argument"; nothing to do anyway.
+        return result;
+    }
+
     // The kernel indexes by flat contiguous offset, so materialize a contiguous
     // input for non-contiguous (e.g. transposed/strided) views to match CPU.
     auto cont = input.is_contiguous() ? input : input.contiguous();
-
-    Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-                  input.dtype(), input.device());
 
     int64_t rows = input_shape[ndim - 2];
     int64_t cols = input_shape[ndim - 1];
@@ -3013,7 +3026,6 @@ auto tril_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> T
         batch_size *= input_shape[i];
     }
 
-    int64_t total_elements = input.numel();
     int num_blocks = get_num_blocks(total_elements);
 
     if (input.dtype() == DType::Float32) {

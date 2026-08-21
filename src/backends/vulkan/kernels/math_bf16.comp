@@ -81,6 +81,44 @@ float roundHalfAwayF32(float x) {
     return sign(x) * floor(abs(x) + 0.5);
 }
 
+// Lower regularized incomplete gamma P(a, x), computed in float32. Mirrors
+// math.comp's case 38 (Lanczos g=7 lgamma + series expansion).
+float igammaLowerF32(float a, float x) {
+    if (x <= 0.0) return 0.0;
+    const float lan_g = 7.0;
+    const float lan_c0 =  0.99999999999980993;
+    const float lan_c1 = 676.5203681218851;
+    const float lan_c2 = -1259.1392167224028;
+    const float lan_c3 = 771.32342877765313;
+    const float lan_c4 = -176.61502916214059;
+    const float lan_c5 = 12.507343278686905;
+    const float lan_c6 = -0.13857109526572012;
+    const float lan_c7 = 9.9843695780195716e-6;
+    const float lan_c8 = 1.5056327351493116e-7;
+    float z = a - 1.0;
+    float sx = lan_c0;
+    sx += lan_c1 / (z + 1.0);
+    sx += lan_c2 / (z + 2.0);
+    sx += lan_c3 / (z + 3.0);
+    sx += lan_c4 / (z + 4.0);
+    sx += lan_c5 / (z + 5.0);
+    sx += lan_c6 / (z + 6.0);
+    sx += lan_c7 / (z + 7.0);
+    sx += lan_c8 / (z + 8.0);
+    float t = z + lan_g + 0.5;
+    float lg = 0.9189385332046727 + (z + 0.5) * log(t) - t + log(sx);
+
+    float term = 1.0 / a;
+    float sum = term;
+    for (int nn = 1; nn < 100; ++nn) {
+        term *= x / (a + float(nn));
+        sum += term;
+        if (abs(term) < abs(sum) * 1e-7) break;
+    }
+    float res = exp(-x + a * log(x) - lg) * sum;
+    return clamp(res, 0.0, 1.0);
+}
+
 void main() {
     // Process 2 elements per thread
     uint pair_idx = gl_GlobalInvocationID.x;
@@ -281,6 +319,14 @@ void main() {
         case 34: // copysign (binary)
             res0 = float(fb0 < 0.0 ? -abs(fa0) : abs(fa0));
             res1 = float(fb1 < 0.0 ? -abs(fa1) : abs(fa1));
+            break;
+        case 38: // igamma (binary) - lower regularized incomplete gamma P(a, x)
+            res0 = igammaLowerF32(fa0, fb0);
+            res1 = igammaLowerF32(fa1, fb1);
+            break;
+        case 39: // igammac (binary) - upper regularized incomplete gamma = 1 - igamma
+            res0 = fb0 <= 0.0 ? 1.0 : 1.0 - igammaLowerF32(fa0, fb0);
+            res1 = fb1 <= 0.0 ? 1.0 : 1.0 - igammaLowerF32(fa1, fb1);
             break;
         case 44: // deg2rad (unary)
             res0 = float(fa0 * 0.01745329251994329577);

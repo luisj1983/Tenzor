@@ -462,6 +462,11 @@ void VulkanBackend::checkLuNonSingular(const Tensor& lu_cont, int64_t n, int64_t
 }
 
 auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
+    // No native BFloat16 shader: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::BFloat16) {
+        auto res = dispatchLinalgDet(dispatchCast(input.contiguous(), DType::Float32));
+        return dispatchCast(res, DType::BFloat16);
+    }
     validate_linalg_dtype(input, "det");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -577,6 +582,11 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
+    // No native BFloat16 shader: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::BFloat16) {
+        auto res = dispatchLinalgInv(dispatchCast(input.contiguous(), DType::Float32));
+        return dispatchCast(res, DType::BFloat16);
+    }
     validate_linalg_dtype(input, "inv");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -703,6 +713,12 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor {
+    // No native BFloat16 shader: widen to Float32, compute, narrow back.
+    if (a.dtype() == DType::BFloat16) {
+        auto res = dispatchLinalgSolve(dispatchCast(a.contiguous(), DType::Float32),
+                                        dispatchCast(b.contiguous(), DType::Float32));
+        return dispatchCast(res, DType::BFloat16);
+    }
     validate_linalg_dtype(a, "solve");
     auto a_shape = a.shape();
     auto b_shape = b.shape();
@@ -848,6 +864,11 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> Tensor {
+    // No native BFloat16 shader: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::BFloat16) {
+        auto res = dispatchLinalgCholesky(dispatchCast(input.contiguous(), DType::Float32), upper);
+        return dispatchCast(res, DType::BFloat16);
+    }
     validate_linalg_dtype(input, "cholesky");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -936,6 +957,11 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor> {
+    // No native BFloat16 shader: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::BFloat16) {
+        auto res = dispatchLinalgQR(dispatchCast(input.contiguous(), DType::Float32));
+        return { dispatchCast(res[0], DType::BFloat16), dispatchCast(res[1], DType::BFloat16) };
+    }
     validate_linalg_dtype(input, "qr");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -1012,6 +1038,13 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -> std::vector<Tensor> {
+    // No native BFloat16 shader at any matrix size: widen to Float32, narrow back.
+    if (input.dtype() == DType::BFloat16) {
+        auto res = dispatchLinalgSVD(dispatchCast(input.contiguous(), DType::Float32), full_matrices);
+        return { dispatchCast(res[0], DType::BFloat16),
+                 dispatchCast(res[1], DType::BFloat16),
+                 dispatchCast(res[2], DType::BFloat16) };
+    }
     validate_linalg_dtype(input, "svd");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -1405,6 +1438,11 @@ void VulkanBackend::runBlockedHessenberg(Tensor& A, Tensor& tau, int64_t n,
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tensor> {
+    // No native BFloat16 shader: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::BFloat16) {
+        auto res = dispatchLinalgEigh(dispatchCast(input.contiguous(), DType::Float32));
+        return { dispatchCast(res[0], DType::BFloat16), dispatchCast(res[1], DType::BFloat16) };
+    }
     validate_linalg_dtype(input, "eigh");
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
@@ -3124,7 +3162,15 @@ auto VulkanBackend::dispatchCross(const Tensor& a, const Tensor& b,
 // pivots is Int32 tensor of shape (..., n) containing 1-based LAPACK pivot indices.
 // ============================================================================
 auto VulkanBackend::dispatchLinalgLU(const Tensor& input) -> std::vector<Tensor> {
-    validate_linalg_dtype(input, "lu");
+    // Note: BFloat16 is valid here (promoted to Float32 below), unlike the other
+    // linalg entry points which reject it outright — validate only Float64/Float16/
+    // Float32/BFloat16.
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
+        input.dtype() != DType::Float16 && input.dtype() != DType::BFloat16) {
+        throw std::invalid_argument(
+            "linalg::lu: unsupported dtype " + std::string(dtype_name(input.dtype())) +
+            " on Vulkan. Supported: Float32, Float64, Float16, BFloat16.");
+    }
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (ndim < 2) throw std::invalid_argument("linalg.lu: input must be at least 2D");
