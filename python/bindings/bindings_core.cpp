@@ -19,6 +19,7 @@
 
 #include <tenzor/tenzor.hpp>
 #include <tenzor/utils/error.hpp>  // tenzor::RuntimeError (Variable __array__/__dlpack__ guards)
+#include <tenzor/utils/safe_math.hpp>  // tenzor::detail::checked_mul_overflow (portable __builtin_mul_overflow)
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/autograd/anomaly_mode.hpp>
 #include <tenzor/autograd/checkpoint.hpp>
@@ -1096,14 +1097,14 @@ Returns:
                 // or zero positive value would otherwise defeat the
                 // required_bytes > available_bytes guard below and yield a
                 // zero-copy view over a too-small buffer (OOB on later access).
-                if (__builtin_mul_overflow(numel, d, &numel))
+                if (tenzor::detail::checked_mul_overflow(numel, d, &numel))
                     throw py::value_error(
                         "from_blob: shape element count overflows int64");
             }
             // Also guard required_bytes = numel * dtype_size against size_t
             // overflow before using it in the buffer-size comparison.
             size_t required_bytes = 0;
-            if (__builtin_mul_overflow(static_cast<size_t>(numel),
+            if (tenzor::detail::checked_mul_overflow(static_cast<size_t>(numel),
                                        tenzor::dtype_size(dtype),
                                        &required_bytes))
                 throw py::value_error(

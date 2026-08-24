@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/jit/pattern_matcher.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <algorithm>
 #include <sstream>
 #include <unordered_set>
@@ -47,7 +48,7 @@ auto PatternMatcher::estimate_elements(
         // Guard the multiply against signed-overflow UB (JIT-020): a wrapped
         // negative product would flow into the cost model. On overflow, report
         // the count as unknown (the cost model already treats that safely).
-        if (__builtin_mul_overflow(elements, d, &elements)) {
+        if (tenzor::detail::checked_mul_overflow(elements, d, &elements)) {
             return FusionMatch::kUnknownElements;
         }
     }
@@ -432,7 +433,7 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
             // for an operand that doesn't actually match the real
             // (still-unresolved) normalized-axes structure.
             if (in_shape[static_cast<size_t>(a)] <= 0 ||
-                __builtin_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
+                tenzor::detail::checked_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
                 overflowed = true;
                 break;
             }
@@ -493,7 +494,7 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
             // against norm_size without a real count, so reject absorption
             // rather than let a 0/negative placeholder multiply through and
             // possibly coincide with norm_size's own value.
-            if (d <= 0 || __builtin_mul_overflow(onumel, d, &onumel)) return false;
+            if (d <= 0 || tenzor::detail::checked_mul_overflow(onumel, d, &onumel)) return false;
         }
         if (onumel == 1) return true;
         if (onumel != norm_size) return false;
@@ -506,7 +507,7 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
         size_t k = 0;
         bool found = false;
         for (size_t i = chain_shape.size(); i-- > 0; ) {
-            if (__builtin_mul_overflow(suffix_prod, chain_shape[i], &suffix_prod)) return false;
+            if (tenzor::detail::checked_mul_overflow(suffix_prod, chain_shape[i], &suffix_prod)) return false;
             ++k;
             if (suffix_prod == norm_size) { found = true; break; }
             if (suffix_prod > norm_size) break;
@@ -729,7 +730,7 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
             // rationale -- <= 0 encodes a dynamic/unknown dim and must not
             // silently multiply through into norm_size.
             if (in_shape[static_cast<size_t>(a)] <= 0 ||
-                __builtin_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
+                tenzor::detail::checked_mul_overflow(prod, in_shape[static_cast<size_t>(a)], &prod)) {
                 overflowed = true;
                 break;
             }
@@ -771,7 +772,7 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
             // against norm_size without a real count, so reject absorption
             // rather than let a 0/negative placeholder multiply through and
             // possibly coincide with norm_size's own value.
-            if (d <= 0 || __builtin_mul_overflow(onumel, d, &onumel)) return false;
+            if (d <= 0 || tenzor::detail::checked_mul_overflow(onumel, d, &onumel)) return false;
         }
         if (onumel == 1) return true;
         if (onumel != norm_size) return false;
@@ -781,7 +782,7 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
         size_t k = 0;
         bool found = false;
         for (size_t i = chain_shape.size(); i-- > 0; ) {
-            if (__builtin_mul_overflow(suffix_prod, chain_shape[i], &suffix_prod)) return false;
+            if (tenzor::detail::checked_mul_overflow(suffix_prod, chain_shape[i], &suffix_prod)) return false;
             ++k;
             if (suffix_prod == norm_size) { found = true; break; }
             if (suffix_prod > norm_size) break;
@@ -971,7 +972,7 @@ auto PatternMatcher::match_gemm_epilogue(const Graph& graph, size_t start_idx,
                 int64_t bnumel = 1;
                 bool overflowed = false;
                 for (auto d : bshape) {
-                    if (__builtin_mul_overflow(bnumel, d, &bnumel)) {
+                    if (tenzor::detail::checked_mul_overflow(bnumel, d, &bnumel)) {
                         overflowed = true;
                         break;
                     }

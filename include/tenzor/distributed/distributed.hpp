@@ -15,6 +15,7 @@
 #include <mutex>
 #include <functional>
 #include "../core/device.hpp"
+#include "../core/export.hpp"
 #include "../autograd/variable.hpp"
 
 namespace tenzor {
@@ -576,8 +577,12 @@ public:
     }
 
 private:
-    static std::shared_ptr<ProcessGroup> global_process_group_;
-    static std::mutex mutex_;
+    // See dispatch_table.hpp's tables_ for why these need explicit export
+    // annotations: they're referenced from the inline replace_process_group()
+    // above, compiled into every consuming DLL, and CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS
+    // only auto-exports function symbols, not data symbols.
+    TENZOR_API static std::shared_ptr<ProcessGroup> global_process_group_;
+    TENZOR_API static std::mutex mutex_;
 };
 
 // Convenience functions

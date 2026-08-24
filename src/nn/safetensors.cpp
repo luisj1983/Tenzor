@@ -14,6 +14,11 @@
 #include <cstdint>
 #include <bit>
 #include <vector>
+#include <limits>
+
+#if defined(_MSC_VER)
+#include <cstdlib>  // _byteswap_uint64
+#endif
 
 namespace tenzor::nn {
 
@@ -67,10 +72,28 @@ inline void convert_endianness(void* data, size_t nbytes, DType dtype) {
 // Convert a u64 between host order and little-endian (symmetric).
 inline uint64_t u64_host_le(uint64_t v) {
     if constexpr (kHostIsBigEndian) {
+#if defined(_MSC_VER)
+        return _byteswap_uint64(v);
+#else
         return __builtin_bswap64(v);
+#endif
     } else {
         return v;
     }
+}
+
+// Portable checked multiply (GCC/Clang's __builtin_mul_overflow has no MSVC
+// equivalent). Both call sites here only ever pass non-negative operands
+// (dims are rejected below zero before this runs, and numel starts at 1), so
+// a division-based check is correct for both the signed (int64_t) and
+// unsigned (size_t) instantiations used below.
+template <typename T>
+inline bool checked_mul_overflow(T a, T b, T* result) {
+    if (a != 0 && b > (std::numeric_limits<T>::max)() / a) {
+        return true;
+    }
+    *result = a * b;
+    return false;
 }
 
 } // namespace
@@ -520,14 +543,14 @@ auto SafeTensorsSerializer::load(const std::string& path)
                 throw std::runtime_error("SafeTensors: tensor '" + name +
                                           "' has a negative dimension");
             }
-            if (__builtin_mul_overflow(numel, dim, &numel)) {
+            if (checked_mul_overflow(numel, dim, &numel)) {
                 throw std::runtime_error("SafeTensors: tensor '" + name +
                                           "' element count overflows int64");
             }
         }
         size_t expected_size;
-        if (__builtin_mul_overflow(static_cast<size_t>(numel),
-                                   dtype_size(meta.dtype), &expected_size)) {
+        if (checked_mul_overflow(static_cast<size_t>(numel),
+                                 dtype_size(meta.dtype), &expected_size)) {
             throw std::runtime_error("SafeTensors: tensor '" + name +
                                       "' byte size overflows size_t");
         }

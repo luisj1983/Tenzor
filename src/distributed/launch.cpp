@@ -34,6 +34,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX  // prevent windows.h's min/max macros from clobbering std::min/std::max
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>

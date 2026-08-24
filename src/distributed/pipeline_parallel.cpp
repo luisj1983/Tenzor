@@ -11,6 +11,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <stdexcept>
 #include <deque>
 
@@ -210,7 +211,7 @@ auto recv_activation(int src_rank, ProcessGroup& pg, const Device& device,
                 "pipeline_parallel: received activation metadata with negative "
                 "dim at index " + std::to_string(d));
         }
-        if (__builtin_mul_overflow(numel, dim, &numel)) {
+        if (tenzor::detail::checked_mul_overflow(numel, dim, &numel)) {
             throw std::runtime_error(
                 "pipeline_parallel: received activation metadata with numel "
                 "overflow");

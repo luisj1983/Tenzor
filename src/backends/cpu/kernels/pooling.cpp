@@ -28,9 +28,13 @@ namespace cpu {
 
 // AVX-512 forward declarations (defined in pooling_avx512.cpp)
 namespace avx512 {
-void avgpool2d_forward_f32(const float*, float*, int64_t, int64_t, int64_t, int64_t,
+// MSVC encodes __restrict in name mangling (unlike GCC/Clang), so these
+// declarations must match pooling_avx512.cpp's __restrict-qualified
+// parameters exactly or the two mangled names diverge and this becomes an
+// unresolved external at link time despite the definition existing.
+void avgpool2d_forward_f32(const float* __restrict, float* __restrict, int64_t, int64_t, int64_t, int64_t,
                            int64_t, int64_t, int64_t, int64_t, int64_t);
-void adaptive_avgpool2d_forward_f32(const float*, float*, int64_t, int64_t, int64_t, int64_t,
+void adaptive_avgpool2d_forward_f32(const float* __restrict, float* __restrict, int64_t, int64_t, int64_t, int64_t,
                                      int64_t, int64_t);
 } // namespace avx512
 

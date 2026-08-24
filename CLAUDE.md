@@ -16,6 +16,39 @@ ninja tenzor_python             # Build Python module (python/tenzor/tenzor_core
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 ```
 
+### Windows
+
+Builds and runs on Windows (MSVC + Ninja) as of this writing — CPU, CUDA,
+ROCm, OneAPI, Vulkan backends and Python bindings all build; CPU/CUDA/ROCm/
+OneAPI all load and run at runtime (Vulkan needs an actual Vulkan-capable
+device/driver to *initialize*, but degrades gracefully without one). See
+[INSTALL.md](INSTALL.md#windows-with-msvc) for the full configure command
+and prerequisites. Key things that differ from Linux and are easy to
+rediscover the hard way if forgotten:
+
+- **Use `-G Ninja`, never the "Visual Studio" generator.** CMake refuses to
+  mix MSVC with Clang-family languages on Windows, and ROCm/OneAPI are
+  Clang-family toolchains (`hipcc`/`icpx`) invoked via direct
+  `add_custom_command` calls, not CMake's native HIP/SYCL language support.
+- **DLL loading is handled automatically**, both for Python (`import
+  tenzor`) and for C++ executables linking `tenzor_core` — don't manually
+  chase "DLL load failed" errors before checking `src/backend/loader.cpp`'s
+  `ensure_win_dll_search_setup()` and the CMake-generated
+  `build/generated/tenzor_win_dll_dirs.generated.hpp` /
+  `build/python/tenzor/_win_dll_dirs.py` are current for the build in
+  question. One thing this does NOT cover: `tenzor_core.dll`'s own static
+  imports (MKL threading, and CUDA's NVRTC / ROCm's HIP runtime compiler
+  when built) resolve via the OS's normal PATH-inclusive search at process
+  startup — a plain C++ executable still needs the relevant vendor `bin`
+  directories on `PATH` before launch (Python's `__init__.py` handles this
+  for itself automatically).
+- A backend failing to *load* (`Failed to load library`) is usually a DLL
+  search-path problem — everything above should already cover it. A backend
+  loading but failing to *initialize* (e.g. Vulkan without a Vulkan driver,
+  CUDA without an NVIDIA driver) is expected graceful degradation, not a
+  bug — check the log line: `"X backend loaded but no X devices available"`
+  is fine, `"Failed to load library"` is not.
+
 ## Testing
 
 ```bash

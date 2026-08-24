@@ -38,6 +38,20 @@
 #define TENZOR_HAS_SSE2 1
 #endif
 
+// __attribute__((target(...))) is GCC/Clang-only function-multiversioning
+// syntax with no MSVC equivalent (cl.exe errors on it as unrecognized
+// syntax). These AVX-512/AVX2 kernel variants are defined unconditionally
+// (selected at runtime via CPU-feature dispatch, not #ifdef'd out), and
+// MSVC allows calling any _mm512_*/_mm256_* intrinsic regardless of the
+// ambient /arch: setting, so a no-op is sufficient there.
+#if defined(_MSC_VER)
+    #define TENZOR_MATH_TARGET_AVX512F
+    #define TENZOR_MATH_TARGET_AVX2_FMA
+#else
+    #define TENZOR_MATH_TARGET_AVX512F __attribute__((target("avx512f")))
+    #define TENZOR_MATH_TARGET_AVX2_FMA __attribute__((target("avx2,fma")))
+#endif
+
 #ifdef _OPENMP
 #include <omp.h>
 #else
@@ -108,9 +122,9 @@ constexpr size_t PREFETCH_B = 128;
 
 // Micro-kernel for small block multiplication (Float64)
 #ifdef TENZOR_HAS_AVX512
-__attribute__((target("avx512f")))
+TENZOR_MATH_TARGET_AVX512F
 #elif defined(TENZOR_HAS_AVX2)
-__attribute__((target("avx2,fma")))
+TENZOR_MATH_TARGET_AVX2_FMA
 #endif
 static void matmul_microkernel_float64(
     const double* A, const double* B, double* C,
@@ -1249,12 +1263,12 @@ inline void validate_elementwise(const Tensor& a, const Tensor& b) {
 
     if (!are_broadcastable(shape_a_vec, shape_b_vec)) {
         std::string msg = "Tensors shapes are not broadcastable: [";
-        for (size_t i = 0; i < shape_a_vec.size(); ++i) {
+        for (int64_t i = 0; i < shape_a_vec.size(); ++i) {
             msg += std::to_string(shape_a_vec[i]);
             if (i < shape_a_vec.size() - 1) msg += ", ";
         }
         msg += "] vs [";
-        for (size_t i = 0; i < shape_b_vec.size(); ++i) {
+        for (int64_t i = 0; i < shape_b_vec.size(); ++i) {
             msg += std::to_string(shape_b_vec[i]);
             if (i < shape_b_vec.size() - 1) msg += ", ";
         }
@@ -1272,7 +1286,7 @@ inline bool have_same_shape(const Tensor& a, const Tensor& b) {
     auto shape_a = a.shape();
     auto shape_b = b.shape();
 
-    for (size_t i = 0; i < shape_a.size(); ++i) {
+    for (int64_t i = 0; i < shape_a.size(); ++i) {
         if (shape_a[i] != shape_b[i]) {
             return false;
         }
@@ -1284,14 +1298,14 @@ inline bool have_same_shape(const Tensor& a, const Tensor& b) {
 // Scalar implementations
 template<typename T>
 inline void add_scalar(const T* a, const T* b, T* c, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         c[i] = a[i] + b[i];
     }
 }
 
 template<typename T>
 inline void sub_scalar(const T* a, const T* b, T* c, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         c[i] = a[i] - b[i];
     }
 }
@@ -1299,21 +1313,21 @@ inline void sub_scalar(const T* a, const T* b, T* c, size_t n) {
 // Specialization for Float16
 template<>
 inline void sub_scalar<Float16>(const Float16* a, const Float16* b, Float16* c, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         c[i] = Float16(static_cast<float>(a[i]) - static_cast<float>(b[i]));
     }
 }
 
 template<typename T>
 inline void mul_scalar(const T* a, const T* b, T* c, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         c[i] = a[i] * b[i];
     }
 }
 
 template<typename T>
 inline void div_scalar(const T* a, const T* b, T* c, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         if constexpr (std::is_integral_v<T>) {
             if (b[i] == T(0)) {
                 throw std::runtime_error("Integer division by zero");
@@ -1328,14 +1342,14 @@ inline void div_scalar(const T* a, const T* b, T* c, size_t n) {
 // SIMD implementations for Float32
 #ifdef TENZOR_HAS_AVX512
 
-__attribute__((target("avx512f")))
-inline void add_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void add_avx512_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     // OpenMP parallel for large tensors
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_add_ps(va, vb);
@@ -1348,13 +1362,13 @@ inline void add_avx512_f32(const float* __restrict__ a, const float* __restrict_
     }
 }
 
-__attribute__((target("avx512f")))
-inline void sub_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void sub_avx512_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_sub_ps(va, vb);
@@ -1366,13 +1380,13 @@ inline void sub_avx512_f32(const float* __restrict__ a, const float* __restrict_
     }
 }
 
-__attribute__((target("avx512f")))
-inline void mul_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void mul_avx512_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_mul_ps(va, vb);
@@ -1384,13 +1398,13 @@ inline void mul_avx512_f32(const float* __restrict__ a, const float* __restrict_
     }
 }
 
-__attribute__((target("avx512f")))
-inline void div_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void div_avx512_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_div_ps(va, vb);
@@ -1404,8 +1418,8 @@ inline void div_avx512_f32(const float* __restrict__ a, const float* __restrict_
 }
 
 // SIMD implementations for Float64
-__attribute__((target("avx512f")))
-inline void add_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void add_avx512_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1421,8 +1435,8 @@ inline void add_avx512_f64(const double* __restrict__ a, const double* __restric
     }
 }
 
-__attribute__((target("avx512f")))
-inline void sub_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void sub_avx512_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1438,8 +1452,8 @@ inline void sub_avx512_f64(const double* __restrict__ a, const double* __restric
     }
 }
 
-__attribute__((target("avx512f")))
-inline void mul_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void mul_avx512_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1455,8 +1469,8 @@ inline void mul_avx512_f64(const double* __restrict__ a, const double* __restric
     }
 }
 
-__attribute__((target("avx512f")))
-inline void div_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX512F
+inline void div_avx512_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1474,7 +1488,7 @@ inline void div_avx512_f64(const double* __restrict__ a, const double* __restric
 }
 
 // SIMD implementations for Int32
-__attribute__((target("avx512f")))
+TENZOR_MATH_TARGET_AVX512F
 inline void add_avx512_i32(const int32_t* a, const int32_t* b, int32_t* c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 16;
@@ -1491,7 +1505,7 @@ inline void add_avx512_i32(const int32_t* a, const int32_t* b, int32_t* c, size_
     }
 }
 
-__attribute__((target("avx512f")))
+TENZOR_MATH_TARGET_AVX512F
 inline void sub_avx512_i32(const int32_t* a, const int32_t* b, int32_t* c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 16;
@@ -1508,7 +1522,7 @@ inline void sub_avx512_i32(const int32_t* a, const int32_t* b, int32_t* c, size_
     }
 }
 
-__attribute__((target("avx512f")))
+TENZOR_MATH_TARGET_AVX512F
 inline void mul_avx512_i32(const int32_t* a, const int32_t* b, int32_t* c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 16;
@@ -1526,7 +1540,7 @@ inline void mul_avx512_i32(const int32_t* a, const int32_t* b, int32_t* c, size_
 }
 
 // SIMD implementations for Int64
-__attribute__((target("avx512f")))
+TENZOR_MATH_TARGET_AVX512F
 inline void add_avx512_i64(const int64_t* a, const int64_t* b, int64_t* c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
@@ -1543,7 +1557,7 @@ inline void add_avx512_i64(const int64_t* a, const int64_t* b, int64_t* c, size_
     }
 }
 
-__attribute__((target("avx512f")))
+TENZOR_MATH_TARGET_AVX512F
 inline void sub_avx512_i64(const int64_t* a, const int64_t* b, int64_t* c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
@@ -1563,14 +1577,14 @@ inline void sub_avx512_i64(const int64_t* a, const int64_t* b, int64_t* c, size_
 #elif defined(TENZOR_HAS_AVX2)
 
 // AVX2 fallback implementations
-__attribute__((target("avx2,fma")))
-inline void add_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void add_avx2_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     // OpenMP parallel for large tensors
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_add_ps(va, vb);
@@ -1583,13 +1597,13 @@ inline void add_avx2_f32(const float* __restrict__ a, const float* __restrict__ 
     }
 }
 
-__attribute__((target("avx2,fma")))
-inline void sub_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void sub_avx2_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_sub_ps(va, vb);
@@ -1601,13 +1615,13 @@ inline void sub_avx2_f32(const float* __restrict__ a, const float* __restrict__ 
     }
 }
 
-__attribute__((target("avx2,fma")))
-inline void mul_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void mul_avx2_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_mul_ps(va, vb);
@@ -1619,13 +1633,13 @@ inline void mul_avx2_f32(const float* __restrict__ a, const float* __restrict__ 
     }
 }
 
-__attribute__((target("avx2,fma")))
-inline void div_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void div_avx2_f32(const float* __restrict a, const float* __restrict b, float* __restrict c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
     #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-    for (size_t i = 0; i < simd_end; i += simd_width) {
+    for (int64_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_div_ps(va, vb);
@@ -1638,8 +1652,8 @@ inline void div_avx2_f32(const float* __restrict__ a, const float* __restrict__ 
     }
 }
 
-__attribute__((target("avx2,fma")))
-inline void add_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void add_avx2_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 
@@ -1655,8 +1669,8 @@ inline void add_avx2_f64(const double* __restrict__ a, const double* __restrict_
     }
 }
 
-__attribute__((target("avx2,fma")))
-inline void sub_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void sub_avx2_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 
@@ -1672,8 +1686,8 @@ inline void sub_avx2_f64(const double* __restrict__ a, const double* __restrict_
     }
 }
 
-__attribute__((target("avx2,fma")))
-inline void mul_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void mul_avx2_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 
@@ -1689,8 +1703,8 @@ inline void mul_avx2_f64(const double* __restrict__ a, const double* __restrict_
     }
 }
 
-__attribute__((target("avx2,fma")))
-inline void div_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
+TENZOR_MATH_TARGET_AVX2_FMA
+inline void div_avx2_f64(const double* __restrict a, const double* __restrict b, double* __restrict c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 
@@ -2329,10 +2343,10 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         std::vector<float> c_f32(c_size);
 
         // Convert Float16 to Float32
-        for (size_t i = 0; i < a_size; ++i) {
+        for (int64_t i = 0; i < a_size; ++i) {
             a_f32[i] = static_cast<float>(a_data[i]);
         }
-        for (size_t i = 0; i < b_size; ++i) {
+        for (int64_t i = 0; i < b_size; ++i) {
             b_f32[i] = static_cast<float>(b_data[i]);
         }
 
@@ -2375,7 +2389,7 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #endif
 
         // Convert Float32 back to Float16
-        for (size_t i = 0; i < c_size; ++i) {
+        for (int64_t i = 0; i < c_size; ++i) {
             c_data[i] = Float16(c_f32[i]);
         }
     } else if (a.dtype() == DType::BFloat16) {
@@ -2393,10 +2407,10 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         std::vector<float> c_f32(c_size);
 
         // Convert BFloat16 to Float32
-        for (size_t i = 0; i < a_size; ++i) {
+        for (int64_t i = 0; i < a_size; ++i) {
             a_f32[i] = static_cast<float>(a_data[i]);
         }
-        for (size_t i = 0; i < b_size; ++i) {
+        for (int64_t i = 0; i < b_size; ++i) {
             b_f32[i] = static_cast<float>(b_data[i]);
         }
 
@@ -2439,7 +2453,7 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #endif
 
         // Convert Float32 back to BFloat16
-        for (size_t i = 0; i < c_size; ++i) {
+        for (int64_t i = 0; i < c_size; ++i) {
             c_data[i] = BFloat16(c_f32[i]);
         }
     } else {
@@ -2497,7 +2511,7 @@ auto sqrt_kernel(const Tensor& input_in) -> Tensor {
             }
             for (; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #else
-            for (size_t i = 0; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
+            for (int64_t i = 0; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #endif
         } else {
             // For large arrays, use OpenMP with thread-local SIMD chunks
@@ -2551,7 +2565,7 @@ auto sqrt_kernel(const Tensor& input_in) -> Tensor {
             }
             for (; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #else
-            for (size_t i = 0; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
+            for (int64_t i = 0; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #endif
         } else {
             #pragma omp parallel
@@ -2598,7 +2612,7 @@ auto sqrt_kernel(const Tensor& input_in) -> Tensor {
             }
             for (; i < n; ++i) out_data[i] = Float16(std::sqrt(static_cast<float>(in_data[i])));
 #else
-            for (size_t i = 0; i < n; ++i) out_data[i] = Float16(std::sqrt(static_cast<float>(in_data[i])));
+            for (int64_t i = 0; i < n; ++i) out_data[i] = Float16(std::sqrt(static_cast<float>(in_data[i])));
 #endif
         } else {
             #pragma omp parallel
@@ -2629,14 +2643,14 @@ auto sqrt_kernel(const Tensor& input_in) -> Tensor {
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::sqrt(in_data[i]);
         }
     } else if (input.dtype() == DType::Complex128) {
         const auto* in_data = input.data<std::complex<double>>();
         auto* out_data = result.data<std::complex<double>>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::sqrt(in_data[i]);
         }
     } else if (input.dtype() == DType::BFloat16) {
@@ -2666,7 +2680,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
 #ifdef TENZOR_HAS_AVX2
         // SIMD + OpenMP for large arrays
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; i += 8) {
+        for (int64_t i = 0; i < n; i += 8) {
             size_t remaining = std::min(size_t(8), n - i);
             if (remaining == 8) {
                 __m256 v = _mm256_loadu_ps(&in_data[i]);
@@ -2680,7 +2694,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
 #endif
@@ -2691,7 +2705,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
 
 #ifdef TENZOR_HAS_AVX2
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; i += 4) {
+        for (int64_t i = 0; i < n; i += 4) {
             size_t remaining = std::min(size_t(4), n - i);
             if (remaining == 4) {
                 __m256d v = _mm256_loadu_pd(&in_data[i]);
@@ -2705,7 +2719,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
 #endif
@@ -2717,7 +2731,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         // Use F16C SIMD for negation (flip sign bit)
 #ifdef __F16C__
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; i += 8) {
+        for (int64_t i = 0; i < n; i += 8) {
             size_t remaining = std::min(size_t(8), n - i);
             if (remaining == 8) {
                 __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
@@ -2733,7 +2747,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = Float16(-static_cast<float>(in_data[i]));
         }
 #endif
@@ -2743,7 +2757,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         BFloat16* out_data = result.data<BFloat16>();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = BFloat16(-static_cast<float>(in_data[i]));
         }
 
@@ -2751,7 +2765,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         const int32_t* in_data = input.data<int32_t>();
         int32_t* out_data = result.data<int32_t>();
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
 
@@ -2760,7 +2774,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         const int64_t* in_data = input.data<int64_t>();
         int64_t* out_data = result.data<int64_t>();
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
 
@@ -2768,7 +2782,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         const auto* in_data  = reinterpret_cast<const std::complex<float>*>(input.data<uint8_t>());
         auto*       out_data = reinterpret_cast<std::complex<float>*>(result.data<uint8_t>());
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
 
@@ -2776,7 +2790,7 @@ auto neg_kernel(const Tensor& input_in) -> Tensor {
         const auto* in_data  = reinterpret_cast<const std::complex<double>*>(input.data<uint8_t>());
         auto*       out_data = reinterpret_cast<std::complex<double>*>(result.data<uint8_t>());
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
 
@@ -2802,7 +2816,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         const auto* in_data  = reinterpret_cast<const std::complex<float>*>(input.data<uint8_t>());
         float* out_data = result.data<float>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) out_data[i] = std::abs(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = std::abs(in_data[i]);
         return result;
     }
     if (input.dtype() == DType::Complex128) {
@@ -2810,7 +2824,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         const auto* in_data  = reinterpret_cast<const std::complex<double>*>(input.data<uint8_t>());
         double* out_data = result.data<double>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) out_data[i] = std::abs(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = std::abs(in_data[i]);
         return result;
     }
 
@@ -2824,7 +2838,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         // SIMD + OpenMP for large arrays
         const __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; i += 8) {
+        for (int64_t i = 0; i < n; i += 8) {
             size_t remaining = std::min(size_t(8), n - i);
             if (remaining == 8) {
                 __m256 v = _mm256_loadu_ps(&in_data[i]);
@@ -2838,7 +2852,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::abs(in_data[i]);
         }
 #endif
@@ -2850,7 +2864,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
 #ifdef TENZOR_HAS_AVX2
         const __m256d sign_mask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFF));
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; i += 4) {
+        for (int64_t i = 0; i < n; i += 4) {
             size_t remaining = std::min(size_t(4), n - i);
             if (remaining == 4) {
                 __m256d v = _mm256_loadu_pd(&in_data[i]);
@@ -2864,7 +2878,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::abs(in_data[i]);
         }
 #endif
@@ -2876,7 +2890,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         // Use F16C SIMD for abs (clear sign bit in FP16: mask 0x7FFF)
 #ifdef __F16C__
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; i += 8) {
+        for (int64_t i = 0; i < n; i += 8) {
             size_t remaining = std::min(size_t(8), n - i);
             if (remaining == 8) {
                 __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
@@ -2892,7 +2906,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = Float16(std::abs(static_cast<float>(in_data[i])));
         }
 #endif
@@ -2907,7 +2921,7 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
         // one value explicitly and return it unchanged: the conventional,
         // well-defined wraparound result NumPy/PyTorch document for
         // abs(INT_MIN).
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             int32_t v = in_data[i];
             out_data[i] = (v == std::numeric_limits<int32_t>::min()) ? v : std::abs(v);
         }
@@ -2915,25 +2929,25 @@ auto abs_kernel(const Tensor& input_in) -> Tensor {
     } else if (input.dtype() == DType::Int8) {
         const int8_t* in_data = input.data<int8_t>();
         int8_t* out_data = result.data<int8_t>();
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             out_data[i] = static_cast<int8_t>(std::abs(static_cast<int>(in_data[i])));
     } else if (input.dtype() == DType::Int16) {
         const int16_t* in_data = input.data<int16_t>();
         int16_t* out_data = result.data<int16_t>();
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             out_data[i] = static_cast<int16_t>(std::abs(static_cast<int>(in_data[i])));
     } else if (input.dtype() == DType::Int64) {
         const int64_t* in_data = input.data<int64_t>();
         int64_t* out_data = result.data<int64_t>();
         // std::abs(INT64_MIN) is UB -- same reasoning as Int32 above.
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             int64_t v = in_data[i];
             out_data[i] = (v == std::numeric_limits<int64_t>::min()) ? v : std::abs(v);
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             out_data[i] = BFloat16(std::abs(static_cast<float>(in_data[i])));
     } else {
         throw std::runtime_error("abs operation only supports Float32, Float64, Float16, BFloat16, Int8, Int16, Int32, Int64, Complex64, and Complex128 dtypes");
@@ -2966,7 +2980,7 @@ auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Ten
         const __m256 max_vec = _mm256_set1_ps(max_f);
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             // Clamp: max(min(v, max), min)
             __m256 clamped = _mm256_max_ps(_mm256_min_ps(v, max_vec), min_vec);
@@ -2984,7 +2998,7 @@ auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Ten
 #else
         // Scalar fallback with OpenMP
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::max(std::min(in_data[i], max_f), min_f);
         }
 #endif
@@ -3003,7 +3017,7 @@ auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Ten
         __m256d max_vec = _mm256_set1_pd(max_val_d);
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += 4) {
+        for (int64_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             // Clamp: max(min(v, max), min)
             __m256d clamped = _mm256_max_pd(_mm256_min_pd(v, max_vec), min_vec);
@@ -3018,7 +3032,7 @@ auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Ten
         }
 #else
         // Scalar fallback
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::max(std::min(in_data[i], max_val_d), min_val_d);
         }
 #endif
@@ -3030,7 +3044,7 @@ auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Ten
         float max_f = static_cast<float>(max_val);
 
         // Convert to float, clamp, then convert back
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             val = std::max(std::min(val, max_f), min_f);
             out_data[i] = Float16(val);
@@ -3042,7 +3056,7 @@ auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Ten
         float min_f = static_cast<float>(min_val);
         float max_f = static_cast<float>(max_val);
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             val = std::max(std::min(val, max_f), min_f);
             out_data[i] = BFloat16(val);
@@ -3060,7 +3074,7 @@ auto clamp_kernel(const Tensor& input_in, double min_val, double max_val) -> Ten
             const double t_hi = static_cast<double>(std::numeric_limits<T>::max());
             T lo = static_cast<T>(std::max(t_lo, std::min(min_val, t_hi)));
             T hi = static_cast<T>(std::max(t_lo, std::min(max_val, t_hi)));
-            for (size_t i = 0; i < n; ++i)
+            for (int64_t i = 0; i < n; ++i)
                 out_data[i] = std::max(std::min(in_data[i], hi), lo);
         };
         switch (input.dtype()) {
@@ -3100,7 +3114,7 @@ auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
         const __m256 min_vec = _mm256_set1_ps(min_f);
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             __m256 clamped = _mm256_max_ps(v, min_vec);
             // NaN parity: Intel max returns the non-NaN operand, so a NaN input
@@ -3115,7 +3129,7 @@ auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::max(in_data[i], min_f);
         }
 #endif
@@ -3130,7 +3144,7 @@ auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
         __m256d min_vec = _mm256_set1_pd(min_val_d);
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += 4) {
+        for (int64_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             __m256d clamped = _mm256_max_pd(v, min_vec);
             // NaN parity with the scalar path / PyTorch (propagate NaN).
@@ -3142,7 +3156,7 @@ auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
             out_data[i] = std::max(in_data[i], min_val_d);
         }
 #else
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::max(in_data[i], min_val_d);
         }
 #endif
@@ -3152,7 +3166,7 @@ auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
         Float16* out_data = result.data<Float16>();
         float min_f = static_cast<float>(min_val);
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             val = std::max(val, min_f);
             out_data[i] = Float16(val);
@@ -3163,7 +3177,7 @@ auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
         BFloat16* out_data = result.data<BFloat16>();
         float min_f = static_cast<float>(min_val);
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             val = std::max(val, min_f);
             out_data[i] = BFloat16(val);
@@ -3179,7 +3193,7 @@ auto clamp_min_kernel(const Tensor& input_in, double min_val) -> Tensor {
             double clamped = std::max(static_cast<double>(std::numeric_limits<T>::lowest()),
                                       std::min(min_val, static_cast<double>(std::numeric_limits<T>::max())));
             T lo = static_cast<T>(clamped);
-            for (size_t i = 0; i < n; ++i) out_data[i] = std::max(in_data[i], lo);
+            for (int64_t i = 0; i < n; ++i) out_data[i] = std::max(in_data[i], lo);
         };
         switch (input.dtype()) {
             case DType::Int8:   run.template operator()<int8_t>();   break;
@@ -3218,7 +3232,7 @@ auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
         const __m256 max_vec = _mm256_set1_ps(max_f);
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             __m256 clamped = _mm256_min_ps(v, max_vec);
             // NaN parity: Intel min returns the non-NaN operand, so a NaN input
@@ -3233,7 +3247,7 @@ auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::min(in_data[i], max_f);
         }
 #endif
@@ -3248,7 +3262,7 @@ auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
         __m256d max_vec = _mm256_set1_pd(max_val_d);
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += 4) {
+        for (int64_t i = 0; i < simd_end; i += 4) {
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             __m256d clamped = _mm256_min_pd(v, max_vec);
             // NaN parity with the scalar path / PyTorch (propagate NaN).
@@ -3260,7 +3274,7 @@ auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
             out_data[i] = std::min(in_data[i], max_val_d);
         }
 #else
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::min(in_data[i], max_val_d);
         }
 #endif
@@ -3270,7 +3284,7 @@ auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
         Float16* out_data = result.data<Float16>();
         float max_f = static_cast<float>(max_val);
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             val = std::min(val, max_f);
             out_data[i] = Float16(val);
@@ -3281,7 +3295,7 @@ auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
         BFloat16* out_data = result.data<BFloat16>();
         float max_f = static_cast<float>(max_val);
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             val = std::min(val, max_f);
             out_data[i] = BFloat16(val);
@@ -3297,7 +3311,7 @@ auto clamp_max_kernel(const Tensor& input_in, double max_val) -> Tensor {
             double clamped = std::max(static_cast<double>(std::numeric_limits<T>::lowest()),
                                       std::min(max_val, static_cast<double>(std::numeric_limits<T>::max())));
             T hi = static_cast<T>(clamped);
-            for (size_t i = 0; i < n; ++i) out_data[i] = std::min(in_data[i], hi);
+            for (int64_t i = 0; i < n; ++i) out_data[i] = std::min(in_data[i], hi);
         };
         switch (input.dtype()) {
             case DType::Int8:   run.template operator()<int8_t>();   break;
@@ -3337,7 +3351,7 @@ auto log_kernel(const Tensor& input_in) -> Tensor {
         // polynomial log was ~10-20 ULP and returned finite garbage for +Inf /
         // NaN inputs; libm matches the Float64 path. MKL uses VML above.
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
 #endif // TENZOR_USE_MKL
@@ -3350,7 +3364,7 @@ auto log_kernel(const Tensor& input_in) -> Tensor {
         vml_chunked(vdLn, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
 #endif
@@ -3366,14 +3380,14 @@ auto log_kernel(const Tensor& input_in) -> Tensor {
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
     } else if (input.dtype() == DType::Complex128) {
         const auto* in_data = input.data<std::complex<double>>();
         auto* out_data = result.data<std::complex<double>>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
     } else if (input.dtype() == DType::BFloat16) {
@@ -3408,7 +3422,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
         // simd_fast_math.hpp was ~2 ULP and mishandled Inf/NaN (e.g. exp(NaN)
         // returned a finite value); MKL builds use the exact VML path above.
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
 #endif // TENZOR_USE_MKL
@@ -3421,7 +3435,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
         vml_chunked(vdExp, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
 #endif
@@ -3462,7 +3476,7 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
                 }
             }
 #else
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 float val = static_cast<float>(in_data[i]);
                 if (std::isnan(val)) {
                     out_data[i] = Float16(val);  // preserve NaN
@@ -3523,14 +3537,14 @@ auto exp_kernel(const Tensor& input_in) -> Tensor {
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
     } else if (input.dtype() == DType::Complex128) {
         const auto* in_data = input.data<std::complex<double>>();
         auto* out_data = result.data<std::complex<double>>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::medium())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
     } else if (input.dtype() == DType::BFloat16) {
@@ -3561,7 +3575,7 @@ auto pow_kernel(const Tensor& input_in, double exponent) -> Tensor {
         // exp(y·log(max(x,1e-30))), silently clamping negative bases to ~0
         // (e.g. pow(-2,3) returned ~0 instead of -8). std::pow is correct.
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::pow(in_data[i], exponent_f);
         }
 
@@ -3571,7 +3585,7 @@ auto pow_kernel(const Tensor& input_in, double exponent) -> Tensor {
         double exp_d = exponent;
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::pow(in_data[i], exp_d);
         }
 
@@ -3582,13 +3596,13 @@ auto pow_kernel(const Tensor& input_in, double exponent) -> Tensor {
 
         // Full-exact libm path (audit C1): no negative-base clamping.
         std::vector<float> in_f32(n), out_f32(n);
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             in_f32[i] = static_cast<float>(in_data[i]);
         }
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_f32[i] = std::pow(in_f32[i], exponent_f);
         }
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = Float16(out_f32[i]);
         }
 
@@ -3596,7 +3610,7 @@ auto pow_kernel(const Tensor& input_in, double exponent) -> Tensor {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
         float exponent_f = static_cast<float>(exponent);
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = BFloat16(std::pow(static_cast<float>(in_data[i]), exponent_f));
         }
 
@@ -3610,7 +3624,7 @@ auto pow_kernel(const Tensor& input_in, double exponent) -> Tensor {
         auto run = [&]<typename T>() {
             const T* in_data = input.data<T>();
             T* out_data = result.data<T>();
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 if (int_exp) {
                     T base = in_data[i], r = T(1);
                     for (long long j = 0; j < k; ++j) r *= base;
@@ -3652,7 +3666,7 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
         float* out_data = result.data<float>();
 
         // Sign function: -1 if x < 0, 0 if x == 0, +1 if x > 0
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = in_data[i];
             out_data[i] = (val > 0.0f) - (val < 0.0f);
         }
@@ -3661,7 +3675,7 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double val = in_data[i];
             out_data[i] = (val > 0.0) - (val < 0.0);
         }
@@ -3670,7 +3684,7 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             float sign_val = static_cast<float>((val > 0.0f) - (val < 0.0f));
             out_data[i] = Float16(sign_val);
@@ -3680,7 +3694,7 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
 
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             float sign_val = static_cast<float>((val > 0.0f) - (val < 0.0f));
             out_data[i] = BFloat16(sign_val);
@@ -3693,7 +3707,7 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
         // i.e. overflow-safe magnitude, unlike a naive sqrt(re*re+im*im)).
         const auto* in_data = input.data<std::complex<float>>();
         auto* out_data = result.data<std::complex<float>>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             std::complex<float> z = in_data[i];
             float mag = std::abs(z);
             out_data[i] = (mag == 0.0f) ? std::complex<float>(0.0f, 0.0f) : (z / mag);
@@ -3702,7 +3716,7 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
     } else if (input.dtype() == DType::Complex128) {
         const auto* in_data = input.data<std::complex<double>>();
         auto* out_data = result.data<std::complex<double>>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             std::complex<double> z = in_data[i];
             double mag = std::abs(z);
             out_data[i] = (mag == 0.0) ? std::complex<double>(0.0, 0.0) : (z / mag);
@@ -3714,7 +3728,7 @@ auto sign_kernel(const Tensor& input_in) -> Tensor {
         auto run = [&]<typename T>() {
             const T* in_data = input.data<T>();
             T* out_data = result.data<T>();
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 if constexpr (std::is_signed_v<T>)
                     out_data[i] = static_cast<T>((in_data[i] > 0) - (in_data[i] < 0));
                 else
@@ -3771,7 +3785,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #ifdef TENZOR_HAS_AVX2
             // SIMD + OpenMP: _CMP_EQ_OQ handles NaN correctly (returns false)
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 8) {
+            for (int64_t i = 0; i < n; i += 8) {
                 size_t remaining = std::min(size_t(8), n - i);
                 if (remaining == 8) {
                     __m256 va = _mm256_loadu_ps(&a_data[i]);
@@ -3791,7 +3805,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] == b_data[i]) &&
                             !std::isnan(a_data[i]) && !std::isnan(b_data[i]);
             }
@@ -3802,7 +3816,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 #ifdef TENZOR_HAS_AVX2
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 4) {
+            for (int64_t i = 0; i < n; i += 4) {
                 size_t remaining = std::min(size_t(4), n - i);
                 if (remaining == 4) {
                     __m256d va = _mm256_loadu_pd(&a_data[i]);
@@ -3821,7 +3835,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] == b_data[i]) &&
                             !std::isnan(a_data[i]) && !std::isnan(b_data[i]);
             }
@@ -3832,7 +3846,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 #ifdef TENZOR_HAS_AVX2
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 8) {
+            for (int64_t i = 0; i < n; i += 8) {
                 size_t remaining = std::min(size_t(8), n - i);
                 if (remaining == 8) {
                     __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a_data[i]));
@@ -3852,20 +3866,20 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
 #endif
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
         // Float16/BFloat16 are upcast to Float32 at function entry, so they can
         // never reach this dispatch — no dedicated half-precision branch here.
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
         } else {
             throw std::runtime_error("Unsupported dtype for eq operation");
         }
@@ -3938,20 +3952,20 @@ auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
         } else {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "ne", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
                 const scalar_t* b_data = b.data<scalar_t>();
-                for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+                for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
             });
         }
     } else {
@@ -4009,7 +4023,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const float* b_data = b.data<float>();
 #ifdef TENZOR_HAS_AVX2
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 8) {
+            for (int64_t i = 0; i < n; i += 8) {
                 size_t remaining = std::min(size_t(8), n - i);
                 if (remaining == 8) {
                     __m256 va = _mm256_loadu_ps(&a_data[i]);
@@ -4028,7 +4042,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] < b_data[i]);
             }
 #endif
@@ -4037,7 +4051,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* b_data = b.data<double>();
 #ifdef TENZOR_HAS_AVX2
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 4) {
+            for (int64_t i = 0; i < n; i += 4) {
                 size_t remaining = std::min(size_t(4), n - i);
                 if (remaining == 4) {
                     __m256d va = _mm256_loadu_pd(&a_data[i]);
@@ -4055,7 +4069,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] < b_data[i]);
             }
 #endif
@@ -4065,7 +4079,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #ifdef TENZOR_HAS_AVX2
             // For less-than on integers: a < b is same as b > a
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 8) {
+            for (int64_t i = 0; i < n; i += 8) {
                 size_t remaining = std::min(size_t(8), n - i);
                 if (remaining == 8) {
                     __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a_data[i]));
@@ -4085,7 +4099,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] < b_data[i]);
             }
 #endif
@@ -4093,14 +4107,14 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] < b_data[i]);
             }
         } else if (a.dtype() == DType::Bool) {
             // PyTorch parity: false < true is true; otherwise false.
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] < b_data[i]);
             }
         } else {
@@ -4109,7 +4123,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "lt", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
                 const scalar_t* b_data = b.data<scalar_t>();
-                for (size_t i = 0; i < n; ++i) {
+                for (int64_t i = 0; i < n; ++i) {
                     c_data[i] = (a_data[i] < b_data[i]);
                 }
             });
@@ -4167,20 +4181,20 @@ auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
         } else {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "le", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
                 const scalar_t* b_data = b.data<scalar_t>();
-                for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+                for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
             });
         }
     } else {
@@ -4235,7 +4249,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 #if defined(TENZOR_HAS_AVX2) && defined(TENZOR_HAS_F16C)
             // F16C + AVX2: Convert to float, then compare
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 8) {
+            for (int64_t i = 0; i < n; i += 8) {
                 size_t remaining = std::min(size_t(8), n - i);
                 if (remaining == 8) {
                     // Load 8 Float16 values
@@ -4260,7 +4274,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (static_cast<float>(a_data[i]) > static_cast<float>(b_data[i]));
             }
 #endif
@@ -4269,7 +4283,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const float* b_data = b.data<float>();
 #ifdef TENZOR_HAS_AVX2
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 8) {
+            for (int64_t i = 0; i < n; i += 8) {
                 size_t remaining = std::min(size_t(8), n - i);
                 if (remaining == 8) {
                     __m256 va = _mm256_loadu_ps(&a_data[i]);
@@ -4288,7 +4302,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
 #endif
@@ -4297,7 +4311,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const double* b_data = b.data<double>();
 #ifdef TENZOR_HAS_AVX2
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 4) {
+            for (int64_t i = 0; i < n; i += 4) {
                 size_t remaining = std::min(size_t(4), n - i);
                 if (remaining == 4) {
                     __m256d va = _mm256_loadu_pd(&a_data[i]);
@@ -4315,7 +4329,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
 #endif
@@ -4324,7 +4338,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int32_t* b_data = b.data<int32_t>();
 #ifdef TENZOR_HAS_AVX2
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; i += 8) {
+            for (int64_t i = 0; i < n; i += 8) {
                 size_t remaining = std::min(size_t(8), n - i);
                 if (remaining == 8) {
                     __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a_data[i]));
@@ -4343,7 +4357,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             }
 #else
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
 #endif
@@ -4351,27 +4365,27 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const BFloat16* a_data = a.data<BFloat16>();
             const BFloat16* b_data = b.data<BFloat16>();
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (static_cast<float>(a_data[i]) > static_cast<float>(b_data[i]));
             }
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
         } else {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "gt", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
                 const scalar_t* b_data = b.data<scalar_t>();
-                for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+                for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
             });
         }
     } else {
@@ -4447,32 +4461,32 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
         } else if (a.dtype() == DType::Float16) {
             const Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (static_cast<float>(a_data[i]) >= static_cast<float>(b_data[i])); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (static_cast<float>(a_data[i]) >= static_cast<float>(b_data[i])); }
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+            for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
         } else {
             TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "ge", [&]() {
                 const scalar_t* a_data = a.data<scalar_t>();
                 const scalar_t* b_data = b.data<scalar_t>();
-                for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+                for (int64_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
             });
         }
     } else {
@@ -5504,23 +5518,23 @@ auto unary_math_kernel(const Tensor& input_in, F32Fn f32_fn, F64Fn f64_fn,
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = f32_fn(in_data[i]);
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i) out_data[i] = f64_fn(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = f64_fn(in_data[i]);
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             out_data[i] = Float16(f32_fn(static_cast<float>(in_data[i])));
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
         #pragma omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_MEDIUM)
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             out_data[i] = BFloat16(f32_fn(static_cast<float>(in_data[i])));
     } else {
         throw std::runtime_error(std::string(op_name) + ": unsupported dtype");
@@ -5552,7 +5566,7 @@ auto unary_vml_kernel(const Tensor& input_in,
         vml_chunked(vml_f32, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f32(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = scalar_f32(in_data[i]);
 #endif
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
@@ -5561,7 +5575,7 @@ auto unary_vml_kernel(const Tensor& input_in,
         vml_chunked(vml_f64, n, in_data, out_data);
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) out_data[i] = scalar_f64(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = scalar_f64(in_data[i]);
 #endif
     } else if (input.dtype() == DType::Float16) {
         // Widen to Float32, apply scalar op, narrow back
@@ -5569,11 +5583,11 @@ auto unary_vml_kernel(const Tensor& input_in,
         Float16* out_data = result.data<Float16>();
 #if defined(TENZOR_USE_MKL)
         std::vector<float> tmp_in(n), tmp_out(n);
-        for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
         vml_chunked(vml_f32, n, tmp_in.data(), tmp_out.data());
-        for (size_t i = 0; i < n; ++i) out_data[i] = Float16(tmp_out[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = Float16(tmp_out[i]);
 #else
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             out_data[i] = Float16(scalar_f32(static_cast<float>(in_data[i])));
 #endif
     } else if (input.dtype() == DType::BFloat16) {
@@ -5581,11 +5595,11 @@ auto unary_vml_kernel(const Tensor& input_in,
         BFloat16* out_data = result.data<BFloat16>();
 #if defined(TENZOR_USE_MKL)
         std::vector<float> tmp_in(n), tmp_out(n);
-        for (size_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) tmp_in[i] = static_cast<float>(in_data[i]);
         vml_chunked(vml_f32, n, tmp_in.data(), tmp_out.data());
-        for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(tmp_out[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = BFloat16(tmp_out[i]);
 #else
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             out_data[i] = BFloat16(scalar_f32(static_cast<float>(in_data[i])));
 #endif
     } else {
@@ -5605,16 +5619,16 @@ auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
-        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = f32_fn(in_data[i]);
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
-        for (size_t i = 0; i < n; ++i) out_data[i] = f64_fn(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = f64_fn(in_data[i]);
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
-        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(static_cast<float>(in_data[i]));
+        for (int64_t i = 0; i < n; ++i) out_data[i] = f32_fn(static_cast<float>(in_data[i]));
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
-        for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(static_cast<float>(in_data[i]));
+        for (int64_t i = 0; i < n; ++i) out_data[i] = f32_fn(static_cast<float>(in_data[i]));
     } else if (input.dtype() == DType::Int8  || input.dtype() == DType::UInt8 ||
                input.dtype() == DType::Int16 || input.dtype() == DType::Int32 ||
                input.dtype() == DType::Int64) {
@@ -5626,7 +5640,7 @@ auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
         // by TENZOR_DISPATCH_INTEGER_TYPES.)
         TENZOR_DISPATCH_INTEGER_TYPES(input.dtype(), op_name, [&]() {
             const scalar_t* in_data = input.data<scalar_t>();
-            for (size_t i = 0; i < n; ++i)
+            for (int64_t i = 0; i < n; ++i)
                 out_data[i] = f64_fn(static_cast<double>(in_data[i]));
         });
     } else {
@@ -5673,7 +5687,7 @@ auto binary_math_kernel(const Tensor& a_in, const Tensor& b_in, F32Fn f32_fn, F6
             const scalar_t* ad = a.data<scalar_t>();
             const scalar_t* bd = b.data<scalar_t>();
             scalar_t* od = result.data<scalar_t>();
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 if constexpr (std::is_same_v<scalar_t, float>) {
                     od[i] = f32_fn(ad[i], bd[i]);
                 } else {
@@ -5885,10 +5899,10 @@ auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor {
         // Scalar weight (numel==1) or element-wise
         if (weight.numel() == 1) {
             scalar_t w = weight.data<scalar_t>()[0];
-            for (size_t i = 0; i < n; ++i) o[i] = s[i] + w * (e[i] - s[i]);
+            for (int64_t i = 0; i < n; ++i) o[i] = s[i] + w * (e[i] - s[i]);
         } else {
             const scalar_t* w = weight.data<scalar_t>();
-            for (size_t i = 0; i < n; ++i) o[i] = s[i] + w[i] * (e[i] - s[i]);
+            for (int64_t i = 0; i < n; ++i) o[i] = s[i] + w[i] * (e[i] - s[i]);
         }
     });
     return result;
@@ -5951,7 +5965,7 @@ static auto logical_binary_kernel(const Tensor& a, const Tensor& b, BoolOp op) -
 
     if (detail::have_same_shape(a, b)) {
         size_t n = static_cast<size_t>(result.numel());
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out[i] = op(to_bool_value(a, i), to_bool_value(b, i));
         }
         return result;
@@ -6000,7 +6014,7 @@ auto logical_not_kernel(const Tensor& input_in) -> Tensor {
     Tensor result(shape_vec, DType::Bool, input.device());
     size_t n = static_cast<size_t>(input.numel());
     bool* out = result.data<bool>();
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         out[i] = !to_bool_value(input, i);
     }
     return result;
@@ -6031,7 +6045,7 @@ static void minimum_typed(const T* a_data, const T* b_data, T* c_data,
     };
     if (detail::have_same_shape(a, b)) {
         size_t n = static_cast<size_t>(a.numel());
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             c_data[i] = sel(a_data[i], b_data[i]);
     } else {
         detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
@@ -6092,7 +6106,7 @@ static void maximum_typed(const T* a_data, const T* b_data, T* c_data,
     };
     if (detail::have_same_shape(a, b)) {
         size_t n = static_cast<size_t>(a.numel());
-        for (size_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n; ++i)
             c_data[i] = sel(a_data[i], b_data[i]);
     } else {
         detail::broadcast_op<T, T>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
@@ -6412,7 +6426,7 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
                 const T* b_batch = b_data + b2 * R * M;
                 T* o_batch = out_data + batch * P * R;
 
-                #pragma omp parallel for collapse(2) if(P * R > ::tenzor::OmpThresholds::complex())
+                #pragma omp parallel for if(P * R > ::tenzor::OmpThresholds::complex())
                 for (int64_t i = 0; i < P; ++i) {
                     for (int64_t j = 0; j < R; ++j) {
                         double dist_sq = 0.0;
@@ -6436,7 +6450,7 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
                 const T* b_batch = b_data + b2 * R * M;
                 T* o_batch = out_data + batch * P * R;
 
-                #pragma omp parallel for collapse(2) if(P * R > ::tenzor::OmpThresholds::complex())
+                #pragma omp parallel for if(P * R > ::tenzor::OmpThresholds::complex())
                 for (int64_t i = 0; i < P; ++i) {
                     for (int64_t j = 0; j < R; ++j) {
                         if (p == std::numeric_limits<double>::infinity()) {
@@ -6728,7 +6742,7 @@ auto betainc_kernel(std::span<const Tensor> inputs) -> Tensor {
         const float* bd = b_t.data<float>();
         const float* xd = x_t.data<float>();
         float* od = result.data<float>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             od[i] = static_cast<float>(betainc_impl(ad[i], bd[i], xd[i]));
         }
     } else if (a_t.dtype() == DType::Float64) {
@@ -6736,7 +6750,7 @@ auto betainc_kernel(std::span<const Tensor> inputs) -> Tensor {
         const double* bd = b_t.data<double>();
         const double* xd = x_t.data<double>();
         double* od = result.data<double>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             od[i] = betainc_impl(ad[i], bd[i], xd[i]);
         }
     } else {
@@ -7612,10 +7626,12 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim) -> Tensor {
         int64_t count = 0;
         TENZOR_DISPATCH_ALL_TYPES(input.dtype(), "count_nonzero", [&]() {
             const scalar_t* data = input.data<scalar_t>();
-            _Pragma("omp parallel for reduction(+:count) if(n > 10000)")
+            int64_t local_count = 0;
+            _Pragma("omp parallel for reduction(+:local_count) if(n > 10000)")
             for (int64_t i = 0; i < n; i++) {
-                if (data[i] != static_cast<scalar_t>(0.0f)) count++;
+                if (data[i] != static_cast<scalar_t>(0.0f)) local_count++;
             }
+            count = local_count;
         });
         // Full reduction collapses to a true 0-dim scalar, matching this
         // codebase's canonical reduction-shape convention -- not a forced
@@ -8565,7 +8581,7 @@ auto gcd_kernel(const Tensor& a_in, const Tensor& b_in) -> Tensor {
             const scalar_t* ad = a.data<scalar_t>();
             const scalar_t* bd = b.data<scalar_t>();
             scalar_t* od = result.data<scalar_t>();
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 od[i] = static_cast<scalar_t>(std::gcd(
                     static_cast<int64_t>(ad[i]), static_cast<int64_t>(bd[i])));
             }
@@ -8616,7 +8632,7 @@ auto lcm_kernel(const Tensor& a_in, const Tensor& b_in) -> Tensor {
             const scalar_t* ad = a.data<scalar_t>();
             const scalar_t* bd = b.data<scalar_t>();
             scalar_t* od = result.data<scalar_t>();
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 od[i] = static_cast<scalar_t>(std::lcm(
                     static_cast<int64_t>(ad[i]), static_cast<int64_t>(bd[i])));
             }
@@ -8788,7 +8804,7 @@ auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
         scalar_t* out = result.data<scalar_t>();
         scalar_t alpha_val = static_cast<scalar_t>(alpha);
         _Pragma("omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)")
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out[i] = in[i] + alpha_val * t1[i] * t2[i];
         }
     });
@@ -8823,7 +8839,7 @@ auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
         scalar_t* out = result.data<scalar_t>();
         scalar_t alpha_val = static_cast<scalar_t>(alpha);
         _Pragma("omp parallel for if(static_cast<int64_t>(n) > OMP_THRESHOLD_SIMPLE)")
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out[i] = in[i] + alpha_val * t1[i] / t2[i];
         }
     });
@@ -8951,7 +8967,7 @@ auto frexp_kernel(const Tensor& input_in) -> std::vector<Tensor> {
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* m_data = mantissa.data<float>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             int exp_val;
             m_data[i] = std::frexp(in_data[i], &exp_val);
             exp_data[i] = exp_val;
@@ -8959,7 +8975,7 @@ auto frexp_kernel(const Tensor& input_in) -> std::vector<Tensor> {
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* m_data = mantissa.data<double>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             int exp_val;
             m_data[i] = std::frexp(in_data[i], &exp_val);
             exp_data[i] = exp_val;
@@ -8967,7 +8983,7 @@ auto frexp_kernel(const Tensor& input_in) -> std::vector<Tensor> {
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* m_data = mantissa.data<Float16>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             int exp_val;
             float mf = std::frexp(static_cast<float>(in_data[i]), &exp_val);
             m_data[i] = Float16(mf);
@@ -8976,7 +8992,7 @@ auto frexp_kernel(const Tensor& input_in) -> std::vector<Tensor> {
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* m_data = mantissa.data<BFloat16>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             int exp_val;
             float mf = std::frexp(static_cast<float>(in_data[i]), &exp_val);
             m_data[i] = BFloat16(mf);
@@ -9842,7 +9858,7 @@ auto multigammaln_kernel(const Tensor& input_in, int64_t d) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
         float coeff_f = static_cast<float>(log_pi_coeff);
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = coeff_f;
             for (int64_t j = 0; j < d; ++j)
                 val += std::lgamma(in_data[i] - static_cast<float>(j) * 0.5f);
@@ -9851,7 +9867,7 @@ auto multigammaln_kernel(const Tensor& input_in, int64_t d) -> Tensor {
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double val = log_pi_coeff;
             for (int64_t j = 0; j < d; ++j)
                 val += std::lgamma(in_data[i] - static_cast<double>(j) * 0.5);
@@ -9861,7 +9877,7 @@ auto multigammaln_kernel(const Tensor& input_in, int64_t d) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
         float coeff_f = static_cast<float>(log_pi_coeff);
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float val = coeff_f;
             for (int64_t j = 0; j < d; ++j)
@@ -9872,7 +9888,7 @@ auto multigammaln_kernel(const Tensor& input_in, int64_t d) -> Tensor {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
         float coeff_f = static_cast<float>(log_pi_coeff);
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float val = coeff_f;
             for (int64_t j = 0; j < d; ++j)

@@ -19,6 +19,12 @@
 #else
 // Non-CUDA build: use OS-level page locking.
 #if defined(_WIN32)
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
 #  include <windows.h>
 #else
 #  include <sys/mman.h>
@@ -44,6 +50,23 @@ inline auto check_cuda_error(cudaError_t error, const char* msg) -> void {
         oss << "CUDA Error in " << msg << ": " << cudaGetErrorString(error);
         throw std::runtime_error(oss.str());
     }
+}
+#endif
+
+#ifndef TENZOR_USE_CUDA
+/**
+ * @brief OS page size, for the non-CUDA/non-ROCm mlock/VirtualLock fallback
+ * path below. sysconf(_SC_PAGESIZE) is POSIX-only; Windows has no equivalent
+ * libc call, so query it via GetSystemInfo instead.
+ */
+inline auto os_page_size() -> size_t {
+#if defined(_WIN32)
+    SYSTEM_INFO info;
+    ::GetSystemInfo(&info);
+    return static_cast<size_t>(info.dwPageSize);
+#else
+    return static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+#endif
 }
 #endif
 
@@ -692,7 +715,7 @@ auto PinnedMemoryAllocator::allocate_cuda_pinned(size_t size, bool& out_via_rocm
     // unprivileged, etc.) we error rather than degrading silently.
     //
     // Allocate page-aligned so mlock can lock the whole region.
-    const size_t page_size = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    const size_t page_size = os_page_size();
     const size_t aligned_size = (size + page_size - 1) / page_size * page_size;
 
 #if defined(_WIN32)
@@ -745,7 +768,7 @@ auto PinnedMemoryAllocator::free_cuda_pinned(void* ptr, size_t size, bool via_ro
     // RLIMIT_MEMLOCK budget when free() returns the region to the heap
     // free-list instead of unmapping it. Recompute the same page-aligned size
     // the allocation used so the unlock span matches the lock span exactly.
-    const size_t page_size = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    const size_t page_size = os_page_size();
     const size_t aligned_size = (size + page_size - 1) / page_size * page_size;
 #if defined(_WIN32)
     // VirtualUnlock undoes the VirtualLock; VirtualFree(_, 0, RELEASE)

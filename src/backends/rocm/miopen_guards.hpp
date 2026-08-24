@@ -2,6 +2,15 @@
 
 /// @file miopen_guards.hpp
 /// @brief RAII guards for MIOpen resources to prevent leaks on exception paths.
+///
+/// MIOpen is unavailable on Windows (not shipped as part of the Windows HIP
+/// SDK), so every actual use of these guards is already gated behind #ifdef
+/// USE_MIOPEN at the call site (see conv2d.hip.cpp etc.) -- but this header
+/// was itself included unconditionally there, and its own unconditional
+/// #include <miopen/miopen.h> below fails to find the header on Windows.
+/// Guarding the whole file keeps it a no-op when MIOpen isn't being used,
+/// matching the call sites' existing convention.
+#ifdef USE_MIOPEN
 
 #include <miopen/miopen.h>
 #include <stdexcept>
@@ -123,3 +132,5 @@ struct MiopenRNNDescGuard {
 /// batchnorm descriptor. Use MiopenTensorDescGuard for those descriptors.
 
 }  // namespace tenzor::rocm
+
+#endif  // USE_MIOPEN

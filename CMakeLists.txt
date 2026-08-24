@@ -7,14 +7,23 @@ endif()
 
 # Pre-project configuration for ROCm/HIP
 # Must happen before project() because HIP language must be enabled at project() time
-# Locate ROCm root: prefer ROCM_PATH env, then find hipcc, then fallback to /opt/rocm
+# Locate ROCm root: prefer ROCM_PATH env, then HIP_PATH (Windows HIP SDK installer
+# default), then find hipcc, then fallback to /opt/rocm
 set(_ROCM_AVAILABLE FALSE)
 if(DEFINED ENV{ROCM_PATH})
     set(_ROCM_ROOT "$ENV{ROCM_PATH}")
+elseif(WIN32 AND DEFINED ENV{HIP_PATH})
+    # Windows HIP SDK installer sets HIP_PATH (e.g. "C:\Program Files\AMD\ROCm\7.2\")
+    # rather than ROCM_PATH; strip the trailing slash so ${_ROCM_ROOT}/bin resolves.
+    string(REGEX REPLACE "[/\\]+$" "" _ROCM_ROOT "$ENV{HIP_PATH}")
 else()
     # ROCm 6.x+/7.x split the toolchain into a "core/" subdirectory, so hipcc
     # may be at /opt/rocm/core/bin/hipcc rather than the legacy /opt/rocm/bin.
-    find_program(_HIPCC_EXE hipcc PATHS /opt/rocm/bin /opt/rocm/core/bin NO_DEFAULT_PATH)
+    if(WIN32)
+        find_program(_HIPCC_EXE NAMES hipcc.exe hipcc.bat)
+    else()
+        find_program(_HIPCC_EXE hipcc PATHS /opt/rocm/bin /opt/rocm/core/bin NO_DEFAULT_PATH)
+    endif()
     if(_HIPCC_EXE)
         get_filename_component(_ROCM_ROOT "${_HIPCC_EXE}" DIRECTORY)   # .../core/bin or .../bin
         get_filename_component(_ROCM_ROOT "${_ROCM_ROOT}" DIRECTORY)   # .../core   or /opt/rocm
@@ -23,13 +32,50 @@ else()
         if(_ROCM_ROOT MATCHES "/core$")
             get_filename_component(_ROCM_ROOT "${_ROCM_ROOT}" DIRECTORY)
         endif()
-    else()
+    elseif(NOT WIN32)
         set(_ROCM_ROOT "/opt/rocm")
     endif()
 endif()
-if(EXISTS "${_ROCM_ROOT}/bin/hipcc" OR EXISTS "${_ROCM_ROOT}/core/bin/hipcc")
-    set(_ROCM_AVAILABLE TRUE)
+if(DEFINED _ROCM_ROOT)
+    # ENV{ROCM_PATH}/ENV{HIP_PATH} carry native Windows backslashes (e.g.
+    # "C:\Program Files\AMD\ROCm\7.2"); vcpkg's find_package() wrapper does
+    # its own internal string parsing on PATHS arguments and chokes on raw
+    # backslashes ("Invalid character escape '\P'") wherever this variable
+    # later gets passed to find_package(... PATHS ${_ROCM_ROOT} ...). Normalise
+    # to the forward-slash form CMake expects internally, same as every other
+    # Windows SDK path (MKL, oneAPI, CUDA, Vulkan) already uses in this project.
+    file(TO_CMAKE_PATH "${_ROCM_ROOT}" _ROCM_ROOT)
+    if(WIN32)
+        # hipcc.exe itself mishandles quoting when it re-invokes clang.exe
+        # internally for paths containing spaces (e.g. "C:/Program Files/AMD/
+        # ROCm/7.2/include" arrives at clang.exe as two unquoted argv tokens,
+        # "clang: error: no such file or directory: 'Files/AMD/ROCm/7.2/
+        # include'") -- reproduced directly against hipcc.exe, not fixable
+        # from flag-escaping on our side. Every -I/-L/PATHS use of
+        # ${_ROCM_ROOT} in this project's custom-command HIP compiles goes
+        # through hipcc, so resolve to the 8.3 short path (no spaces) instead;
+        # any Win32 API, including CMake's own file/find_package handling,
+        # treats it identically to the long form.
+        execute_process(
+            COMMAND cmd /c for %A in ("${_ROCM_ROOT}") do @echo %~sA
+            OUTPUT_VARIABLE _ROCM_ROOT_SHORT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(_ROCM_ROOT_SHORT)
+            file(TO_CMAKE_PATH "${_ROCM_ROOT_SHORT}" _ROCM_ROOT)
+        endif()
+    endif()
 endif()
+if(WIN32)
+    set(_HIPCC_NAMES "hipcc.exe" "hipcc.bat")
+else()
+    set(_HIPCC_NAMES "hipcc")
+endif()
+foreach(_hipcc_name ${_HIPCC_NAMES})
+    if(EXISTS "${_ROCM_ROOT}/bin/${_hipcc_name}" OR EXISTS "${_ROCM_ROOT}/core/bin/${_hipcc_name}")
+        set(_ROCM_AVAILABLE TRUE)
+    endif()
+endforeach()
 
 
 # Set TENZOR_BUILD_ROCM before project() so the HIP language can be enabled.
@@ -75,7 +121,14 @@ endif()
 
 # Determine languages to enable
 set(TENZOR_LANGUAGES CXX)
-if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
+if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE AND NOT WIN32)
+    # On Windows, CMake's Windows-Clang.cmake platform module hard-blocks
+    # mixing MSVC (cl.exe) and any Clang-family compiler (hipcc's clang
+    # frontend included) as co-enabled languages within one project() --
+    # unconditional CMake policy, no flag-level workaround. src/backends/rocm
+    # never enables the HIP language itself; instead it invokes hipcc.exe
+    # directly via add_custom_command (the same pattern the OneAPI backend
+    # uses for icpx), so HIP is intentionally left out of TENZOR_LANGUAGES here.
     list(APPEND TENZOR_LANGUAGES HIP)
 endif()
 
@@ -93,6 +146,18 @@ project(tenzor VERSION 0.1.0 LANGUAGES ${TENZOR_LANGUAGES})
 # ensures every target configured after this point -- including fetched
 # static deps -- is compiled PIC.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# On Windows, an MSVC-built DLL exports NO symbols by default (unlike a Linux
+# .so, where everything is visible unless hidden). None of Tenzor's SHARED
+# targets (tenzor_core, tenzor_backend_*) have manual dllexport/dllimport
+# annotations, so without this, every Windows DLL link in this project would
+# produce a library with an empty export table and nothing else could link
+# against it. This makes MSVC auto-generate exports for every symbol,
+# matching the Linux/GCC default-visibility behavior the rest of the build
+# already assumes.
+if(WIN32)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 # Use ccache if available for faster rebuilds
 find_program(CCACHE_PROGRAM ccache)
@@ -519,6 +584,12 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     if(TENZOR_WERROR)
         list(APPEND TENZOR_WARNING_FLAGS /WX)
     endif()
+    # M_PI/M_E/etc. are a POSIX/GNU <cmath> extension, not standard C++ — MSVC
+    # only defines them when _USE_MATH_DEFINES is set before <cmath> is first
+    # included. Several targets force-include a precompiled header ahead of
+    # any source file's own #includes, so this must be a global compile
+    # definition rather than a per-file #define (which would be too late).
+    add_compile_definitions(_USE_MATH_DEFINES)
 endif()
 
 # clang-tidy integration
@@ -570,6 +641,16 @@ endif()
 # Find required packages
 find_package(Threads REQUIRED)
 find_package(OpenMP)
+if(OpenMP_CXX_FOUND AND MSVC)
+    # MSVC's default /openmp switch only implements OpenMP 2.0, which lacks
+    # the min/max reduction clauses used by reduction.cpp. /openmp:llvm
+    # selects the LLVM-based runtime (OpenMP 3.1+) instead.
+    # (Note: /openmp:experimental was tried for #pragma omp simd support in
+    # nn_kernels.cpp/rnn_kernels.cpp, but it turned out to be a distinct mode
+    # that does NOT support min/max reductions -- those two files' #pragma
+    # omp simd hints were dropped instead of juggling per-file flags.)
+    set_property(TARGET OpenMP::OpenMP_CXX PROPERTY INTERFACE_COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CXX>:/openmp:llvm>")
+endif()
 
 # D.1: spdlog for structured logging across distributed / serving / io.
 # Prefer the system package; FetchContent as fallback so offline builds
@@ -620,6 +701,104 @@ target_include_directories(tenzor_nlohmann_json INTERFACE
 
 # Add subdirectories
 add_subdirectory(src)
+
+# Windows: compute the vendor SDK bin directories this build's native code
+# may need on the DLL search path (MKL/oneAPI's SYCL+dnnl runtime, and when
+# built, CUDA's NVRTC / ROCm's HIP runtime compiler libraries). Consumed two
+# ways below: (1) baked into tenzor_core itself via a generated header, so
+# BackendLoader::load_library() can register these directories and preload
+# the handful of runtime DLLs that need it (see loader.cpp) before loading
+# ANY backend .dll -- this is what makes a plain C++ executable linking
+# tenzor_core work without the caller doing anything; (2) written out as a
+# Python manifest for python/tenzor/__init__.py, which needs its own copy
+# since it has to register directories even earlier (before tenzor_core.dll
+# itself, a static import of the .pyd, has loaded -- loader.cpp's own
+# registration can't run until tenzor_core.dll is already resident).
+# Computed from the exact SDK roots THIS build was configured against, not
+# hardcoded, so it stays correct across version bumps and install layouts.
+if(WIN32)
+    set(_TENZOR_WIN_DLL_DIRS "${PROJECT_BINARY_DIR}/bin")
+
+    # Derive MKL's root from the CACHE variable find_package(MKL CONFIG)
+    # left behind (cmake/FindMKL.cmake already ran this from within
+    # src/backends/cpu/'s subdirectory scope). Re-calling find_package(MKL
+    # CONFIG) here would normally re-populate MKL_ROOT in this scope too,
+    # but Intel's MKLConfig.cmake wraps itself in include_guard(GLOBAL), so
+    # a second call from a different directory scope silently no-ops and
+    # leaves MKL_ROOT unset here. MKL_DIR (a CACHE variable, visible in
+    # every scope) is unaffected by that guard, so derive from it directly:
+    # .../mkl/<version>/lib/cmake/mkl -> .../mkl/<version>.
+    if(DEFINED MKL_DIR)
+        get_filename_component(_TENZOR_MKL_ROOT "${MKL_DIR}/../../.." ABSOLUTE)
+        file(TO_CMAKE_PATH "${_TENZOR_MKL_ROOT}/bin" _tenzor_d)
+        list(APPEND _TENZOR_WIN_DLL_DIRS "${_tenzor_d}")
+        get_filename_component(_TENZOR_ONEAPI_ROOT_GUESS "${_TENZOR_MKL_ROOT}/../.." ABSOLUTE)
+    endif()
+
+    # oneAPI's Windows installer always lays components out as
+    # <oneAPI root>/<component>/<version>/bin. Glob for the compiler
+    # (sycl*.dll, libmmd.dll, svml_dispmd.dll, ur_win_proxy_loader.dll,
+    # libiomp5md.dll), tbb (tbb12.dll), and dnnl (dnnl.dll) components next
+    # to wherever MKL was found, plus $ENV{ONEAPI_ROOT} (set by oneAPI's own
+    # setvars.bat) as a second source.
+    set(_tenzor_oneapi_roots "${_TENZOR_ONEAPI_ROOT_GUESS}")
+    if(DEFINED ENV{ONEAPI_ROOT})
+        file(TO_CMAKE_PATH "$ENV{ONEAPI_ROOT}" _tenzor_env_root)
+        list(APPEND _tenzor_oneapi_roots "${_tenzor_env_root}")
+    endif()
+    foreach(_tenzor_root ${_tenzor_oneapi_roots})
+        if(_tenzor_root AND EXISTS "${_tenzor_root}")
+            foreach(_tenzor_component compiler tbb dnnl)
+                file(GLOB _tenzor_bins "${_tenzor_root}/${_tenzor_component}/*/bin")
+                list(APPEND _TENZOR_WIN_DLL_DIRS ${_tenzor_bins})
+            endforeach()
+        endif()
+    endforeach()
+
+    if(TARGET tenzor_backend_cuda)
+        find_package(CUDAToolkit QUIET)
+        if(CUDAToolkit_FOUND AND DEFINED CUDAToolkit_BIN_DIR)
+            list(APPEND _TENZOR_WIN_DLL_DIRS
+                "${CUDAToolkit_BIN_DIR}" "${CUDAToolkit_BIN_DIR}/x64")
+        endif()
+    endif()
+
+    if(TARGET tenzor_backend_rocm AND _ROCM_AVAILABLE)
+        list(APPEND _TENZOR_WIN_DLL_DIRS "${_ROCM_ROOT}/bin")
+    endif()
+
+    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+        list(APPEND _TENZOR_WIN_DLL_DIRS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+    elseif(DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg" AND DEFINED VCPKG_TARGET_TRIPLET)
+        get_filename_component(_tenzor_vcpkg_root "${CMAKE_TOOLCHAIN_FILE}" DIRECTORY)
+        get_filename_component(_tenzor_vcpkg_root "${_tenzor_vcpkg_root}/../.." ABSOLUTE)
+        list(APPEND _TENZOR_WIN_DLL_DIRS "${_tenzor_vcpkg_root}/installed/${VCPKG_TARGET_TRIPLET}/bin")
+    endif()
+
+    list(REMOVE_DUPLICATES _TENZOR_WIN_DLL_DIRS)
+
+    # (1) C++ side: a generated header baked into tenzor_core so
+    # BackendLoader::load_library() (src/backend/loader.cpp) can act on this
+    # list directly -- no Python involved.
+    set(_tenzor_cpp_header "// Auto-generated by CMakeLists.txt at configure time. Do not edit.\n")
+    string(APPEND _tenzor_cpp_header
+        "// Vendor SDK bin directories this build's native code may need on\n"
+        "// the Windows DLL search path. Consumed by\n"
+        "// BackendLoader::load_library() (src/backend/loader.cpp).\n"
+        "#pragma once\n"
+        "namespace tenzor::generated {\n"
+        "inline constexpr const char* kWinDllDirs[] = {\n")
+    foreach(_tenzor_d ${_TENZOR_WIN_DLL_DIRS})
+        if(EXISTS "${_tenzor_d}")
+            string(APPEND _tenzor_cpp_header "    R\"(${_tenzor_d})\",\n")
+        endif()
+    endforeach()
+    string(APPEND _tenzor_cpp_header
+        "};\n"
+        "}  // namespace tenzor::generated\n")
+    file(WRITE "${PROJECT_BINARY_DIR}/generated/tenzor_win_dll_dirs.generated.hpp" "${_tenzor_cpp_header}")
+    target_include_directories(tenzor_core PRIVATE "${PROJECT_BINARY_DIR}/generated")
+endif()
 
 # Python bindings
 if(TENZOR_BUILD_PYTHON)
@@ -719,10 +898,45 @@ if(TENZOR_BUILD_PYTHON)
         endif()
         target_compile_options(tenzor_python PRIVATE ${TENZOR_WARNING_FLAGS})
 
+        # Windows: write the SAME vendor-directory list computed above (right
+        # after add_subdirectory(src)) as a Python manifest, so
+        # python/tenzor/__init__.py can register directories via
+        # os.add_dll_directory() before importing the native extension.
+        # Python needs its own copy of this list because it must register
+        # directories even before tenzor_core.dll itself has loaded (the
+        # .pyd statically imports it) -- BackendLoader::load_library()'s own
+        # copy (src/backend/loader.cpp, from the generated C++ header) can't
+        # run until tenzor_core.dll is already resident.
+        if(WIN32)
+            set(_tenzor_manifest "# Auto-generated by CMakeLists.txt at configure time. Do not edit.\n")
+            string(APPEND _tenzor_manifest
+                "# Vendor SDK bin directories this build's native extension may need\n"
+                "# on the Windows DLL search path. Read by __init__.py's Windows\n"
+                "# bootstrap before importing tenzor_core.\n"
+                "DLL_DIRS = [\n")
+            foreach(_tenzor_d ${_TENZOR_WIN_DLL_DIRS})
+                if(EXISTS "${_tenzor_d}")
+                    string(APPEND _tenzor_manifest "    r\"${_tenzor_d}\",\n")
+                endif()
+            endforeach()
+            string(APPEND _tenzor_manifest "]\n")
+            file(WRITE "${PROJECT_BINARY_DIR}/python/tenzor/_win_dll_dirs.py" "${_tenzor_manifest}")
+        endif()
+
 
         set_target_properties(tenzor_python PROPERTIES
             OUTPUT_NAME "tenzor_core"
             LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/python/tenzor"
+            # Windows-only: this MODULE target's OUTPUT_NAME intentionally
+            # matches the real tenzor_core C++ library (Python's import
+            # machinery expects tenzor_core.pyd), so its auto-generated
+            # import .lib (which nothing actually links against -- a .pyd
+            # is loaded via Python's import mechanism, not linked) would
+            # otherwise collide with bin/tenzor_core.lib under the global
+            # CMAKE_ARCHIVE_OUTPUT_DIRECTORY (LNK1149: output filename
+            # matches input filename, since this target also links against
+            # the real tenzor_core.dll). Route it alongside the .pyd instead.
+            ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/python/tenzor"
         )
 
         # Copy Python package files incrementally: only re-copy when source

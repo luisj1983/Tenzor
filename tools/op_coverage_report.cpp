@@ -23,7 +23,21 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#define dup _dup
+#define dup2 _dup2
+#define close _close
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+#ifndef STDERR_FILENO
+#define STDERR_FILENO 2
+#endif
+#else
 #include <unistd.h>
+#endif
 
 using namespace tenzor;
 

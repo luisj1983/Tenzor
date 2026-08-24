@@ -230,10 +230,10 @@ namespace cpu {
     auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor;
 
     // Inplace operations
-    auto add_inplace_kernel(Tensor& a, const Tensor& b) -> void;
-    auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> void;
-    auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> void;
-    auto div_inplace_kernel(Tensor& a, const Tensor& b) -> void;
+    auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor&;
+    auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor&;
+    auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor&;
+    auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor&;
 
     // Inplace activation operations
     auto relu_inplace_kernel(Tensor& input) -> void;

@@ -8,6 +8,7 @@
 #include "tenzor/lite/memory_planner.hpp"
 #include "tenzor/lite/model_format.hpp"
 #include "tenzor/lite/tensor_bridge.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <cerrno>
 
 // Inf-E4: POSIX mmap for load_mmap(path). On non-POSIX platforms the
@@ -644,7 +645,7 @@ auto LiteRuntime::create_input(const std::vector<int64_t>& shape, DType dtype) -
                 "LiteRuntime::create_input: negative shape dimension");
         }
         tensor.shape[i] = shape[i];
-        if (__builtin_mul_overflow(numel, static_cast<int64_t>(shape[i]), &numel)) {
+        if (tenzor::detail::checked_mul_overflow(numel, static_cast<int64_t>(shape[i]), &numel)) {
             throw std::overflow_error(
                 "LiteRuntime::create_input: shape element count overflows int64");
         }
@@ -656,7 +657,7 @@ auto LiteRuntime::create_input(const std::vector<int64_t>& shape, DType dtype) -
     }
 
     int64_t bytes;
-    if (__builtin_mul_overflow(numel, static_cast<int64_t>(dtype_size(dtype)), &bytes)) {
+    if (tenzor::detail::checked_mul_overflow(numel, static_cast<int64_t>(dtype_size(dtype)), &bytes)) {
         throw std::overflow_error(
             "LiteRuntime::create_input: tensor byte size overflows int64");
     }

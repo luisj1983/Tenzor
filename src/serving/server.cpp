@@ -10,6 +10,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -649,7 +650,7 @@ auto InferenceServer::serve_loop() -> void {
             // Guard the element-count product against int64 overflow; a wrapped
             // (small/negative) product would otherwise pass the length check and
             // under-allocate, leading to OOM/DoS or an out-of-bounds write.
-            if (__builtin_mul_overflow(expected, v, &expected)) {
+            if (tenzor::detail::checked_mul_overflow(expected, v, &expected)) {
                 throw std::runtime_error("shape product overflows int64");
             }
         }

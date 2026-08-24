@@ -39,6 +39,21 @@
 #include <omp.h>
 #endif
 
+// __attribute__((target(...))) is GCC/Clang-only function-multiversioning
+// syntax with no MSVC equivalent, and cl.exe errors on it outright (it's not
+// recognized attribute syntax there). Under MSVC this whole file is already
+// compiled at a single, uniform /arch:AVX2 (or higher) for every function, so
+// the per-function target attribute is redundant rather than needed � a
+// no-op definition preserves the ambient ISA level GCC/Clang would get
+// explicitly from the attribute.
+#if defined(_MSC_VER)
+    #define TENZOR_GEMM_TARGET_AVX2_FMA
+    #define TENZOR_GEMM_TARGET_AVX512
+#else
+    #define TENZOR_GEMM_TARGET_AVX2_FMA __attribute__((target("avx2,fma")))
+    #define TENZOR_GEMM_TARGET_AVX512 __attribute__((target("avx512f,avx512vl")))
+#endif
+
 namespace tenzor {
 namespace cpu {
 namespace gemm {
@@ -106,11 +121,11 @@ struct GemmPackBuffers {
  * @param K Reduction dimension
  * @param ldc Leading dimension of C
  */
-__attribute__((target("avx2,fma")))
+TENZOR_GEMM_TARGET_AVX2_FMA
 inline void microkernel_6x16_avx2(
-    const float* __restrict__ A,
-    const float* __restrict__ B,
-    float* __restrict__ C,
+    const float* __restrict A,
+    const float* __restrict B,
+    float* __restrict C,
     int64_t K,
     int64_t ldc,
     float alpha = 1.0f
@@ -198,8 +213,8 @@ inline void microkernel_6x16_avx2(
  * @brief Pack A matrix into column-major micro-panels
  */
 inline void pack_a_avx2(
-    const float* __restrict__ A,
-    float* __restrict__ A_packed,
+    const float* __restrict A,
+    float* __restrict A_packed,
     int64_t M, int64_t K, int64_t lda
 ) {
     for (int64_t i = 0; i < M; i += MR_AVX2) {
@@ -221,8 +236,8 @@ inline void pack_a_avx2(
  * @brief Pack B matrix into row-major micro-panels
  */
 inline void pack_b_avx2(
-    const float* __restrict__ B,
-    float* __restrict__ B_packed,
+    const float* __restrict B,
+    float* __restrict B_packed,
     int64_t K, int64_t N, int64_t ldb
 ) {
     for (int64_t j = 0; j < N; j += NR_AVX2) {
@@ -251,11 +266,11 @@ inline void pack_b_avx2(
 /**
  * @brief 6x32 micro-kernel for AVX-512
  */
-__attribute__((target("avx512f,avx512vl")))
+TENZOR_GEMM_TARGET_AVX512
 inline void microkernel_6x32_avx512(
-    const float* __restrict__ A,
-    const float* __restrict__ B,
-    float* __restrict__ C,
+    const float* __restrict A,
+    const float* __restrict B,
+    float* __restrict C,
     int64_t K,
     int64_t ldc,
     float alpha = 1.0f
@@ -341,8 +356,8 @@ inline void microkernel_6x32_avx512(
  * @brief Pack A matrix for AVX-512
  */
 inline void pack_a_avx512(
-    const float* __restrict__ A,
-    float* __restrict__ A_packed,
+    const float* __restrict A,
+    float* __restrict A_packed,
     int64_t M, int64_t K, int64_t lda
 ) {
     for (int64_t i = 0; i < M; i += MR_AVX512) {
@@ -363,8 +378,8 @@ inline void pack_a_avx512(
  * @brief Pack B matrix for AVX-512
  */
 inline void pack_b_avx512(
-    const float* __restrict__ B,
-    float* __restrict__ B_packed,
+    const float* __restrict B,
+    float* __restrict B_packed,
     int64_t K, int64_t N, int64_t ldb
 ) {
     for (int64_t j = 0; j < N; j += NR_AVX512) {
@@ -409,9 +424,9 @@ inline void pack_b_avx512(
  * k>0, silently corrupting the last 3 rows of the result.
  */
 inline void microkernel_scalar(
-    const float* __restrict__ A,
-    const float* __restrict__ B,
-    float* __restrict__ C,
+    const float* __restrict A,
+    const float* __restrict B,
+    float* __restrict C,
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc,
     float alpha = 1.0f
@@ -451,9 +466,9 @@ inline void microkernel_scalar(
  * @param beta Scalar multiplier for C (default 0.0)
  */
 inline void gemm_optimized(
-    const float* __restrict__ A,
-    const float* __restrict__ B,
-    float* __restrict__ C,
+    const float* __restrict A,
+    const float* __restrict B,
+    float* __restrict C,
     int64_t M, int64_t N, int64_t K,
     float alpha = 1.0f,
     float beta = 0.0f
@@ -642,9 +657,9 @@ inline void gemm_optimized(
  * When B is transposed, it's already in row-major which is good for our access pattern.
  */
 inline void gemm_transB_optimized(
-    const float* __restrict__ A,
-    const float* __restrict__ B,  // B is (N x K), we compute A @ B^T
-    float* __restrict__ C,
+    const float* __restrict A,
+    const float* __restrict B,  // B is (N x K), we compute A @ B^T
+    float* __restrict C,
     int64_t M, int64_t N, int64_t K
 ) {
     // For non-trivial sizes, transpose B and use the optimized blocked GEMM.
@@ -718,9 +733,9 @@ inline void gemm_transB_optimized(
  * @brief Optimized GEMM for transposed A: C = A^T * B
  */
 inline void gemm_transA_optimized(
-    const float* __restrict__ A,  // A is (K x M), we compute A^T @ B
-    const float* __restrict__ B,
-    float* __restrict__ C,
+    const float* __restrict A,  // A is (K x M), we compute A^T @ B
+    const float* __restrict B,
+    float* __restrict C,
     int64_t M, int64_t N, int64_t K
 ) {
     std::memset(C, 0, M * N * sizeof(float));

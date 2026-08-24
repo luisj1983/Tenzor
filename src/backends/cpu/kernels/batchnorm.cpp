@@ -34,10 +34,14 @@ namespace tenzor {
 namespace cpu {
 
 // AVX-512 forward declarations (defined in batchnorm_avx512.cpp)
+// MSVC encodes __restrict in name mangling (unlike GCC/Clang), so these
+// declarations must match batchnorm_avx512.cpp's __restrict-qualified
+// parameters exactly or the two mangled names diverge and this becomes an
+// unresolved external at link time despite the definition existing.
 namespace avx512 {
-void batchnorm_mean_var_f32(const float*, float*, float*, int64_t, int64_t, int64_t, int64_t);
-void batchnorm_forward_affine_f32(const float*, float*, const float*, const float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t);
-void batchnorm_normalize_f32(const float*, float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t);
+void batchnorm_mean_var_f32(const float* __restrict, float* __restrict, float* __restrict, int64_t, int64_t, int64_t, int64_t);
+void batchnorm_forward_affine_f32(const float* __restrict, float* __restrict, const float*, const float*, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t);
+void batchnorm_normalize_f32(const float* __restrict, float* __restrict, const float*, const float*, float, int64_t, int64_t, int64_t, int64_t);
 } // namespace avx512
 
 // ============================================================================

@@ -34,6 +34,7 @@ namespace tenzor {
 // only set it if the user hasn't, and only if the candidate path actually
 // contains hip/hip_runtime.h — so a non-standard ROCm install is unaffected.
 static void ensure_rocm_path_for_hiprtc() {
+#ifndef _WIN32
     if (std::getenv("ROCM_PATH") != nullptr) {
         return;  // Respect user-provided path.
     }
@@ -43,6 +44,9 @@ static void ensure_rocm_path_for_hiprtc() {
         std::fclose(f);
         ::setenv("ROCM_PATH", kCandidate, /*overwrite=*/0);
     }
+#endif  // The Windows HIP SDK installer sets HIP_PATH itself (see top-level
+        // CMakeLists.txt's _ROCM_ROOT detection); there is no /opt/rocm-style
+        // hardcoded default candidate path to probe on Windows.
 }
 
 ROCmBackend::ROCmBackend() {
@@ -62,8 +66,18 @@ ROCmBackend::ROCmBackend() {
     int count = 0;
     hipError_t err = hipGetDeviceCount(&count);
     if (err != hipSuccess && err != hipErrorNoDevice) {
+        // hipGetErrorString() is documented to always return a valid
+        // string, but that assumes a working driver/runtime -- on a host
+        // with no AMD driver at all (not just no GPU), the runtime can be
+        // broken enough that this call itself returns null. Concatenating a
+        // null const char* onto a std::string is undefined behavior (it
+        // calls char_traits::length(nullptr) internally), not a catchable
+        // exception -- guard it, matching the equivalent fix in
+        // cuda_backend.cpp's device_count().
+        const char* msg = hipGetErrorString(err);
         throw std::runtime_error(
-            std::string("Failed to initialize ROCm backend: ") + hipGetErrorString(err)
+            std::string("Failed to initialize ROCm backend: ") +
+            (msg ? msg : "no error string available")
         );
     }
 }
@@ -565,6 +579,17 @@ auto ROCmBackend::create_hip_graph(int32_t device_id) -> std::unique_ptr<rocm::H
 
 // Factory function for backend creation
 extern "C" {
+    // This backend is built via a raw custom-command hipcc invocation (see
+    // src/backends/rocm/CMakeLists.txt), not CMake's add_library(...
+    // SHARED), so CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS never applies to it --
+    // without an explicit dllexport this symbol isn't exported at all on
+    // Windows, breaking BOTH the runtime GetProcAddress(handle,
+    // "create_backend") lookup (src/backend/loader.cpp) AND, incidentally,
+    // link.exe's generation of an import lib for anything link-time-
+    // depending on this DLL (e.g. the python bindings module).
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
     Backend* create_backend() {
         return new ROCmBackend();
     }

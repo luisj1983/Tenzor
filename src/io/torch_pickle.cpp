@@ -22,6 +22,7 @@
  */
 
 #include "tenzor/io/torch_pickle.hpp"
+#include "tenzor/utils/safe_math.hpp"
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -587,16 +588,16 @@ auto build_tensor_from_storage(const ZipReader& zip,
         if (static_cast<int64_t>(d) < 0) {
             throw std::runtime_error("torch_pickle: negative tensor dimension");
         }
-        if (__builtin_mul_overflow(numel, static_cast<int64_t>(d), &numel)) {
+        if (tenzor::detail::checked_mul_overflow(numel, static_cast<int64_t>(d), &numel)) {
             throw std::runtime_error("torch_pickle: tensor element count overflows int64");
         }
     }
     size_t copy_bytes;
     size_t offset_bytes;
     size_t required_bytes;
-    if (__builtin_mul_overflow(static_cast<size_t>(numel), elem_size, &copy_bytes) ||
-        __builtin_mul_overflow(static_cast<size_t>(storage_offset), elem_size, &offset_bytes) ||
-        __builtin_add_overflow(offset_bytes, copy_bytes, &required_bytes)) {
+    if (tenzor::detail::checked_mul_overflow(static_cast<size_t>(numel), elem_size, &copy_bytes) ||
+        tenzor::detail::checked_mul_overflow(static_cast<size_t>(storage_offset), elem_size, &offset_bytes) ||
+        tenzor::detail::checked_add_overflow(offset_bytes, copy_bytes, &required_bytes)) {
         throw std::runtime_error("torch_pickle: storage byte size overflow");
     }
     if (required_bytes > view.size()) {

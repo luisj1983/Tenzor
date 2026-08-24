@@ -102,10 +102,10 @@ static void depthwise_conv1d_impl(const T* in_data,
 // arbitrary padding allowed (only affects the per-tap iw_start arithmetic).
 // ---------------------------------------------------------------------
 #ifdef TENZOR_DWCONV1D_AVX2
-static void depthwise_conv1d_avx2_f32(const float* __restrict__ in_data,
-                                       const float* __restrict__ w_data,
-                                       const float* __restrict__ b_data,
-                                       float* __restrict__ out_data,
+static void depthwise_conv1d_avx2_f32(const float* __restrict in_data,
+                                       const float* __restrict w_data,
+                                       const float* __restrict b_data,
+                                       float* __restrict out_data,
                                        int64_t N, int64_t C,
                                        int64_t L, int64_t kL, int64_t L_out,
                                        int64_t padding_l) {

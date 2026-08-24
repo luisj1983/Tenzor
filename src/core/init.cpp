@@ -7,14 +7,25 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
-#include <dlfcn.h>
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX  // prevent windows.h's min/max macros from clobbering std::min/std::max
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
 #include <unistd.h>  // getpid(), for per-process OCL ICD vendor dir
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -25,6 +36,28 @@
 #endif
 
 namespace tenzor {
+
+// dlsym()/setenv() have no Windows equivalent with the same signature — these
+// wrap the platform call so the rest of this file can stay branch-free.
+#ifdef _WIN32
+static auto tenzor_dlsym(void* handle, const char* name) -> void* {
+    return reinterpret_cast<void*>(
+        GetProcAddress(static_cast<HMODULE>(handle), name));
+}
+static auto tenzor_setenv(const char* name, const char* value, int overwrite) -> void {
+    if (!overwrite && std::getenv(name) != nullptr) return;
+    _putenv_s(name, value);
+}
+constexpr const char* kBackendLibExt = ".dll";
+#else
+static auto tenzor_dlsym(void* handle, const char* name) -> void* {
+    return dlsym(handle, name);
+}
+static auto tenzor_setenv(const char* name, const char* value, int overwrite) -> void {
+    setenv(name, value, overwrite);
+}
+constexpr const char* kBackendLibExt = ".so";
+#endif
 
 // Flag to track initialization state (used by finalize() guard)
 static std::atomic<bool> g_initialized{false};
@@ -97,13 +130,13 @@ auto initialize() -> void {
         std::string threads_str = std::to_string(num_threads);
 
         // Set OMP_NUM_THREADS for libraries that check env var during static init
-        setenv("OMP_NUM_THREADS", threads_str.c_str(), 0);
+        tenzor_setenv("OMP_NUM_THREADS", threads_str.c_str(), 0);
 
         if (std::getenv("MKL_NUM_THREADS") == nullptr) {
-            setenv("MKL_NUM_THREADS", threads_str.c_str(), 0);
+            tenzor_setenv("MKL_NUM_THREADS", threads_str.c_str(), 0);
         }
         if (std::getenv("DNNL_CPU_RUNTIME") == nullptr) {
-            setenv("DNNL_CPU_RUNTIME", "OMP", 0);
+            tenzor_setenv("DNNL_CPU_RUNTIME", "OMP", 0);
         }
     }
 #endif
@@ -114,37 +147,58 @@ auto initialize() -> void {
     auto& loader = backend_registry();
 
     // Locate backend directory using dynamic search strategy
-    auto find_backend_dir = []() -> std::filesystem::path {
+    const std::string cpu_backend_filename = std::string("tenzor_backend_cpu") + kBackendLibExt;
+    auto find_backend_dir = [&cpu_backend_filename]() -> std::filesystem::path {
         // 1. Environment variable override
         if (auto* env = std::getenv("TENZOR_BACKEND_DIR"))
             return env;
 
-        // 2. Relative to the library containing this function (via dladdr).
-        //    Covers both the wheel layout (site-packages/tenzor/lib/ holds
-        //    libtenzor_core.so and all tenzor_backend_*.so side by side) and
-        //    the FHS layout from `cmake --install` (backends one level down
-        //    in lib/tenzor/backends/).
+        // 2. Relative to the library containing this function (dladdr on Unix,
+        //    GetModuleHandleEx+GetModuleFileName on Windows). Covers both the
+        //    wheel layout (site-packages/tenzor/lib/ holds tenzor_core's shared
+        //    library and all tenzor_backend_* side by side) and the FHS layout
+        //    from `cmake --install` (backends one level down in lib/tenzor/backends/).
+#ifdef _WIN32
+        HMODULE this_module = nullptr;
+        if (GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCSTR>(&initialize), &this_module) &&
+            this_module) {
+            char buf[MAX_PATH];
+            DWORD len = GetModuleFileNameA(this_module, buf, MAX_PATH);
+            if (len > 0 && len < MAX_PATH) {
+                auto lib_dir = std::filesystem::path(std::string(buf, len)).parent_path();
+                if (std::filesystem::exists(lib_dir / cpu_backend_filename))
+                    return lib_dir;
+                if (std::filesystem::exists(lib_dir / "tenzor" / "backends" / cpu_backend_filename))
+                    return lib_dir / "tenzor" / "backends";
+            }
+        }
+#else
         Dl_info info;
         if (dladdr(reinterpret_cast<void*>(&initialize), &info) && info.dli_fname) {
             auto lib_dir = std::filesystem::path(info.dli_fname).parent_path();
-            if (std::filesystem::exists(lib_dir / "tenzor_backend_cpu.so"))
+            if (std::filesystem::exists(lib_dir / cpu_backend_filename))
                 return lib_dir;
-            if (std::filesystem::exists(lib_dir / "tenzor" / "backends" / "tenzor_backend_cpu.so"))
+            if (std::filesystem::exists(lib_dir / "tenzor" / "backends" / cpu_backend_filename))
                 return lib_dir / "tenzor" / "backends";
         }
 
-        // 3. Relative to executable
+        // 3. Relative to executable (Unix only — Windows already resolved a
+        //    usable module path via GetModuleFileNameA above).
         std::error_code ec;
         auto exe_dir = std::filesystem::read_symlink("/proc/self/exe", ec).parent_path();
-        if (!ec && std::filesystem::exists(exe_dir / "tenzor_backend_cpu.so"))
+        if (!ec && std::filesystem::exists(exe_dir / cpu_backend_filename))
             return exe_dir;
+#endif
 
         // 4. Current directory
         return ".";
     };
 
     std::filesystem::path bin_path = find_backend_dir();
-    std::filesystem::path cpu_backend_path = bin_path / "tenzor_backend_cpu.so";
+    std::filesystem::path cpu_backend_path = bin_path / cpu_backend_filename;
 
     TENZOR_LOG_INFO("Loading CPU backend from: {}", cpu_backend_path.string());
 
@@ -179,7 +233,7 @@ auto initialize() -> void {
     void* handle = loader.last_library_handle();
     if (handle) {
         using RegisterFn = void(*)(BackendDispatchTable*);
-        auto register_fn = reinterpret_cast<RegisterFn>(dlsym(handle, "register_kernels"));
+        auto register_fn = reinterpret_cast<RegisterFn>(tenzor_dlsym(handle, "register_kernels"));
         if (register_fn) {
             register_fn(&cpu_table);
             DispatchTableRegistry::mark_ready(Device::Type::CPU);
@@ -196,7 +250,7 @@ auto initialize() -> void {
     }
 
     // Try to load CUDA backend if available
-    std::filesystem::path cuda_backend_path = bin_path / "tenzor_backend_cuda.so";
+    std::filesystem::path cuda_backend_path = bin_path / (std::string("tenzor_backend_cuda") + kBackendLibExt);
 
     if (std::filesystem::exists(cuda_backend_path)) {
         TENZOR_LOG_INFO("Loading CUDA backend from: {}", cuda_backend_path.string());
@@ -224,7 +278,7 @@ auto initialize() -> void {
                 void* cuda_handle = loader.last_library_handle();
                 if (cuda_handle) {
                     using RegisterFn = void(*)(BackendDispatchTable*);
-                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(cuda_handle, "register_kernels"));
+                    auto register_fn = reinterpret_cast<RegisterFn>(tenzor_dlsym(cuda_handle, "register_kernels"));
                     if (register_fn) {
                         register_fn(&cuda_table);
                         DispatchTableRegistry::mark_ready(Device::Type::CUDA);
@@ -251,7 +305,7 @@ auto initialize() -> void {
     }
 
     // Try to load ROCm backend if available
-    std::filesystem::path rocm_backend_path = bin_path / "tenzor_backend_rocm.so";
+    std::filesystem::path rocm_backend_path = bin_path / (std::string("tenzor_backend_rocm") + kBackendLibExt);
 
     // Allow disabling ROCm loading via environment variable
     bool skip_rocm = (std::getenv("TENZOR_DISABLE_ROCM") != nullptr);
@@ -285,7 +339,7 @@ auto initialize() -> void {
                 void* rocm_handle = loader.last_library_handle();
                 if (rocm_handle) {
                     using RegisterFn = void(*)(BackendDispatchTable*);
-                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(rocm_handle, "register_kernels"));
+                    auto register_fn = reinterpret_cast<RegisterFn>(tenzor_dlsym(rocm_handle, "register_kernels"));
                     if (register_fn) {
                         register_fn(&rocm_table);
                         DispatchTableRegistry::mark_ready(Device::Type::ROCm);
@@ -312,7 +366,7 @@ auto initialize() -> void {
     }
 
     // Try to load OneAPI backend if available
-    std::filesystem::path oneapi_backend_path = bin_path / "tenzor_backend_oneapi.so";
+    std::filesystem::path oneapi_backend_path = bin_path / (std::string("tenzor_backend_oneapi") + kBackendLibExt);
 
     // SYCL's platform::get_platforms() probes ALL OpenCL ICDs, including AMD's
     // which can hang if the ROCm/HSA runtime is broken (same bug as hipGetDeviceCount).
@@ -335,6 +389,11 @@ auto initialize() -> void {
     // Upstream bug tracking: the underlying AMD-OCL ICD probe hang has no public
     // fix yet; once it's resolved we can drop this entirely.
     bool oneapi_skip_probe = false;
+#ifndef _WIN32
+    // This whole workaround targets the Linux OpenCL ICD loader convention
+    // (OCL_ICD_VENDORS, /tmp, getpid()-named scratch dirs) — none of which
+    // apply on Windows, where SYCL's device enumeration doesn't go through
+    // an ICD loader in the same way. Skipped entirely there.
     if (!std::getenv("OCL_ICD_VENDORS")) {
         auto find_intel_ocl_icd = []() -> std::filesystem::path {
             namespace fs = std::filesystem;
@@ -439,7 +498,7 @@ auto initialize() -> void {
                             "tenzor: failed flushing OCL ICD vendor file; "
                             "skipping AMD-OCL probe workaround.");
                     } else {
-                        setenv("OCL_ICD_VENDORS", icd_dir.c_str(), 0);
+                        tenzor_setenv("OCL_ICD_VENDORS", icd_dir.c_str(), 0);
                         // Record path so finalize() can clean it up.
                         g_ocl_icd_vendor_dir = icd_dir.string();
                         oneapi_skip_probe = true;
@@ -448,8 +507,9 @@ auto initialize() -> void {
             }
         }
     }
+#endif  // !_WIN32
     if (!std::getenv("ONEAPI_DEVICE_SELECTOR")) {
-        setenv("ONEAPI_DEVICE_SELECTOR", "*:cpu", 0);
+        tenzor_setenv("ONEAPI_DEVICE_SELECTOR", "*:cpu", 0);
     }
 
     // Configure Intel OpenCL CPU runtime target architecture BEFORE loading
@@ -502,7 +562,7 @@ auto initialize() -> void {
                 void* oneapi_handle = loader.last_library_handle();
                 if (oneapi_handle) {
                     using RegisterFn = void(*)(BackendDispatchTable*);
-                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(oneapi_handle, "register_kernels"));
+                    auto register_fn = reinterpret_cast<RegisterFn>(tenzor_dlsym(oneapi_handle, "register_kernels"));
                     if (register_fn) {
                         register_fn(&oneapi_table);
                         DispatchTableRegistry::mark_ready(Device::Type::OneAPI);
@@ -529,7 +589,7 @@ auto initialize() -> void {
     }
 
     // Try to load Vulkan backend if available
-    std::filesystem::path vulkan_backend_path = bin_path / "tenzor_backend_vulkan.so";
+    std::filesystem::path vulkan_backend_path = bin_path / (std::string("tenzor_backend_vulkan") + kBackendLibExt);
 
     if (std::filesystem::exists(vulkan_backend_path)) {
         TENZOR_LOG_INFO("Loading Vulkan backend from: {}", vulkan_backend_path.string());
@@ -557,7 +617,7 @@ auto initialize() -> void {
                 void* vulkan_handle = loader.last_library_handle();
                 if (vulkan_handle) {
                     using RegisterFn = void(*)(BackendDispatchTable*);
-                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(vulkan_handle, "register_kernels"));
+                    auto register_fn = reinterpret_cast<RegisterFn>(tenzor_dlsym(vulkan_handle, "register_kernels"));
                     if (register_fn) {
                         register_fn(&vulkan_table);
                         DispatchTableRegistry::mark_ready(Device::Type::Vulkan);
@@ -586,7 +646,7 @@ auto initialize() -> void {
     }
 
     // Try to load MPS backend if available
-    std::filesystem::path mps_backend_path = bin_path / "tenzor_backend_mps.so";
+    std::filesystem::path mps_backend_path = bin_path / (std::string("tenzor_backend_mps") + kBackendLibExt);
 
     if (std::filesystem::exists(mps_backend_path)) {
         TENZOR_LOG_INFO("Loading MPS backend from: {}", mps_backend_path.string());
@@ -614,7 +674,7 @@ auto initialize() -> void {
                 void* mps_handle = loader.last_library_handle();
                 if (mps_handle) {
                     using RegisterFn = void(*)(BackendDispatchTable*);
-                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(mps_handle, "register_kernels"));
+                    auto register_fn = reinterpret_cast<RegisterFn>(tenzor_dlsym(mps_handle, "register_kernels"));
                     if (register_fn) {
                         register_fn(&mps_table);
                         DispatchTableRegistry::mark_ready(Device::Type::MPS);

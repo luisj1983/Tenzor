@@ -8,6 +8,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/omp_thresholds.hpp"
 #include "tenzor/utils/log.hpp"
+#include <array>
 #include <bit>
 #include <limits>
 #include <random>
@@ -472,7 +473,6 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t o = 0; o < out_features; ++o) {
                 float sum = 0.0f;
-                #pragma omp simd reduction(+:sum)
                 for (int64_t i = 0; i < in_features; ++i) {
                     sum += in_data[b * in_features + i] * w_data[o * in_features + i];
                 }
@@ -497,7 +497,6 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t o = 0; o < out_features; ++o) {
                 double sum = 0.0;
-                #pragma omp simd reduction(+:sum)
                 for (int64_t i = 0; i < in_features; ++i) {
                     sum += in_data[b * in_features + i] * w_data[o * in_features + i];
                 }
@@ -524,7 +523,6 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t o = 0; o < out_features; ++o) {
                 float sum = 0.0f;
-                #pragma omp simd reduction(+:sum)
                 for (int64_t i = 0; i < in_features; ++i) {
                     sum += in_data[b * in_features + i] * w_data[o * in_features + i];
                 }
@@ -559,7 +557,6 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t o = 0; o < out_features; ++o) {
                 float sum = 0.0f;
-                #pragma omp simd reduction(+:sum)
                 for (int64_t i = 0; i < in_features; ++i) {
                     sum += in_data[b * in_features + i] * w_data[o * in_features + i];
                 }

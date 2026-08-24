@@ -83,6 +83,16 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_G
     )
 endif()
 
+# CUDA's CCCL headers (cuda/std/__cccl/preprocessor.h) hard-error under MSVC's
+# legacy/"traditional" preprocessor — its macro-expansion semantics differ from
+# the standard-conforming one CCCL assumes. cl.exe needs /Zc:preprocessor
+# passed through nvcc's -Xcompiler to opt in to the conforming preprocessor.
+if(MSVC)
+    target_compile_options(tenzor_backend_cuda PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+    )
+endif()
+
 # Set CUDA properties
 set_target_properties(tenzor_backend_cuda PROPERTIES
     VERSION ${PROJECT_VERSION}

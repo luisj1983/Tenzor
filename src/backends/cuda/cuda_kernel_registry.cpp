@@ -679,6 +679,17 @@ namespace cuda {
     auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
     auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t dD, int64_t dH, int64_t dW, cudaStream_t stream) -> Tensor;
 
+    // Conv3d / ConvTranspose3d operations (custom kernels - fallback when cuDNN
+    // unavailable). These were missing from this file's declaration block even
+    // though register_cuda_kernels() below calls them unconditionally; only
+    // surfaced once a config actually compiled this path (see cuda_backend.cpp
+    // for the matching declarations).
+    auto conv3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, std::array<int64_t, 3> dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto conv3d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, std::array<int64_t, 3> dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto conv_transpose3d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto conv_transpose3d_backward_input_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto conv_transpose3d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+
     // Deformable Conv2d (DCNv2) operations
     auto deformable_conv2d_forward_kernel(
         const Tensor& input, const Tensor& offset, const Tensor& weight,
@@ -1263,6 +1274,32 @@ auto bn_backward_custom(std::span<const Tensor> inputs, const OpAttributes& attr
     );
     return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
 }
+
+// Wave B4 + F.11: non-cuDNN ConvT3d fallback — these device kernels still take
+// scalar stride/padding/output_padding/dilation, so we assert iso here. Hoisted
+// to a free function (was a local lambda captured by the three registrations
+// below) because SingleOutputKernelFn is a raw function pointer: a lambda that
+// captures another lambda by value cannot decay to one, even when the
+// captured lambda itself is stateless. This path is only reachable without
+// cuDNN, so it had never actually been compiled before.
+auto t3d_iso_or_throw(const OpAttributes& attrs, const char* op_name)
+    -> std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t> {
+    const auto stride         = ::tenzor::backend::attrs::stride_3d(attrs);
+    const auto padding        = ::tenzor::backend::attrs::padding_3d(attrs);
+    const auto output_padding = ::tenzor::backend::attrs::output_padding_3d(attrs);
+    const auto dilation       = ::tenzor::backend::attrs::dilation_3d(attrs);
+    int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+    if (stride[0] != stride[1] || stride[1] != stride[2] ||
+        padding[0] != padding[1] || padding[1] != padding[2] ||
+        output_padding[0] != output_padding[1] || output_padding[1] != output_padding[2] ||
+        dilation[0] != dilation[1] || dilation[1] != dilation[2]) {
+        throw std::runtime_error(
+            std::string("CUDA ") + op_name + ": asymmetric stride/padding/"
+            "output_padding/dilation requires cuDNN; rebuild with TENZOR_HAS_CUDNN.");
+    }
+    return {stride[0], padding[0], output_padding[0], dilation[0], groups};
+}
+
 } // namespace
 
 /**
@@ -3362,35 +3399,20 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Wave B4 + F.11: non-cuDNN ConvT3d fallback — these device kernels still
     // take scalar stride/padding/output_padding/dilation, so we assert iso here.
     // (Native per-axis ConvT3d device kernels are a separate refactor; the
-    // cuDNN path already supports asymmetric.)
-    auto t3d_iso_or_throw = [](const OpAttributes& attrs, const char* op_name)
-        -> std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t> {
-        const auto stride         = ::tenzor::backend::attrs::stride_3d(attrs);
-        const auto padding        = ::tenzor::backend::attrs::padding_3d(attrs);
-        const auto output_padding = ::tenzor::backend::attrs::output_padding_3d(attrs);
-        const auto dilation       = ::tenzor::backend::attrs::dilation_3d(attrs);
-        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        if (stride[0] != stride[1] || stride[1] != stride[2] ||
-            padding[0] != padding[1] || padding[1] != padding[2] ||
-            output_padding[0] != output_padding[1] || output_padding[1] != output_padding[2] ||
-            dilation[0] != dilation[1] || dilation[1] != dilation[2]) {
-            throw std::runtime_error(
-                std::string("CUDA ") + op_name + ": asymmetric stride/padding/"
-                "output_padding/dilation requires cuDNN; rebuild with TENZOR_HAS_CUDNN.");
-        }
-        return {stride[0], padding[0], output_padding[0], dilation[0], groups};
-    };
-    table.register_single_output_kernel(OpId::ConvTranspose3dForward, [t3d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    // cuDNN path already supports asymmetric.) t3d_iso_or_throw is a free
+    // function (see above) rather than a local lambda: SingleOutputKernelFn is
+    // a raw function pointer, and these registrations must stay non-capturing.
+    table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto [stride, padding, output_padding, dilation, groups] = t3d_iso_or_throw(attrs, "ConvTranspose3d (non-cuDNN fallback)");
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::conv_transpose3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
-    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardInput, [t3d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto [stride, padding, output_padding, dilation, groups] = t3d_iso_or_throw(attrs, "ConvTranspose3dBackwardInput (non-cuDNN fallback)");
         return cuda::conv_transpose3d_backward_input_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
-    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardWeight, [t3d_iso_or_throw](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto [stride, padding, output_padding, dilation, groups] = t3d_iso_or_throw(attrs, "ConvTranspose3dBackwardWeight (non-cuDNN fallback)");
         return cuda::conv_transpose3d_backward_weight_kernel(
             inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));

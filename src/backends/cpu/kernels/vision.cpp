@@ -1395,7 +1395,7 @@ auto box_iou_kernel(const Tensor& boxes1_in, const Tensor& boxes2_in, int iou_ty
         T* out = output.data<T>();
 
         const T eps = static_cast<T>(1e-7);
-        #pragma omp parallel for collapse(2) if(N * M > ::tenzor::OmpThresholds::complex())
+        #pragma omp parallel for if(N * M > ::tenzor::OmpThresholds::complex())
         for (int64_t i = 0; i < N; ++i) {
             for (int64_t j = 0; j < M; ++j) {
                 T x1 = std::max(b1[i * 4 + 0], b2[j * 4 + 0]);

@@ -5,6 +5,12 @@
 
 #include "tenzor/ops/custom_op.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+// custom_op.hpp only forward-declares Variable (for the CustomBackwardVariableFn
+// signature). That's enough to declare std::span<const Variable>/std::function<...>,
+// but this TU is the first to actually instantiate them (e.g. `!var_backward`
+// below), which needs Variable complete. MSVC's STL enforces that at the
+// instantiation point; GCC/Clang's happened not to here, masking the gap.
+#include "tenzor/autograd/variable.hpp"
 
 #include <stdexcept>
 

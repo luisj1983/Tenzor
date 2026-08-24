@@ -281,6 +281,10 @@ target_compile_definitions(tenzor_backend_vulkan PRIVATE
 if(WIN32)
     target_compile_definitions(tenzor_backend_vulkan PRIVATE
         VK_USE_PLATFORM_WIN32_KHR
+        # vulkan_win32.h pulls in <windows.h>, whose min/max macros clash
+        # with std::max/std::min call sites throughout this backend.
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
     )
 elseif(APPLE)
     target_compile_definitions(tenzor_backend_vulkan PRIVATE

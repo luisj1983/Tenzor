@@ -5,7 +5,9 @@
 
 #include "tenzor/distributed/distributed.hpp"
 #include "tenzor/backend/loader.hpp"  // backend_registry() — resolve GPU backend DSO for NCCL/RCCL
+#ifndef _WIN32
 #include "tenzor/distributed/gloo_backend.hpp"
+#endif
 #ifdef TENZOR_HAS_MPI
 #include "tenzor/distributed/mpi_backend.hpp"
 #endif
@@ -292,8 +294,22 @@ auto ProcessGroup::create_process_group(
             }
             break;
         case Backend::GLOO:
+#ifndef _WIN32
             comm_backend = std::make_unique<GlooBackend>();
             break;
+#else
+            throw std::runtime_error(
+                "GLOO backend requested but Tenzor was built without Gloo "
+                "support on Windows: its CPU collective-comm implementation "
+                "uses raw POSIX sockets that have not been ported (matching "
+                "upstream PyTorch, whose Gloo backend is also Linux/macOS-only). "
+                "\n"
+                "Alternative backends that work on Windows:\n"
+                "  - NCCL: GPU-to-GPU communication (requires CUDA + NCCL)\n"
+                "  - MPI: rebuild with -DTENZOR_BUILD_MPI=ON after installing "
+                "an MPI implementation (e.g. Microsoft MPI)\n"
+            );
+#endif
         case Backend::MPI:
 #ifdef TENZOR_HAS_MPI
             comm_backend = std::make_unique<MPIBackend>();

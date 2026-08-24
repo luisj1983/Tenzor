@@ -5856,8 +5856,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
 } // namespace tenzor
 
-// Export for dynamic loading via dlsym
+// Export for dynamic loading via dlsym/GetProcAddress. Windows needs
+// __declspec(dllexport) explicitly -- this target is a raw custom-command
+// build (hipcc.exe invoked directly, not CMake's HIP language support), so
+// CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS never applies to it (same reasoning as
+// create_backend() in rocm_backend.cpp).
 extern "C" {
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
     void register_kernels(tenzor::BackendDispatchTable* table) {
         if (table) {
             tenzor::register_rocm_kernels(*table);

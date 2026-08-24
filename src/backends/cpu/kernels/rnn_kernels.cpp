@@ -39,6 +39,12 @@ inline float sigmoid(float x) {
 namespace {
 
 // audit C1: register the RNN oneDNN cache clear-callback for clear_dnnl_cache().
+// Both register_dnnl_cache_clear_callback (onednn_cache.hpp) and
+// rnn_onednn::clear_rnn_onednn_caches (rnn_onednn.hpp) only exist when
+// oneDNN is enabled -- mirrors the guard every other kernel file's analogous
+// registrar already uses (activations.cpp, batchnorm.cpp, conv2d.cpp,
+// math.cpp, nn_kernels.cpp, pooling.cpp).
+#ifdef TENZOR_USE_ONEDNN
 struct RnnOneDnnCacheClearRegistrar {
     RnnOneDnnCacheClearRegistrar() {
         ::tenzor::cpu::register_dnnl_cache_clear_callback(
@@ -46,6 +52,7 @@ struct RnnOneDnnCacheClearRegistrar {
     }
 };
 static RnnOneDnnCacheClearRegistrar g_rnn_onednn_cache_clear_registrar;
+#endif  // TENZOR_USE_ONEDNN
 
 inline double sigmoid_d(double x) { return 1.0 / (1.0 + std::exp(-x)); }
 
@@ -977,7 +984,6 @@ auto lstm_forward_kernel(
             const float* bih_ptr = has_bias_ih ? bias_ih.data<float>() : nullptr;
             const float* bhh_ptr = has_bias_hh ? bias_hh.data<float>() : nullptr;
             if (has_bias_ih && has_bias_hh) {
-                #pragma omp simd
                 for (int64_t i = 0; i < bias_size; ++i) {
                     combined_bias_buffer[i] = bih_ptr[i] + bhh_ptr[i];
                 }
@@ -1735,7 +1741,6 @@ auto lstm_multilayer_forward_kernel(
             const float* ih_ptr = has_ih ? bias_ih_list[static_cast<size_t>(l)].data<float>() : nullptr;
             const float* hh_ptr = has_hh ? bias_hh_list[static_cast<size_t>(l)].data<float>() : nullptr;
             if (has_ih && has_hh) {
-                #pragma omp simd
                 for (int64_t i = 0; i < 4 * hidden; ++i) {
                     buf[static_cast<size_t>(i)] = ih_ptr[i] + hh_ptr[i];
                 }

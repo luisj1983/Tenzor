@@ -15,7 +15,11 @@
 // Platform-specific includes for SIMD intrinsics
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h>
-    #include <cpuid.h>
+    #if defined(_MSC_VER)
+        #include <intrin.h>
+    #else
+        #include <cpuid.h>
+    #endif
     #define TENZOR_X86
 #elif defined(__ARM_NEON) || defined(__aarch64__)
     #include <arm_neon.h>
@@ -78,12 +82,28 @@ void detect_cpu_features() {
 
 #ifdef TENZOR_X86
     // Use CPUID to detect x86/x64 features
-    unsigned int eax, ebx, ecx, edx;
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
 
+#if defined(_MSC_VER)
+    // MSVC has no <cpuid.h>; <intrin.h>'s __cpuid/__cpuidex write into an
+    // int[4] (eax,ebx,ecx,edx) instead of taking eax/ebx/ecx/edx by reference.
+    int cpu_info[4] = {0, 0, 0, 0};
+    __cpuid(cpu_info, 0);
+    unsigned int max_leaf = static_cast<unsigned int>(cpu_info[0]);
+
+    if (max_leaf >= 1) {
+        __cpuid(cpu_info, 1);
+        eax = static_cast<unsigned int>(cpu_info[0]);
+        ebx = static_cast<unsigned int>(cpu_info[1]);
+        ecx = static_cast<unsigned int>(cpu_info[2]);
+        edx = static_cast<unsigned int>(cpu_info[3]);
+        (void)eax; (void)edx;
+#else
     // Check if CPUID is supported
     if (__get_cpuid_max(0, nullptr) >= 1) {
         // Get feature flags
         __cpuid(1, eax, ebx, ecx, edx);
+#endif
 
         // SSE4.2: ECX bit 20
         features->sse42 = (ecx & (1 << 20)) != 0;
@@ -103,8 +123,14 @@ void detect_cpu_features() {
         }
 
         // Check extended features (leaf 7)
+#if defined(_MSC_VER)
+        if (max_leaf >= 7) {
+            __cpuidex(cpu_info, 7, 0);
+            ebx = static_cast<unsigned int>(cpu_info[1]);
+#else
         if (__get_cpuid_max(0, nullptr) >= 7) {
             __cpuid_count(7, 0, eax, ebx, ecx, edx);
+#endif
 
             // AVX2: EBX bit 5 — gated on OS saving YMM state.
             features->avx2 = ((ebx & (1 << 5)) != 0) && os_avx;
@@ -283,7 +309,14 @@ float reduce_max_scalar(const float* src, size_t size) {
 // x86/x64 SIMD Implementations
 // ============================================================================
 
-#ifdef TENZOR_X86
+// MSVC has no equivalent of GCC/Clang's __attribute__((target(...)))
+// function-multiversioning, and compiles a whole translation unit against a
+// single /arch: flag rather than per-function ISA targets — so these
+// SSE4.2/AVX2/AVX-512 variants (which rely on that attribute to coexist in
+// one TU) aren't compiled under MSVC. initialize_kernel_table() below always
+// selects the scalar kernels in that case; CPU feature detection above still
+// works and is used by the public cpu_supports_*() queries.
+#if defined(TENZOR_X86) && !defined(_MSC_VER)
 
 // SSE4.2 Implementations (4 floats per operation)
 __attribute__((target("sse4.2")))
@@ -684,7 +717,7 @@ float reduce_max_avx512(const float* src, size_t size) {
     return max_val;
 }
 
-#endif // TENZOR_X86
+#endif // TENZOR_X86 && !_MSC_VER
 
 // ============================================================================
 // ARM NEON Implementations
@@ -849,7 +882,7 @@ void initialize_kernel_table() {
 
     // Select best available implementation for each operation
 
-#ifdef TENZOR_X86
+#if defined(TENZOR_X86) && !defined(_MSC_VER)
     if (features.avx512) {
         table->add = kernels::add_avx512;
         table->mul = kernels::mul_avx512;

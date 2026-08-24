@@ -64,11 +64,11 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
         if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 output[i] = op(input[i]);
             }
         } else {
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 output[i] = op(input[i]);
             }
         }
@@ -101,15 +101,15 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
         };
         if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
-            for (size_t chunk = 0; chunk < n; chunk += 512) {
-                process_chunk(chunk, std::min(chunk + 512, n));
+            for (int64_t chunk = 0; chunk < n; chunk += 512) {
+                process_chunk(chunk, std::min(chunk + 512, static_cast<int64_t>(n)));
             }
         } else {
             process_chunk(0, n);
         }
 #else
         // Scalar fallback without F16C
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(input[i]);
             output[i] = static_cast<T>(op(val));
         }
@@ -144,21 +144,21 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
         };
         if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
-            for (size_t chunk = 0; chunk < n; chunk += 512) {
-                process_chunk(chunk, std::min(chunk + 512, n));
+            for (int64_t chunk = 0; chunk < n; chunk += 512) {
+                process_chunk(chunk, std::min(chunk + 512, static_cast<int64_t>(n)));
             }
         } else {
             process_chunk(0, n);
         }
 #else
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(input[i]);
             output[i] = static_cast<T>(op(val));
         }
 #endif
     } else {
         // Other types: scalar fallback
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(input[i]);
             output[i] = static_cast<T>(op(val));
         }
@@ -178,11 +178,11 @@ void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
         if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 output[i] = op(a[i], b[i]);
             }
         } else {
-            for (size_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 output[i] = op(a[i], b[i]);
             }
         }
@@ -219,14 +219,14 @@ void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
         };
         if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
-            for (size_t chunk = 0; chunk < n; chunk += 512) {
-                process_chunk(chunk, std::min(chunk + 512, n));
+            for (int64_t chunk = 0; chunk < n; chunk += 512) {
+                process_chunk(chunk, std::min(chunk + 512, static_cast<int64_t>(n)));
             }
         } else {
             process_chunk(0, n);
         }
 #else
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float va = static_cast<float>(a[i]);
             float vb = static_cast<float>(b[i]);
             output[i] = static_cast<T>(op(va, vb));
@@ -265,21 +265,21 @@ void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
         };
         if (static_cast<int64_t>(n) >= ELEMENTWISE_OMP_THRESHOLD) {
             #pragma omp parallel for schedule(static)
-            for (size_t chunk = 0; chunk < n; chunk += 512) {
-                process_chunk(chunk, std::min(chunk + 512, n));
+            for (int64_t chunk = 0; chunk < n; chunk += 512) {
+                process_chunk(chunk, std::min(chunk + 512, static_cast<int64_t>(n)));
             }
         } else {
             process_chunk(0, n);
         }
 #else
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float va = static_cast<float>(a[i]);
             float vb = static_cast<float>(b[i]);
             output[i] = static_cast<T>(op(va, vb));
         }
 #endif
     } else {
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float va = static_cast<float>(a[i]);
             float vb = static_cast<float>(b[i]);
             output[i] = static_cast<T>(op(va, vb));

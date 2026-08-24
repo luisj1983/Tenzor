@@ -1931,10 +1931,10 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
 
 #ifdef TENZOR_CONV_AVX2
 void depthwise_conv2d_avx2_f32(
-    const float* __restrict__ in_data,
-    const float* __restrict__ w_data,
-    const float* __restrict__ b_data,
-    float* __restrict__ out_data,
+    const float* __restrict in_data,
+    const float* __restrict w_data,
+    const float* __restrict b_data,
+    float* __restrict out_data,
     int64_t N, int64_t C, int64_t H, int64_t W,
     int64_t kH, int64_t kW, int64_t H_out, int64_t W_out,
     int64_t padding_h, int64_t padding_w) {

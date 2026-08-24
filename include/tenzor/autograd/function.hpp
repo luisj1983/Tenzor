@@ -17,6 +17,7 @@
 #include <vector>
 #include <atomic>
 #include "../core/tensor.hpp"
+#include "../core/export.hpp"
 #include "../ops/op_id.hpp"
 #include "../backend/op_attributes.hpp"
 #include "../sparse/sparse_tensor.hpp"
@@ -712,7 +713,10 @@ protected:
 
 private:
     uint64_t id_;                                                    ///< Unique identifier (stable key for gradient accumulators)
-    static std::atomic<uint64_t> next_id_;                           ///< Global counter for unique IDs
+    // See dispatch_table.hpp's tables_ for why this needs an explicit export
+    // annotation: CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS only auto-exports function
+    // symbols, not data symbols like this static counter.
+    TENZOR_API static std::atomic<uint64_t> next_id_;                 ///< Global counter for unique IDs
 };
 
 // ============================================================================

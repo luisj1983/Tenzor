@@ -20,9 +20,22 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
 #include <sys/types.h>
 #include <limits.h>
+#endif
+#ifndef HOST_NAME_MAX
+#define HOST_NAME_MAX 256  // not defined by MSVC; large enough for any hostname
+#endif
 #include <thread>
 #include <atomic>
 
@@ -886,10 +899,17 @@ auto SummaryWriter::get_current_time() -> double {
 
 auto SummaryWriter::get_hostname() -> std::string {
     char hostname[HOST_NAME_MAX + 1];
+#ifdef _WIN32
+    DWORD size = sizeof(hostname);
+    if (GetComputerNameA(hostname, &size)) {
+        return std::string(hostname, size);
+    }
+#else
     if (gethostname(hostname, sizeof(hostname)) == 0) {
         hostname[HOST_NAME_MAX] = '\0';
         return std::string(hostname);
     }
+#endif
     return "unknown";
 }
 
@@ -900,7 +920,11 @@ auto SummaryWriter::create_event_filename() -> std::string {
         now.time_since_epoch()) % 1000;
 
     std::tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &now_time_t);
+#else
     localtime_r(&now_time_t, &tm);
+#endif
 
     // Format: events.out.tfevents.{timestamp}.{hostname}
     char buffer[256];

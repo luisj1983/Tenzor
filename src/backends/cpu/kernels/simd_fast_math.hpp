@@ -21,16 +21,20 @@
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h>
-    #if defined(__AVX512F__)
+    // MSVC never predefines __AVX512F__/__FMA__/__F16C__ (unlike GCC/Clang),
+    // even when the project's own TENZOR_HAS_* feature macros (set by CMake
+    // based on /arch: and CPU detection) are enabled; fall back to those so
+    // these SIMD paths aren't silently dropped under MSVC.
+    #if defined(__AVX512F__) || defined(TENZOR_HAS_AVX512)
         #define TENZOR_FAST_MATH_AVX512
     #endif
-    #if defined(__AVX2__)
+    #if defined(__AVX2__) || defined(TENZOR_HAS_AVX2)
         #define TENZOR_FAST_MATH_AVX2
     #endif
-    #if defined(__FMA__)
+    #if defined(__FMA__) || defined(TENZOR_HAS_FMA)
         #define TENZOR_FAST_MATH_FMA
     #endif
-    #if defined(__F16C__)
+    #if defined(__F16C__) || defined(TENZOR_HAS_F16C)
         #define TENZOR_FAST_MATH_F16C
     #endif
 #endif
@@ -674,7 +678,7 @@ inline void gelu_batch_avx2(const float* input, float* output, size_t n) {
     // intrinsic, so this is a scalar loop (the prior tanh approximation was
     // ~1e-3 off and inconsistent with the op-level GELU).
     constexpr float inv_sqrt2 = 0.70710678f;
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         float x = input[i];
         output[i] = 0.5f * x * (1.0f + std::erf(x * inv_sqrt2));
     }
@@ -690,7 +694,7 @@ inline void where_batch_avx2(const float* cond, const float* x, const float* y,
     __m256 zero = _mm256_setzero_ps();
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
-    for (size_t i = 0; i < simd_end; i += 8) {
+    for (int64_t i = 0; i < simd_end; i += 8) {
         __m256 c = _mm256_loadu_ps(cond + i);
         __m256 vx = _mm256_loadu_ps(x + i);
         __m256 vy = _mm256_loadu_ps(y + i);
@@ -721,7 +725,7 @@ inline void where_batch_avx512(const float* cond, const float* x, const float* y
     __m512 zero = _mm512_setzero_ps();
 
     #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
-    for (size_t i = 0; i < simd_end; i += 16) {
+    for (int64_t i = 0; i < simd_end; i += 16) {
         __m512 c = _mm512_loadu_ps(cond + i);
         __m512 vx = _mm512_loadu_ps(x + i);
         __m512 vy = _mm512_loadu_ps(y + i);
@@ -880,7 +884,7 @@ inline void gelu_batch_avx512(const float* input, float* output, size_t n) {
     // gelu_kernel and PyTorch's default (approximate='none').  erf has no
     // AVX-512 intrinsic, so this is a scalar loop.
     constexpr float inv_sqrt2 = 0.70710678f;
-    for (size_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         float x = input[i];
         output[i] = 0.5f * x * (1.0f + std::erf(x * inv_sqrt2));
     }

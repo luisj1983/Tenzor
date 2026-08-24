@@ -8,7 +8,12 @@
  */
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    #if defined(__AVX512F__)
+    // MSVC never predefines __AVX512F__ (unlike GCC/Clang), even when the
+    // project's own TENZOR_HAS_AVX512 (set by CMake based on /arch: and CPU
+    // detection) is enabled; fall back to that so this file's AVX-512 kernels
+    // aren't silently dropped -- with call sites elsewhere unconditionally
+    // referencing them -- under MSVC.
+    #if defined(__AVX512F__) || defined(TENZOR_HAS_AVX512)
         #include <immintrin.h>
         #define TENZOR_POOL_HAS_AVX512
     #endif

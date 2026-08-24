@@ -28,6 +28,19 @@
 #include <omp.h>
 #endif
 
+// __attribute__((target(...))) is GCC/Clang-only function-multiversioning
+// syntax; cl.exe has no equivalent and errors on it outright. These kernel
+// variants are selected at runtime via CPU-feature dispatch (not #ifdef'd
+// out), and MSVC allows calling any _mm512_*/_mm256_* intrinsic regardless
+// of the ambient /arch: setting, so a no-op is sufficient there.
+#if defined(_MSC_VER)
+    #define TENZOR_FUSED_TARGET_AVX512F
+    #define TENZOR_FUSED_TARGET_AVX2_FMA
+#else
+    #define TENZOR_FUSED_TARGET_AVX512F __attribute__((target("avx512f")))
+    #define TENZOR_FUSED_TARGET_AVX2_FMA __attribute__((target("avx2,fma")))
+#endif
+
 // Import shared Float16/BFloat16 operator overloads
 #include "half_operators.hpp"
 
@@ -81,7 +94,7 @@ auto fused_linear_relu_kernel(
             // Flatten input to 2D if needed
             auto input_shape = in_wide.shape();
             int64_t batch_size = 1;
-            for (size_t i = 0; i < input_shape.size() - 1; ++i) {
+            for (int64_t i = 0; i < input_shape.size() - 1; ++i) {
                 batch_size *= input_shape[i];
             }
             int64_t in_features = input_shape[input_shape.size() - 1];
@@ -104,7 +117,7 @@ auto fused_linear_relu_kernel(
                 const float* bias_data = b_ptr ? b_ptr->data<float>() : nullptr;
 
                 #pragma omp parallel for if(static_cast<int64_t>(total_elems) > ::tenzor::OmpThresholds::simple())
-                for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
+                for (int64_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
                     for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                         size_t idx = i * out_features + j;
                         float val = out_data[idx];
@@ -119,7 +132,7 @@ auto fused_linear_relu_kernel(
                 const double* bias_data = b_ptr ? b_ptr->data<double>() : nullptr;
 
                 #pragma omp parallel for if(static_cast<int64_t>(total_elems) > ::tenzor::OmpThresholds::simple())
-                for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
+                for (int64_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
                     for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                         size_t idx = i * out_features + j;
                         double val = out_data[idx];
@@ -630,7 +643,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         size_t vec_end = n - (n % 8);
         __m256 zero_vec = _mm256_setzero_ps();
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < vec_end; i += 8) {
+        for (int64_t i = 0; i < vec_end; i += 8) {
             __m256 v = _mm256_loadu_ps(data + i);
             _mm256_storeu_ps(data + i, _mm256_max_ps(zero_vec, v));
         }
@@ -639,7 +652,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         }
 #else
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
 #endif
@@ -647,7 +660,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         double* data = result.data<double>();
         size_t n = static_cast<size_t>(result.numel());
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0, data[i]);
         }
     } else if (result.dtype() == DType::Float16) {
@@ -655,7 +668,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         float* data = result_f32.data<float>();
         size_t n = static_cast<size_t>(result.numel());
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
         result = result_f32.to(DType::Float16);
@@ -664,7 +677,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         float* data = result_f32.data<float>();
         size_t n = static_cast<size_t>(result.numel());
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
         result = result_f32.to(DType::BFloat16);
@@ -703,7 +716,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         size_t n = static_cast<size_t>(input.numel());
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             out_data[i] = 0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F));
         }
@@ -713,7 +726,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         size_t n = static_cast<size_t>(input.numel());
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             out_data[i] = 0.5 * x * (1.0 + std::erf(x * INV_SQRT2_D));
         }
@@ -723,7 +736,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         size_t n = static_cast<size_t>(input.numel());
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             out_data[i] = Float16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
@@ -733,7 +746,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         size_t n = static_cast<size_t>(input.numel());
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             out_data[i] = BFloat16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
@@ -1259,7 +1272,7 @@ constexpr int64_t ATTN_TILE_K = 64;
 
 #ifdef TENZOR_ATTN_AVX2
 
-__attribute__((target("avx2,fma")))
+TENZOR_FUSED_TARGET_AVX2_FMA
 static inline float attn_hsum_avx2(__m256 v) {
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 lo = _mm256_castps256_ps128(v);
@@ -1269,7 +1282,7 @@ static inline float attn_hsum_avx2(__m256 v) {
     return _mm_cvtss_f32(s);
 }
 
-__attribute__((target("avx2,fma")))
+TENZOR_FUSED_TARGET_AVX2_FMA
 static inline float attn_hmax_avx2(__m256 v) {
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 lo = _mm256_castps256_ps128(v);
@@ -1280,7 +1293,7 @@ static inline float attn_hmax_avx2(__m256 v) {
 }
 
 // SIMD dot product of two float vectors of length `len`.
-__attribute__((target("avx2,fma")))
+TENZOR_FUSED_TARGET_AVX2_FMA
 static inline float attn_dot_avx2(const float* a, const float* b, int64_t len) {
     __m256 vsum = _mm256_setzero_ps();
     int64_t d = 0;
@@ -1297,7 +1310,7 @@ static inline float attn_dot_avx2(const float* a, const float* b, int64_t len) {
 }
 
 // Weighted accumulation: out[d] += weight * v[d] for d in [0, len).
-__attribute__((target("avx2,fma")))
+TENZOR_FUSED_TARGET_AVX2_FMA
 static inline void attn_axpy_avx2(float* out, float weight, const float* v, int64_t len) {
     __m256 vw = _mm256_set1_ps(weight);
     int64_t d = 0;
@@ -1313,7 +1326,7 @@ static inline void attn_axpy_avx2(float* out, float weight, const float* v, int6
 }
 
 // Scale a float vector: out[d] *= s for d in [0, len).
-__attribute__((target("avx2,fma")))
+TENZOR_FUSED_TARGET_AVX2_FMA
 static inline void attn_scale_avx2(float* out, float s, int64_t len) {
     __m256 vs = _mm256_set1_ps(s);
     int64_t d = 0;
@@ -1331,17 +1344,17 @@ static inline void attn_scale_avx2(float* out, float s, int64_t len) {
 
 #ifdef TENZOR_ATTN_AVX512
 
-__attribute__((target("avx512f")))
+TENZOR_FUSED_TARGET_AVX512F
 static inline float attn_hsum_avx512(__m512 v) {
     return _mm512_reduce_add_ps(v);
 }
 
-__attribute__((target("avx512f")))
+TENZOR_FUSED_TARGET_AVX512F
 static inline float attn_hmax_avx512(__m512 v) {
     return _mm512_reduce_max_ps(v);
 }
 
-__attribute__((target("avx512f")))
+TENZOR_FUSED_TARGET_AVX512F
 static inline float attn_dot_avx512(const float* a, const float* b, int64_t len) {
     __m512 vsum = _mm512_setzero_ps();
     int64_t d = 0;
@@ -1358,7 +1371,7 @@ static inline float attn_dot_avx512(const float* a, const float* b, int64_t len)
     return dot;
 }
 
-__attribute__((target("avx512f")))
+TENZOR_FUSED_TARGET_AVX512F
 static inline void attn_axpy_avx512(float* out, float weight, const float* v, int64_t len) {
     __m512 vw = _mm512_set1_ps(weight);
     int64_t d = 0;
@@ -1373,7 +1386,7 @@ static inline void attn_axpy_avx512(float* out, float weight, const float* v, in
     }
 }
 
-__attribute__((target("avx512f")))
+TENZOR_FUSED_TARGET_AVX512F
 static inline void attn_scale_avx512(float* out, float s, int64_t len) {
     __m512 vs = _mm512_set1_ps(s);
     int64_t d = 0;
@@ -1447,10 +1460,10 @@ static inline void attn_scale(float* out, float s, int64_t len) {
 // After all tiles: o_i /= l_i
 //
 static void attention_online_f32(
-    const float* __restrict__ q_data,
-    const float* __restrict__ k_data,
-    const float* __restrict__ v_data,
-    float* __restrict__ out_data,
+    const float* __restrict q_data,
+    const float* __restrict k_data,
+    const float* __restrict v_data,
+    float* __restrict out_data,
     int64_t batch_heads,
     int64_t seq_q,
     int64_t seq_k,
@@ -1561,10 +1574,10 @@ static void attention_online_f32(
 // most targets; correctness over peak throughput is the right
 // tradeoff for the Float64 path.
 static void attention_online_f64(
-    const double* __restrict__ q_data,
-    const double* __restrict__ k_data,
-    const double* __restrict__ v_data,
-    double* __restrict__ out_data,
+    const double* __restrict q_data,
+    const double* __restrict k_data,
+    const double* __restrict v_data,
+    double* __restrict out_data,
     int64_t batch_heads,
     int64_t seq_q,
     int64_t seq_k,

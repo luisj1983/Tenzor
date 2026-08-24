@@ -36,12 +36,18 @@ get_filename_component(SYCL_COMPILER_DIR ${SYCL_BIN_DIR} DIRECTORY)
 set(SYCL_INCLUDE_DIR "${SYCL_COMPILER_DIR}/include")
 set(SYCL_LIBRARY_DIR "${SYCL_COMPILER_DIR}/lib")
 
-# Verify SYCL library exists
-if(NOT EXISTS "${SYCL_LIBRARY_DIR}/libsycl.so")
-    if(EXISTS "${SYCL_COMPILER_DIR}/lib64/libsycl.so")
-        set(SYCL_LIBRARY_DIR "${SYCL_COMPILER_DIR}/lib64")
-    else()
-        message(WARNING "SYCL library not found at ${SYCL_LIBRARY_DIR}/libsycl.so")
+# Verify SYCL library exists (libsycl.so on Linux, sycl.lib import lib on Windows)
+if(WIN32)
+    if(NOT EXISTS "${SYCL_LIBRARY_DIR}/sycl.lib")
+        message(WARNING "SYCL library not found at ${SYCL_LIBRARY_DIR}/sycl.lib")
+    endif()
+else()
+    if(NOT EXISTS "${SYCL_LIBRARY_DIR}/libsycl.so")
+        if(EXISTS "${SYCL_COMPILER_DIR}/lib64/libsycl.so")
+            set(SYCL_LIBRARY_DIR "${SYCL_COMPILER_DIR}/lib64")
+        else()
+            message(WARNING "SYCL library not found at ${SYCL_LIBRARY_DIR}/libsycl.so")
+        endif()
     endif()
 endif()
 
@@ -120,11 +126,59 @@ endif()
 # =========================================================================
 # icpx supports C++23 — using it for std::expected, std::ranges, and other C++23 features
 set(SYCL_COMMON_FLAGS
-    -std=c++23 -fPIC
+    -std=c++23
     -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
     -O3 -DNDEBUG
     -I${PROJECT_SOURCE_DIR}/include
 )
+if(NOT WIN32)
+    # -fPIC is meaningless for Windows PE targets (icpx errors on it there --
+    # ASLR is opt-out via /DYNAMICBASE, not a compile-time position-independence flag).
+    list(APPEND SYCL_COMMON_FLAGS -fPIC)
+endif()
+
+# include/tenzor/utils/log.hpp (pulled in transitively by logging.hpp, which
+# oneapi_backend.cpp and other backend glue sources include) #includes
+# <spdlog/spdlog.h> directly. Unlike the CPU backend (a normal CMake target
+# that gets this via `target_link_libraries(... spdlog::spdlog)`), this
+# backend invokes icpx directly through add_custom_command, so spdlog's
+# include dir needs to be added explicitly or a FetchContent'd spdlog (no
+# system package found) fails with "spdlog/spdlog.h: No such file or directory".
+if(TARGET spdlog::spdlog)
+    get_target_property(_SPDLOG_INCLUDE_DIRS spdlog::spdlog INTERFACE_INCLUDE_DIRECTORIES)
+    if(_SPDLOG_INCLUDE_DIRS)
+        foreach(_spdlog_dir ${_SPDLOG_INCLUDE_DIRS})
+            if(_spdlog_dir)
+                list(APPEND SYCL_COMMON_FLAGS -I${_spdlog_dir})
+            endif()
+        endforeach()
+    endif()
+    # Without SPDLOG_COMPILED_LIB, <spdlog/spdlog.h> re-defines spdlog's own
+    # implementation inline in every including TU; propagate it to match how
+    # tenzor_core / the CPU backend already consume spdlog via a real
+    # target_link_libraries (the symbols resolve at link time via
+    # tenzor_core.dll, which already statically links spdlog and re-exports
+    # it under CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS).
+    get_target_property(_SPDLOG_COMPILE_DEFS spdlog::spdlog INTERFACE_COMPILE_DEFINITIONS)
+    if(_SPDLOG_COMPILE_DEFS)
+        foreach(_spdlog_def ${_SPDLOG_COMPILE_DEFS})
+            if(_spdlog_def)
+                list(APPEND SYCL_COMMON_FLAGS -D${_spdlog_def})
+            endif()
+        endforeach()
+    endif()
+    # Independent of SPDLOG_COMPILED_LIB: spdlog's *bundled* fmt copy
+    # (fmt/bundled/*.h) is always header-only, so fmt/bundled/format-inl.h
+    # still gets pulled into every TU. icpx's C++23 consteval checking
+    # rejects that old bundled fmt's FMT_STRING machinery ("call to consteval
+    # function ... is not a constant expression") -- a compiler-strictness
+    # issue in third-party vendored code, unrelated to Tenzor's own sources.
+    # FMT_CONSTEVAL is an explicit, fmt-supported override point (core.h
+    # guards its definition with #ifndef) for exactly this class of
+    # incomplete/overly-strict consteval support; defining it empty falls
+    # back to fmt's pre-C++20-consteval codepath.
+    list(APPEND SYCL_COMMON_FLAGS -DFMT_CONSTEVAL=)
+endif()
 
 if(ONEDPL_FOUND)
     list(APPEND SYCL_COMMON_FLAGS -DTENZOR_HAS_ONEDPL)
@@ -298,45 +352,97 @@ endforeach()
 set(ONEMKL_LINK_FLAGS "")
 if(ONEMKL_SYCL_FOUND)
     get_filename_component(ONEMKL_LIB_DIR "${ONEMKL_SYCL_INCLUDE_DIR}/../lib" ABSOLUTE)
-    # Use GNU threading layer instead of Intel threading to avoid cleanup symbol issues
-    # Link order: mkl_sycl -> mkl_intel_ilp64 -> mkl_gnu_thread -> mkl_core -> gomp
-    set(ONEMKL_LINK_FLAGS
-        -L${ONEMKL_LIB_DIR} -Wl,-rpath,${ONEMKL_LIB_DIR}
-        -Wl,--no-as-needed -lmkl_sycl -lmkl_intel_ilp64 -lmkl_gnu_thread -lmkl_core -lgomp -Wl,--as-needed
-    )
+    if(WIN32)
+        # Windows MKL ships no GNU-threaded variant (no libgomp on Windows) and
+        # uses "_dll" suffixed import libs for the dynamic runtime. Match the
+        # intel_thread choice the CPU backend uses elsewhere in this build.
+        # Link order: mkl_sycl -> mkl_intel_ilp64 -> mkl_intel_thread -> mkl_core
+        set(ONEMKL_LINK_FLAGS
+            -L${ONEMKL_LIB_DIR}
+            -lmkl_sycl_dll -lmkl_intel_ilp64_dll -lmkl_intel_thread_dll -lmkl_core_dll
+        )
+    else()
+        # Use GNU threading layer instead of Intel threading to avoid cleanup symbol issues
+        # Link order: mkl_sycl -> mkl_intel_ilp64 -> mkl_gnu_thread -> mkl_core -> gomp
+        set(ONEMKL_LINK_FLAGS
+            -L${ONEMKL_LIB_DIR} -Wl,-rpath,${ONEMKL_LIB_DIR}
+            -Wl,--no-as-needed -lmkl_sycl -lmkl_intel_ilp64 -lmkl_gnu_thread -lmkl_core -lgomp -Wl,--as-needed
+        )
+    endif()
 endif()
 
 set(ONEDNN_LINK_FLAGS "")
 if(ONEDNN_FOUND)
-    set(ONEDNN_LINK_FLAGS -L${ONEDNN_LIB_DIR} -Wl,-rpath,${ONEDNN_LIB_DIR} -ldnnl)
+    if(WIN32)
+        set(ONEDNN_LINK_FLAGS -L${ONEDNN_LIB_DIR} -ldnnl)
+    else()
+        set(ONEDNN_LINK_FLAGS -L${ONEDNN_LIB_DIR} -Wl,-rpath,${ONEDNN_LIB_DIR} -ldnnl)
+    endif()
 endif()
 
-set(SYCL_LINK_FLAGS -L${SYCL_LIBRARY_DIR} -lsycl -Wl,-rpath,${SYCL_LIBRARY_DIR})
+if(WIN32)
+    set(SYCL_LINK_FLAGS -L${SYCL_LIBRARY_DIR} -lsycl)
+else()
+    set(SYCL_LINK_FLAGS -L${SYCL_LIBRARY_DIR} -lsycl -Wl,-rpath,${SYCL_LIBRARY_DIR})
+endif()
 
-set(ONEAPI_SO_OUTPUT "${PROJECT_BINARY_DIR}/bin/tenzor_backend_oneapi.so")
-add_custom_command(
-    OUTPUT ${ONEAPI_SO_OUTPUT}
-    COMMAND ${SYCL_COMPILER}
-        -shared -fPIC
-        -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
-        ${ALL_OBJECTS}
-        -o ${ONEAPI_SO_OUTPUT}
-        -Wl,-soname,tenzor_backend_oneapi.so
-        -L${PROJECT_BINARY_DIR}/bin -ltenzor_core
-        # Build-tree rpath (find libtenzor_core during local runs) plus
-        # relocatable $ORIGIN rpaths so the INSTALLED .so finds libtenzor_core
-        # relative to itself: $ORIGIN for the wheel (co-located) layout and
-        # $ORIGIN/../.. for the FHS layout (lib/tenzor/backends -> lib).
-        -Wl,-rpath,${PROJECT_BINARY_DIR}/bin
-        -Wl,-rpath,$ORIGIN
-        -Wl,-rpath,$ORIGIN/../..
-        ${SYCL_LINK_FLAGS}
-        ${ONEMKL_LINK_FLAGS}
-        ${ONEDNN_LINK_FLAGS}
-    DEPENDS ${ALL_OBJECTS}
-    COMMENT "Linking oneAPI backend shared library"
-    VERBATIM
-)
+if(WIN32)
+    set(ONEAPI_SO_OUTPUT "${PROJECT_BINARY_DIR}/bin/tenzor_backend_oneapi.dll")
+    # link.exe (invoked internally by icpx) silently skips writing a .lib
+    # import library when the DLL exports nothing via __declspec(dllexport)
+    # -- confirmed empirically: even with /IMPLIB: given, zero exported
+    # symbols meant zero bytes written, no error. oneapi_backend.cpp's
+    # create_backend() (the DLL's one real entry point, looked up via
+    # GetProcAddress at runtime -- src/backend/loader.cpp) now carries an
+    # explicit dllexport for exactly this reason, which is what actually
+    # makes link.exe produce this file; the explicit /IMPLIB: below is kept
+    # for clarity/robustness (matches icpx's own auto-derived path, harmless
+    # if redundant). Downstream consumers that link against this as an
+    # IMPORTED target on Windows (python bindings) need IMPORTED_IMPLIB set
+    # to something that actually exists.
+    set(ONEAPI_IMPLIB "${PROJECT_BINARY_DIR}/bin/tenzor_backend_oneapi.lib")
+    add_custom_command(
+        OUTPUT ${ONEAPI_SO_OUTPUT} ${ONEAPI_IMPLIB}
+        COMMAND ${SYCL_COMPILER}
+            -shared
+            -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
+            ${ALL_OBJECTS}
+            -o ${ONEAPI_SO_OUTPUT}
+            -Xlinker /IMPLIB:${ONEAPI_IMPLIB}
+            -L${PROJECT_BINARY_DIR}/bin -ltenzor_core
+            ${SYCL_LINK_FLAGS}
+            ${ONEMKL_LINK_FLAGS}
+            ${ONEDNN_LINK_FLAGS}
+        DEPENDS ${ALL_OBJECTS}
+        COMMENT "Linking oneAPI backend shared library"
+        VERBATIM
+    )
+else()
+    set(ONEAPI_SO_OUTPUT "${PROJECT_BINARY_DIR}/bin/tenzor_backend_oneapi.so")
+    add_custom_command(
+        OUTPUT ${ONEAPI_SO_OUTPUT}
+        COMMAND ${SYCL_COMPILER}
+            -shared -fPIC
+            -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
+            ${ALL_OBJECTS}
+            -o ${ONEAPI_SO_OUTPUT}
+            -Wl,-soname,tenzor_backend_oneapi.so
+            -L${PROJECT_BINARY_DIR}/bin -ltenzor_core
+            # Build-tree rpath (find libtenzor_core during local runs) plus
+            # relocatable $ORIGIN rpaths so the INSTALLED .so finds libtenzor_core
+            # relative to itself: $ORIGIN for the wheel (co-located) layout and
+            # $ORIGIN/../.. for the FHS layout (lib/tenzor/backends -> lib).
+            -Wl,-rpath,${PROJECT_BINARY_DIR}/bin
+            -Wl,-rpath,$ORIGIN
+            -Wl,-rpath,$ORIGIN/../..
+            ${SYCL_LINK_FLAGS}
+            ${ONEMKL_LINK_FLAGS}
+            ${ONEDNN_LINK_FLAGS}
+        DEPENDS ${ALL_OBJECTS}
+        COMMENT "Linking oneAPI backend shared library"
+        VERBATIM
+    )
+endif()
 
 # Custom target for building the shared library
 add_custom_target(tenzor_backend_oneapi_build ALL
@@ -352,6 +458,13 @@ set_target_properties(tenzor_backend_oneapi PROPERTIES
     IMPORTED_LOCATION ${ONEAPI_SO_OUTPUT}
     INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/include"
 )
+if(WIN32)
+    # Required for any target that link-time-depends on this IMPORTED SHARED
+    # target on Windows (e.g. the python bindings module).
+    set_target_properties(tenzor_backend_oneapi PROPERTIES
+        IMPORTED_IMPLIB ${ONEAPI_IMPLIB}
+    )
+endif()
 add_dependencies(tenzor_backend_oneapi tenzor_backend_oneapi_build)
 
 # Installation (FHS layout only; wheel installs are handled centrally in the

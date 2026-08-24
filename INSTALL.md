@@ -230,21 +230,46 @@ source /opt/intel/oneapi/setvars.sh
 cmake .. -DTENZOR_BUILD_ONEAPI=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
 ```
 
-### Windows with Visual Studio
+### Windows with MSVC
+
+Use the **Ninja** generator, not the "Visual Studio 17 2022" generator. CMake
+hard-blocks mixing MSVC with Clang-family languages on Windows
+(`Windows-Clang.cmake`), and the ROCm and OneAPI backends are Clang-family
+toolchains (`hipcc`/`icpx`) — the VS generator can't build them at all. Every
+backend builds fine under Ninja with `cl.exe` as the host compiler; ROCm and
+OneAPI sources are compiled via direct custom `add_custom_command` calls to
+`hipcc.exe`/`icpx.exe` rather than CMake's native HIP/SYCL language support.
+
+**Prerequisites:**
+
+1. [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) (or full VS) with the "Desktop development with C++" workload — provides `cl.exe`, `link.exe`, `dumpbin.exe`.
+2. [CMake](https://cmake.org/download/) 3.25+ and [Ninja](https://ninja-build.org/).
+3. [vcpkg](https://github.com/microsoft/vcpkg) (for zlib/curl/OpenSSL/spdlog etc.) — clone it and note the path to its `scripts/buildsystems/vcpkg.cmake` toolchain file.
+4. Optional, per backend you want: [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) (OneAPI backend, and MKL/oneDNN which the CPU backend also uses), [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (CUDA backend), [AMD ROCm/HIP SDK for Windows](https://rocm.docs.amd.com/) (ROCm backend), [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) (Vulkan backend).
+5. [Python](https://www.python.org/downloads/) 3.9–3.13 + `pip install pybind11` if building Python bindings.
+
+**Configure and build**, from a `vcvars64.bat`-initialized shell (Developer PowerShell/Command Prompt for VS 2022) with `cmake`/`ninja` and any vendor compiler `bin/` directories (e.g. oneAPI's `compiler\<ver>\bin`, ROCm's `bin`) on `PATH`:
 
 ```powershell
-# Open Developer PowerShell for VS 2022
-mkdir build
-cd build
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+    -DCMAKE_CXX_COMPILER=cl `
+    -DTENZOR_BUILD_CUDA=ON -DTENZOR_BUILD_ROCM=ON -DTENZOR_BUILD_ONEAPI=ON -DTENZOR_BUILD_VULKAN=ON `
+    -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90" `
+    -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+    -DVCPKG_TARGET_TRIPLET=x64-windows `
+    -DCMAKE_PREFIX_PATH="C:/Program Files (x86)/Intel/oneAPI/tbb/<version>" `
+    -DPython_EXECUTABLE=C:/path/to/python.exe `
+    -Dpybind11_DIR=C:/path/to/site-packages/pybind11/share/cmake/pybind11
 
-# Configure
-cmake .. -G "Visual Studio 17 2022" -A x64 -DTENZOR_BUILD_CUDA=ON
+cmake --build build --config Release
+```
 
-# Build
-cmake --build . --config Release --parallel
+Turn off `-DTENZOR_BUILD_*` for any backend whose SDK isn't installed — CPU-only (`-DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_VULKAN=OFF`) needs only MSVC + vcpkg + oneAPI's MKL/oneDNN (the CPU backend itself depends on those).
 
-# Install
-cmake --install . --config Release
+**Running the result:** `tenzor_core.dll`, on Windows, statically links a handful of vendor runtime libraries directly (MKL threading, and — when built — CUDA's NVRTC and ROCm's HIP runtime compiler). Those resolve via the OS's normal DLL search order, which includes `PATH` — so add each enabled vendor SDK's `bin` directory to `PATH` before running a C++ executable that links `tenzor_core`. Backend `.dll`s themselves (`tenzor_backend_*.dll`) are loaded dynamically at runtime by `BackendLoader`, which registers the same vendor directories itself (`src/backend/loader.cpp`, from a list CMake generates at configure time into `build/generated/tenzor_win_dll_dirs.generated.hpp`) — no extra setup needed for those. The Python package does the equivalent automatically (`python/tenzor/__init__.py`, from `build/python/tenzor/_win_dll_dirs.py`), so `import tenzor` works with no manual `PATH`/`os.add_dll_directory` setup at all.
+
+```powershell
+cmake --install build --config Release
 ```
 
 ### Cross-Platform Vulkan Backend

@@ -16,6 +16,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/dtype_from_string.hpp"
+#include "tenzor/utils/safe_math.hpp"
 
 #include <grpcpp/grpcpp.h>
 #include "tenzor_serving.grpc.pb.h"
@@ -81,7 +82,7 @@ public:
                     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                         "negative tensor dimension");
                 }
-                if (__builtin_mul_overflow(numel, d, &numel)) {
+                if (tenzor::detail::checked_mul_overflow(numel, d, &numel)) {
                     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                         "tensor shape too large");
                 }
@@ -92,7 +93,7 @@ public:
             // payload, and tenzor::empty() allocates from the full shape
             // (bad_alloc DoS). Use a checked multiply and reject on overflow.
             size_t required = 0;
-            if (__builtin_mul_overflow(static_cast<size_t>(numel),
+            if (tenzor::detail::checked_mul_overflow(static_cast<size_t>(numel),
                                        tenzor::dtype_size(dtype), &required)) {
                 return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                     "tensor byte size overflows size_t");

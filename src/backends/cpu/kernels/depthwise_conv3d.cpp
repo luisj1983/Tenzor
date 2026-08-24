@@ -126,10 +126,10 @@ static void depthwise_conv3d_impl(const T* in_data,
 // in conv2d.cpp — we mirror its boundary-handling strategy verbatim.
 // ---------------------------------------------------------------------
 #ifdef TENZOR_DWCONV3D_AVX2
-static void depthwise_conv3d_avx2_f32(const float* __restrict__ in_data,
-                                       const float* __restrict__ w_data,
-                                       const float* __restrict__ b_data,
-                                       float* __restrict__ out_data,
+static void depthwise_conv3d_avx2_f32(const float* __restrict in_data,
+                                       const float* __restrict w_data,
+                                       const float* __restrict b_data,
+                                       float* __restrict out_data,
                                        int64_t N, int64_t C,
                                        int64_t D, int64_t H, int64_t W,
                                        int64_t kD, int64_t kH, int64_t kW,

@@ -1372,7 +1372,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t signal_len,
         using T = std::remove_pointer_t<decltype(tag)>;
         const std::complex<T>* x = cont.template data<std::complex<T>>();
         std::complex<T>* y = full.template data<std::complex<T>>();
-        #pragma omp parallel for collapse(2) schedule(static) if (outer * inner > 64)
+        #pragma omp parallel for schedule(static) if (outer * inner > 64)
         for (int64_t o = 0; o < outer; ++o) {
             for (int64_t j = 0; j < inner; ++j) {
                 // Positive frequencies (and DC, Nyquist if N even) copied directly.

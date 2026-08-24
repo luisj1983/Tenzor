@@ -385,7 +385,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         __m512 zero = _mm512_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __m512 result = _mm512_max_ps(x, zero);
             _mm512_storeu_ps(out_data + i, result);
@@ -399,7 +399,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         __m256 zero = _mm256_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 result = _mm256_max_ps(x, zero);
             _mm256_storeu_ps(out_data + i, result);
@@ -409,7 +409,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::max(0.0f, in_data[i]);
         }
 #endif
@@ -426,7 +426,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         __m512d zero = _mm512_setzero_pd();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m512d x = _mm512_loadu_pd(in_data + i);
             __m512d result = _mm512_max_pd(x, zero);
             _mm512_storeu_pd(out_data + i, result);
@@ -440,7 +440,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         __m256d zero = _mm256_setzero_pd();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256d x = _mm256_loadu_pd(in_data + i);
             __m256d result = _mm256_max_pd(x, zero);
             _mm256_storeu_pd(out_data + i, result);
@@ -450,7 +450,7 @@ auto relu_kernel(const Tensor& input_raw) -> Tensor {
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::max(0.0, in_data[i]);
         }
 #endif
@@ -491,7 +491,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         __m512 zero = _mm512_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __m512 grad_out = _mm512_loadu_ps(grad_out_data + i);
             __mmask16 mask = _mm512_cmp_ps_mask(x, zero, _CMP_GT_OQ);
@@ -508,7 +508,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         __m256 zero = _mm256_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 grad_out = _mm256_loadu_ps(grad_out_data + i);
             __m256 mask = _mm256_cmp_ps(x, zero, _CMP_GT_OQ);
@@ -521,7 +521,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : 0.0f);
         }
 #endif
@@ -537,7 +537,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         __m512d zero_d = _mm512_setzero_pd();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m512d x = _mm512_loadu_pd(in_data + i);
             __m512d grad = _mm512_loadu_pd(grad_out_data + i);
             __mmask8 mask = _mm512_cmp_pd_mask(x, zero_d, _CMP_GT_OQ);
@@ -553,7 +553,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         __m256d zero_d = _mm256_setzero_pd();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256d x = _mm256_loadu_pd(in_data + i);
             __m256d grad = _mm256_loadu_pd(grad_out_data + i);
             __m256d mask = _mm256_cmp_pd(x, zero_d, _CMP_GT_OQ);
@@ -565,7 +565,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : 0.0);
         }
 #endif
@@ -576,7 +576,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             grad_in_data[i] = Float16(grad_out_val * (in_val > 0.0f ? 1.0f : 0.0f));
@@ -588,7 +588,7 @@ auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             grad_in_data[i] = BFloat16(grad_out_val * (in_val > 0.0f ? 1.0f : 0.0f));
@@ -639,7 +639,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         const size_t simd_end = (n / simd_width) * simd_width;
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __m512 result = fast_math::sigmoid_avx512(x);
             _mm512_storeu_ps(out_data + i, result);
@@ -655,7 +655,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         const size_t simd_end = (n / simd_width) * simd_width;
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 result = fast_math::sigmoid_avx2(x);
             _mm256_storeu_ps(out_data + i, result);
@@ -668,7 +668,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             out_data[i] = 1.0f / (1.0f + std::exp(-x));
         }
@@ -680,7 +680,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             out_data[i] = 1.0 / (1.0 + std::exp(-x));
         }
@@ -694,7 +694,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         std::vector<float> in_f32(n), out_f32(n);
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             in_f32[i] = static_cast<float>(in_data[i]);
         }
 
@@ -702,7 +702,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         const size_t simd_end = (n / simd_width) * simd_width;
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_f32.data() + i);
             __m256 result = fast_math::sigmoid_avx2(x);
             _mm256_storeu_ps(out_f32.data() + i, result);
@@ -714,12 +714,12 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         }
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = Float16(out_f32[i]);
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(1.0f / (1.0f + std::exp(-val)));
         }
@@ -730,7 +730,7 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = BFloat16(1.0f / (1.0f + std::exp(-val)));
         }
@@ -756,7 +756,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
 #ifdef TENZOR_HAS_AVX512
         __m512 one = _mm512_set1_ps(1.0f);
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t ii = 0; ii < n / 16; ++ii) {
+        for (int64_t ii = 0; ii < n / 16; ++ii) {
             size_t offset = ii * 16;
             __m512 x = _mm512_loadu_ps(in_data + offset);
             __m512 grad = _mm512_loadu_ps(grad_out_data + offset);
@@ -772,7 +772,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
 #elif defined(TENZOR_HAS_AVX2)
         __m256 one = _mm256_set1_ps(1.0f);
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t ii = 0; ii < n / 8; ++ii) {
+        for (int64_t ii = 0; ii < n / 8; ++ii) {
             size_t offset = ii * 8;
             __m256 x = _mm256_loadu_ps(in_data + offset);
             __m256 grad = _mm256_loadu_ps(grad_out_data + offset);
@@ -787,7 +787,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) >= RELU_SIGMOID_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float sigmoid_x = 1.0f / (1.0f + std::exp(-in_data[i]));
             grad_in_data[i] = grad_out_data[i] * sigmoid_x * (1.0f - sigmoid_x);
         }
@@ -799,7 +799,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double sigmoid_x = 1.0 / (1.0 + std::exp(-in_data[i]));
             grad_in_data[i] = grad_out_data[i] * sigmoid_x * (1.0 - sigmoid_x);
         }
@@ -810,7 +810,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * sigmoid_x * (1.0f - sigmoid_x));
@@ -822,7 +822,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * sigmoid_x * (1.0f - sigmoid_x));
@@ -861,7 +861,7 @@ auto tanh_kernel(const Tensor& input_raw) -> Tensor {
         // libm/CUDA. CUDA's tanh_kernel always calls the correctly-rounded
         // device tanhf, so CPU must use std::tanh to match.
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::tanh(in_data[i]);
         }
     } else if (input.dtype() == DType::Float64) {
@@ -870,7 +870,7 @@ auto tanh_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = std::tanh(in_data[i]);
         }
     } else if (input.dtype() == DType::Float16) {
@@ -881,7 +881,7 @@ auto tanh_kernel(const Tensor& input_raw) -> Tensor {
         // Exact path (see the Float32 branch above): widen to Float32,
         // compute via std::tanh, narrow back — no fast_math polynomial.
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(std::tanh(val));
         }
@@ -891,7 +891,7 @@ auto tanh_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = BFloat16(std::tanh(val));
         }
@@ -915,7 +915,7 @@ auto tanh_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float tanh_x = std::tanh(in_data[i]);
             grad_in_data[i] = grad_out_data[i] * (1.0f - tanh_x * tanh_x);
         }
@@ -926,7 +926,7 @@ auto tanh_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double tanh_x = std::tanh(in_data[i]);
             grad_in_data[i] = grad_out_data[i] * (1.0 - tanh_x * tanh_x);
         }
@@ -937,7 +937,7 @@ auto tanh_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             float tanh_x = std::tanh(in_val);
@@ -950,7 +950,7 @@ auto tanh_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             float tanh_x = std::tanh(in_val);
@@ -991,7 +991,7 @@ auto gelu_kernel(const Tensor& input_raw) -> Tensor {
         }
 #endif
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             out_data[i] = 0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F));
         }
@@ -1001,7 +1001,7 @@ auto gelu_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             out_data[i] = 0.5 * x * (1.0 + std::erf(x * INV_SQRT2_D));
         }
@@ -1011,7 +1011,7 @@ auto gelu_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             out_data[i] = Float16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
@@ -1021,7 +1021,7 @@ auto gelu_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             out_data[i] = BFloat16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
@@ -1056,7 +1056,7 @@ auto gelu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT2_F));
             float pdf = PDF_COEF_F * std::exp(-0.5f * x * x);
@@ -1069,7 +1069,7 @@ auto gelu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double cdf = 0.5 * (1.0 + std::erf(x * INV_SQRT2_D));
             double pdf = PDF_COEF_D * std::exp(-0.5 * x * x);
@@ -1082,7 +1082,7 @@ auto gelu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT2_F));
             float pdf = PDF_COEF_F * std::exp(-0.5f * x * x);
@@ -1095,7 +1095,7 @@ auto gelu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT2_F));
             float pdf = PDF_COEF_F * std::exp(-0.5f * x * x);
@@ -1124,7 +1124,7 @@ auto swish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             out_data[i] = x * sigmoid_x;
@@ -1135,7 +1135,7 @@ auto swish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
             out_data[i] = x * sigmoid_x;
@@ -1146,7 +1146,7 @@ auto swish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             out_data[i] = Float16(x * sigmoid_x);
@@ -1157,7 +1157,7 @@ auto swish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             out_data[i] = BFloat16(x * sigmoid_x);
@@ -1183,7 +1183,7 @@ auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_ra
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             grad_in_data[i] = grad_out_data[i] * (sigmoid_x * (1.0f + x * (1.0f - sigmoid_x)));
@@ -1195,7 +1195,7 @@ auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_ra
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
             grad_in_data[i] = grad_out_data[i] * (sigmoid_x * (1.0 + x * (1.0 - sigmoid_x)));
@@ -1207,7 +1207,7 @@ auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_ra
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             float grad = static_cast<float>(grad_out_data[i]) * (sigmoid_x * (1.0f + x * (1.0f - sigmoid_x)));
@@ -1220,7 +1220,7 @@ auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_ra
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
             float grad = static_cast<float>(grad_out_data[i]) * (sigmoid_x * (1.0f + x * (1.0f - sigmoid_x)));
@@ -1257,7 +1257,7 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         const __m512 zero = _mm512_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __mmask16 mask = _mm512_cmp_ps_mask(x, zero, _CMP_GT_OQ);
             __m512 negative_part = _mm512_mul_ps(x, alpha_vec);
@@ -1275,7 +1275,7 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         const __m256 zero = _mm256_setzero_ps();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 mask = _mm256_cmp_ps(x, zero, _CMP_GT_OQ);
             __m256 negative_part = _mm256_mul_ps(x, alpha_vec);
@@ -1288,7 +1288,7 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha_f * in_data[i];
         }
 #endif
@@ -1299,7 +1299,7 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         double alpha_d = static_cast<double>(alpha);
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             out_data[i] = in_data[i] > 0.0 ? in_data[i] : alpha_d * in_data[i];
         }
     } else if (input.dtype() == DType::Float16) {
@@ -1308,7 +1308,7 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
@@ -1318,7 +1318,7 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = BFloat16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
@@ -1342,7 +1342,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : alpha);
         }
     } else if (input.dtype() == DType::Float64) {
@@ -1360,7 +1360,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
         __m512d vslope_d = _mm512_set1_pd(alpha_d);
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m512d x = _mm512_loadu_pd(in_data + i);
             __m512d grad = _mm512_loadu_pd(grad_out_data + i);
             __mmask8 mask = _mm512_cmp_pd_mask(x, zero_d, _CMP_GT_OQ);
@@ -1379,7 +1379,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
         __m256d vslope_d = _mm256_set1_pd(alpha_d);
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
+        for (int64_t i = 0; i < simd_end; i += simd_width) {
             __m256d x = _mm256_loadu_pd(in_data + i);
             __m256d grad = _mm256_loadu_pd(grad_out_data + i);
             __m256d mask = _mm256_cmp_pd(x, zero_d, _CMP_GT_OQ);
@@ -1392,7 +1392,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
         }
 #else
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : alpha_d);
         }
 #endif
@@ -1403,7 +1403,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             grad_in_data[i] = Float16(static_cast<float>(grad_out_val * (in_val > 0.0f ? 1.0f : alpha)));
@@ -1415,7 +1415,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float in_val = static_cast<float>(in_data[i]);
             float grad_out_val = static_cast<float>(grad_out_data[i]);
             grad_in_data[i] = BFloat16(static_cast<float>(grad_out_val * (in_val > 0.0f ? 1.0f : alpha)));
@@ -2291,7 +2291,7 @@ auto elu_kernel(const Tensor& input_raw, float alpha) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             out_data[i] = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
         }
@@ -2301,7 +2301,7 @@ auto elu_kernel(const Tensor& input_raw, float alpha) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             out_data[i] = (x > 0.0) ? x : static_cast<double>(alpha) * (std::exp(x) - 1.0);
         }
@@ -2311,7 +2311,7 @@ auto elu_kernel(const Tensor& input_raw, float alpha) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float result = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
             out_data[i] = Float16(result);
@@ -2322,7 +2322,7 @@ auto elu_kernel(const Tensor& input_raw, float alpha) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float result = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
             out_data[i] = BFloat16(result);
@@ -2347,7 +2347,7 @@ auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw,
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             grad_in_data[i] = grad_out_data[i] * ((x > 0.0f) ? 1.0f : alpha * std::exp(x));
         }
@@ -2358,7 +2358,7 @@ auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw,
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             grad_in_data[i] = grad_out_data[i] * ((x > 0.0) ? 1.0 : static_cast<double>(alpha) * std::exp(x));
         }
@@ -2369,7 +2369,7 @@ auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw,
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
             float result = grad_out * ((x > 0.0f) ? 1.0f : alpha * std::exp(x));
@@ -2382,7 +2382,7 @@ auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw,
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
             float result = grad_out * ((x > 0.0f) ? 1.0f : alpha * std::exp(x));
@@ -2420,7 +2420,7 @@ auto selu_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             out_data[i] = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
         }
@@ -2430,7 +2430,7 @@ auto selu_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             out_data[i] = SELU_SCALE_D *
                 ((x > 0.0) ? x : SELU_ALPHA_D * (std::exp(x) - 1.0));
@@ -2441,7 +2441,7 @@ auto selu_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float result = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
             out_data[i] = Float16(result);
@@ -2452,7 +2452,7 @@ auto selu_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float result = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
             out_data[i] = BFloat16(result);
@@ -2477,7 +2477,7 @@ auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             grad_in_data[i] = grad_out_data[i] * SELU_SCALE *
                 ((x > 0.0f) ? 1.0f : SELU_ALPHA * std::exp(x));
@@ -2489,7 +2489,7 @@ auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             grad_in_data[i] = grad_out_data[i] * SELU_SCALE_D *
                 ((x > 0.0) ? 1.0 : SELU_ALPHA_D * std::exp(x));
@@ -2501,7 +2501,7 @@ auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
             float result = grad_out * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * std::exp(x));
@@ -2514,7 +2514,7 @@ auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
             float result = grad_out * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * std::exp(x));
@@ -2542,7 +2542,7 @@ auto mish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             // Numerically stable softplus: log(1 + exp(x))
             // For large x: softplus(x) ≈ x
@@ -2563,7 +2563,7 @@ auto mish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double softplus;
             if (x > 20.0) {
@@ -2581,7 +2581,7 @@ auto mish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float softplus;
             if (x > 20.0f) {
@@ -2599,7 +2599,7 @@ auto mish_kernel(const Tensor& input_raw) -> Tensor {
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float softplus;
             if (x > 20.0f) {
@@ -2632,7 +2632,7 @@ auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float softplus;
             if (x > 20.0f) {
@@ -2654,7 +2654,7 @@ auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double softplus;
             if (x > 20.0) {
@@ -2676,7 +2676,7 @@ auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
             float softplus;
@@ -2699,7 +2699,7 @@ auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float grad_out = static_cast<float>(grad_out_data[i]);
             float softplus;
@@ -2739,7 +2739,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i] * beta;
             // Numerically stable softplus
             if (x > threshold) {
@@ -2756,7 +2756,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i] * static_cast<double>(beta);
             double thresh = static_cast<double>(threshold);
             if (x > thresh) {
@@ -2773,7 +2773,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float result;
             if (x > threshold) {
@@ -2791,7 +2791,7 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float result;
             if (x > threshold) {
@@ -2824,7 +2824,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = in_data[i] * beta;
             float sigmoid_x;
             if (x > threshold) {
@@ -2843,7 +2843,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         size_t n = input.numel();
 
         #pragma omp parallel for if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = in_data[i] * static_cast<double>(beta);
             double thresh = static_cast<double>(threshold);
             double sigmoid_x;
@@ -2863,7 +2863,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float sigmoid_x;
             if (x > threshold) {
@@ -2882,7 +2882,7 @@ auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input
         size_t n = input.numel();
 
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]) * beta;
             float sigmoid_x;
             if (x > threshold) {
@@ -2917,21 +2917,21 @@ auto relu_inplace_kernel(Tensor& input) -> void {
         float* data = input.data<float>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = data[i] > 0.0f ? data[i] : 0.0f;
         }
     } else if (input.dtype() == DType::Float64) {
         double* data = input.data<double>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = data[i] > 0.0 ? data[i] : 0.0;
         }
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(val > 0.0f ? val : 0.0f);
         }
@@ -2939,7 +2939,7 @@ auto relu_inplace_kernel(Tensor& input) -> void {
         BFloat16* data = input.data<BFloat16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = BFloat16(val > 0.0f ? val : 0.0f);
         }
@@ -2956,21 +2956,21 @@ auto sigmoid_inplace_kernel(Tensor& input) -> void {
         float* data = input.data<float>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = 1.0f / (1.0f + std::exp(-data[i]));
         }
     } else if (input.dtype() == DType::Float64) {
         double* data = input.data<double>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = 1.0 / (1.0 + std::exp(-data[i]));
         }
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(1.0f / (1.0f + std::exp(-val)));
         }
@@ -2978,7 +2978,7 @@ auto sigmoid_inplace_kernel(Tensor& input) -> void {
         BFloat16* data = input.data<BFloat16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = BFloat16(1.0f / (1.0f + std::exp(-val)));
         }
@@ -2995,21 +2995,21 @@ auto tanh_inplace_kernel(Tensor& input) -> void {
         float* data = input.data<float>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = std::tanh(data[i]);
         }
     } else if (input.dtype() == DType::Float64) {
         double* data = input.data<double>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = std::tanh(data[i]);
         }
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(std::tanh(val));
         }
@@ -3017,7 +3017,7 @@ auto tanh_inplace_kernel(Tensor& input) -> void {
         BFloat16* data = input.data<BFloat16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = BFloat16(std::tanh(val));
         }
@@ -3034,7 +3034,7 @@ auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void {
         float* data = input.data<float>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = data[i] > 0.0f ? data[i] : alpha * data[i];
         }
     } else if (input.dtype() == DType::Float64) {
@@ -3042,14 +3042,14 @@ auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void {
         size_t n = input.numel();
         double alpha_d = static_cast<double>(alpha);
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             data[i] = data[i] > 0.0 ? data[i] : alpha_d * data[i];
         }
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = Float16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
@@ -3057,7 +3057,7 @@ auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void {
         BFloat16* data = input.data<BFloat16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float val = static_cast<float>(data[i]);
             data[i] = BFloat16(static_cast<float>(val > 0.0f ? val : alpha * val));
         }
@@ -3079,7 +3079,7 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
         float* data = input.data<float>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = data[i];
             data[i] = 0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F));
         }
@@ -3087,7 +3087,7 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
         double* data = input.data<double>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             double x = data[i];
             data[i] = 0.5 * x * (1.0 + std::erf(x * INV_SQRT2_D));
         }
@@ -3095,7 +3095,7 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
         Float16* data = input.data<Float16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(data[i]);
             data[i] = Float16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
@@ -3103,7 +3103,7 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
         BFloat16* data = input.data<BFloat16>();
         size_t n = input.numel();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
+        for (int64_t i = 0; i < n; ++i) {
             float x = static_cast<float>(data[i]);
             data[i] = BFloat16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
@@ -3148,22 +3148,22 @@ auto hardswish_kernel(const Tensor& input_raw) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = output.data<float>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f32(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = compute_f32(in_data[i]);
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = output.data<double>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f64(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = compute_f64(in_data[i]);
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = output.data<Float16>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = Float16(compute_f32(static_cast<float>(in_data[i])));
+        for (int64_t i = 0; i < n; ++i) out_data[i] = Float16(compute_f32(static_cast<float>(in_data[i])));
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = output.data<BFloat16>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(compute_f32(static_cast<float>(in_data[i])));
+        for (int64_t i = 0; i < n; ++i) out_data[i] = BFloat16(compute_f32(static_cast<float>(in_data[i])));
     } else {
         throw std::runtime_error("hardswish_kernel: Unsupported dtype");
     }
@@ -3204,22 +3204,22 @@ auto hardsigmoid_kernel(const Tensor& input_raw) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = output.data<float>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f32(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = compute_f32(in_data[i]);
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = output.data<double>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = compute_f64(in_data[i]);
+        for (int64_t i = 0; i < n; ++i) out_data[i] = compute_f64(in_data[i]);
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = output.data<Float16>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = Float16(compute_f32(static_cast<float>(in_data[i])));
+        for (int64_t i = 0; i < n; ++i) out_data[i] = Float16(compute_f32(static_cast<float>(in_data[i])));
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = output.data<BFloat16>();
         #pragma omp parallel for schedule(static) if(static_cast<int64_t>(n) > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) out_data[i] = BFloat16(compute_f32(static_cast<float>(in_data[i])));
+        for (int64_t i = 0; i < n; ++i) out_data[i] = BFloat16(compute_f32(static_cast<float>(in_data[i])));
     } else {
         throw std::runtime_error("hardsigmoid_kernel: Unsupported dtype");
     }

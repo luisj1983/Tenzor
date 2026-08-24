@@ -311,12 +311,21 @@ public:
             if (err != cudaErrorNoDevice) {
                 static std::once_flag warned_once;
                 std::call_once(warned_once, [err]() {
+                    // cudaGetErrorString() is documented to always return a
+                    // valid string, but that assumes a working driver/runtime
+                    // -- on a host with NO NVIDIA driver installed at all
+                    // (not just no GPU), the runtime can be broken enough
+                    // that this call itself returns null. Passing a null
+                    // const char* to a {} placeholder throws inside fmt
+                    // ("string pointer is null"), which spdlog's default
+                    // error handler then prints instead of this message.
+                    const char* msg = cudaGetErrorString(err);
                     TENZOR_LOG_WARN(
                         "[CUDA] cudaGetDeviceCount() failed with {} ({}); "
                         "reporting 0 CUDA devices. This may indicate a "
                         "driver/runtime mismatch or broken CUDA install rather "
                         "than a genuine absence of GPU hardware.",
-                        static_cast<int>(err), cudaGetErrorString(err));
+                        static_cast<int>(err), msg ? msg : "no error string available");
                 });
             }
             // No usable CUDA device: clear the sticky error and report zero so

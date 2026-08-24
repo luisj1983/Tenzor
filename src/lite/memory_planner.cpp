@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/lite/memory_planner.hpp"
+#include "tenzor/utils/safe_math.hpp"
 
 #include "tenzor/core/dtype.hpp"
 
@@ -32,13 +33,13 @@ auto bytes_of(const TensorValue& tv) -> uint64_t {
     for (int64_t d : tv.shape) {
         if (d <= 0) return 0;  // dynamic dim — defer to runtime alloc
         uint64_t prod = 0;
-        if (__builtin_mul_overflow(n, static_cast<uint64_t>(d), &prod)) {
+        if (tenzor::detail::checked_mul_overflow(n, static_cast<uint64_t>(d), &prod)) {
             return std::numeric_limits<uint64_t>::max();
         }
         n = prod;
     }
     uint64_t bytes = 0;
-    if (__builtin_mul_overflow(n, static_cast<uint64_t>(dtype_size(tv.dtype)),
+    if (tenzor::detail::checked_mul_overflow(n, static_cast<uint64_t>(dtype_size(tv.dtype)),
                                &bytes)) {
         return std::numeric_limits<uint64_t>::max();
     }

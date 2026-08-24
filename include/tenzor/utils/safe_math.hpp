@@ -46,4 +46,30 @@ inline constexpr auto safe_abs(int64_t v) -> uint64_t {
     return static_cast<uint64_t>(v < 0 ? -v : v);
 }
 
+/// Portable checked multiply mirroring GCC/Clang's __builtin_mul_overflow,
+/// which has no MSVC equivalent. Only valid for non-negative operands — every
+/// call site computes a tensor element/byte count (dims/sizes are validated
+/// non-negative before multiplying), so a division-based check is correct
+/// for both the signed (int64_t) and unsigned (size_t/uint64_t)
+/// instantiations used across the codebase.
+template <typename T>
+inline bool checked_mul_overflow(T a, T b, T* result) {
+    if (a != 0 && b > (std::numeric_limits<T>::max)() / a) {
+        return true;
+    }
+    *result = a * b;
+    return false;
+}
+
+/// Portable checked add mirroring GCC/Clang's __builtin_add_overflow.
+/// Same non-negative-operand caveat as checked_mul_overflow above.
+template <typename T>
+inline bool checked_add_overflow(T a, T b, T* result) {
+    if (a > (std::numeric_limits<T>::max)() - b) {
+        return true;
+    }
+    *result = a + b;
+    return false;
+}
+
 } // namespace tenzor::detail

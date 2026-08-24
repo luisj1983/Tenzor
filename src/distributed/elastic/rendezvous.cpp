@@ -24,10 +24,22 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace tenzor {
 namespace distributed {
+
+// getpid() has no direct MSVC equivalent (Windows uses GetCurrentProcessId,
+// which returns DWORD rather than pid_t).
+#ifdef _WIN32
+inline unsigned long tenzor_getpid() { return GetCurrentProcessId(); }
+#else
+inline pid_t tenzor_getpid() { return ::getpid(); }
+#endif
 namespace elastic {
 
 namespace {
@@ -108,7 +120,7 @@ auto C10dRendezvous::worker_id() const -> std::string {
     if (::gethostname(host, sizeof(host) - 1) != 0) {
         std::snprintf(host, sizeof(host), "unknown");
     }
-    return std::string(host) + ":" + std::to_string(static_cast<long long>(::getpid()));
+    return std::string(host) + ":" + std::to_string(static_cast<long long>(tenzor_getpid()));
 }
 
 auto C10dRendezvous::join() -> RendezvousResult {

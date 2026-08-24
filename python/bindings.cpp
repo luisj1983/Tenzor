@@ -148,12 +148,30 @@
 // to use all available hardware threads if not already set.
 // This is necessary because once the OpenMP runtime is initialized (e.g., by
 // MKL via NumPy/PyTorch), omp_set_num_threads() may not affect all runtimes.
+#ifdef _WIN32
+static void __cdecl configure_openmp_threads();
+// MSVC has no __attribute__((constructor(N))); the portable equivalent is
+// registering a function pointer in the ".CRT$XCU" section, which the CRT
+// startup code walks and calls for every entry before main()/DllMain()
+// returns from DLL_PROCESS_ATTACH -- the same mechanism MSVC itself uses to
+// run C++ dynamic initializers. Exact numeric priority ordering (like GCC's
+// "(101)") isn't a concept this section supports, but "runs very early,
+// before other load-time init" is preserved.
+#pragma section(".CRT$XCU", read)
+__declspec(allocate(".CRT$XCU")) static void(__cdecl* configure_openmp_threads_init)() = configure_openmp_threads;
+static void __cdecl configure_openmp_threads() {
+#else
 __attribute__((constructor(101)))  // Priority 101 = very early
 static void configure_openmp_threads() {
+#endif
     if (std::getenv("OMP_NUM_THREADS") == nullptr) {
         unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
         std::string env_value = std::to_string(num_threads);
+#ifdef _WIN32
+        _putenv_s("OMP_NUM_THREADS", env_value.c_str());
+#else
         setenv("OMP_NUM_THREADS", env_value.c_str(), 0);  // 0 = don't overwrite
+#endif
     }
 }
 
@@ -377,6 +395,29 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("initialize", &tenzor::initialize,
           py::call_guard<py::gil_scoped_release>(),
           "Initialize the Tenzor library (registers backends and operations)");
+
+    // Explicit shutdown. tenzor::initialize() already registers finalize()
+    // via std::atexit() as a safety net (it's a no-op the second time,
+    // guarded by g_initialized), so calling this from Python is optional --
+    // but on Windows, relying solely on that atexit-triggered call ran
+    // backend teardown (SYCL device/queue release for the OneAPI backend in
+    // particular) at an point in the process-wide atexit cascade where
+    // another DLL's own atexit-registered cleanup (observed: the SYCL
+    // runtime/its dependencies) had already run in an order this process
+    // doesn't control, corrupting the heap (STATUS_STACK_BUFFER_OVERRUN /
+    // 0xC0000409 at process exit). Calling finalize() here -- from
+    // __init__.py's Python-level atexit hook, which fires while the
+    // interpreter is still fully alive and well before that C-runtime
+    // cascade begins -- runs the exact same teardown deterministically
+    // early instead, avoiding the race entirely (verified with a minimal
+    // non-Python repro: explicit finalize() before main() returns never
+    // crashes; letting only the atexit-registered call fire always does).
+    m.def("finalize", &tenzor::finalize,
+          py::call_guard<py::gil_scoped_release>(),
+          "Explicitly shut down all backends and release resources. Safe to "
+          "call multiple times or not at all (an atexit hook calls it "
+          "automatically); calling it explicitly avoids a Windows-specific "
+          "shutdown-ordering crash against other DLLs' own exit-time cleanup.");
 
     m.def("mkl_cleanup", &tenzor::mkl_cleanup,
           "Free MKL internal buffers (call before using PyTorch/NumPy with MKL)");

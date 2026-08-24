@@ -13,6 +13,19 @@
 #include <omp.h>
 #endif
 
+// __attribute__((target(...))) is GCC/Clang-only function-multiversioning
+// syntax; cl.exe has no equivalent and errors on it outright. These kernel
+// variants are selected at runtime via CPU-feature dispatch (not #ifdef'd
+// out), and MSVC allows calling any _mm512_*/_mm256_* intrinsic regardless
+// of the ambient /arch: setting, so a no-op is sufficient there.
+#if defined(_MSC_VER)
+    #define TENZOR_REDUCTION_TARGET_AVX512F
+    #define TENZOR_REDUCTION_TARGET_AVX2
+#else
+    #define TENZOR_REDUCTION_TARGET_AVX512F __attribute__((target("avx512f")))
+    #define TENZOR_REDUCTION_TARGET_AVX2 __attribute__((target("avx2")))
+#endif
+
 // SIMD intrinsics for vectorized reductions
 #if defined(__AVX512F__)
 #include <immintrin.h>
@@ -44,25 +57,25 @@ namespace cpu {
 #ifdef TENZOR_REDUCTION_AVX512
 
 // Horizontal sum of 16 floats in AVX-512 register -> single float
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static inline float hsum_avx512(__m512 v) {
     return _mm512_reduce_add_ps(v);
 }
 
 // Horizontal max of 16 floats in AVX-512 register -> single float
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static inline float hmax_avx512(__m512 v) {
     return _mm512_reduce_max_ps(v);
 }
 
 // Horizontal min of 16 floats in AVX-512 register -> single float
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static inline float hmin_avx512(__m512 v) {
     return _mm512_reduce_min_ps(v);
 }
 
 // AVX-512 vectorized sum for float32 with Kahan compensation
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static float simd_sum_f32_avx512(const float* data, int64_t n) {
     constexpr int64_t VEC_SIZE = 16;
     const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
@@ -95,7 +108,7 @@ static float simd_sum_f32_avx512(const float* data, int64_t n) {
 }
 
 // AVX-512 vectorized max for float32
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static float simd_max_f32_avx512(const float* data, int64_t n) {
     if (n == 0) return -std::numeric_limits<float>::infinity();
 
@@ -119,7 +132,7 @@ static float simd_max_f32_avx512(const float* data, int64_t n) {
 }
 
 // AVX-512 vectorized min for float32
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static float simd_min_f32_avx512(const float* data, int64_t n) {
     if (n == 0) return std::numeric_limits<float>::infinity();
 
@@ -147,7 +160,7 @@ static float simd_min_f32_avx512(const float* data, int64_t n) {
 #ifdef TENZOR_REDUCTION_AVX2
 
 // Horizontal sum of 8 floats in AVX register -> single float
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static inline float hsum_avx2(__m256 v) {
     // Reduce 256 bits -> 128 bits
     __m128 lo = _mm256_castps256_ps128(v);
@@ -163,7 +176,7 @@ static inline float hsum_avx2(__m256 v) {
 }
 
 // Horizontal max of 8 floats in AVX register -> single float
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static inline float hmax_avx2(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
@@ -179,7 +192,7 @@ static inline float hmax_avx2(__m256 v) {
 }
 
 // Horizontal min of 8 floats in AVX register -> single float
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static inline float hmin_avx2(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
@@ -194,7 +207,7 @@ static inline float hmin_avx2(__m256 v) {
 }
 
 // AVX2 vectorized sum for float32 with Kahan compensation
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static float simd_sum_f32_avx2(const float* data, int64_t n) {
     constexpr int64_t VEC_SIZE = 8;
     const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
@@ -227,7 +240,7 @@ static float simd_sum_f32_avx2(const float* data, int64_t n) {
 }
 
 // AVX2 vectorized max for float32
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static float simd_max_f32_avx2(const float* data, int64_t n) {
     if (n == 0) return -std::numeric_limits<float>::infinity();
 
@@ -251,7 +264,7 @@ static float simd_max_f32_avx2(const float* data, int64_t n) {
 }
 
 // AVX2 vectorized min for float32
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static float simd_min_f32_avx2(const float* data, int64_t n) {
     if (n == 0) return std::numeric_limits<float>::infinity();
 
@@ -283,7 +296,7 @@ static float simd_min_f32_avx2(const float* data, int64_t n) {
 #ifdef TENZOR_REDUCTION_AVX512
 
 // Horizontal sum of 8 doubles in AVX-512 register
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static inline double hsum_avx512_f64(__m512d v) {
     __m256d lo = _mm512_castpd512_pd256(v);
     __m256d hi = _mm512_extractf64x4_pd(v, 1);
@@ -295,7 +308,7 @@ static inline double hsum_avx512_f64(__m512d v) {
     return _mm_cvtsd_f64(sum128);
 }
 
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static double simd_sum_f64_avx512(const double* data, int64_t n) {
     constexpr int64_t VEC_SIZE = 8;
     const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
@@ -319,7 +332,7 @@ static double simd_sum_f64_avx512(const double* data, int64_t n) {
     return sum;
 }
 
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static double simd_max_f64_avx512(const double* data, int64_t n) {
     if (n == 0) return -std::numeric_limits<double>::infinity();
     constexpr int64_t VEC_SIZE = 8;
@@ -336,7 +349,7 @@ static double simd_max_f64_avx512(const double* data, int64_t n) {
     return max_val;
 }
 
-__attribute__((target("avx512f")))
+TENZOR_REDUCTION_TARGET_AVX512F
 static double simd_min_f64_avx512(const double* data, int64_t n) {
     if (n == 0) return std::numeric_limits<double>::infinity();
     constexpr int64_t VEC_SIZE = 8;
@@ -358,7 +371,7 @@ static double simd_min_f64_avx512(const double* data, int64_t n) {
 #ifdef TENZOR_REDUCTION_AVX2
 
 // Horizontal sum of 4 doubles in AVX register
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static inline double hsum_avx2_f64(__m256d v) {
     __m128d lo = _mm256_castpd256_pd128(v);
     __m128d hi = _mm256_extractf128_pd(v, 1);
@@ -368,7 +381,7 @@ static inline double hsum_avx2_f64(__m256d v) {
 }
 
 // Horizontal max of 4 doubles in AVX register
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static inline double hmax_avx2_f64(__m256d v) {
     __m128d lo = _mm256_castpd256_pd128(v);
     __m128d hi = _mm256_extractf128_pd(v, 1);
@@ -379,7 +392,7 @@ static inline double hmax_avx2_f64(__m256d v) {
 }
 
 // Horizontal min of 4 doubles in AVX register
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static inline double hmin_avx2_f64(__m256d v) {
     __m128d lo = _mm256_castpd256_pd128(v);
     __m128d hi = _mm256_extractf128_pd(v, 1);
@@ -389,7 +402,7 @@ static inline double hmin_avx2_f64(__m256d v) {
     return _mm_cvtsd_f64(min128);
 }
 
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static double simd_sum_f64_avx2(const double* data, int64_t n) {
     constexpr int64_t VEC_SIZE = 4;
     const int64_t vec_end = (n / VEC_SIZE) * VEC_SIZE;
@@ -413,7 +426,7 @@ static double simd_sum_f64_avx2(const double* data, int64_t n) {
     return sum;
 }
 
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static double simd_max_f64_avx2(const double* data, int64_t n) {
     if (n == 0) return -std::numeric_limits<double>::infinity();
     constexpr int64_t VEC_SIZE = 4;
@@ -430,7 +443,7 @@ static double simd_max_f64_avx2(const double* data, int64_t n) {
     return max_val;
 }
 
-__attribute__((target("avx2")))
+TENZOR_REDUCTION_TARGET_AVX2
 static double simd_min_f64_avx2(const double* data, int64_t n) {
     if (n == 0) return std::numeric_limits<double>::infinity();
     constexpr int64_t VEC_SIZE = 4;

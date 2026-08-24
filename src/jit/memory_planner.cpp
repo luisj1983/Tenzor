@@ -9,6 +9,7 @@
 #include "../../include/tenzor/jit/memory_planner.hpp"
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/core/dtype.hpp"
+#include "../../include/tenzor/utils/safe_math.hpp"
 #include <algorithm>
 #include <cassert>
 #include <functional>
@@ -31,12 +32,12 @@ inline auto checked_byte_size(const std::vector<int64_t>& shape,
     size_t numel = 1;
     for (int64_t dim : shape) {
         if (dim <= 0) return 0;  // dynamic or invalid dimension
-        if (__builtin_mul_overflow(numel, static_cast<size_t>(dim), &numel)) {
+        if (tenzor::detail::checked_mul_overflow(numel, static_cast<size_t>(dim), &numel)) {
             return 0;  // overflow: skip planning this value
         }
     }
     size_t bytes = 0;
-    if (__builtin_mul_overflow(numel, elem_size, &bytes)) return 0;
+    if (tenzor::detail::checked_mul_overflow(numel, elem_size, &bytes)) return 0;
     return bytes;
 }
 

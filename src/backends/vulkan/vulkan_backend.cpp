@@ -816,7 +816,7 @@ void VulkanBackend::createLogicalDevices() {
 
         // Initialize caches and per-device structures
         stagingPools_.push_back({});
-        pipelineCaches_.push_back({});
+        pipelineCaches_.emplace_back();
         deferred_frees_.push_back({});
     }
 }

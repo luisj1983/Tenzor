@@ -12,6 +12,7 @@
 
 #include "../../include/tenzor/onnx/importer.hpp"
 #include "../../include/tenzor/utils/error.hpp"
+#include "../../include/tenzor/utils/safe_math.hpp"
 #include "../../include/tenzor/nn/layers/linear.hpp"
 #include "../../include/tenzor/nn/layers/conv.hpp"
 #include "../../include/tenzor/nn/layers/padding.hpp"
@@ -477,7 +478,7 @@ auto ONNXTensorData::to_tensor(Device device) const -> Tensor {
     // cannot trigger a giant (multi-TB) allocation ahead of the size check.
     if (!raw_data.empty()) {
         size_t expected_bytes;
-        if (__builtin_mul_overflow(static_cast<size_t>(n),
+        if (tenzor::detail::checked_mul_overflow(static_cast<size_t>(n),
                                    dtype_size(tenzor_dtype), &expected_bytes)) {
             throw std::runtime_error(
                 "ONNX tensor '" + name + "' byte size overflows size_t");
@@ -524,7 +525,7 @@ auto ONNXTensorData::numel() const -> int64_t {
             throw std::runtime_error(
                 "ONNX tensor '" + name + "' has a negative dimension");
         }
-        if (__builtin_mul_overflow(result, dim, &result)) {
+        if (tenzor::detail::checked_mul_overflow(result, dim, &result)) {
             throw std::runtime_error(
                 "ONNX tensor '" + name + "' element count overflows int64");
         }

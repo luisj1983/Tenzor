@@ -27,7 +27,7 @@ namespace tenzor::models {
 // ============================================================================
 
 HubConfig::HubConfig()
-    : cache_dir(fs::path(getenv("HOME") ? getenv("HOME") : ".") / ".tenzor" / "checkpoints")
+    : cache_dir((fs::path(getenv("HOME") ? getenv("HOME") : ".") / ".tenzor" / "checkpoints").string())
     , max_cache_size(0)  // Unlimited by default
     , verify_checksums(true)
     , resume_downloads(true)

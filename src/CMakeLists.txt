@@ -271,6 +271,23 @@ set(TENZOR_CORE_SOURCES
     export/export.cpp
 )
 
+# Gloo's CPU collective-comm backend is raw-POSIX-socket-only (int fds,
+# getuid()-based rendezvous paths, chmod, usleep, MSG_NOSIGNAL — none of which
+# exist on Windows). Not ported; matches upstream PyTorch, whose own Gloo
+# backend is also Linux/macOS-only. distributed.cpp throws a clear runtime
+# error if Backend::GLOO is requested on Windows instead of failing to link.
+# elastic/rendezvous.cpp and elastic_trainer.cpp both build directly on
+# gloo_backend.cpp's RendezvousStore (raw-socket TCP key-value store), so the
+# whole elastic-rendezvous feature goes with it; elastic/health_monitor.cpp
+# and state_sync.cpp have no such dependency and stay in the Windows build.
+if(WIN32)
+    list(REMOVE_ITEM TENZOR_CORE_SOURCES
+        distributed/gloo_backend.cpp
+        distributed/elastic/rendezvous.cpp
+        distributed/elastic/elastic_trainer.cpp
+    )
+endif()
+
 # Create core library
 add_library(tenzor_core SHARED ${TENZOR_CORE_SOURCES})
 
@@ -286,6 +303,15 @@ set_target_properties(tenzor_core PROPERTIES
 
 # Internal methods visible only to core + backends
 target_compile_definitions(tenzor_core PRIVATE TENZOR_INTERNAL)
+
+# Marks TENZOR_API (include/tenzor/core/export.hpp) as __declspec(dllexport)
+# while compiling tenzor_core itself; every other consumer (backends, tools,
+# tests) sees the default __declspec(dllimport) -- needed for data symbols
+# like DispatchTableRegistry::tables_ that CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS's
+# auto-export doesn't cover (it only picks up function symbols).
+if(WIN32)
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_BUILDING_DLL)
+endif()
 
 # Profiling annotations (NVTX for CUDA, ROCTX for ROCm)
 if(TENZOR_ENABLE_PROFILING)
@@ -697,9 +723,58 @@ if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
         # of tenzor_core. See rocm_transfer.hpp. This restores async ROCm offload
         # transfers that were previously compiled out (the #ifdef TENZOR_USE_ROCM
         # paths in transfer_engine.cpp could not be enabled in a CUDA+HIP build).
-        set_source_files_properties(core/rocm_transfer.hip.cpp PROPERTIES LANGUAGE HIP)
-        target_sources(tenzor_core PRIVATE core/rocm_transfer.hip.cpp)
-        set(TENZOR_ROCM_TRANSFER_REAL TRUE)
+        if(WIN32)
+            # HIP is never an enabled CMake LANGUAGE on Windows (see top-level
+            # CMakeLists.txt -- MSVC/Clang-family language mixing is hard-blocked
+            # there), so compile this one real-HIP-device-code TU via a direct
+            # hipcc invocation, the same custom-command pattern src/backends/rocm
+            # and src/backends/oneapi already use, and feed the resulting object
+            # straight into tenzor_core's link as an EXTERNAL_OBJECT.
+            find_program(_TENZOR_CORE_HIPCC NAMES hipcc.exe hipcc.bat PATHS ${_ROCM_ROOT}/bin NO_DEFAULT_PATH)
+            if(_TENZOR_CORE_HIPCC)
+                set(_ROCM_TRANSFER_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/tenzor_core.dir/core/rocm_transfer.hip.o")
+                set(_rocm_transfer_flags
+                    -std=c++20
+                    -D__HIP_PLATFORM_AMD__
+                    -D__HIP_PLATFORM_HCC__
+                    -DTENZOR_INTERNAL
+                    -D_USE_MATH_DEFINES
+                    -I${PROJECT_SOURCE_DIR}/include
+                    -I${_ROCM_ROOT}/include
+                    -O3
+                    # hipcc's clang defaults to the static CRT (/MT); the rest
+                    # of tenzor_core (compiled by cl.exe) uses the dynamic CRT
+                    # (/MD, CMake's default for MSVC). Mixing the two within
+                    # one binary is a hard link error (LNK2038 RuntimeLibrary
+                    # mismatch) -- match it explicitly.
+                    -fms-runtime-lib=dll
+                )
+                foreach(_rocm_arch ${CMAKE_HIP_ARCHITECTURES})
+                    list(APPEND _rocm_transfer_flags --offload-arch=${_rocm_arch})
+                endforeach()
+                add_custom_command(
+                    OUTPUT ${_ROCM_TRANSFER_OBJ}
+                    COMMAND ${_TENZOR_CORE_HIPCC}
+                        -c ${CMAKE_CURRENT_SOURCE_DIR}/core/rocm_transfer.hip.cpp
+                        -o ${_ROCM_TRANSFER_OBJ}
+                        ${_rocm_transfer_flags}
+                    DEPENDS
+                        ${CMAKE_CURRENT_SOURCE_DIR}/core/rocm_transfer.hip.cpp
+                        ${PROJECT_SOURCE_DIR}/include/tenzor/core/rocm_transfer.hpp
+                    COMMENT "Compiling HIP: core/rocm_transfer.hip.cpp"
+                    VERBATIM
+                )
+                set_source_files_properties(${_ROCM_TRANSFER_OBJ} PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+                target_sources(tenzor_core PRIVATE ${_ROCM_TRANSFER_OBJ})
+                set(TENZOR_ROCM_TRANSFER_REAL TRUE)
+            else()
+                message(WARNING "hipcc not found for core/rocm_transfer.hip.cpp — ROCm transfer support will be stubbed")
+            endif()
+        else()
+            set_source_files_properties(core/rocm_transfer.hip.cpp PROPERTIES LANGUAGE HIP)
+            target_sources(tenzor_core PRIVATE core/rocm_transfer.hip.cpp)
+            set(TENZOR_ROCM_TRANSFER_REAL TRUE)
+        endif()
     endif()
 endif()
 

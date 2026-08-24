@@ -285,6 +285,10 @@ private:
     // Pipeline cache for reusing compiled shaders
     struct PipelineCache {
         std::unordered_map<std::string, std::unique_ptr<vulkan::ComputePipeline>> pipelines;
+
+        PipelineCache() = default;
+        PipelineCache(PipelineCache&&) = default;
+        PipelineCache& operator=(PipelineCache&&) = default;
     };
 
     // Initialization

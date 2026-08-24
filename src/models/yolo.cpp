@@ -774,11 +774,11 @@ CSPDarknet::CSPDarknet(double depth_multiple, double width_multiple)
     int64_t ch4 = make_divisible(static_cast<int64_t>(512 * width_multiple_));  // P4 output
     int64_t ch5 = make_divisible(static_cast<int64_t>(1024 * width_multiple_)); // P5 output
 
-    int64_t n1 = std::max(static_cast<int64_t>(1 * depth_multiple_), 1L);
-    int64_t n2 = std::max(static_cast<int64_t>(3 * depth_multiple_), 1L);
-    int64_t n3 = std::max(static_cast<int64_t>(9 * depth_multiple_), 1L);
-    int64_t n4 = std::max(static_cast<int64_t>(9 * depth_multiple_), 1L);
-    int64_t n5 = std::max(static_cast<int64_t>(3 * depth_multiple_), 1L);
+    int64_t n1 = std::max(static_cast<int64_t>(1 * depth_multiple_), static_cast<int64_t>(1));
+    int64_t n2 = std::max(static_cast<int64_t>(3 * depth_multiple_), static_cast<int64_t>(1));
+    int64_t n3 = std::max(static_cast<int64_t>(9 * depth_multiple_), static_cast<int64_t>(1));
+    int64_t n4 = std::max(static_cast<int64_t>(9 * depth_multiple_), static_cast<int64_t>(1));
+    int64_t n5 = std::max(static_cast<int64_t>(3 * depth_multiple_), static_cast<int64_t>(1));
 
     stage1_ = make_stage(base_channels, ch1, n1);
     stage2_ = make_stage(ch1, ch2, n2);

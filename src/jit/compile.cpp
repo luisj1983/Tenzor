@@ -28,11 +28,24 @@
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 #include <unordered_map>
 
 namespace tenzor {
 namespace jit {
+
+// getpid() has no direct MSVC equivalent (Windows uses GetCurrentProcessId,
+// which returns DWORD rather than pid_t); wrapped so call sites below don't
+// need to branch.
+#ifdef _WIN32
+inline unsigned long tenzor_getpid() { return GetCurrentProcessId(); }
+#else
+inline pid_t tenzor_getpid() { return ::getpid(); }
+#endif
 
 // ============================================================================
 // MLIR backend cache (Pimpl)
@@ -1701,7 +1714,7 @@ auto CompiledFunction::mlir_invoke_impl(std::span<const Variable> inputs,
                 const fs::path tmp_in =
                     fs::temp_directory_path() /
                     ("tz_jit_dump_iree_" +
-                     std::to_string(::getpid()) + "_" + key.substr(0, 8) +
+                     std::to_string(tenzor_getpid()) + "_" + key.substr(0, 8) +
                      ".mlir");
                 {
                     std::ofstream f(tmp_in,
@@ -1860,7 +1873,7 @@ auto CompiledFunction::dump_iree(std::span<const Variable> inputs) -> std::strin
     namespace fs = std::filesystem;
     const fs::path tmp_in =
         fs::temp_directory_path() /
-        ("tz_jit_dump_iree_" + std::to_string(::getpid()) + ".mlir");
+        ("tz_jit_dump_iree_" + std::to_string(tenzor_getpid()) + ".mlir");
     {
         std::ofstream f(tmp_in, std::ios::binary | std::ios::trunc);
         f.write(mlir_text.data(),

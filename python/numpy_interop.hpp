@@ -7,6 +7,13 @@
 
 namespace py = pybind11;
 
+#ifdef _WIN32
+// ssize_t is a POSIX typedef (<sys/types.h>) with no MSVC equivalent;
+// pybind11 itself already defines py::ssize_t (aliasing Py_ssize_t) for
+// exactly this reason. numpy_interop.cpp uses the bare, unqualified name.
+using ssize_t = py::ssize_t;
+#endif
+
 namespace tenzor {
 namespace numpy {
 

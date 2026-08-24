@@ -7,6 +7,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <string>
+#include "tenzor_win_dll_dirs.generated.hpp"
 #else
 #include <dlfcn.h>
 #include <sys/wait.h>
@@ -17,6 +19,76 @@
 #endif
 
 namespace tenzor {
+
+#ifdef _WIN32
+namespace {
+
+// Registers this build's vendor SDK directories (see
+// generated/tenzor_win_dll_dirs.generated.hpp, written by CMakeLists.txt at
+// configure time) on the process DLL search path, and pre-loads the handful
+// of runtime DLLs known to need it. Two separate problems, both required
+// for a backend .dll to load successfully on a machine with no PATH/manual
+// setup:
+//
+//  1. AddDllDirectory() registration. Backend DLLs (and their transitive
+//     deps: MKL/oneDNN/oneAPI's SYCL runtime, CUDA's NVRTC, ROCm's HIP
+//     runtime compiler libraries) rarely live next to tenzor_core.dll or in
+//     System32. load_library() below loads them via LoadLibraryExW with
+//     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, which only consults the application
+//     directory, System32, and AddDllDirectory-registered directories --
+//     deliberately NOT the process's PATH or current directory. Without
+//     this call, none of those vendor directories are searched at all.
+//
+//  2. Preloading. Confirmed by hand: some of these vendor DLLs (Intel
+//     oneAPI's SYCL runtime, and the oneMKL SYCL interop libraries) fail to
+//     resolve their OWN nested dependencies via AddDllDirectory-registered
+//     search paths when loaded cold, but succeed immediately once those
+//     dependencies are already resident in the process. Preloading by name
+//     pattern sidesteps this; a pattern matching nothing on this machine
+//     (e.g. no ROCm installed) is simply skipped.
+//
+// Called once, lazily, from load_library() -- so a program that never loads
+// a backend (there isn't really one, but in principle) pays nothing, and
+// every backend load after the first reuses the same registration.
+void ensure_win_dll_search_setup() {
+    static std::once_flag once;
+    std::call_once(once, []() {
+        for (const char* dir : tenzor::generated::kWinDllDirs) {
+            std::wstring wdir(dir, dir + std::string_view(dir).size());
+            AddDllDirectory(wdir.c_str());
+        }
+
+        static const char* const kPreloadPatterns[] = {
+            "libmmd.dll", "svml_dispmd.dll", "tbb12.dll", "tbb.dll",
+            "ur_win_proxy_loader.dll", "sycl*.dll", "libiomp5md.dll",
+            "mkl_core.*.dll", "mkl_intel_thread.*.dll", "mkl_tbb_thread.*.dll",
+            "mkl_sequential.*.dll", "dnnl.dll",
+            "nvrtc64_*.dll", "hiprtc*.dll", "amdhip64_*.dll",
+        };
+        for (const char* dir : tenzor::generated::kWinDllDirs) {
+            for (const char* pattern : kPreloadPatterns) {
+                std::string glob = std::string(dir) + "\\" + pattern;
+                WIN32_FIND_DATAA fd;
+                HANDLE h = FindFirstFileA(glob.c_str(), &fd);
+                if (h == INVALID_HANDLE_VALUE) continue;
+                do {
+                    std::string full = std::string(dir) + "\\" + fd.cFileName;
+                    std::wstring wfull(full.begin(), full.end());
+                    // Best-effort: a preload failure here (e.g. a debug
+                    // variant like sycl9d.dll that doesn't actually exist
+                    // despite matching the glob) is fine -- the DLL just
+                    // won't be resident, same as if we hadn't tried.
+                    LoadLibraryExW(wfull.c_str(), nullptr,
+                                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+                } while (FindNextFileA(h, &fd));
+                FindClose(h);
+            }
+        }
+    });
+}
+
+}  // namespace
+#endif
 
 // Forward declarations
 auto backend_registry() -> BackendLoader&;
@@ -103,7 +175,10 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
     );
 
     if (!factory) {
-        unload_library(handle);
+        // Do NOT unload_library here — same reasoning as shutdown()/~BackendLoader()
+        // above: the library's DllMain/static initializers already ran and may have
+        // registered transitive state (e.g. a GPU API loader's own global tables)
+        // that misbehaves on unload. The OS reclaims it at process exit.
         return std::unexpected("Failed to find create_backend symbol");
     }
 
@@ -296,11 +371,18 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
     try {
         backend.reset(factory());
     } catch (const std::exception& e) {
-        unload_library(handle);
+        // Do NOT unload_library here (see shutdown()/~BackendLoader() above): a
+        // constructor that ran partway before throwing may have already touched
+        // library-global state (confirmed on Windows for the Vulkan backend —
+        // FreeLibrary() right after a failed vkCreateInstance access-violates,
+        // apparently in the Vulkan loader's own unload path). Leaving the
+        // library mapped and letting the OS reclaim it at exit is the same
+        // tradeoff already made for the normal-shutdown path.
         return std::unexpected(std::string("Backend initialization failed: ") + e.what());
     }
     if (!backend) {
-        unload_library(handle);
+        // Same reasoning as above — leave the library loaded rather than risk
+        // an unsafe unload.
         return std::unexpected("Backend factory returned null");
     }
 
@@ -403,7 +485,23 @@ auto BackendLoader::unload_backend(std::string_view name) -> bool {
 
 auto BackendLoader::load_library(const std::filesystem::path& path) -> LibHandle {
     #ifdef _WIN32
-        return LoadLibraryA(path.string().c_str());
+        // Plain LoadLibraryA ignores directories registered via
+        // AddDllDirectory entirely -- that registration only takes effect
+        // for LoadLibraryEx calls that explicitly pass a
+        // LOAD_LIBRARY_SEARCH_* flag (or for a process that has called
+        // SetDefaultDllDirectories(), which this one has not). Without it,
+        // a backend DLL whose own direct dependencies live outside the
+        // application directory/System32 (confirmed: ROCm's
+        // rocblas/hiprand/rocfft/rocsolver/rocsparse, OneAPI's mkl_sycl_*)
+        // fails to load even though every directory is correctly
+        // registered and the files are right there. ensure_win_dll_search_
+        // setup() (above) is what does that registration -- called here so
+        // every load_library() call, from Python or a plain C++ executable
+        // alike, gets it regardless of what the caller has (or hasn't) set
+        // up itself.
+        ensure_win_dll_search_setup();
+        return LoadLibraryExW(path.wstring().c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     #else
         // Clear any existing error
         dlerror();

@@ -1,5 +1,6 @@
 #include "tenzor/data/datasets/mnist.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/utils/safe_math.hpp"
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
@@ -42,9 +43,9 @@ auto read_idx_images(const std::string& path) -> std::pair<std::vector<uint8_t>,
     }
 
     size_t total;
-    if (__builtin_mul_overflow(static_cast<size_t>(num_images),
+    if (tenzor::detail::checked_mul_overflow(static_cast<size_t>(num_images),
                                static_cast<size_t>(rows), &total) ||
-        __builtin_mul_overflow(total, static_cast<size_t>(cols), &total)) {
+        tenzor::detail::checked_mul_overflow(total, static_cast<size_t>(cols), &total)) {
         throw std::runtime_error("MNIST: image dimensions overflow in " + path);
     }
 

@@ -395,7 +395,7 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
         const T dropout_scale_T = apply_dropout ? T(1) / (T(1) - dropout_p_T) : T(1);
 
         // Parallelize over batch and heads
-        #pragma omp parallel for collapse(2) if(batch * num_heads > 1)
+        #pragma omp parallel for if(batch * num_heads > 1)
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t h = 0; h < num_heads; ++h) {
                 int64_t bh_offset = (b * num_heads + h) * seq_len * head_dim;

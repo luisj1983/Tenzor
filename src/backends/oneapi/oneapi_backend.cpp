@@ -18,6 +18,17 @@
 #include <cpuid.h>
 #endif
 
+#ifdef _WIN32
+static auto tenzor_setenv(const char* name, const char* value, int overwrite) -> void {
+    if (!overwrite && std::getenv(name) != nullptr) return;
+    _putenv_s(name, value);
+}
+#else
+static auto tenzor_setenv(const char* name, const char* value, int overwrite) -> void {
+    setenv(name, value, overwrite);
+}
+#endif
+
 #ifdef TENZOR_HAS_ONEMKL
 #include <oneapi/mkl.hpp>
 #endif
@@ -81,7 +92,7 @@ static void configure_opencl_cpu_target_arch() {
     unsigned int max_leaf = eax;
     if (max_leaf < 7) {
         // Very old CPU — use the safest baseline
-        setenv("CL_CONFIG_CPU_TARGET_ARCH", "corei7", /*overwrite=*/0);
+        tenzor_setenv("CL_CONFIG_CPU_TARGET_ARCH", "corei7", /*overwrite=*/0);
         return;
     }
 
@@ -108,7 +119,7 @@ static void configure_opencl_cpu_target_arch() {
         arch = "corei7";                   // SSE4.2 (Nehalem-class)
     }
 
-    setenv("CL_CONFIG_CPU_TARGET_ARCH", arch, /*overwrite=*/0);
+    tenzor_setenv("CL_CONFIG_CPU_TARGET_ARCH", arch, /*overwrite=*/0);
 #endif  // __x86_64__
 }
 
@@ -124,7 +135,7 @@ static void configure_opencl_cpu_target_arch() {
 // on-disk binary cache for exactly this, but it is OFF by default. Enable it
 // (respecting any explicit user setting, including an explicit "0").
 static void configure_sycl_persistent_cache() {
-    setenv("SYCL_CACHE_PERSISTENT", "1", /*overwrite=*/0);
+    tenzor_setenv("SYCL_CACHE_PERSISTENT", "1", /*overwrite=*/0);
 }
 
 namespace {
@@ -887,6 +898,19 @@ static void early_configure_opencl_cpu_target() {
 }
 
 extern "C" {
+    // This backend is built via a raw custom-command hipcc/icpx invocation
+    // (see src/backends/oneapi/CMakeLists.txt), not CMake's add_library(...
+    // SHARED), so CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS never applies to it --
+    // without an explicit dllexport this symbol isn't exported at all on
+    // Windows, breaking BOTH the runtime GetProcAddress(handle,
+    // "create_backend") lookup (src/backend/loader.cpp) AND, incidentally,
+    // link.exe's generation of an import lib for anything link-time-
+    // depending on this DLL (e.g. the python bindings module) -- with zero
+    // exported symbols, link.exe silently skips producing a .lib even when
+    // /IMPLIB: is given.
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
     Backend* create_backend() {
         return new OneAPIBackend();
     }

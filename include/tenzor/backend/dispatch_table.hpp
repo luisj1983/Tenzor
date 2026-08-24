@@ -24,6 +24,7 @@
 #include <string>
 #include "../core/tensor.hpp"
 #include "../core/device.hpp"
+#include "../core/export.hpp"
 #include "../core/jit_hooks.hpp"  // For in-place tracing notification
 #include "../ops/op_id.hpp"
 #include "backend.hpp"  // For OpAttributes
@@ -639,7 +640,11 @@ public:
 
 private:
     /// Dispatch tables indexed by Device::Type
-    static std::array<BackendDispatchTable, DEVICE_TYPE_COUNT> tables_;
+    // CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS auto-exports function symbols only, not
+    // data symbols, so this static data member -- accessed cross-DLL through
+    // the inline accessors above (compiled separately into every consuming
+    // backend DLL) -- needs an explicit dllexport/dllimport annotation.
+    TENZOR_API static std::array<BackendDispatchTable, DEVICE_TYPE_COUNT> tables_;
 };
 
 /**

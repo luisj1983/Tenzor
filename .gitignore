@@ -120,3 +120,4 @@ skipped_tests.txt
 
 # Per-backend out-of-source build directories
 /build-*/
+/build_*/

@@ -127,7 +127,7 @@ int64_t EfficientNetConfig::round_layers(double layers) {
 
 EfficientNetSqueezeExcitation::EfficientNetSqueezeExcitation(int64_t channels, double reduction_ratio,
                                                              int64_t reduction_base_channels)
-    : reduced_channels_(std::max(1L, static_cast<int64_t>(
+    : reduced_channels_(std::max(static_cast<int64_t>(1), static_cast<int64_t>(
           (reduction_base_channels > 0 ? reduction_base_channels : channels) * reduction_ratio))) {
 
     // Global average pooling
@@ -271,7 +271,7 @@ EfficientNet::EfficientNet(const EfficientNetConfig& config) {
     int64_t stem_channels = EfficientNetConfig::round_channels(32 * config.width_mult);
 
     // Calculate head channels (1280 scaled by width, minimum 1280)
-    int64_t head_channels = std::max(1280L,
+    int64_t head_channels = std::max(static_cast<int64_t>(1280),
         EfficientNetConfig::round_channels(1280 * config.width_mult));
 
     // Get final stage output channels (last MBConv block output)

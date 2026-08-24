@@ -7130,9 +7130,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
 
 // ============================================================================
-// Export function for dynamic loading via dlsym
+// Export function for dynamic loading via dlsym/GetProcAddress. Windows needs
+// __declspec(dllexport) explicitly -- this target is a raw custom-command
+// build (icpx invoked directly, not CMake's native language support), so
+// CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS never applies to it (same reasoning as
+// create_backend() in oneapi_backend.cpp).
 // ============================================================================
 extern "C" {
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
     void register_kernels(tenzor::BackendDispatchTable* table) {
         if (table) {
             tenzor::register_oneapi_kernels(*table);

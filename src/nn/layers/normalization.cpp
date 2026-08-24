@@ -147,10 +147,10 @@ static inline int norm_kernel_threads() {
 
 #if defined(__x86_64__) || defined(_M_X64)
 static void fused_rms_norm_f32(
-    const float* __restrict__ input,
-    const float* __restrict__ weight,
-    float* __restrict__ output,
-    float* __restrict__ rrms_out,
+    const float* __restrict input,
+    const float* __restrict weight,
+    float* __restrict output,
+    float* __restrict rrms_out,
     int64_t batch_size,
     int64_t norm_size,
     float eps
