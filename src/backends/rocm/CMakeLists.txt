@@ -85,6 +85,40 @@ else()
     message(STATUS "ROCm Backend: Found HIP (hipcc: ${HIPCC_COMPILER})")
 endif()
 
+# HIP include dir for the pure-C++ (non-hipcc) custom commands below
+# (rocm_backend.cpp / rocm_kernel_registry.cpp / hip_graph_impl.cpp /
+# nccl_backend.cpp / nccl_process_group.cpp), which invoke
+# ${CMAKE_CXX_COMPILER} directly and so — unlike the hipcc-compiled kernels —
+# don't get <hip/hip_runtime.h> found automatically by ROCm's own compiler
+# driver.
+#
+# Do NOT hardcode ${_ROCM_ROOT}/include: the HIP runtime headers move between
+# ROCm layouts (ROCm 6.x+/7.x puts them under <root>/core/include; older
+# layouts used <root>/include, and on some installs — e.g. this one — the
+# latter does not exist at all). Derive the dir from the same hip::host
+# imported target find_package(hip) set up above, mirroring the identical fix
+# already applied to tenzor_core's TENZOR_HIPRTC_INCLUDE in
+# src/CMakeLists.txt. Falls back to the discovered core/include then include
+# if the target property is unavailable.
+get_target_property(_ROCM_HOST_CXX_INCS hip::host INTERFACE_INCLUDE_DIRECTORIES)
+set(_ROCM_HOST_CXX_INCLUDE_DIR "")
+foreach(_rocm_host_cxx_d ${_ROCM_HOST_CXX_INCS})
+    string(REGEX REPLACE "\\$<[^:>]+:([^>]*)>" "\\1" _rocm_host_cxx_d "${_rocm_host_cxx_d}")
+    string(REGEX REPLACE "\\$<.*>" "" _rocm_host_cxx_d "${_rocm_host_cxx_d}")
+    if(EXISTS "${_rocm_host_cxx_d}")
+        set(_ROCM_HOST_CXX_INCLUDE_DIR "${_rocm_host_cxx_d}")
+        break()
+    endif()
+endforeach()
+if(NOT _ROCM_HOST_CXX_INCLUDE_DIR)
+    foreach(_rocm_host_cxx_d "${_ROCM_ROOT}/core/include" "${_ROCM_ROOT}/include")
+        if(EXISTS "${_rocm_host_cxx_d}")
+            set(_ROCM_HOST_CXX_INCLUDE_DIR "${_rocm_host_cxx_d}")
+            break()
+        endif()
+    endforeach()
+endif()
+
 # Find MIOpen (ROCm's DNN library - equivalent to cuDNN) early: kernel
 # sources (pooling, batchnorm, lstm, gru) need to know about it via
 # USE_MIOPEN at HIP-kernel compile time, not just at final-link time.
@@ -441,7 +475,7 @@ add_custom_command(
         ${ROCM_HOST_OPENMP}
         ${ROCM_HOST_SPDLOG_FLAGS}
         -I${PROJECT_SOURCE_DIR}/include
-        -I${_ROCM_ROOT}/include
+        -I${_ROCM_HOST_CXX_INCLUDE_DIR}
         -DTENZOR_HAS_MIOPEN
         -DTENZOR_HAS_ROCBLAS
         -DTENZOR_ROCM_BACKEND
@@ -487,7 +521,7 @@ add_custom_command(
         ${ROCM_HOST_OPENMP}
         ${ROCM_HOST_SPDLOG_FLAGS}
         -I${PROJECT_SOURCE_DIR}/include
-        -I${_ROCM_ROOT}/include
+        -I${_ROCM_HOST_CXX_INCLUDE_DIR}
         -DTENZOR_HAS_MIOPEN
         -DTENZOR_HAS_ROCBLAS
         -DTENZOR_ROCM_BACKEND
@@ -524,7 +558,7 @@ add_custom_command(
         ${ROCM_HOST_OPENMP}
         ${ROCM_HOST_SPDLOG_FLAGS}
         -I${PROJECT_SOURCE_DIR}/include
-        -I${_ROCM_ROOT}/include
+        -I${_ROCM_HOST_CXX_INCLUDE_DIR}
         -DTENZOR_HAS_MIOPEN
         -DTENZOR_HAS_ROCBLAS
         -DTENZOR_ROCM_BACKEND
@@ -601,7 +635,7 @@ add_custom_command(
         ${ROCM_HOST_OPENMP}
         ${ROCM_HOST_SPDLOG_FLAGS}
         -I${PROJECT_SOURCE_DIR}/include
-        -I${_ROCM_ROOT}/include
+        -I${_ROCM_HOST_CXX_INCLUDE_DIR}
         ${ROCM_NCCL_DEFS}
     DEPENDS
         ${PROJECT_SOURCE_DIR}/src/distributed/nccl_backend.cpp
@@ -629,7 +663,7 @@ add_custom_command(
         ${ROCM_HOST_OPENMP}
         ${ROCM_HOST_SPDLOG_FLAGS}
         -I${PROJECT_SOURCE_DIR}/include
-        -I${_ROCM_ROOT}/include
+        -I${_ROCM_HOST_CXX_INCLUDE_DIR}
         ${ROCM_NCCL_DEFS}
     DEPENDS
         ${PROJECT_SOURCE_DIR}/src/distributed/nccl_process_group.cpp

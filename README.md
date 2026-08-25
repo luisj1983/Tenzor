@@ -10,7 +10,7 @@ A multi-backend tensor computation and deep learning library written in modern C
 
 ## What/How/Why
 
-I started this as a way to learn how AI and neural networks work, especially how tensors are involved. It started off with just me and a lot of googling, and then came Claude — so I have to admit probably 85-90% of this library is Claude's work. It basically ended up teaching me an awful lot; I led the direction of the project. It's taken me 2 years to get to the point where I feel comfortable using it. A few caveats: distributed training/inference hasn't been tested since I only have one GPU, ROCm has only been tested on my APU, oneAPI has only been tested on my CPU, and for Apple users, please dont get your hopes up, I have no apple hardware. 
+I started this as a way to learn how AI and neural networks work, especially how tensors are involved. It started off with just me and a lot of googling, and then came Claude — so I have to admit probably 85-90% of this library is Claude's work. It basically ended up teaching me an awful lot; I led the direction of the project. It's taken me 2 years to get to the point where I feel comfortable using it. A few caveats: distributed training/inference hasn't been tested since I only have one GPU, ROCm has only been tested on my APU, oneAPI has only been tested on my CPU, I have only tested on Arch Linux(native), and on Windows11(virtual machine with CPU backend only) and for Apple users, please dont get your hopes up, I have no apple hardware. 
 
 
 ## What's in the box
