@@ -12,6 +12,7 @@
 #include <mkl.h>
 #include <mkl_lapacke.h>
 #elif defined(TENZOR_USE_LAPACKE)
+#include <cblas.h>
 #include <lapacke.h>
 #endif
 #include <stdexcept>
