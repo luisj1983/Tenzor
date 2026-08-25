@@ -50,11 +50,11 @@ public:
         register_module("layer" + std::to_string(num_layers - 1), layers_.back());
     }
 
-    Variable forward(const Variable& input) override {
+    Variable forward_impl(const Variable& input) override {
         Variable x = input;
         for (size_t i = 0; i < layers_.size() - 1; ++i) {
             x = layers_[i]->forward(x);
-            x = x.relu();
+            x = relu(x);
         }
         return layers_.back()->forward(x);
     }
@@ -158,8 +158,7 @@ BENCHMARK(BM_Pruning_StructuredChannel)->Arg(30)->Arg(50)->Arg(70)->Unit(benchma
 // =============================================================================
 
 static void BM_Quantization_PerTensorSymmetric(benchmark::State& state) {
-    Tensor input({1024, 1024}, DType::Float32, g_bench_device);
-    input.randn_();
+    Tensor input = randn({1024, 1024}, DType::Float32, g_bench_device);
 
     for (auto _ : state) {
         auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
@@ -168,8 +167,7 @@ static void BM_Quantization_PerTensorSymmetric(benchmark::State& state) {
 
     // Measure quantization error
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
-    auto dequant = q_tensor.dequantize();
-    float error = compute_quantization_error(input, q_tensor);
+    float error = std::get<0>(compute_quantization_error(input, q_tensor));
 
     state.counters["QuantError"] = error;
     state.SetBytesProcessed(state.iterations() * input.numel() * sizeof(float));
@@ -177,8 +175,7 @@ static void BM_Quantization_PerTensorSymmetric(benchmark::State& state) {
 BENCHMARK(BM_Quantization_PerTensorSymmetric)->Unit(benchmark::kMillisecond);
 
 static void BM_Quantization_PerTensorAsymmetric(benchmark::State& state) {
-    Tensor input({1024, 1024}, DType::Float32, g_bench_device);
-    input.randn_();
+    Tensor input = randn({1024, 1024}, DType::Float32, g_bench_device);
 
     for (auto _ : state) {
         auto q_tensor = quantize_per_tensor_asymmetric(input, QuantDType::INT8);
@@ -186,7 +183,7 @@ static void BM_Quantization_PerTensorAsymmetric(benchmark::State& state) {
     }
 
     auto q_tensor = quantize_per_tensor_asymmetric(input, QuantDType::INT8);
-    float error = compute_quantization_error(input, q_tensor);
+    float error = std::get<0>(compute_quantization_error(input, q_tensor));
 
     state.counters["QuantError"] = error;
     state.SetBytesProcessed(state.iterations() * input.numel() * sizeof(float));
@@ -194,8 +191,7 @@ static void BM_Quantization_PerTensorAsymmetric(benchmark::State& state) {
 BENCHMARK(BM_Quantization_PerTensorAsymmetric)->Unit(benchmark::kMillisecond);
 
 static void BM_Quantization_PerChannel(benchmark::State& state) {
-    Tensor input({128, 512, 7, 7}, DType::Float32, g_bench_device);
-    input.randn_();
+    Tensor input = randn({128, 512, 7, 7}, DType::Float32, g_bench_device);
     int64_t axis = 1; // quantize per output channel
 
     for (auto _ : state) {
@@ -204,7 +200,7 @@ static void BM_Quantization_PerChannel(benchmark::State& state) {
     }
 
     auto q_tensor = quantize_per_channel_symmetric(input, axis, QuantDType::INT8);
-    float error = compute_quantization_error(input, q_tensor);
+    float error = std::get<0>(compute_quantization_error(input, q_tensor));
 
     state.counters["QuantError"] = error;
 }
@@ -215,8 +211,7 @@ static void BM_Quantization_Observer_MinMax(benchmark::State& state) {
 
     for (auto _ : state) {
         for (int i = 0; i < 10; ++i) {
-            Tensor input({128, 256}, DType::Float32, g_bench_device);
-            input.randn_();
+            Tensor input = randn({128, 256}, DType::Float32, g_bench_device);
             observer->observe(input);
         }
         observer->reset();
@@ -230,8 +225,7 @@ static void BM_Quantization_Observer_Histogram(benchmark::State& state) {
     for (auto _ : state) {
         auto observer = std::make_unique<HistogramObserver>(num_bins);
         for (int i = 0; i < 10; ++i) {
-            Tensor input({128, 256}, DType::Float32, g_bench_device);
-            input.randn_();
+            Tensor input = randn({128, 256}, DType::Float32, g_bench_device);
             observer->observe(input);
         }
         auto params = observer->calculate_qparams(QuantDType::INT8,
@@ -243,8 +237,7 @@ BENCHMARK(BM_Quantization_Observer_Histogram)->Arg(128)->Arg(256)->Arg(512)->Uni
 
 static void BM_Quantization_FakeQuantize(benchmark::State& state) {
     auto fake_quant = std::make_shared<FakeQuantize>();
-    Tensor input({64, 128}, DType::Float32, g_bench_device);
-    input.randn_();
+    Tensor input = randn({64, 128}, DType::Float32, g_bench_device);
     Variable var(input, true);
 
     for (auto _ : state) {
@@ -301,8 +294,7 @@ static void BM_MemoryFootprint_Baseline(benchmark::State& state) {
 
     for (auto _ : state) {
         state.PauseTiming();
-        Tensor weights({num_params}, DType::Float32, g_bench_device);
-        weights.randn_();
+        Tensor weights = randn({num_params}, DType::Float32, g_bench_device);
         state.ResumeTiming();
 
         size_t fp32_bytes = weights.numel() * sizeof(float);
@@ -318,8 +310,7 @@ static void BM_MemoryFootprint_Quantized(benchmark::State& state) {
 
     for (auto _ : state) {
         state.PauseTiming();
-        Tensor weights({num_params}, DType::Float32, g_bench_device);
-        weights.randn_();
+        Tensor weights = randn({num_params}, DType::Float32, g_bench_device);
         state.ResumeTiming();
 
         auto q_tensor = quantize_per_tensor_symmetric(weights, QuantDType::INT8);
@@ -338,8 +329,7 @@ BENCHMARK(BM_MemoryFootprint_Quantized)->Range(1<<20, 1<<24)->Unit(benchmark::kM
 
 static void BM_Inference_FP32_Baseline(benchmark::State& state) {
     auto model = std::make_shared<BenchmarkModel>(784, 512, 3, 10);
-    Tensor input({32, 784}, DType::Float32, g_bench_device);
-    input.randn_();
+    Tensor input = randn({32, 784}, DType::Float32, g_bench_device);
     Variable var(input, false);
 
     for (auto _ : state) {
@@ -356,8 +346,7 @@ static void BM_Inference_Pruned_50Percent(benchmark::State& state) {
     auto config = prune_unstructured(model, 0.5f, ImportanceCriterion::L1);
     apply_pruning_masks(model, config);
 
-    Tensor input({32, 784}, DType::Float32, g_bench_device);
-    input.randn_();
+    Tensor input = randn({32, 784}, DType::Float32, g_bench_device);
     Variable var(input, false);
 
     for (auto _ : state) {
@@ -375,8 +364,7 @@ static void BM_Inference_Pruned_90Percent(benchmark::State& state) {
     auto config = prune_unstructured(model, 0.9f, ImportanceCriterion::L1);
     apply_pruning_masks(model, config);
 
-    Tensor input({32, 784}, DType::Float32, g_bench_device);
-    input.randn_();
+    Tensor input = randn({32, 784}, DType::Float32, g_bench_device);
     Variable var(input, false);
 
     for (auto _ : state) {
