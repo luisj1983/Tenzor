@@ -1179,9 +1179,9 @@ auto conv2d_forward_kernel(
                 #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > OmpThresholds::medium())
                 for (int64_t b_idx = 0; b_idx < batch; ++b_idx) {
                     for (int64_t oc = 0; oc < out_channels; ++oc) {
-                        float bv = bias_data[oc];
-                        float* ch = out_data + (b_idx * out_channels + oc) * spatial;
-                        for (int64_t i = 0; i < spatial; ++i) ch[i] += bv;
+                        for (int64_t i = 0; i < spatial; ++i) {
+                            out_data[(b_idx * out_channels + oc) * spatial + i] += bias_data[oc];
+                        }
                     }
                 }
             }
