@@ -77,6 +77,9 @@ if(_MKL_MODULE_FOUND_TEST_LSTM AND MKL_FOUND)
     target_link_libraries(test_lstm_fused_train_kernel PRIVATE ${MKL_LIBRARIES})
     target_include_directories(test_lstm_fused_train_kernel PRIVATE ${MKL_INCLUDE_DIRS})
     target_compile_definitions(test_lstm_fused_train_kernel PRIVATE TENZOR_USE_MKL)
+else()
+    find_package(BLAS REQUIRED)
+    target_link_libraries(test_lstm_fused_train_kernel PRIVATE BLAS::BLAS)
 endif()
 
 # SDPA multi-backend × multi-dtype tests. Replaces the legacy CUDA-only
