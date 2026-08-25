@@ -84,6 +84,26 @@ inline void cvt_f32_to_f16_avx2(__m256 fp32, uint16_t* fp16) {
     _mm_storeu_si128(reinterpret_cast<__m128i*>(fp16), fp16_vec);
 }
 
+/**
+ * @brief Saturate a single Float32 to the finite Float16 range (NaN-preserving).
+ *
+ * Used by the scalar remainder loops and the non-SIMD fallback so every
+ * float->half conversion path shares the same saturating overflow semantics.
+ */
+inline float sat_f16_value(float x) {
+    // Comparisons with NaN are false, so NaN passes through unchanged.
+    if (x > 65504.0f) return 65504.0f;
+    if (x < -65504.0f) return -65504.0f;
+    return x;
+}
+
+/**
+ * @brief Convert one Float32 to a Float16 bit pattern, saturating overflow.
+ */
+inline uint16_t cvt_f32_to_f16_sat(float x) {
+    return _cvtss_sh(sat_f16_value(x), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+}
+
 #ifdef TENZOR_F16_AVX512
 
 /**
@@ -116,26 +136,6 @@ inline void cvt_f32_to_f16_avx512(__m512 fp32, uint16_t* fp16) {
     fp32 = saturate_f16_range_avx512(fp32);
     __m256i fp16_vec = _mm512_cvtps_ph(fp32, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(fp16), fp16_vec);
-}
-
-/**
- * @brief Saturate a single Float32 to the finite Float16 range (NaN-preserving).
- *
- * Used by the scalar remainder loops and the non-SIMD fallback so every
- * float->half conversion path shares the same saturating overflow semantics.
- */
-inline float sat_f16_value(float x) {
-    // Comparisons with NaN are false, so NaN passes through unchanged.
-    if (x > 65504.0f) return 65504.0f;
-    if (x < -65504.0f) return -65504.0f;
-    return x;
-}
-
-/**
- * @brief Convert one Float32 to a Float16 bit pattern, saturating overflow.
- */
-inline uint16_t cvt_f32_to_f16_sat(float x) {
-    return _cvtss_sh(sat_f16_value(x), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 }
 
 #endif // TENZOR_F16_AVX512
